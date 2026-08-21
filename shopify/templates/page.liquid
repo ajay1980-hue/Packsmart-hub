@@ -1,0 +1,11 @@
+{% assign page_has_h1 = false %}
+{% if page.content contains '<h1' or page.content contains '<H1' %}
+  {% assign page_has_h1 = true %}
+{% endif %}
+{{ 'page-packsmart.css' | asset_url | stylesheet_tag }}
+{% unless page_has_h1 %}
+<section class="premium-page__hero"><div class="wrap"><h1>{{ page.title }}</h1></div></section>
+{% endunless %}
+<section class="premium-page{% if page_has_h1 %} premium-page--body-heading{% endif %}">
+  <div class="wrap"><article class="premium-page__content">{{ page.content }}</article></div>
+</section>
