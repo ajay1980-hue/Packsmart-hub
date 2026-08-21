@@ -110,7 +110,10 @@ public class MainActivity extends Activity {
 
             @Override
             public void onPageFinished(WebView view, String url) {
-                if (isPacksmartUrl(url)) injectPacksmartSocialFooter(view);
+                if (isPacksmartUrl(url)) {
+                    injectAppSafeArea(view);
+                    injectPacksmartSocialFooter(view);
+                }
             }
 
             @Override
@@ -180,6 +183,37 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             Toast.makeText(this, "Unable to open link", Toast.LENGTH_SHORT).show();
         }
+    }
+
+    private void injectAppSafeArea(WebView view) {
+        String js = "(function(){" +
+                "if(window.__packsmartSafeAreaInstalled){if(window.__packsmartApplySafeArea)window.__packsmartApplySafeArea();return;}" +
+                "window.__packsmartSafeAreaInstalled=true;" +
+                "window.__packsmartApplySafeArea=function(){" +
+                "var nodes=document.querySelectorAll('body *');" +
+                "for(var i=0;i<nodes.length;i++){" +
+                "var el=nodes[i];var t=(el.innerText||el.textContent||'').trim().toLowerCase();" +
+                "if(t==='ask packsmart'||(t.indexOf('ask packsmart')>-1&&t.length<80)){" +
+                "var target=el;" +
+                "for(var j=0;j<6&&target&&target!==document.body;j++,target=target.parentElement){" +
+                "var cs=window.getComputedStyle(target);" +
+                "if(cs.position==='fixed'){" +
+                "target.style.setProperty('bottom','56px','important');" +
+                "target.style.setProperty('z-index','2147483000','important');" +
+                "break;" +
+                "}" +
+                "}" +
+                "}" +
+                "}" +
+                "};" +
+                "window.__packsmartApplySafeArea();" +
+                "var mo=new MutationObserver(function(){" +
+                "clearTimeout(window.__packsmartSafeTimer);" +
+                "window.__packsmartSafeTimer=setTimeout(window.__packsmartApplySafeArea,100);" +
+                "});" +
+                "mo.observe(document.documentElement,{childList:true,subtree:true});" +
+                "})();";
+        view.evaluateJavascript(js, null);
     }
 
     private void injectPacksmartSocialFooter(WebView view) {
