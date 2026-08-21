@@ -1,0 +1,128 @@
+/* Packsmart Premium Polish v2 — lightweight visual + performance layer */
+
+/* Performance: defer rendering of heavier below-the-fold areas */
+@supports (content-visibility:auto) {
+  body.template-index .ps-home-section,
+  body.template-product .product-related,
+  body.template-collection .collection-page,
+  body.template-search .search-page {
+    content-visibility:auto;
+    contain-intrinsic-size:700px;
+  }
+}
+
+/* Premium typography */
+h1,h2,.collection-hero h1,.product-details h1{
+  text-wrap:balance;
+}
+p,.rte{
+  text-wrap:pretty;
+}
+
+/* Responsive/touch polish */
+.btn,
+button,
+input[type="submit"],
+.collection-shortcuts a,
+.product-thumb{
+  touch-action:manipulation;
+}
+
+/* Premium card surfaces */
+.ps-home-card,
+.collection-card,
+.search-card,
+.product-related__card{
+  transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease,background-color .22s ease;
+  box-shadow:0 16px 36px rgba(0,0,0,.32),inset 0 1px 0 rgba(255,255,255,.025);
+}
+
+/* Rich keyboard/focus state */
+.ps-home-card:focus-within,
+.collection-card:focus-within,
+.search-card:focus-within,
+.product-related__card:focus-within{
+  border-color:rgba(243,206,112,.82);
+  box-shadow:0 0 0 1px rgba(243,206,112,.22),0 22px 48px rgba(0,0,0,.46);
+}
+
+/* Premium form controls */
+input:not([type="hidden"]),
+select,
+textarea{
+  transition:border-color .18s ease,box-shadow .18s ease,background-color .18s ease;
+}
+input:not([type="hidden"]):focus,
+select:focus,
+textarea:focus{
+  border-color:rgba(243,206,112,.78)!important;
+  box-shadow:0 0 0 3px rgba(212,163,60,.13);
+}
+
+/* Buttons: more material depth without animation bloat */
+.btn.primary,
+.product-form__submit,
+.search-form button{
+  background-size:100% 140%;
+  box-shadow:0 12px 32px rgba(194,133,29,.24),inset 0 1px 0 rgba(255,255,255,.44);
+}
+.btn:active,
+.product-form__submit:active,
+.search-form button:active{
+  transform:translateY(0) scale(.985);
+}
+
+/* Product imagery */
+.product-main-image,
+.collection-card__media,
+.search-card-media,
+.ps-home-image{
+  isolation:isolate;
+}
+.product-main-image{
+  transition:border-color .2s ease,box-shadow .2s ease;
+  box-shadow:0 18px 42px rgba(0,0,0,.28);
+}
+
+/* Mobile rails feel more native */
+.ps-home-grid,
+.collection-shortcuts__links{
+  overscroll-behavior-x:contain;
+  -webkit-overflow-scrolling:touch;
+}
+@media(max-width:500px){
+  .ps-home-grid{scroll-snap-type:x proximity}
+  .ps-home-card{scroll-snap-align:start}
+}
+
+/* Hover polish only on devices that genuinely hover */
+@media(hover:hover) and (pointer:fine){
+  .ps-home-card:hover,
+  .collection-card:hover,
+  .search-card:hover,
+  .product-related__card:hover{
+    transform:translateY(-4px);
+    border-color:rgba(243,206,112,.78);
+    box-shadow:0 24px 52px rgba(0,0,0,.48),0 0 0 1px rgba(212,163,60,.08),inset 0 1px 0 rgba(255,255,255,.035);
+  }
+  .btn.primary:hover,
+  .product-form__submit:hover,
+  .search-form button:hover{
+    box-shadow:0 16px 38px rgba(194,133,29,.3),inset 0 1px 0 rgba(255,255,255,.52);
+  }
+  .product-main-image:hover{
+    border-color:rgba(243,206,112,.46);
+    box-shadow:0 22px 52px rgba(0,0,0,.38);
+  }
+}
+
+/* Keep reduced-motion preference authoritative */
+@media(prefers-reduced-motion:reduce){
+  .ps-home-card,
+  .collection-card,
+  .search-card,
+  .product-related__card,
+  .product-main-image{
+    transform:none!important;
+  }
+}
