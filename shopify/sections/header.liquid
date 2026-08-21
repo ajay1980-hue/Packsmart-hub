@@ -1,0 +1,29 @@
+{% liquid
+  assign nav_menu = section.settings.menu
+  if nav_menu == blank
+    assign nav_menu = linklists['main-menu']
+  endif
+%}
+<header class="main-head">
+  <div class="wrap head-row">
+    <a class="ps-header-brand" href="{{ routes.root_url }}" aria-label="{{ shop.name }} home">
+      <picture>
+        <source media="(max-width: 680px)" srcset="https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-3d-header-mobile.webp?v=1785447702">
+        <img class="ps-header-wordmark" src="https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-3d-header-desktop.webp?v=1785447686" alt="Packsmart Solutions Ltd" width="1600" height="363" loading="eager" fetchpriority="high">
+      </picture>
+    </a>
+    {% if section.settings.show_search %}
+      <form class="search" action="{{ routes.search_url }}" method="get" role="search">
+        <input aria-label="Search products" type="search" name="q" value="{{ search.terms | escape }}" placeholder="{{ section.settings.search_placeholder | escape }}" autocomplete="off">
+        <input type="hidden" name="type" value="product">
+        <button type="submit" aria-label="Search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m16 16 4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+      </form>
+    {% endif %}
+    <div class="head-actions">
+      {% if section.settings.show_account and shop.customer_accounts_enabled %}<a class="head-action" href="{{ routes.account_url }}"><svg class="head-action__icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5.5 20c.7-4 3-6 6.5-6s5.8 2 6.5 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>ACCOUNT</span></a>{% endif %}
+      {% if section.settings.show_cart %}<a class="head-action" href="{{ routes.cart_url }}"><svg class="head-action__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 8h14l-1 12H6L5 8Z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 9V7a3 3 0 0 1 6 0v2" fill="none" stroke="currentColor" stroke-width="1.7"/></svg><span>BASKET</span><b class="head-action__count">{{ cart.item_count }}</b></a>{% endif %}
+    </div>
+  </div>
+  {% if nav_menu.links.size > 0 %}<nav class="nav" aria-label="Main navigation"><div class="wrap">{% for link in nav_menu.links %}<a href="{{ link.url }}"{% if link.current or link.child_active %} class="active" aria-current="page"{% endif %}>{{ link.title }}</a>{% endfor %}</div></nav>{% endif %}
+</header>
+{% schema %}{"name":"Header","settings":[{"type":"link_list","id":"menu","label":"Main menu","default":"main-menu"},{"type":"checkbox","id":"show_search","label":"Show product search","default":true},{"type":"text","id":"search_placeholder","label":"Search placeholder","default":"Search for products..."},{"type":"checkbox","id":"show_account","label":"Show account link","default":true},{"type":"checkbox","id":"show_cart","label":"Show basket link","default":true}]}{% endschema %}

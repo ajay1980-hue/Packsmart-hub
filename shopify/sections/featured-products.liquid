@@ -1,0 +1,16 @@
+{% assign featured_collection = collections[section.settings.collection] %}
+{% if featured_collection == blank %}{% assign featured_collection = collections.all %}{% endif %}
+<section class="premium-products"><div class="wrap">
+  <div class="premium-products__title"><h2>{{ section.settings.heading | escape }}</h2></div>
+  <p class="premium-products__intro"><strong>Full catalogue, flexible fulfilment.</strong> Core stock is despatched quickly; the wider supplier-backed range is ordered as needed.</p>
+  <div class="premium-products__grid">
+    {% for product in featured_collection.products limit: 5 %}
+      {% assign featured_quote = false %}{% if product.tags contains 'quote-required' or product.tags contains 'delivery:two-metre-freight' %}{% assign featured_quote = true %}{% endif %}
+      {% assign featured_stocked = false %}{% if product.tags contains 'stocked' or product.tags contains 'Stocked' or product.tags contains 'stock-held' or product.tags contains 'fast-dispatch' %}{% assign featured_stocked = true %}{% endif %}
+      {% assign featured_alt = product.featured_image.alt | default: product.title %}
+      <a class="premium-product" href="{{ product.url }}"><div class="premium-product__media">{% if product.featured_image %}{{ product.featured_image | image_url: width: 640 | image_tag: loading: 'lazy', widths: '260,420,640', alt: featured_alt }}{% else %}<div class="premium-product__placeholder">Image coming soon</div>{% endif %}{% unless product.available %}<span class="premium-product__badge">Sold out</span>{% else %}{% if featured_quote %}<span class="premium-product__badge">Delivery quote</span>{% elsif featured_stocked %}<span class="premium-product__badge premium-product__badge--stock">Fast despatch</span>{% else %}<span class="premium-product__badge">Available to order</span>{% endif %}{% endunless %}</div><div class="premium-product__copy"><h3>{{ product.title }}</h3><p class="premium-product__type">{{ product.type | default: 'Protective packaging' }}</p>{% if product.available %}{% if featured_quote %}<p class="premium-product__fulfilment">Separate freight or pallet quote required.</p>{% elsif featured_stocked %}<p class="premium-product__fulfilment premium-product__fulfilment--stock">In stock — fast UK despatch.</p>{% else %}<p class="premium-product__fulfilment">Typically despatched within 3–5 working days.</p>{% endif %}{% endif %}<div class="premium-product__price">{% if product.price_varies %}From {% endif %}{{ product.price | money }}</div></div></a>
+    {% else %}<div class="premium-products__empty">Products will appear here as soon as they are available.</div>{% endfor %}
+  </div>
+  <div class="premium-products__button"><a class="btn secondary" href="{{ routes.all_products_collection_url }}">View All Products <span aria-hidden="true">›</span></a></div>
+</div></section>
+{% schema %}{"name":"Featured products premium","settings":[{"type":"text","id":"heading","label":"Heading","default":"Featured Products"},{"type":"collection","id":"collection","label":"Collection"}]}{% endschema %}

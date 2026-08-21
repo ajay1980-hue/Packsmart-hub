@@ -1,0 +1,16 @@
+{% assign featured = collections['frontpage'] %}
+{% if featured == blank or featured.products_count == 0 %}{% assign featured = collections.all %}{% endif %}
+<section class="ps-home-section alt" aria-labelledby="FeaturedTitle">
+  <div class="wrap">
+    <div class="ps-home-head"><h2 id="FeaturedTitle">Featured products</h2><a href="{{ routes.all_products_collection_url }}">Browse every product</a></div>
+    <div class="ps-home-grid ps-home-products">
+      {% for product in featured.products limit: 5 %}
+        {% assign image_alt = product.featured_image.alt | default: product.title %}
+        <a class="ps-home-card" href="{{ product.url }}">
+          <div class="ps-home-image">{% if product.featured_image %}{{ product.featured_image | image_url: width: 700 | image_tag: loading: 'lazy', widths: '260,420,560,700', sizes: '(min-width:1020px) 18vw, (min-width:720px) 30vw, 78vw', alt: image_alt }}{% endif %}</div>
+          <div class="ps-home-copy"><h3>{{ product.title }}</h3><p>{{ product.type | default: 'Protective packaging' }}</p><div class="ps-home-price">{% if product.price_varies %}From {% endif %}{{ product.price | money }}</div></div>
+        </a>
+      {% else %}<p>Products will appear here when they are available.</p>{% endfor %}
+    </div>
+  </div>
+</section>
