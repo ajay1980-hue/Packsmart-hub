@@ -1,3 +1,3 @@
-# Packsmart Hub
+# Packsmart Premium Mirror Android App
 
-Packsmart Solutions storefront, Android app shell and supporting assets.
+Native Android wrapper for https://packsmartsolutions.com.
