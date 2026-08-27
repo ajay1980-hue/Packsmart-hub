@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+def debugSigningProps = new Properties()
+def debugSigningPropsFile = file('debug-signing.properties')
+if (debugSigningPropsFile.exists()) {
+    debugSigningPropsFile.withInputStream { debugSigningProps.load(it) }
+}
+
 android {
     namespace 'com.packsmartsolutions.app'
     compileSdk 36
@@ -14,6 +20,15 @@ android {
         versionName '2.0.0'
     }
 
+    signingConfigs {
+        debug {
+            storeFile file(debugSigningProps['storeFile'])
+            storePassword debugSigningProps['storePassword']
+            keyAlias debugSigningProps['keyAlias']
+            keyPassword debugSigningProps['keyPassword']
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
@@ -22,6 +37,7 @@ android {
         debug {
             applicationIdSuffix '.debug'
             versionNameSuffix '-debug'
+            signingConfig signingConfigs.debug
         }
     }
 
