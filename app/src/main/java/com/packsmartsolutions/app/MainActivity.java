@@ -3,6 +3,7 @@ package com.packsmartsolutions.app;
 import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
@@ -20,8 +21,12 @@ import android.webkit.WebViewClient;
 import android.widget.ProgressBar;
 import android.widget.Toast;
 
+import java.util.ArrayList;
+import java.util.List;
+
 public class MainActivity extends Activity {
     private static final String STORE_URL = "https://packsmartsolutions.com";
+    private static final int MAX_EBAY_PHOTOS = 24;
     private WebView webView;
     private ProgressBar progress;
     private ValueCallback<Uri[]> fileChooserCallback;
@@ -92,7 +97,9 @@ public class MainActivity extends Activity {
                 if (fileChooserCallback != null) fileChooserCallback.onReceiveValue(null);
                 fileChooserCallback = filePathCallback;
                 try {
-                    startActivityForResult(fileChooserParams.createIntent(), FILE_CHOOSER_REQUEST);
+                    Intent pickerIntent = fileChooserParams.createIntent();
+                    pickerIntent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                    startActivityForResult(pickerIntent, FILE_CHOOSER_REQUEST);
                     return true;
                 } catch (ActivityNotFoundException e) {
                     fileChooserCallback = null;
@@ -113,6 +120,7 @@ public class MainActivity extends Activity {
                 if (isPacksmartUrl(url)) {
                     injectAppSafeArea(view);
                     injectPacksmartSocialFooter(view);
+                    injectMultiImageUpload(view);
                 }
             }
 
@@ -239,6 +247,28 @@ public class MainActivity extends Activity {
         view.evaluateJavascript(js, null);
     }
 
+    private void injectMultiImageUpload(WebView view) {
+        String js = "(function(){" +
+                "function enable(){" +
+                "var inputs=document.querySelectorAll('input[type=file]');" +
+                "for(var i=0;i<inputs.length;i++){" +
+                "var el=inputs[i];" +
+                "var accept=(el.getAttribute('accept')||'').toLowerCase();" +
+                "var context=((el.parentElement&&el.parentElement.innerText)||'').toLowerCase();" +
+                "if(accept.indexOf('image')>-1||context.indexOf('ebay')>-1||context.indexOf('photo')>-1||context.indexOf('image')>-1){" +
+                "el.setAttribute('multiple','multiple');" +
+                "if(!accept)el.setAttribute('accept','image/*');" +
+                "}" +
+                "}" +
+                "}" +
+                "enable();" +
+                "if(window.__packsmartMultiUploadObserver)return;" +
+                "window.__packsmartMultiUploadObserver=new MutationObserver(function(){enable();});" +
+                "window.__packsmartMultiUploadObserver.observe(document.documentElement,{childList:true,subtree:true});" +
+                "})();";
+        view.evaluateJavascript(js, null);
+    }
+
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
@@ -268,10 +298,32 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == FILE_CHOOSER_REQUEST && fileChooserCallback != null) {
-            Uri[] results = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+            Uri[] results = collectSelectedUris(resultCode, data);
             fileChooserCallback.onReceiveValue(results);
             fileChooserCallback = null;
         }
+    }
+
+    private Uri[] collectSelectedUris(int resultCode, Intent data) {
+        if (resultCode != RESULT_OK || data == null) return null;
+
+        List<Uri> selected = new ArrayList<>();
+        ClipData clipData = data.getClipData();
+
+        if (clipData != null) {
+            int count = Math.min(clipData.getItemCount(), MAX_EBAY_PHOTOS);
+            for (int i = 0; i < count; i++) {
+                Uri uri = clipData.getItemAt(i).getUri();
+                if (uri != null) selected.add(uri);
+            }
+            if (clipData.getItemCount() > MAX_EBAY_PHOTOS) {
+                Toast.makeText(this, "eBay allows up to 24 photos. First 24 selected.", Toast.LENGTH_LONG).show();
+            }
+        } else if (data.getData() != null) {
+            selected.add(data.getData());
+        }
+
+        return selected.isEmpty() ? null : selected.toArray(new Uri[0]);
     }
 
     @Override
