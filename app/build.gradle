@@ -20,8 +20,10 @@ android {
             shrinkResources false
         }
         debug {
-            applicationIdSuffix '.debug'
-            versionNameSuffix '-debug'
+            // Use a unique package for sideload testing so it can install
+            // alongside any existing Packsmart Play/debug build.
+            applicationIdSuffix '.multiphoto'
+            versionNameSuffix '-multiphoto'
         }
     }
 
