@@ -34,13 +34,13 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Packsmart-Premium-Mirror-debug
+          name: Packsmart-Mirror-v2.1.1-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
       - name: Upload unsigned Play AAB
         uses: actions/upload-artifact@v4
         with:
-          name: Packsmart-Premium-Mirror-Play-unsigned
+          name: Packsmart-Mirror-v2.1.1-Play-unsigned
           path: app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
