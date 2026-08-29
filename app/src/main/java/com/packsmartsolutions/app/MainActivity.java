@@ -6,6 +6,9 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Message;
@@ -27,9 +30,11 @@ import java.util.List;
 public class MainActivity extends Activity {
     private static final String STORE_URL = "https://packsmartsolutions.com";
     private static final int MAX_EBAY_PHOTOS = 24;
+    private static final int MAX_MAIN_FRAME_RETRIES = 2;
     private WebView webView;
     private ProgressBar progress;
     private ValueCallback<Uri[]> fileChooserCallback;
+    private int mainFrameRetryCount = 0;
     private static final int FILE_CHOOSER_REQUEST = 1901;
 
     private static final String INSTAGRAM = "https://www.instagram.com/packsmartsolutions/";
@@ -62,7 +67,7 @@ public class MainActivity extends Activity {
         settings.setSupportMultipleWindows(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setUserAgentString(settings.getUserAgentString() + " PacksmartSolutionsAndroid/2.1.1");
+        settings.setUserAgentString(settings.getUserAgentString() + " PacksmartSolutionsAndroid/2.1.2");
 
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
@@ -118,6 +123,7 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 if (isPacksmartUrl(url)) {
+                    mainFrameRetryCount = 0;
                     injectAppSafeArea(view);
                     injectPacksmartSocialFooter(view);
                     injectMultiImageUpload(view);
@@ -131,8 +137,39 @@ public class MainActivity extends Activity {
 
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) {
-                    view.loadUrl("file:///android_asset/offline.html");
+                if (!request.isForMainFrame()) return;
+
+                String failedUrl = request.getUrl() == null ? "" : request.getUrl().toString();
+
+                // A WebView can report harmless/cancelled main-frame errors during
+                // redirects. Never replace a checkout or third-party page with our
+                // offline screen just because one of those redirects was cancelled.
+                if (!isPacksmartUrl(failedUrl)) return;
+
+                if (!hasInternetNetwork()) {
+                    showConnectionPage(view);
+                    return;
+                }
+
+                int code = error.getErrorCode();
+                if (isRetryableNetworkError(code) && mainFrameRetryCount < MAX_MAIN_FRAME_RETRIES) {
+                    mainFrameRetryCount++;
+                    long delayMs = 700L * mainFrameRetryCount;
+                    view.postDelayed(() -> {
+                        if (webView == null) return;
+                        if (hasInternetNetwork()) {
+                            webView.loadUrl(failedUrl);
+                        } else {
+                            showConnectionPage(webView);
+                        }
+                    }, delayMs);
+                    return;
+                }
+
+                // For generic ERR_FAILED / cancelled redirects we leave the current
+                // page alone instead of falsely telling the customer they are offline.
+                if (isRetryableNetworkError(code)) {
+                    showConnectionPage(view);
                 }
             }
         });
@@ -146,6 +183,32 @@ public class MainActivity extends Activity {
         } else {
             webView.restoreState(savedInstanceState);
         }
+    }
+
+    private boolean hasInternetNetwork() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            Network network = cm.getActiveNetwork();
+            if (network == null) return false;
+            NetworkCapabilities caps = cm.getNetworkCapabilities(network);
+            return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        } catch (Exception ignored) {
+            // If Android cannot tell us, avoid a false "offline" result.
+            return true;
+        }
+    }
+
+    private boolean isRetryableNetworkError(int code) {
+        return code == WebViewClient.ERROR_HOST_LOOKUP
+                || code == WebViewClient.ERROR_CONNECT
+                || code == WebViewClient.ERROR_TIMEOUT
+                || code == WebViewClient.ERROR_IO;
+    }
+
+    private void showConnectionPage(WebView view) {
+        if (view == null) return;
+        view.loadUrl("file:///android_asset/offline.html");
     }
 
     private boolean handleNavigation(Uri uri) {

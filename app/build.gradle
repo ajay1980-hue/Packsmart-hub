@@ -10,8 +10,8 @@ android {
         applicationId 'com.packsmartsolutions.app'
         minSdk 26
         targetSdk 36
-        versionCode 101
-        versionName '2.1.1'
+        versionCode 102
+        versionName '2.1.2'
     }
 
     buildTypes {
