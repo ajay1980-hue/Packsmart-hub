@@ -10,8 +10,8 @@ android {
         applicationId 'com.packsmartsolutions.app'
         minSdk 26
         targetSdk 36
-        versionCode 20
-        versionName '2.0.0'
+        versionCode 101
+        versionName '2.1.1'
     }
 
     buildTypes {
@@ -20,8 +20,8 @@ android {
             shrinkResources false
         }
         debug {
-            // Use a unique package for sideload testing so it can install
-            // alongside any existing Packsmart Play/debug build.
+            // Keep the sideload test build separate from the Play-installed app
+            // so both can be installed on the same phone during QA.
             applicationIdSuffix '.multiphoto'
             versionNameSuffix '-multiphoto'
         }
