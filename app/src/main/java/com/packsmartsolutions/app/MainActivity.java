@@ -62,7 +62,7 @@ public class MainActivity extends Activity {
         settings.setSupportMultipleWindows(true);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
-        settings.setUserAgentString(settings.getUserAgentString() + " PacksmartSolutionsAndroid/2.0");
+        settings.setUserAgentString(settings.getUserAgentString() + " PacksmartSolutionsAndroid/2.1.1");
 
         CookieManager.getInstance().setAcceptCookie(true);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
