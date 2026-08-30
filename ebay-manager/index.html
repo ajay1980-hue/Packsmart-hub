@@ -14,13 +14,19 @@
         <h1>eBay Manager</h1>
         <p class="sub">Shopify-connected listing builder</p>
       </div>
-      <div class="status" id="storeStatus">Store: checking…</div>
+      <div class="status-stack">
+        <div class="status" id="storeStatus">Store: checking…</div>
+        <div class="status" id="ebayStatus" data-state="checking">eBay: checking…</div>
+      </div>
     </header>
 
     <section class="card">
       <div class="section-head">
-        <div><h2>1. Import from Packsmart</h2><p>Pull a live Shopify product into the eBay draft.</p></div>
-        <button class="secondary" id="refreshProducts" type="button">Refresh products</button>
+        <div><h2>1. Import from Packsmart</h2><p>Pull a Shopify product into the eBay draft.</p></div>
+        <div class="inline-actions">
+          <button class="secondary" id="refreshProducts" type="button">Refresh products</button>
+          <button class="secondary" id="checkEbay" type="button">Check eBay</button>
+        </div>
       </div>
       <label for="productSelect">Shopify product</label>
       <select id="productSelect"><option value="">Choose a product…</option></select>
@@ -28,7 +34,7 @@
 
     <section class="card">
       <div class="section-head">
-        <div><h2>2. Photos</h2><p>Add up to 24 photos. Reorder them and mark the main eBay image.</p></div>
+        <div><h2>2. Photos</h2><p>Add up to 24 photos. Reorder them and choose the main eBay image.</p></div>
         <strong id="photoCount">0 / 24</strong>
       </div>
       <label class="dropzone" id="dropzone" for="photoInput">
@@ -52,14 +58,19 @@
     </section>
 
     <section class="actions">
-      <button class="secondary" id="clearDraft" type="button">Clear draft</button>
-      <button class="primary" id="saveDraft" type="button">Save draft</button>
+      <button class="secondary" id="clearDraft" type="button">Clear</button>
+      <button class="secondary strong" id="saveDraft" type="button">Save eBay draft</button>
+      <button class="primary" id="createListing" type="button">Create live eBay listing</button>
     </section>
 
+    <p class="security-note">Uses the existing hosted eBay connection. OAuth secrets and refresh tokens stay server-side and are never stored in this browser build.</p>
+
     <section class="card compact" id="resultCard" hidden>
-      <h2>Draft ready</h2><p id="resultText"></p>
+      <h2>eBay Manager result</h2><p id="resultText"></p>
     </section>
   </main>
+  <script src="./core.js"></script>
+  <script src="./backend.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
