@@ -2,6 +2,10 @@ name: Packsmart Google SEO
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/google-seo.yml"
   schedule:
     - cron: "17 6 * * 1"
 
