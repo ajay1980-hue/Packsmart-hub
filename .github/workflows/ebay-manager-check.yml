@@ -3,7 +3,7 @@ name: eBay Manager Check
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, finish-ebay-manager]
     paths:
       - "ebay-manager/**"
       - ".github/workflows/ebay-manager-check.yml"
@@ -18,17 +18,27 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Validate manager JavaScript
-        run: node --check ebay-manager/app.js
+        run: |
+          node --check ebay-manager/core.js
+          node --check ebay-manager/backend.js
+          node --check ebay-manager/app.js
 
-      - name: Validate multi-photo build
+      - name: Run eBay Manager behaviour tests
+        run: node ebay-manager/tests/ebay-manager.test.js
+
+      - name: Validate multi-photo and live-listing build
         shell: bash
         run: |
           grep -q 'type="file" accept="image/\*" multiple' ebay-manager/index.html
-          grep -q 'MAX_PHOTOS = 24' ebay-manager/app.js
-          grep -q 'makeMain' ebay-manager/app.js
-          grep -q 'movePhoto' ebay-manager/app.js
-          grep -q 'photoOrder' ebay-manager/app.js
-          echo "Multi-photo UI checks passed"
+          grep -q 'MAX_PHOTOS = 24' ebay-manager/core.js
+          grep -q 'makeMain' ebay-manager/core.js
+          grep -q 'movePhoto' ebay-manager/core.js
+          grep -q 'photoOrder' ebay-manager/core.js
+          grep -q 'id="saveDraft"' ebay-manager/index.html
+          grep -q 'id="createListing"' ebay-manager/index.html
+          grep -q 'backend.createListing' ebay-manager/app.js
+          grep -q "form.append('photos'" ebay-manager/backend.js
+          echo "Multi-photo, draft and live-listing UI checks passed"
 
       - name: Validate authenticated Shopify catalogue snapshot
         shell: bash
@@ -62,10 +72,11 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          code=$(curl -LsS -o /tmp/products.json -w "%{http_code}"             'https://packsmartsolutions.com/products.json?limit=250')
+          code=$(curl -LsS -o /tmp/products.json -w "%{http_code}" \
+            'https://packsmartsolutions.com/products.json?limit=250')
           echo "Public Shopify feed HTTP $code"
           if [ "$code" = "200" ]; then
             echo "::notice::Public Shopify feed is live; the manager will prefer live catalogue data."
           else
-            echo "::notice::Public Shopify feed is unavailable (HTTP $code); the manager will automatically use the authenticated synced catalogue."
+            echo "::notice::Public Shopify feed is unavailable (HTTP $code); the manager will automatically use the synced catalogue."
           fi
