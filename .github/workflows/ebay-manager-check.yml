@@ -1,0 +1,43 @@
+name: eBay Manager Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "ebay-manager/**"
+      - ".github/workflows/ebay-manager-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate manager JavaScript
+        run: node --check ebay-manager/app.js
+      - name: Validate multi-photo build
+        shell: bash
+        run: |
+          grep -q 'type="file" accept="image/\*" multiple' ebay-manager/index.html
+          grep -q 'MAX_PHOTOS = 24' ebay-manager/app.js
+          grep -q 'makeMain' ebay-manager/app.js
+          grep -q 'movePhoto' ebay-manager/app.js
+          echo "Multi-photo UI checks passed"
+      - name: Check Packsmart Shopify product feed
+        shell: bash
+        run: |
+          curl -fLsS --retry 3 --retry-delay 2             -H 'Origin: https://example.invalid'             -D /tmp/headers             'https://packsmartsolutions.com/products.json?limit=250'             -o /tmp/products.json
+          python - <<'PY'
+          import json
+          with open('/tmp/products.json', encoding='utf-8') as f:
+              data = json.load(f)
+          products = data.get('products', [])
+          if not products:
+              raise SystemExit('No products returned from Shopify feed')
+          print(f'Shopify feed returned {len(products)} products')
+          PY
+          echo "Response headers:"
+          grep -iE '^(access-control|content-type|http/)' /tmp/headers || true
