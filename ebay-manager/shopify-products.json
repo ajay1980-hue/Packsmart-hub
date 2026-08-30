@@ -1,0 +1,366 @@
+{
+  "syncedAt": "2026-08-30T14:26:00+01:00",
+  "source": "authenticated-shopify",
+  "products": [
+    {
+      "id": "gid://shopify/Product/15952658465102",
+      "handle": "grey-mailing-bags-230-x-300mm-9-x-12",
+      "title": "Grey Mailing Bags 230 x 300mm (9\" x 12\")",
+      "description": "Strong 50 micron co-extruded grey mailing bags with a permanent self-seal strip. Opaque, tear-resistant and water-resistant.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-mailing-bags-product-template_8b4b20cb-241b-4d2f-8b9b-616b7c8dece3.png?v=1785442982",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "2.50",
+          "sku": "GM-230x300-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "4.20",
+          "sku": "GM-230x300-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "7.80",
+          "sku": "GM-230x300-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15952658596174",
+      "handle": "grey-mailing-bags-305-x-405mm-12-x-16",
+      "title": "Grey Mailing Bags 305 x 405mm (12\" x 16\")",
+      "description": "Strong 50 micron co-extruded grey mailing bags with a permanent self-seal strip. Opaque, tear-resistant and water-resistant.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-mailing-bags-product-template_e7d4a50a-8099-4fd5-8f72-297c92973e38.png?v=1785442981",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "4.25",
+          "sku": "GM-305x405-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "7.08",
+          "sku": "GM-305x405-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "13.02",
+          "sku": "GM-305x405-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15952658661710",
+      "handle": "grey-mailing-bags-330-x-485mm-13-x-19",
+      "title": "Grey Mailing Bags 330 x 485mm (13\" x 19\")",
+      "description": "Strong 50 micron co-extruded grey mailing bags with a permanent self-seal strip. Opaque, tear-resistant and water-resistant.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-mailing-bags-product-template_94b60d64-55bd-4b3b-8150-ac9399e2b64e.png?v=1785442982",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "5.70",
+          "sku": "GM-330x485-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "9.49",
+          "sku": "GM-330x485-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "17.99",
+          "sku": "GM-330x485-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15952658825550",
+      "handle": "grey-mailing-bags-350-x-525mm-14-x-21",
+      "title": "Grey Mailing Bags 350 x 525mm (14\" x 21\")",
+      "description": "Strong 50 micron co-extruded grey mailing bags with a permanent self-seal strip. Opaque, tear-resistant and water-resistant.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-mailing-bags-product-template_e74a63b7-11e2-4a27-8933-5a3b3011bde9.png?v=1785442982",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "6.30",
+          "sku": "GM-350x525-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "10.49",
+          "sku": "GM-350x525-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "19.99",
+          "sku": "GM-350x525-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15952658497870",
+      "handle": "grey-mailing-bags-250-x-350mm-10-x-14",
+      "title": "Grey Mailing Bags | 250 × 350mm (10 × 14in)",
+      "description": "A practical all-round mailing bag size for clothing, textiles and everyday ecommerce orders.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-mailing-bags-product-template_a4bf3a2a-4bce-4acb-80f1-f6d784f12300.png?v=1785442982",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "3.20",
+          "sku": "GM-250x350-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "5.35",
+          "sku": "GM-250x350-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "9.75",
+          "sku": "GM-250x350-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15952658923854",
+      "handle": "bubble-envelopes-ep1-110-x-165mm",
+      "title": "Padded Bubble Envelopes EP1 | 110 × 165mm",
+      "description": "Compact padded mailers that protect small valuables without adding unnecessary bulk.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-padded-envelopes-product-template_9ccbfd1a-8ba3-40eb-8eae-0b0e524a957f.png?v=1785443089",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "5.85",
+          "sku": "BE-EP1-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "9.75",
+          "sku": "BE-EP1-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "18.95",
+          "sku": "BE-EP1-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15976443969870",
+      "handle": "bubble-envelopes-ep2-120-x-215mm",
+      "title": "Padded Bubble Envelopes EP2 | 120 × 215mm",
+      "description": "Lightweight cushioning for everyday ecommerce orders, with a quick peel-and-seal closure.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-padded-envelopes-product-template_b8b72496-5f6c-4a86-b40c-cc9b3be780f9.png?v=1785443089",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "6.90",
+          "sku": "BE-EP2-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "11.49",
+          "sku": "BE-EP2-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "21.95",
+          "sku": "BE-EP2-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15999724028238",
+      "handle": "padded-bubble-envelopes-ep3-150-215mm",
+      "title": "Padded Bubble Envelopes EP3 | 150 × 215mm",
+      "description": "Practical padded bubble envelopes for accessories, stationery, cables and compact electronics.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-padded-envelopes-product-template_716cc69d-c5d4-4d91-88a3-eacdd4e5a932.png?v=1785443089",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "7.75",
+          "sku": "BE-EP3-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "12.95",
+          "sku": "BE-EP3-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "24.49",
+          "sku": "BE-EP3-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15952658956622",
+      "handle": "bubble-envelopes-ep4-180-x-265mm",
+      "title": "Padded Bubble Envelopes EP4 | 180 × 265mm",
+      "description": "A versatile A5-size padded mailer for books, accessories and ecommerce orders that need extra protection.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-padded-envelopes-product-template_b3bc9aba-df30-47a0-b4a2-d39a1c4f1b4c.png?v=1785443089",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "8.95",
+          "sku": "BE-EP4-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "14.95",
+          "sku": "BE-EP4-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "28.95",
+          "sku": "BE-EP4-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15999724323150",
+      "handle": "padded-bubble-envelopes-ep5-220-265mm",
+      "title": "Padded Bubble Envelopes EP5 | 220 × 265mm",
+      "description": "Roomy padded bubble envelopes for larger books, boxed accessories, tablets and bulkier ecommerce orders.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-padded-envelopes-product-template_2dca46a2-9168-4633-a7f6-cfa421bb933d.png?v=1785443089",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "9.55",
+          "sku": "BE-EP5-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "15.95",
+          "sku": "BE-EP5-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "29.95",
+          "sku": "BE-EP5-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15999722815822",
+      "handle": "self-seal-bubble-pouches-bp1-100-135mm",
+      "title": "Self-Seal Bubble Pouches BP1 | 100 × 135mm",
+      "description": "Compact self-seal bubble pouches for jewellery, small components, memory cards and delicate accessories.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-bubble-pouches-product-template_5319cd83-d58c-40c0-806f-aabf3185c88c.png?v=1785443040",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "5.10",
+          "sku": "BP1-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "8.49",
+          "sku": "BP1-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "14.99",
+          "sku": "BP1-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15976443871566",
+      "handle": "self-seal-bubble-pouches-bp2-130-x-185mm-1",
+      "title": "Self-Seal Bubble Pouches BP2 | 130 × 185mm",
+      "description": "Pack small products faster with built-in bubble protection and a quick self-seal closure.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-bubble-pouches-product-template_5129b709-a6c3-4bc8-bc38-05bdd4895c40.png?v=1785443040",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "5.40",
+          "sku": "BP2-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "8.99",
+          "sku": "BP2-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "15.99",
+          "sku": "BP2-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15976443937102",
+      "handle": "self-seal-bubble-pouches-bp3-180-x-235mm",
+      "title": "Self-Seal Bubble Pouches BP3 | 180 × 235mm",
+      "description": "Cushion, seal and dispatch in seconds — no separate wrapping needed.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-bubble-pouches-product-template_36a335ad-d194-4d28-a379-010569fe0396.png?v=1785443040",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "8.70",
+          "sku": "BP3-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "14.49",
+          "sku": "BP3-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "26.95",
+          "sku": "BP3-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15999723274574",
+      "handle": "self-seal-bubble-pouches-bp4-230-285mm",
+      "title": "Self-Seal Bubble Pouches BP4 | 230 × 285mm",
+      "description": "Versatile self-seal bubble pouches for larger accessories, books, electronics and boxed items.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-bubble-pouches-product-template_91d243c2-7454-4c82-9ba5-1811d2dd2dab.png?v=1785443040",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "8.95",
+          "sku": "BP4-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "14.95",
+          "sku": "BP4-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "27.95",
+          "sku": "BP4-200"
+        }
+      ]
+    },
+    {
+      "id": "gid://shopify/Product/15999723667790",
+      "handle": "self-seal-bubble-pouches-bp5-280-360mm",
+      "title": "Self-Seal Bubble Pouches BP5 | 280 × 360mm",
+      "description": "Large self-seal bubble pouches for tablets, larger components, boxed accessories and bulkier items.",
+      "image": "https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-bubble-pouches-product-template_1e509dd0-da77-4d09-8174-c09f3d9fdf30.png?v=1785443040",
+      "variants": [
+        {
+          "title": "Pack of 50",
+          "price": "13.15",
+          "sku": "BP5-50"
+        },
+        {
+          "title": "Pack of 100",
+          "price": "21.95",
+          "sku": "BP5-100"
+        },
+        {
+          "title": "Pack of 200",
+          "price": "39.95",
+          "sku": "BP5-200"
+        }
+      ]
+    }
+  ]
+}
