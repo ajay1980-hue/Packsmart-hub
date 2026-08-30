@@ -1,0 +1,70 @@
+name: Packsmart Google SEO
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  seo-check:
+    runs-on: ubuntu-latest
+    env:
+      SITE_URL: https://packsmartsolutions.com/
+      SITEMAP_URL: https://packsmartsolutions.com/sitemap.xml
+    steps:
+      - name: Check sitemap and priority pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          urls=(
+            "https://packsmartsolutions.com/"
+            "https://packsmartsolutions.com/collections/bubble-pouches"
+            "https://packsmartsolutions.com/collections/bubble-envelopes"
+            "https://packsmartsolutions.com/collections/mailing-bags"
+            "$SITEMAP_URL"
+          )
+          for url in "${urls[@]}"; do
+            code=$(curl -L -sS -o /dev/null -w "%{http_code}" "$url")
+            echo "$code $url"
+            test "$code" -ge 200 -a "$code" -lt 400
+          done
+
+      - name: Set up Python
+        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON != '' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Google API libraries
+        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON != '' }}
+        run: pip install --disable-pip-version-check google-api-python-client google-auth
+
+      - name: Submit sitemap to Google Search Console
+        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON != '' }}
+        env:
+          GSC_SERVICE_ACCOUNT_JSON: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON }}
+        shell: python
+        run: |
+          import json, os
+          from google.oauth2 import service_account
+          from googleapiclient.discovery import build
+
+          site_url = "https://packsmartsolutions.com/"
+          sitemap_url = "https://packsmartsolutions.com/sitemap.xml"
+          info = json.loads(os.environ["GSC_SERVICE_ACCOUNT_JSON"])
+          creds = service_account.Credentials.from_service_account_info(
+              info,
+              scopes=["https://www.googleapis.com/auth/webmasters"],
+          )
+          service = build("searchconsole", "v1", credentials=creds, cache_discovery=False)
+          service.sitemaps().submit(siteUrl=site_url, feedpath=sitemap_url).execute()
+          print(f"Submitted {sitemap_url} for {site_url}")
+
+      - name: Google credential not configured
+        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON == '' }}
+        run: |
+          echo "::notice::SEO URL checks passed. Add repository secret GSC_SERVICE_ACCOUNT_JSON to enable automatic sitemap submission to Google Search Console."
+          echo "::notice::Google does not offer a general-purpose API to request indexing for ordinary Shopify pages; use Search Console URL Inspection for the four priority URLs."
