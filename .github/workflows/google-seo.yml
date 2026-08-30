@@ -18,6 +18,7 @@ jobs:
     env:
       SITE_URL: https://packsmartsolutions.com/
       SITEMAP_URL: https://packsmartsolutions.com/sitemap.xml
+      GSC_SERVICE_ACCOUNT_JSON: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON }}
     steps:
       - name: Check sitemap and priority pages
         shell: bash
@@ -37,19 +38,17 @@ jobs:
           done
 
       - name: Set up Python
-        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON != '' }}
+        if: env.GSC_SERVICE_ACCOUNT_JSON != ''
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Install Google API libraries
-        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON != '' }}
+        if: env.GSC_SERVICE_ACCOUNT_JSON != ''
         run: pip install --disable-pip-version-check google-api-python-client google-auth
 
       - name: Submit sitemap to Google Search Console
-        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON != '' }}
-        env:
-          GSC_SERVICE_ACCOUNT_JSON: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON }}
+        if: env.GSC_SERVICE_ACCOUNT_JSON != ''
         shell: python
         run: |
           import json, os
@@ -68,7 +67,7 @@ jobs:
           print(f"Submitted {sitemap_url} for {site_url}")
 
       - name: Google credential not configured
-        if: ${{ secrets.GSC_SERVICE_ACCOUNT_JSON == '' }}
+        if: env.GSC_SERVICE_ACCOUNT_JSON == ''
         run: |
           echo "::notice::SEO URL checks passed. Add repository secret GSC_SERVICE_ACCOUNT_JSON to enable automatic sitemap submission to Google Search Console."
           echo "::notice::Google does not offer a general-purpose API to request indexing for ordinary Shopify pages; use Search Console URL Inspection for the four priority URLs."
