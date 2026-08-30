@@ -16,8 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+
       - name: Validate manager JavaScript
         run: node --check ebay-manager/app.js
+
       - name: Validate multi-photo build
         shell: bash
         run: |
@@ -25,19 +27,45 @@ jobs:
           grep -q 'MAX_PHOTOS = 24' ebay-manager/app.js
           grep -q 'makeMain' ebay-manager/app.js
           grep -q 'movePhoto' ebay-manager/app.js
+          grep -q 'photoOrder' ebay-manager/app.js
           echo "Multi-photo UI checks passed"
-      - name: Check Packsmart Shopify product feed
+
+      - name: Validate authenticated Shopify catalogue snapshot
         shell: bash
         run: |
-          curl -fLsS --retry 3 --retry-delay 2             -H 'Origin: https://example.invalid'             -D /tmp/headers             'https://packsmartsolutions.com/products.json?limit=250'             -o /tmp/products.json
           python - <<'PY'
           import json
-          with open('/tmp/products.json', encoding='utf-8') as f:
-              data = json.load(f)
-          products = data.get('products', [])
-          if not products:
-              raise SystemExit('No products returned from Shopify feed')
-          print(f'Shopify feed returned {len(products)} products')
+          from pathlib import Path
+
+          path = Path("ebay-manager/shopify-products.json")
+          data = json.loads(path.read_text(encoding="utf-8"))
+          products = data.get("products", [])
+          if len(products) != 15:
+              raise SystemExit(f"Expected 15 synced Packsmart products, got {len(products)}")
+
+          required = {"id", "handle", "title", "variants"}
+          for product in products:
+              missing = required - product.keys()
+              if missing:
+                  raise SystemExit(f"{product.get('title', 'Unknown product')} missing {sorted(missing)}")
+              if not product["variants"]:
+                  raise SystemExit(f"{product['title']} has no variants")
+              for variant in product["variants"]:
+                  for field in ("title", "price", "sku"):
+                      if field not in variant:
+                          raise SystemExit(f"{product['title']} variant missing {field}")
+
+          print(f"Authenticated Shopify snapshot valid: {len(products)} products")
           PY
-          echo "Response headers:"
-          grep -iE '^(access-control|content-type|http/)' /tmp/headers || true
+
+      - name: Probe public Shopify feed
+        continue-on-error: true
+        shell: bash
+        run: |
+          code=$(curl -LsS -o /tmp/products.json -w "%{http_code}"             'https://packsmartsolutions.com/products.json?limit=250')
+          echo "Public Shopify feed HTTP $code"
+          if [ "$code" = "200" ]; then
+            echo "::notice::Public Shopify feed is live; the manager will prefer live catalogue data."
+          else
+            echo "::notice::Public Shopify feed is unavailable (HTTP $code); the manager will automatically use the authenticated synced catalogue."
+          fi
