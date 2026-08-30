@@ -8,7 +8,7 @@
   const DEFAULT_ROUTES = {
     status: ['/api/ebay/status', '/api/status', '/api/health'],
     draft: ['/api/ebay/drafts', '/api/ebay/draft', '/api/drafts', '/api/draft'],
-    listing: ['/api/ebay/listings', '/api/ebay/listing', '/api/create-listing', '/create-listing']
+    listing: ['/api/ebay/create-listing', '/api/ebay/listings', '/api/ebay/listing', '/api/create-listing', '/create-listing']
   };
 
   function joinUrl(baseUrl, path) {
