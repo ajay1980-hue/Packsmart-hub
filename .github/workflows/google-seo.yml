@@ -24,18 +24,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          urls=(
+          pages=(
             "https://packsmartsolutions.com/"
             "https://packsmartsolutions.com/collections/bubble-pouches"
             "https://packsmartsolutions.com/collections/bubble-envelopes"
             "https://packsmartsolutions.com/collections/mailing-bags"
-            "$SITEMAP_URL"
           )
-          for url in "${urls[@]}"; do
-            code=$(curl -L -sS -o /dev/null -w "%{http_code}" "$url")
-            echo "$code $url"
+
+          storefront_locked=false
+          for url in "${pages[@]}"; do
+            result=$(curl --fail-with-body -L -sS -o /dev/null \
+              -w "%{http_code} %{url_effective}" "$url")
+            read -r code effective_url <<< "$result"
+            echo "$code $url -> $effective_url"
+
+            if [[ "$effective_url" == *"/password"* ]]; then
+              storefront_locked=true
+              continue
+            fi
+
             test "$code" -ge 200 -a "$code" -lt 400
           done
+
+          sitemap_code=$(curl -L -sS -o /dev/null -w "%{http_code}" "$SITEMAP_URL")
+          echo "$sitemap_code $SITEMAP_URL"
+
+          if $storefront_locked; then
+            echo "::warning::The Shopify storefront is password-protected. Priority pages redirect to /password and Shopify does not expose sitemap.xml until the store is public."
+            test "$sitemap_code" = "404" -o "$sitemap_code" = "200"
+          else
+            test "$sitemap_code" -ge 200 -a "$sitemap_code" -lt 400
+          fi
 
       - name: Set up Python
         if: env.GSC_SERVICE_ACCOUNT_JSON != ''
