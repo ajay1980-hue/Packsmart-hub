@@ -26,19 +26,29 @@ jobs:
       - name: Run eBay Manager behaviour tests
         run: node ebay-manager/tests/ebay-manager.test.js
 
-      - name: Validate multi-photo and live-listing build
+      - name: Validate upload, postage and live-listing build
         shell: bash
         run: |
-          grep -q 'type="file" accept="image/\*" multiple' ebay-manager/index.html
+          grep -q 'id="photoInput" type="file"' ebay-manager/index.html
+          grep -q 'id="labelInput" type="file" accept="application/pdf,image/\*,.pdf"' ebay-manager/index.html
+          grep -q 'name="postageMode" value="free"' ebay-manager/index.html
+          grep -q 'name="postageMode" value="paid"' ebay-manager/index.html
+          grep -q 'packsmartsolutions20' ebay-manager/index.html
           grep -q 'MAX_PHOTOS = 24' ebay-manager/core.js
+          grep -q 'MAX_PHOTO_BYTES = 12' ebay-manager/core.js
           grep -q 'makeMain' ebay-manager/core.js
           grep -q 'movePhoto' ebay-manager/core.js
+          grep -q 'validatePhotoFile' ebay-manager/core.js
+          grep -q 'validateLabelFile' ebay-manager/core.js
+          grep -q 'normalizePostage' ebay-manager/core.js
           grep -q 'photoOrder' ebay-manager/core.js
           grep -q 'id="saveDraft"' ebay-manager/index.html
           grep -q 'id="createListing"' ebay-manager/index.html
           grep -q 'backend.createListing' ebay-manager/app.js
           grep -q "form.append('photos'" ebay-manager/backend.js
-          echo "Multi-photo, draft and live-listing UI checks passed"
+          grep -q "form.append('postage'" ebay-manager/backend.js
+          grep -q "form.append('ebayAccount'" ebay-manager/backend.js
+          echo "Photo, label, postage, draft and live-listing UI checks passed"
 
       - name: Validate authenticated Shopify catalogue snapshot
         shell: bash

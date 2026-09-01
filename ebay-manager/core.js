@@ -6,6 +6,13 @@
   'use strict';
 
   const MAX_PHOTOS = 24;
+  const MAX_PHOTO_BYTES = 12 * 1024 * 1024;
+  const MAX_LABEL_BYTES = 25 * 1024 * 1024;
+  const PHOTO_EXTENSIONS = ['jpg', 'jpeg', 'gif', 'png', 'bmp', 'tif', 'tiff', 'avif', 'heic', 'webp'];
+  const PHOTO_MIME_TYPES = [
+    'image/jpeg', 'image/gif', 'image/png', 'image/bmp', 'image/tiff',
+    'image/avif', 'image/heic', 'image/heif', 'image/webp'
+  ];
 
   function stripHtml(html, documentRef) {
     if (!html) return '';
@@ -71,7 +78,70 @@
     return copy.concat(incoming.slice(0, remaining));
   }
 
+  function fileExtension(name) {
+    const match = String(name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+    return match ? match[1] : '';
+  }
+
+  function validatePhotoFile(file) {
+    if (!file) return 'No photo file was selected.';
+    const type = String(file.type || '').toLowerCase();
+    const extension = fileExtension(file.name);
+    const supported = PHOTO_MIME_TYPES.includes(type) || PHOTO_EXTENSIONS.includes(extension);
+    if (!supported) {
+      return `${file.name || 'This file'} is not an eBay-supported image. Use JPG, PNG, GIF, BMP, TIFF, AVIF, HEIC or WEBP.`;
+    }
+    if (Number(file.size) > MAX_PHOTO_BYTES) {
+      return `${file.name || 'This photo'} is larger than eBay's 12 MB image limit.`;
+    }
+    return '';
+  }
+
+  function labelFileKind(file) {
+    const type = String(file && file.type || '').toLowerCase();
+    const extension = fileExtension(file && file.name);
+    if (type === 'application/pdf' || extension === 'pdf') return 'pdf';
+    if (PHOTO_MIME_TYPES.includes(type) || PHOTO_EXTENSIONS.includes(extension)) return 'image';
+    return '';
+  }
+
+  function validateLabelFile(file) {
+    if (!file) return 'Choose a postage-label PDF or image first.';
+    if (!labelFileKind(file)) return 'Postage labels must be a PDF or supported image file.';
+    if (Number(file.size) > MAX_LABEL_BYTES) return 'The postage-label file is larger than 25 MB.';
+    return '';
+  }
+
+  function normalizePostage(fields) {
+    const mode = fields && fields.postageMode === 'paid' ? 'paid' : 'free';
+    const enteredCost = String(fields && fields.shippingCost || '').trim();
+    const numericCost = Number(enteredCost);
+    const cost = mode === 'free'
+      ? '0.00'
+      : (Number.isFinite(numericCost) ? numericCost.toFixed(2) : enteredCost);
+
+    return {
+      mode,
+      optionType: 'DOMESTIC',
+      costType: 'FLAT_RATE',
+      freeShipping: mode === 'free',
+      buyerResponsibleForShipping: mode === 'paid',
+      serviceCode: String(fields && fields.shippingServiceCode || '').trim(),
+      serviceName: String(fields && fields.shippingServiceName || '').trim(),
+      shippingCost: { value: cost, currency: 'GBP' },
+      fulfillmentPolicyId: String(fields && fields.fulfillmentPolicyId || '').trim() || null
+    };
+  }
+
+  function extractEbayAccount(data) {
+    if (!data || typeof data !== 'object') return '';
+    const account = data.ebayAccount || data.ebayUser || data.username || data.userId ||
+      data.userID || data.accountName || (data.user && (data.user.username || data.user.userId));
+    return String(account || '').trim();
+  }
+
   function buildDraft(fields, photos, selectedProduct, catalogueSource) {
+    fields = fields || {};
     const ordered = photos.slice(0, MAX_PHOTOS);
     let localIndex = 0;
     const photoOrder = ordered.map((p, index) => {
@@ -88,8 +158,18 @@
       return item;
     });
 
+    const postage = normalizePostage(fields || {});
+    const shippingService = {
+      shippingService: postage.serviceCode,
+      shippingServiceCost: postage.shippingCost.value,
+      freeShipping: postage.freeShipping,
+      shippingServicePriority: 1
+    };
+
     return {
       source: 'packsmart-ebay-manager',
+      ebayAccount: String(fields.ebayAccount || '').trim() || null,
+      marketplaceId: 'EBAY_GB',
       catalogueSource: catalogueSource || null,
       shopifyProductId: selectedProduct && selectedProduct.id || null,
       shopifyHandle: selectedProduct && selectedProduct.handle || null,
@@ -99,7 +179,16 @@
       description: String(fields.description || '').trim(),
       imageUrls: ordered.filter(p => p.kind !== 'file' && p.url).map(p => p.url),
       localPhotoCount: localIndex,
-      photoOrder
+      photoOrder,
+      postage,
+      freeShipping: postage.freeShipping,
+      shippingCost: postage.shippingCost.value,
+      shippingService: postage.serviceCode,
+      fulfillmentPolicyId: postage.fulfillmentPolicyId,
+      shippingDetails: {
+        shippingType: 'Flat',
+        shippingServiceOptions: [shippingService]
+      }
     };
   }
 
@@ -110,17 +199,32 @@
     if (!Number.isFinite(price) || price <= 0) errors.push('Add a valid price greater than £0.');
     if (!photoCount) errors.push('Add at least one product photo.');
     if (photoCount > MAX_PHOTOS) errors.push(`eBay allows a maximum of ${MAX_PHOTOS} photos.`);
+    if (!draft.postage || !draft.postage.serviceCode) errors.push('Choose a UK postage service.');
+    if (draft.postage && draft.postage.mode === 'paid') {
+      const shippingCost = Number(draft.postage.shippingCost && draft.postage.shippingCost.value);
+      if (!Number.isFinite(shippingCost) || shippingCost <= 0) {
+        errors.push('Add a valid paid-postage amount greater than £0.');
+      }
+    }
     return errors;
   }
 
   return {
     MAX_PHOTOS,
+    MAX_PHOTO_BYTES,
+    MAX_LABEL_BYTES,
+    PHOTO_EXTENSIONS,
     stripHtml,
     normalizePublicProduct,
     normalizeSnapshotProduct,
     movePhoto,
     makeMain,
     appendPhotos,
+    validatePhotoFile,
+    validateLabelFile,
+    labelFileKind,
+    normalizePostage,
+    extractEbayAccount,
     buildDraft,
     validateDraft
   };

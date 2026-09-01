@@ -18,8 +18,11 @@
 
   async function parseResponse(res) {
     const type = (res.headers && res.headers.get && res.headers.get('content-type')) || '';
-    if (type.includes('application/json')) return res.json();
     const text = await res.text();
+    if (!text) return {};
+    if (type.includes('application/json')) {
+      try { return JSON.parse(text); } catch (_) { return { message: text }; }
+    }
     try { return JSON.parse(text); } catch (_) { return { message: text }; }
   }
 
@@ -87,8 +90,15 @@
       form.append('price', draft.price || '');
       form.append('sku', draft.sku || '');
       form.append('description', draft.description || '');
+      form.append('ebayAccount', draft.ebayAccount || '');
+      form.append('marketplaceId', draft.marketplaceId || 'EBAY_GB');
       form.append('imageUrls', JSON.stringify(draft.imageUrls || []));
       form.append('photoOrder', JSON.stringify(draft.photoOrder || []));
+      form.append('postage', JSON.stringify(draft.postage || {}));
+      form.append('freeShipping', String(Boolean(draft.freeShipping)));
+      form.append('shippingCost', draft.shippingCost || '');
+      form.append('shippingService', draft.shippingService || '');
+      form.append('fulfillmentPolicyId', draft.fulfillmentPolicyId || '');
 
       orderedLocal.forEach((photo, index) => {
         const name = photo.name || `photo-${index + 1}.jpg`;
