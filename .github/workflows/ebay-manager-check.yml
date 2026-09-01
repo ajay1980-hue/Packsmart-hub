@@ -2,6 +2,11 @@ name: eBay Manager Check
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ebay-manager/**"
+      - ".github/workflows/ebay-manager-check.yml"
   push:
     branches: [main, finish-ebay-manager]
     paths:
