@@ -28,6 +28,20 @@ function photo(name, kind = 'remote') {
   const main = core.makeMain(moved, 2);
   assert.deepEqual(main.map(x => x.name), ['d', 'a', 'b', 'c'], 'main-image selection must move chosen photo to position 1');
 
+  assert.equal(core.validatePhotoFile({ name: 'photo.png', type: 'image/png', size: 1024 }), '', 'PNG photos must be accepted');
+  assert.match(
+    core.validatePhotoFile({ name: 'notes.pdf', type: 'application/pdf', size: 1024 }),
+    /not an eBay-supported image/,
+    'PDF files must not be silently accepted as listing photos'
+  );
+  assert.match(
+    core.validatePhotoFile({ name: 'huge.jpg', type: 'image/jpeg', size: core.MAX_PHOTO_BYTES + 1 }),
+    /12 MB/,
+    'oversized eBay photos must be rejected before upload'
+  );
+  assert.equal(core.validateLabelFile({ name: 'label.pdf', type: 'application/pdf', size: 2048 }), '', 'PDF postage labels must be accepted');
+  assert.equal(core.labelFileKind({ name: 'label.webp', type: 'image/webp' }), 'image', 'image postage labels must be accepted');
+
   const product = core.normalizePublicProduct({
     id: 123,
     handle: 'sample',
@@ -43,7 +57,17 @@ function photo(name, kind = 'remote') {
 
   const local = photo('local', 'file');
   const draft = core.buildDraft(
-    { title: 'A valid eBay title', price: '12.50', sku: 'ABC', description: 'Description' },
+    {
+      title: 'A valid eBay title',
+      price: '12.50',
+      sku: 'ABC',
+      description: 'Description',
+      ebayAccount: 'packsmartsolutions20',
+      postageMode: 'paid',
+      shippingServiceCode: 'UK_RoyalMailTracked',
+      shippingServiceName: 'Royal Mail Tracked 48',
+      shippingCost: '3.71'
+    },
     [main[0], local, main[1]],
     product,
     'live'
@@ -51,7 +75,25 @@ function photo(name, kind = 'remote') {
   assert.equal(draft.photoOrder[0].main, true, 'first image must be main');
   assert.equal(draft.photoOrder[1].localFileIndex, 0, 'local file index must match upload order');
   assert.equal(draft.localPhotoCount, 1);
+  assert.equal(draft.ebayAccount, 'packsmartsolutions20');
+  assert.equal(draft.postage.freeShipping, false);
+  assert.equal(draft.postage.shippingCost.value, '3.71');
+  assert.equal(draft.shippingDetails.shippingServiceOptions[0].shippingService, 'UK_RoyalMailTracked');
   assert.deepEqual(core.validateDraft(draft, 3), []);
+
+  const freePostage = core.normalizePostage({
+    postageMode: 'free',
+    shippingServiceCode: 'UK_RoyalMailTracked',
+    shippingCost: '99.99'
+  });
+  assert.equal(freePostage.freeShipping, true);
+  assert.equal(freePostage.shippingCost.value, '0.00', 'free postage must always send a zero charge');
+
+  const invalidPaid = Object.assign({}, draft, {
+    postage: core.normalizePostage({ postageMode: 'paid', shippingServiceCode: 'UK_RoyalMailTracked', shippingCost: '' })
+  });
+  assert.match(core.validateDraft(invalidPaid, 3).join(' '), /paid-postage amount/, 'paid postage must require a positive cost');
+  assert.equal(core.extractEbayAccount({ user: { username: 'packsmartsolutions20' } }), 'packsmartsolutions20');
 
   const calls = [];
   const fakeFetch = async (url, init) => {
@@ -72,6 +114,10 @@ function photo(name, kind = 'remote') {
   assert.ok(calls[1].init.body instanceof FormData, 'draft request must use multipart FormData');
   assert.equal(calls[1].init.body.getAll('photos').length, 1, 'multipart request must include local photos');
   assert.equal(JSON.parse(calls[1].init.body.get('photoOrder'))[0].main, true, 'multipart payload must preserve main image');
+  assert.equal(calls[1].init.body.get('ebayAccount'), 'packsmartsolutions20', 'multipart payload must target the correct eBay account');
+  assert.equal(calls[1].init.body.get('freeShipping'), 'false', 'multipart payload must preserve paid-postage choice');
+  assert.equal(calls[1].init.body.get('shippingCost'), '3.71', 'multipart payload must include buyer postage cost');
+  assert.equal(JSON.parse(calls[1].init.body.get('postage')).serviceCode, 'UK_RoyalMailTracked');
 
   console.log('Packsmart eBay Manager tests passed');
 })().catch(err => {

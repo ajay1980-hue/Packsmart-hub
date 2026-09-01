@@ -12,7 +12,7 @@
       <div>
         <p class="eyebrow">PACKSMART SOLUTIONS</p>
         <h1>eBay Manager</h1>
-        <p class="sub">Shopify-connected listing builder</p>
+        <p class="sub">Shopify-connected listing builder for <strong>packsmartsolutions20</strong></p>
       </div>
       <div class="status-stack">
         <div class="status" id="storeStatus">Store: checking…</div>
@@ -39,22 +39,66 @@
       </div>
       <label class="dropzone" id="dropzone" for="photoInput">
         <span class="drop-title">Add product photos</span>
-        <span>Tap to choose multiple images or drag them here</span>
-        <input id="photoInput" type="file" accept="image/*" multiple />
+        <span>JPG, PNG, GIF, BMP, TIFF, AVIF, HEIC or WEBP • maximum 12 MB each</span>
+        <input id="photoInput" type="file" accept="image/jpeg,image/png,image/gif,image/bmp,image/tiff,image/avif,image/heic,image/heif,image/webp,.jpg,.jpeg,.gif,.png,.bmp,.tif,.tiff,.avif,.heic,.webp" multiple />
       </label>
       <p class="hint" id="photoHint">The first photo is used as the main image unless you choose another.</p>
       <div class="photo-grid" id="photoGrid" aria-live="polite"></div>
     </section>
 
-    <section class="card form-grid">
-      <div class="wide">
-        <label for="title">eBay title</label>
-        <input id="title" maxlength="80" placeholder="Listing title" />
-        <div class="counter"><span id="titleCount">0</span>/80</div>
+    <section class="card">
+      <div class="section-head">
+        <div><h2>3. Listing details</h2><p>Review the title, price, SKU and description before saving.</p></div>
       </div>
-      <div><label for="price">Price (£)</label><input id="price" inputmode="decimal" placeholder="0.00" /></div>
-      <div><label for="sku">SKU</label><input id="sku" placeholder="SKU" /></div>
-      <div class="wide"><label for="description">Description</label><textarea id="description" rows="8" placeholder="Product description"></textarea></div>
+      <div class="form-grid">
+        <div class="wide">
+          <label for="title">eBay title</label>
+          <input id="title" maxlength="80" placeholder="Listing title" />
+          <div class="counter"><span id="titleCount">0</span>/80</div>
+        </div>
+        <div><label for="price">Price (£)</label><input id="price" inputmode="decimal" placeholder="0.00" /></div>
+        <div><label for="sku">SKU</label><input id="sku" placeholder="SKU" /></div>
+        <div class="wide"><label for="description">Description</label><textarea id="description" rows="8" placeholder="Product description"></textarea></div>
+      </div>
+    </section>
+
+    <section class="card" id="postageSection">
+      <div class="section-head">
+        <div><h2>4. Postage</h2><p>Choose free postage or a flat amount paid by the buyer.</p></div>
+      </div>
+      <fieldset class="choice-grid">
+        <legend class="sr-only">Postage charge</legend>
+        <label class="choice-card">
+          <input type="radio" name="postageMode" value="free" checked />
+          <span><strong>Free postage</strong><small>Buyer pays £0.00</small></span>
+        </label>
+        <label class="choice-card">
+          <input type="radio" name="postageMode" value="paid" />
+          <span><strong>Paid postage</strong><small>Enter a flat buyer charge</small></span>
+        </label>
+      </fieldset>
+      <div class="form-grid postage-fields">
+        <div>
+          <label for="shippingService">UK postage service</label>
+          <select id="shippingService">
+            <option value="UK_RoyalMailTracked">Royal Mail Tracked 48</option>
+            <option value="UK_RoyalMailNextDay">Royal Mail Tracked 24</option>
+            <option value="UK_RoyalMailSecondClassStandard">Royal Mail 2nd Class</option>
+            <option value="UK_SellersStandardRate">Seller's standard delivery</option>
+            <option value="Courier">Courier</option>
+          </select>
+        </div>
+        <div id="postageCostField" hidden>
+          <label for="shippingCost">Buyer postage charge (£)</label>
+          <input id="shippingCost" inputmode="decimal" placeholder="3.71" />
+        </div>
+        <details class="wide advanced">
+          <summary>Advanced eBay policy</summary>
+          <label for="fulfillmentPolicyId">Fulfilment policy ID (optional)</label>
+          <input id="fulfillmentPolicyId" autocomplete="off" placeholder="Only needed by Inventory API backends" />
+        </details>
+      </div>
+      <p class="hint" id="postageHint">Free postage will be sent as £0.00 on the first domestic service.</p>
     </section>
 
     <section class="actions">
@@ -67,6 +111,29 @@
 
     <section class="card compact" id="resultCard" hidden>
       <h2>eBay Manager result</h2><p id="resultText"></p>
+    </section>
+
+    <section class="card" id="labelSection">
+      <div class="section-head">
+        <div><h2>5. Postage label</h2><p>Open and print a label PDF or image without attaching it to the product listing.</p></div>
+      </div>
+      <label class="dropzone compact-dropzone" id="labelDropzone" for="labelInput">
+        <span class="drop-title">Add postage-label file</span>
+        <span>PDF or image • maximum 25 MB • stays on this device</span>
+        <input id="labelInput" type="file" accept="application/pdf,image/*,.pdf" />
+      </label>
+      <p class="hint" id="labelHint">Postage labels are order documents, so they are kept separate from listing photos.</p>
+      <div class="label-preview" id="labelPreview" hidden>
+        <div class="file-summary">
+          <div><strong id="labelName"></strong><small id="labelMeta"></small></div>
+          <div class="inline-actions">
+            <a class="secondary button-link" id="openLabel" target="_blank" rel="noopener">Open / print label</a>
+            <button class="secondary" id="clearLabel" type="button">Remove label</button>
+          </div>
+        </div>
+        <iframe class="label-frame" id="labelFrame" title="Postage label PDF preview" hidden></iframe>
+        <img class="label-image" id="labelImage" alt="Postage label preview" hidden />
+      </div>
     </section>
   </main>
   <script src="./core.js"></script>

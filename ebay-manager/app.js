@@ -3,12 +3,20 @@
 
   const SHOP_URL = 'https://packsmartsolutions.com';
   const SNAPSHOT_URL = './shopify-products.json';
+  const EXPECTED_EBAY_ACCOUNT = 'packsmartsolutions20';
   const core = window.PacksmartEbayCore;
   const backendLib = window.PacksmartEbayBackend;
   if (!core || !backendLib) throw new Error('Packsmart eBay Manager modules failed to load.');
 
   const MAX_PHOTOS = core.MAX_PHOTOS;
-  const state = { products: [], photos: [], selectedProduct: null, catalogueSource: null };
+  const state = {
+    products: [],
+    photos: [],
+    label: null,
+    selectedProduct: null,
+    catalogueSource: null,
+    ebayAccountVerified: null
+  };
   const backend = backendLib.createBackend(window.PACKSMART_EBAY_CONFIG || {});
 
   const $ = id => document.getElementById(id);
@@ -21,6 +29,17 @@
   const price = $('price');
   const sku = $('sku');
   const description = $('description');
+  const shippingService = $('shippingService');
+  const shippingCost = $('shippingCost');
+  const fulfillmentPolicyId = $('fulfillmentPolicyId');
+  const postageCostField = $('postageCostField');
+  const postageHint = $('postageHint');
+  const labelInput = $('labelInput');
+  const labelDropzone = $('labelDropzone');
+  const labelPreview = $('labelPreview');
+  const labelFrame = $('labelFrame');
+  const labelImage = $('labelImage');
+  const openLabel = $('openLabel');
   const ebayStatus = $('ebayStatus');
   const resultCard = $('resultCard');
   const resultText = $('resultText');
@@ -31,6 +50,13 @@
   const money = v => {
     const n = Number(v);
     return Number.isFinite(n) ? n.toFixed(2) : '';
+  };
+  const normalizeAccount = value => String(value || '').trim().toLowerCase();
+  const formatBytes = bytes => {
+    const size = Number(bytes) || 0;
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
   };
 
   function showResult(message, tone) {
@@ -47,6 +73,17 @@
     if (id) return `${fallback} • ${id}`;
     if (data.message) return `${fallback} • ${data.message}`;
     return fallback;
+  }
+
+  function backendErrorMessage(error) {
+    if (!error) return 'Unknown hosted-backend error.';
+    if (error.status === 413) return 'The hosted upload limit was exceeded. Keep each photo under 12 MB or increase the server upload limit.';
+    if (error.status === 415) return 'The hosted backend rejected the image format. Use JPG or PNG, or update its media-upload handler.';
+    if (error.status === 422 || error.status === 400) return `eBay rejected part of the listing: ${error.message}`;
+    if (/No compatible|route .* returned|Failed to fetch|NetworkError|fetch failed/i.test(error.message || '')) {
+      return 'No compatible hosted eBay upload route could be reached. The browser UI is ready, but its server-side eBay endpoint still needs to be deployed or configured.';
+    }
+    return error.message || 'The hosted eBay backend did not accept the request.';
   }
 
   function populateProductSelect() {
@@ -107,11 +144,37 @@
     try {
       const result = await backend.status();
       const data = result.data || {};
-      const connected = data.connected !== false && data.authorized !== false && data.authenticated !== false;
-      ebayStatus.textContent = connected ? 'eBay: connected' : 'eBay: sign-in required';
-      ebayStatus.dataset.state = connected ? 'ok' : 'warn';
+      const account = core.extractEbayAccount(data);
+      const explicitConnected = data.connected === true || data.authorized === true ||
+        data.authenticated === true || data.ebayConnected === true;
+      const explicitDisconnected = data.connected === false || data.authorized === false ||
+        data.authenticated === false || data.ebayConnected === false;
+
+      if (account && normalizeAccount(account) !== EXPECTED_EBAY_ACCOUNT) {
+        state.ebayAccountVerified = false;
+        ebayStatus.textContent = `eBay: wrong account • ${account}`;
+        ebayStatus.dataset.state = 'error';
+        showResult(`Live publishing is blocked because the hosted manager reported ${account}, not ${EXPECTED_EBAY_ACCOUNT}.`, 'error');
+      } else if (explicitConnected && account) {
+        state.ebayAccountVerified = true;
+        ebayStatus.textContent = `eBay: connected • ${account}`;
+        ebayStatus.dataset.state = 'ok';
+      } else if (explicitConnected) {
+        state.ebayAccountVerified = null;
+        ebayStatus.textContent = 'eBay: connected • account not reported';
+        ebayStatus.dataset.state = 'neutral';
+      } else if (explicitDisconnected) {
+        state.ebayAccountVerified = null;
+        ebayStatus.textContent = 'eBay: sign-in required';
+        ebayStatus.dataset.state = 'warn';
+      } else {
+        state.ebayAccountVerified = null;
+        ebayStatus.textContent = 'eBay: backend reachable • OAuth unconfirmed';
+        ebayStatus.dataset.state = 'neutral';
+      }
     } catch (e) {
       console.info('eBay status route not verified yet.', e);
+      state.ebayAccountVerified = null;
       ebayStatus.textContent = e && (e.status === 401 || e.status === 403) ? 'eBay: sign-in required' : 'eBay: backend not verified';
       ebayStatus.dataset.state = e && (e.status === 401 || e.status === 403) ? 'warn' : 'neutral';
     } finally {
@@ -144,7 +207,13 @@
   }
 
   function addFiles(fileList) {
-    const files = Array.from(fileList || []).filter(f => f.type.startsWith('image/'));
+    const selected = Array.from(fileList || []);
+    const rejected = [];
+    const files = selected.filter(file => {
+      const error = core.validatePhotoFile(file);
+      if (error) rejected.push(error);
+      return !error;
+    });
     const remaining = MAX_PHOTOS - state.photos.length;
     const incoming = files.slice(0, Math.max(0, remaining)).map(file => ({
       id: `${file.name}-${file.size}-${file.lastModified}-${Math.random()}`,
@@ -154,9 +223,11 @@
       file
     }));
     state.photos = core.appendPhotos(state.photos, incoming, MAX_PHOTOS);
-    $('photoHint').textContent = files.length > remaining
-      ? `eBay allows ${MAX_PHOTOS} photos. Extra images were not added.`
-      : 'The first photo is used as the main image unless you choose another.';
+    const messages = rejected.slice(0, 2);
+    if (files.length > remaining) messages.push(`eBay allows ${MAX_PHOTOS} photos. Extra images were not added.`);
+    $('photoHint').textContent = messages.length
+      ? messages.join(' ')
+      : `${incoming.length} photo${incoming.length === 1 ? '' : 's'} added. The first photo is the main image.`;
     photoInput.value = '';
     renderPhotos();
   }
@@ -191,6 +262,7 @@
       card.innerHTML = `
         ${i === 0 ? '<span class="badge">MAIN</span>' : ''}
         <img src="${esc(photo.url)}" alt="${esc(photo.name)}">
+        <span class="preview-fallback">Preview unavailable; the file can still be uploaded.</span>
         <div class="photo-meta">
           <div class="photo-name" title="${esc(photo.name)}">${esc(photo.name)}</div>
           <div class="photo-controls">
@@ -200,6 +272,7 @@
             <button type="button" data-a="remove" aria-label="Remove photo">×</button>
           </div>
         </div>`;
+      card.querySelector('img').onerror = () => card.classList.add('preview-unavailable');
       card.querySelector('[data-a="left"]').onclick = () => movePhoto(i, -1);
       card.querySelector('[data-a="main"]').onclick = () => makeMain(i);
       card.querySelector('[data-a="right"]').onclick = () => movePhoto(i, 1);
@@ -212,12 +285,71 @@
     $('titleCount').textContent = title.value.length;
   }
 
+  function selectedPostageMode() {
+    return document.querySelector('input[name="postageMode"]:checked')?.value || 'free';
+  }
+
+  function updatePostageFields() {
+    const paid = selectedPostageMode() === 'paid';
+    postageCostField.hidden = !paid;
+    shippingCost.required = paid;
+    postageHint.textContent = paid
+      ? 'The buyer will be charged this flat amount on the first domestic service.'
+      : 'Free postage will be sent as £0.00 on the first domestic service.';
+  }
+
+  function shippingServiceName() {
+    return shippingService.options[shippingService.selectedIndex]?.textContent.trim() || '';
+  }
+
+  function clearLabel() {
+    if (state.label?.url) URL.revokeObjectURL(state.label.url);
+    state.label = null;
+    labelInput.value = '';
+    labelFrame.removeAttribute('src');
+    labelImage.removeAttribute('src');
+    openLabel.removeAttribute('href');
+    labelFrame.hidden = true;
+    labelImage.hidden = true;
+    labelPreview.hidden = true;
+    $('labelHint').textContent = 'Postage labels are order documents, so they are kept separate from listing photos.';
+  }
+
+  function addLabelFile(file) {
+    const error = core.validateLabelFile(file);
+    labelInput.value = '';
+    if (error) {
+      $('labelHint').textContent = error;
+      return;
+    }
+
+    clearLabel();
+    const kind = core.labelFileKind(file);
+    const url = URL.createObjectURL(file);
+    state.label = { file, kind, url };
+    $('labelName').textContent = file.name || 'Postage label';
+    $('labelMeta').textContent = `${kind.toUpperCase()} • ${formatBytes(file.size)} • kept locally`;
+    openLabel.href = url;
+    labelFrame.hidden = kind !== 'pdf';
+    labelImage.hidden = kind !== 'image';
+    if (kind === 'pdf') labelFrame.src = url;
+    else labelImage.src = url;
+    labelPreview.hidden = false;
+    $('labelHint').textContent = 'Label ready. Use Open / print label to print from your browser or PDF viewer.';
+  }
+
   function currentDraft() {
     return core.buildDraft({
       title: title.value,
       price: price.value,
       sku: sku.value,
-      description: description.value
+      description: description.value,
+      ebayAccount: EXPECTED_EBAY_ACCOUNT,
+      postageMode: selectedPostageMode(),
+      shippingServiceCode: shippingService.value,
+      shippingServiceName: shippingServiceName(),
+      shippingCost: shippingCost.value,
+      fulfillmentPolicyId: fulfillmentPolicyId.value
     }, state.photos, state.selectedProduct, state.catalogueSource);
   }
 
@@ -229,6 +361,15 @@
       return null;
     }
     return draft;
+  }
+
+  function canWriteToExpectedAccount() {
+    if (state.ebayAccountVerified === true) return true;
+    const detail = state.ebayAccountVerified === false
+      ? 'The hosted manager reported a different eBay account.'
+      : 'The hosted status route has not confirmed its eBay username.';
+    showResult(`${detail} The eBay write is blocked until it explicitly confirms ${EXPECTED_EBAY_ACCOUNT}.`, 'error');
+    return false;
   }
 
   async function withBusy(button, busyText, task) {
@@ -247,11 +388,16 @@
     if (!draft) return;
     localStorage.setItem('packsmart-ebay-draft', JSON.stringify(draft));
 
+    if (!canWriteToExpectedAccount()) {
+      resultText.textContent += ' A local recovery draft has still been saved in this browser.';
+      return;
+    }
+
     await withBusy($('saveDraft'), 'Saving…', async () => {
       try {
         const result = await backend.saveDraft(draft, state.photos);
         showResult(summarizeResponse(result.data, `Draft saved to hosted eBay Manager • ${state.photos.length} photos`), 'ok');
-        ebayStatus.textContent = 'eBay: backend connected';
+        ebayStatus.textContent = `eBay: backend connected • target ${EXPECTED_EBAY_ACCOUNT}`;
         ebayStatus.dataset.state = 'ok';
       } catch (e) {
         console.error(e);
@@ -260,7 +406,7 @@
           ebayStatus.dataset.state = 'warn';
           showResult('Draft saved locally. Sign in to the hosted eBay Manager to save it server-side.', 'warn');
         } else {
-          showResult(`Draft saved locally. Hosted backend did not accept it yet: ${e.message}`, 'warn');
+          showResult(`Draft saved locally. ${backendErrorMessage(e)}`, 'warn');
         }
       }
     });
@@ -269,14 +415,18 @@
   async function createLiveListing() {
     const draft = validateCurrentDraft();
     if (!draft) return;
-    if (!confirm(`Create this listing live on eBay now?\n\n${draft.title}\n£${draft.price}\n${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`)) return;
+    if (!canWriteToExpectedAccount()) return;
+    const postageSummary = draft.postage.freeShipping
+      ? 'Free postage'
+      : `Buyer postage: £${draft.postage.shippingCost.value}`;
+    if (!confirm(`Create this listing live on ${EXPECTED_EBAY_ACCOUNT}?\n\n${draft.title}\n£${draft.price}\n${postageSummary}\n${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`)) return;
 
     await withBusy($('createListing'), 'Creating listing…', async () => {
       try {
         const result = await backend.createListing(draft, state.photos);
         localStorage.setItem('packsmart-ebay-last-listing', JSON.stringify(result.data || {}));
         showResult(summarizeResponse(result.data, 'Live eBay listing created'), 'ok');
-        ebayStatus.textContent = 'eBay: connected';
+        ebayStatus.textContent = `eBay: connected • ${EXPECTED_EBAY_ACCOUNT}`;
         ebayStatus.dataset.state = 'ok';
       } catch (e) {
         console.error(e);
@@ -285,7 +435,7 @@
           ebayStatus.dataset.state = 'warn';
           showResult('eBay sign-in is required before a live listing can be created.', 'warn');
         } else {
-          showResult(`Live listing was not created: ${e.message}`, 'error');
+          showResult(`Live listing was not created. ${backendErrorMessage(e)}`, 'error');
         }
       }
     });
@@ -300,14 +450,19 @@
     price.value = '';
     sku.value = '';
     description.value = '';
+    document.querySelector('input[name="postageMode"][value="free"]').checked = true;
+    shippingCost.value = '';
+    fulfillmentPolicyId.value = '';
     localStorage.removeItem('packsmart-ebay-draft');
     resultCard.hidden = true;
     $('photoHint').textContent = 'The first photo is used as the main image unless you choose another.';
+    updatePostageFields();
     updateTitleCount();
     renderPhotos();
   }
 
   photoInput.addEventListener('change', e => addFiles(e.target.files));
+  labelInput.addEventListener('change', e => addLabelFile(e.target.files && e.target.files[0]));
   productSelect.addEventListener('change', e => importProduct(e.target.value));
   $('refreshProducts').addEventListener('click', loadProducts);
   $('checkEbay').addEventListener('click', checkBackend);
@@ -315,6 +470,10 @@
   $('createListing').addEventListener('click', createLiveListing);
   $('clearDraft').addEventListener('click', clearDraft);
   title.addEventListener('input', updateTitleCount);
+  document.querySelectorAll('input[name="postageMode"]').forEach(input =>
+    input.addEventListener('change', updatePostageFields)
+  );
+  $('clearLabel').addEventListener('click', clearLabel);
 
   ['dragenter', 'dragover'].forEach(evt =>
     dropzone.addEventListener(evt, e => {
@@ -330,8 +489,27 @@
   );
   dropzone.addEventListener('drop', e => addFiles(e.dataTransfer.files));
 
+  ['dragenter', 'dragover'].forEach(evt =>
+    labelDropzone.addEventListener(evt, e => {
+      e.preventDefault();
+      labelDropzone.classList.add('drag');
+    })
+  );
+  ['dragleave', 'drop'].forEach(evt =>
+    labelDropzone.addEventListener(evt, e => {
+      e.preventDefault();
+      labelDropzone.classList.remove('drag');
+    })
+  );
+  labelDropzone.addEventListener('drop', e => addLabelFile(e.dataTransfer.files && e.dataTransfer.files[0]));
+  window.addEventListener('beforeunload', () => {
+    state.photos.forEach(cleanup);
+    if (state.label?.url) URL.revokeObjectURL(state.label.url);
+  });
+
   renderPhotos();
   updateTitleCount();
+  updatePostageFields();
   loadProducts();
   checkBackend();
 })();
