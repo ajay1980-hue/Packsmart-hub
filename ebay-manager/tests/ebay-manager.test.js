@@ -67,6 +67,13 @@ function photo(name, kind = 'remote') {
       shippingServiceCode: 'UK_RoyalMailTracked',
       shippingServiceName: 'Royal Mail Tracked 48',
       shippingCost: '3.71'
+      ,variations: [
+        { quantity: 50, price: '12.50', sku: 'ABC-50', enabled: true },
+        { quantity: 100, price: '21.00', sku: 'ABC-100', enabled: true },
+        { quantity: 200, price: '38.00', sku: 'ABC-200', enabled: true }
+      ]
+      ,promotionType: 'promoted-listings-standard'
+      ,adRatePercent: '3.5'
     },
     [main[0], local, main[1]],
     product,
@@ -78,6 +85,9 @@ function photo(name, kind = 'remote') {
   assert.equal(draft.ebayAccount, 'packsmartsolutions20');
   assert.equal(draft.postage.freeShipping, false);
   assert.equal(draft.postage.shippingCost.value, '3.71');
+  assert.deepEqual(draft.variations.map(v => v.quantity), [50, 100, 200]);
+  assert.equal(draft.promotion.type, 'PROMOTED_LISTINGS_STANDARD');
+  assert.equal(draft.promotion.adRatePercent, '3.5');
   assert.equal(draft.shippingDetails.shippingServiceOptions[0].shippingService, 'UK_RoyalMailTracked');
   assert.deepEqual(core.validateDraft(draft, 3), []);
 
@@ -118,6 +128,8 @@ function photo(name, kind = 'remote') {
   assert.equal(calls[1].init.body.get('freeShipping'), 'false', 'multipart payload must preserve paid-postage choice');
   assert.equal(calls[1].init.body.get('shippingCost'), '3.71', 'multipart payload must include buyer postage cost');
   assert.equal(JSON.parse(calls[1].init.body.get('postage')).serviceCode, 'UK_RoyalMailTracked');
+  assert.equal(JSON.parse(calls[1].init.body.get('variations')).length, 3);
+  assert.equal(JSON.parse(calls[1].init.body.get('promotion')).adRatePercent, '3.5');
 
   console.log('Packsmart eBay Manager tests passed');
 })().catch(err => {
