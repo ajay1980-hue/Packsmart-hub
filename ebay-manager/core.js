@@ -140,6 +140,26 @@
     return String(account || '').trim();
   }
 
+  function normalizeVariations(rows) {
+    return (rows || []).filter(row => row && row.enabled !== false).map(row => ({
+      name: 'Pack size',
+      value: `Pack of ${Number(row.quantity)}`,
+      quantity: Number(row.quantity),
+      price: String(row.price || '').trim(),
+      sku: String(row.sku || '').trim()
+    })).filter(row => [50, 100, 200].includes(row.quantity));
+  }
+
+  function normalizePromotion(fields) {
+    const enabled = fields && fields.promotionType === 'promoted-listings-standard';
+    const rate = Number(fields && fields.adRatePercent);
+    return {
+      enabled,
+      type: enabled ? 'PROMOTED_LISTINGS_STANDARD' : 'NONE',
+      adRatePercent: enabled && Number.isFinite(rate) ? rate.toFixed(1) : null
+    };
+  }
+
   function buildDraft(fields, photos, selectedProduct, catalogueSource) {
     fields = fields || {};
     const ordered = photos.slice(0, MAX_PHOTOS);
@@ -159,6 +179,8 @@
     });
 
     const postage = normalizePostage(fields || {});
+    const variations = normalizeVariations(fields.variations);
+    const promotion = normalizePromotion(fields);
     const shippingService = {
       shippingService: postage.serviceCode,
       shippingServiceCost: postage.shippingCost.value,
@@ -177,6 +199,8 @@
       price: String(fields.price || '').trim(),
       sku: String(fields.sku || '').trim(),
       description: String(fields.description || '').trim(),
+      variations,
+      promotion,
       imageUrls: ordered.filter(p => p.kind !== 'file' && p.url).map(p => p.url),
       localPhotoCount: localIndex,
       photoOrder,
@@ -206,6 +230,15 @@
         errors.push('Add a valid paid-postage amount greater than £0.');
       }
     }
+    if (!draft.variations || !draft.variations.length) errors.push('Enable at least one pack-size variation.');
+    (draft.variations || []).forEach(variation => {
+      const variationPrice = Number(variation.price);
+      if (!Number.isFinite(variationPrice) || variationPrice <= 0) errors.push(`${variation.value} needs a valid price greater than £0.`);
+    });
+    if (draft.promotion && draft.promotion.enabled) {
+      const rate = Number(draft.promotion.adRatePercent);
+      if (!Number.isFinite(rate) || rate < 2 || rate > 100) errors.push('Promoted Listings ad rate must be between 2% and 100%.');
+    }
     return errors;
   }
 
@@ -224,6 +257,8 @@
     validateLabelFile,
     labelFileKind,
     normalizePostage,
+    normalizeVariations,
+    normalizePromotion,
     extractEbayAccount,
     buildDraft,
     validateDraft

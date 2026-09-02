@@ -90,6 +90,8 @@
       form.append('price', draft.price || '');
       form.append('sku', draft.sku || '');
       form.append('description', draft.description || '');
+      form.append('variations', JSON.stringify(draft.variations || []));
+      form.append('promotion', JSON.stringify(draft.promotion || { enabled: false, type: 'NONE' }));
       form.append('ebayAccount', draft.ebayAccount || '');
       form.append('marketplaceId', draft.marketplaceId || 'EBAY_GB');
       form.append('imageUrls', JSON.stringify(draft.imageUrls || []));

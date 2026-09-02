@@ -34,6 +34,9 @@
   const fulfillmentPolicyId = $('fulfillmentPolicyId');
   const postageCostField = $('postageCostField');
   const postageHint = $('postageHint');
+  const promotionType = $('promotionType');
+  const adRatePercent = $('adRatePercent');
+  const adRateField = $('adRateField');
   const labelInput = $('labelInput');
   const labelDropzone = $('labelDropzone');
   const labelPreview = $('labelPreview');
@@ -193,6 +196,11 @@
     price.value = money(v.price);
     sku.value = v.sku || '';
     description.value = p.description || '';
+    [50, 100, 200].forEach((quantity, rowIndex) => {
+      const match = (p.variants || []).find(variant => new RegExp(`(^|\\D)${quantity}(\\D|$)`).test(variant.title || '')) || (p.variants || [])[rowIndex] || {};
+      $(`variation${quantity}Price`).value = money(match.price || (rowIndex === 0 ? v.price : ''));
+      $(`variation${quantity}Sku`).value = match.sku || (v.sku ? `${v.sku}-${quantity}` : '');
+    });
     updateTitleCount();
 
     const incoming = (p.images || []).map((url, i) => ({
@@ -302,6 +310,30 @@
     return shippingService.options[shippingService.selectedIndex]?.textContent.trim() || '';
   }
 
+  function variationRows() {
+    return [50, 100, 200].map(quantity => ({
+      quantity,
+      enabled: $(`variation${quantity}Enabled`).checked,
+      price: $(`variation${quantity}Price`).value,
+      sku: $(`variation${quantity}Sku`).value
+    }));
+  }
+
+  function updateVariationFields(quantity) {
+    const enabled = $(`variation${quantity}Enabled`).checked;
+    $(`variation${quantity}Price`).disabled = !enabled;
+    $(`variation${quantity}Sku`).disabled = !enabled;
+  }
+
+  function updatePromotionFields() {
+    const enabled = promotionType.value === 'promoted-listings-standard';
+    adRateField.hidden = !enabled;
+    adRatePercent.required = enabled;
+    $('promotionHint').textContent = enabled
+      ? 'The hosted backend must add the published listing to an eBay advertising campaign at this rate.'
+      : 'No eBay advertising fee will be requested.';
+  }
+
   function clearLabel() {
     if (state.label?.url) URL.revokeObjectURL(state.label.url);
     state.label = null;
@@ -350,6 +382,9 @@
       shippingServiceName: shippingServiceName(),
       shippingCost: shippingCost.value,
       fulfillmentPolicyId: fulfillmentPolicyId.value
+      ,variations: variationRows()
+      ,promotionType: promotionType.value
+      ,adRatePercent: adRatePercent.value
     }, state.photos, state.selectedProduct, state.catalogueSource);
   }
 
@@ -453,6 +488,15 @@
     document.querySelector('input[name="postageMode"][value="free"]').checked = true;
     shippingCost.value = '';
     fulfillmentPolicyId.value = '';
+    [50, 100, 200].forEach(quantity => {
+      $(`variation${quantity}Enabled`).checked = true;
+      $(`variation${quantity}Price`).value = '';
+      $(`variation${quantity}Sku`).value = '';
+      updateVariationFields(quantity);
+    });
+    promotionType.value = 'none';
+    adRatePercent.value = '';
+    updatePromotionFields();
     localStorage.removeItem('packsmart-ebay-draft');
     resultCard.hidden = true;
     $('photoHint').textContent = 'The first photo is used as the main image unless you choose another.';
@@ -473,6 +517,8 @@
   document.querySelectorAll('input[name="postageMode"]').forEach(input =>
     input.addEventListener('change', updatePostageFields)
   );
+  [50, 100, 200].forEach(quantity => $('variation' + quantity + 'Enabled').addEventListener('change', () => updateVariationFields(quantity)));
+  promotionType.addEventListener('change', updatePromotionFields);
   $('clearLabel').addEventListener('click', clearLabel);
 
   ['dragenter', 'dragover'].forEach(evt =>
@@ -510,6 +556,8 @@
   renderPhotos();
   updateTitleCount();
   updatePostageFields();
+  [50, 100, 200].forEach(updateVariationFields);
+  updatePromotionFields();
   loadProducts();
   checkBackend();
 })();
