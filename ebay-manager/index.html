@@ -127,6 +127,7 @@
       </div>
 
       <div class="strategy-actions">
+        <button class="primary" id="applyLaunchPreset" type="button">Apply Packsmart launch preset</button>
         <button class="secondary strong" id="applySuggestedPrices" type="button">Apply target-margin prices</button>
         <button class="secondary" id="applyShippingRecommendation" type="button">Apply shipping recommendation</button>
       </div>
@@ -165,10 +166,10 @@
         <div><h2>7. eBay promotion</h2><p>Choose whether this listing should be submitted for Promoted Listings Standard.</p></div>
       </div>
       <div class="form-grid">
-        <div><label for="promotionType">Promotion</label><select id="promotionType"><option value="none">No promotion</option><option value="promoted-listings-standard">Promoted Listings Standard</option></select></div>
-        <div id="adRateField" hidden><label for="adRatePercent">Ad rate (%)</label><input id="adRatePercent" inputmode="decimal" placeholder="2.0"></div>
+        <div><label for="promotionType">Promotion</label><select id="promotionType"><option value="none">No promotion</option><option value="promoted-listings-standard" selected>Promoted Listings Standard</option></select></div>
+        <div id="adRateField"><label for="adRatePercent">Ad rate (%)</label><input id="adRatePercent" inputmode="decimal" value="3.0" placeholder="3.0"></div>
       </div>
-      <p class="hint" id="promotionHint">No eBay advertising fee will be requested.</p>
+      <p class="hint" id="promotionHint">Packsmart launch preset: 3.0% General promoted listing. No ad spend is triggered until a live listing is confirmed and the hosted eBay backend applies the campaign.</p>
     </section>
 
     <section class="actions">
