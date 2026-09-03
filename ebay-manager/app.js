@@ -507,8 +507,8 @@
       $(`variation${quantity}Sku`).value = '';
       updateVariationFields(quantity);
     });
-    promotionType.value = 'none';
-    adRatePercent.value = '';
+    promotionType.value = 'promoted-listings-standard';
+    adRatePercent.value = '3.0';
     updatePromotionFields();
     commercialUI.reset();
     localStorage.removeItem('packsmart-ebay-draft');
