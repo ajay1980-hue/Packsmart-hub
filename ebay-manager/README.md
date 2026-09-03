@@ -63,3 +63,22 @@ The live-listing payload sets `action: "publish"`; draft creation sets `action: 
 
 ## Tests
 GitHub Actions validates JavaScript syntax, the synced Shopify catalogue, photo/label/postage markup, backend integration hooks and `tests/ebay-manager.test.js`. The Node test covers the 24-photo cap, file validation, postage-label types, free and paid postage, target-account metadata, Shopify normalization, draft creation and multipart backend route fallback.
+
+
+## Sales strategy and profit protection
+The manager now contains a Packsmart-specific commercial engine rather than relying on Shopify price alone.
+
+- Per-product economics are remembered locally for Pack 50 / 100 / 200: landed product cost, packing cost and actual outbound delivery cost.
+- UK business-seller fee assumptions are editable: final-value percentage, regulatory percentage, VAT treatment on eBay/ad fees and fixed order fee.
+- Promoted Listings ad rate is included in profit before publish.
+- Target net margin defaults to 25%; the hard live-publish floor defaults to 20%.
+- Suggested eBay prices are calculated from costs, shipping, fees, ad rate and the chosen target margin.
+- Shipping recommendation prefers free delivery only when every enabled pack remains above the hard profit floor; otherwise it recommends a controlled buyer postage charge.
+- Multi-buy defaults to 3% / 5% / 7% for 2 / 3 / 4+ purchases.
+- Optional Best Offer metadata includes a safe per-variation floor.
+- The live-publish guard tests the worst enabled promotional discount, not just the undiscounted selling price.
+- Incomplete or low-margin economics do not prevent saving a draft, but they do block live publishing while the profit guard is enabled.
+
+commercial, bestOffer and multiBuy are included both inside the multipart JSON payload and as compatibility fields for the hosted backend. The existing eBay OAuth/session remains server-side and unchanged.
+
+The commercial defaults are deliberately editable because eBay category fees and VAT recovery treatment can differ. Packsmart should update the inputs when its actual seller fee/category treatment changes.
