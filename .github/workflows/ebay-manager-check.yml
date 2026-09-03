@@ -58,6 +58,11 @@ jobs:
           grep -q "form.append('bestOffer'" ebay-manager/backend.js
           grep -q "form.append('multiBuy'" ebay-manager/backend.js
           grep -q 'id="profitGuardEnabled"' ebay-manager/index.html
+          grep -q 'id="applyLaunchPreset"' ebay-manager/index.html
+          grep -q 'value="promoted-listings-standard" selected' ebay-manager/index.html
+          grep -q 'value="3.0" placeholder="3.0"' ebay-manager/index.html
+          grep -q 'applyLaunchPreset' ebay-manager/strategy-ui.js
+          grep -q 'General promoted listing' ebay-manager/app.js
           grep -q 'id="applySuggestedPrices"' ebay-manager/index.html
           grep -q 'PacksmartEbayStrategy' ebay-manager/app.js
           grep -q "form.append('ebayAccount'" ebay-manager/backend.js

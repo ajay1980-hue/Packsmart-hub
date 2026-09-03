@@ -467,7 +467,16 @@
     const marginSummary = draft.commercial && draft.commercial.minimumObservedMarginPercent != null
       ? `\nProtected worst-case margin: ${draft.commercial.minimumObservedMarginPercent.toFixed(1)}%`
       : '';
-    if (!confirm(`Create this listing live on ${EXPECTED_EBAY_ACCOUNT}?\n\n${draft.title}\n£${draft.price}\n${postageSummary}${marginSummary}\n${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`)) return;
+    const adSummary = draft.promotion && draft.promotion.enabled
+      ? `\nGeneral promoted listing: ${draft.promotion.adRatePercent}%`
+      : '\nGeneral promoted listing: OFF';
+    const multiBuySummary = draft.multiBuy && draft.multiBuy.enabled
+      ? `\nMulti-buy: ${draft.multiBuy.tiers.map(t => t.quantity + '+=' + t.discountPercent + '%').join(' • ')}`
+      : '\nMulti-buy: OFF';
+    const offerSummary = draft.bestOffer && draft.bestOffer.enabled
+      ? `\nBest Offer: ON • max ${draft.bestOffer.maxDiscountPercent}%`
+      : '\nBest Offer: OFF';
+    if (!confirm(`Create this listing live on ${EXPECTED_EBAY_ACCOUNT}?\n\n${draft.title}\n£${draft.price}\n${postageSummary}${adSummary}${multiBuySummary}${offerSummary}${marginSummary}\n${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`)) return;
 
     await withBusy($('createListing'), 'Creating listing…', async () => {
       try {
@@ -507,8 +516,8 @@
       $(`variation${quantity}Sku`).value = '';
       updateVariationFields(quantity);
     });
-    promotionType.value = 'none';
-    adRatePercent.value = '';
+    promotionType.value = 'promoted-listings-standard';
+    adRatePercent.value = '3.0';
     updatePromotionFields();
     commercialUI.reset();
     localStorage.removeItem('packsmart-ebay-draft');
