@@ -25,7 +25,9 @@ jobs:
       - name: Validate manager JavaScript
         run: |
           node --check ebay-manager/core.js
+          node --check ebay-manager/strategy.js
           node --check ebay-manager/backend.js
+          node --check ebay-manager/strategy-ui.js
           node --check ebay-manager/app.js
 
       - name: Run eBay Manager behaviour tests
@@ -52,6 +54,12 @@ jobs:
           grep -q 'backend.createListing' ebay-manager/app.js
           grep -q "form.append('photos'" ebay-manager/backend.js
           grep -q "form.append('postage'" ebay-manager/backend.js
+          grep -q "form.append('commercial'" ebay-manager/backend.js
+          grep -q "form.append('bestOffer'" ebay-manager/backend.js
+          grep -q "form.append('multiBuy'" ebay-manager/backend.js
+          grep -q 'id="profitGuardEnabled"' ebay-manager/index.html
+          grep -q 'id="applySuggestedPrices"' ebay-manager/index.html
+          grep -q 'PacksmartEbayStrategy' ebay-manager/app.js
           grep -q "form.append('ebayAccount'" ebay-manager/backend.js
           echo "Photo, label, postage, draft and live-listing UI checks passed"
 
