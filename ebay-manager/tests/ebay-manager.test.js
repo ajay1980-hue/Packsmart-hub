@@ -3,6 +3,7 @@
 const assert = require('assert');
 const core = require('../core.js');
 const backendLib = require('../backend.js');
+const strategy = require('../strategy.js');
 
 function photo(name, kind = 'remote') {
   return {
@@ -105,6 +106,53 @@ function photo(name, kind = 'remote') {
   assert.match(core.validateDraft(invalidPaid, 3).join(' '), /paid-postage amount/, 'paid postage must require a positive cost');
   assert.equal(core.extractEbayAccount({ user: { username: 'packsmartsolutions20' } }), 'packsmartsolutions20');
 
+  const commercial = strategy.buildCommercial({
+    finalValuePercent: '12.5',
+    regulatoryPercent: '0.35',
+    feeVatPercent: '20',
+    fixedOrderFee: '0.40',
+    targetMarginPercent: '25',
+    hardFloorMarginPercent: '20',
+    guardEnabled: true,
+    costRows: [
+      { quantity: 50, landedCost: '4.00', packingCost: '0.30', outboundShippingCost: '3.00' },
+      { quantity: 100, landedCost: '7.00', packingCost: '0.30', outboundShippingCost: '4.00' },
+      { quantity: 200, landedCost: '12.00', packingCost: '0.40', outboundShippingCost: '5.00' }
+    ],
+    multiBuyEnabled: true,
+    multiBuyTiers: [
+      { quantity: 2, discountPercent: 3 },
+      { quantity: 3, discountPercent: 5 },
+      { quantity: 4, discountPercent: 7 }
+    ],
+    bestOfferEnabled: true,
+    bestOfferMaxDiscountPercent: '5'
+  }, draft.variations, draft.promotion, draft.postage);
+
+  assert.equal(commercial.allComplete, true, 'commercial engine must recognise complete cost rows');
+  assert.equal(commercial.publishAllowed, true, 'healthy protected margins must allow live publishing');
+  assert.equal(commercial.worstDiscountPercent, 7, 'profit guard must use the worst enabled promotion discount');
+  assert.equal(commercial.shippingRecommendation.mode, 'paid', 'low entry pack should preserve buyer-paid delivery when free shipping is not safe');
+  assert.ok(Number(commercial.rows[0].suggestedPrice) > 0, 'commercial engine must calculate a target-margin price');
+  assert.ok(Number(commercial.bestOffer.perVariationFloor[200]) > 0, 'commercial engine must calculate a safe offer floor');
+
+  const lowMarginCommercial = strategy.buildCommercial({
+    hardFloorMarginPercent: '20',
+    guardEnabled: true,
+    costRows: [
+      { quantity: 50, landedCost: '20', packingCost: '1', outboundShippingCost: '8' },
+      { quantity: 100, landedCost: '30', packingCost: '1', outboundShippingCost: '8' },
+      { quantity: 200, landedCost: '50', packingCost: '1', outboundShippingCost: '8' }
+    ],
+    multiBuyEnabled: true
+  }, draft.variations, draft.promotion, draft.postage);
+  assert.equal(lowMarginCommercial.publishAllowed, false, 'profit guard must block unsafe margins');
+  assert.match(strategy.validateCommercial(lowMarginCommercial)[0], /margin|cost/i);
+
+  draft.commercial = commercial;
+  draft.bestOffer = commercial.bestOffer;
+  draft.multiBuy = commercial.multiBuy;
+
   const calls = [];
   const fakeFetch = async (url, init) => {
     calls.push({ url, init });
@@ -130,6 +178,9 @@ function photo(name, kind = 'remote') {
   assert.equal(JSON.parse(calls[1].init.body.get('postage')).serviceCode, 'UK_RoyalMailTracked');
   assert.equal(JSON.parse(calls[1].init.body.get('variations')).length, 3);
   assert.equal(JSON.parse(calls[1].init.body.get('promotion')).adRatePercent, '3.5');
+  assert.equal(JSON.parse(calls[1].init.body.get('commercial')).publishAllowed, true);
+  assert.equal(JSON.parse(calls[1].init.body.get('bestOffer')).enabled, true);
+  assert.equal(JSON.parse(calls[1].init.body.get('multiBuy')).tiers[2].discountPercent, 7);
 
   console.log('Packsmart eBay Manager tests passed');
 })().catch(err => {

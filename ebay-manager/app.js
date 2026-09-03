@@ -6,7 +6,9 @@
   const EXPECTED_EBAY_ACCOUNT = 'packsmartsolutions20';
   const core = window.PacksmartEbayCore;
   const backendLib = window.PacksmartEbayBackend;
-  if (!core || !backendLib) throw new Error('Packsmart eBay Manager modules failed to load.');
+  const strategy = window.PacksmartEbayStrategy;
+  const commercialUI = window.PacksmartEbayCommercial;
+  if (!core || !backendLib || !strategy || !commercialUI) throw new Error('Packsmart eBay Manager modules failed to load.');
 
   const MAX_PHOTOS = core.MAX_PHOTOS;
   const state = {
@@ -212,6 +214,7 @@
     }));
     state.photos = core.appendPhotos(state.photos, incoming, MAX_PHOTOS);
     renderPhotos();
+    commercialUI.setProduct(p);
   }
 
   function addFiles(fileList) {
@@ -371,7 +374,7 @@
   }
 
   function currentDraft() {
-    return core.buildDraft({
+    const draft = core.buildDraft({
       title: title.value,
       price: price.value,
       sku: sku.value,
@@ -386,11 +389,18 @@
       ,promotionType: promotionType.value
       ,adRatePercent: adRatePercent.value
     }, state.photos, state.selectedProduct, state.catalogueSource);
+
+    const commercial = commercialUI.build();
+    draft.commercial = commercial;
+    draft.bestOffer = commercial.bestOffer;
+    draft.multiBuy = commercial.multiBuy;
+    return draft;
   }
 
-  function validateCurrentDraft() {
+  function validateCurrentDraft(forLive) {
     const draft = currentDraft();
     const errors = core.validateDraft(draft, state.photos.length);
+    if (forLive) errors.push(...strategy.validateCommercial(draft.commercial));
     if (errors.length) {
       alert(errors[0]);
       return null;
@@ -448,13 +458,16 @@
   }
 
   async function createLiveListing() {
-    const draft = validateCurrentDraft();
+    const draft = validateCurrentDraft(true);
     if (!draft) return;
     if (!canWriteToExpectedAccount()) return;
     const postageSummary = draft.postage.freeShipping
       ? 'Free postage'
       : `Buyer postage: £${draft.postage.shippingCost.value}`;
-    if (!confirm(`Create this listing live on ${EXPECTED_EBAY_ACCOUNT}?\n\n${draft.title}\n£${draft.price}\n${postageSummary}\n${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`)) return;
+    const marginSummary = draft.commercial && draft.commercial.minimumObservedMarginPercent != null
+      ? `\nProtected worst-case margin: ${draft.commercial.minimumObservedMarginPercent.toFixed(1)}%`
+      : '';
+    if (!confirm(`Create this listing live on ${EXPECTED_EBAY_ACCOUNT}?\n\n${draft.title}\n£${draft.price}\n${postageSummary}${marginSummary}\n${state.photos.length} photo${state.photos.length === 1 ? '' : 's'}`)) return;
 
     await withBusy($('createListing'), 'Creating listing…', async () => {
       try {
@@ -497,6 +510,7 @@
     promotionType.value = 'none';
     adRatePercent.value = '';
     updatePromotionFields();
+    commercialUI.reset();
     localStorage.removeItem('packsmart-ebay-draft');
     resultCard.hidden = true;
     $('photoHint').textContent = 'The first photo is used as the main image unless you choose another.';
@@ -558,6 +572,7 @@
   updatePostageFields();
   [50, 100, 200].forEach(updateVariationFields);
   updatePromotionFields();
+  commercialUI.render();
   loadProducts();
   checkBackend();
 })();

@@ -92,6 +92,9 @@
       form.append('description', draft.description || '');
       form.append('variations', JSON.stringify(draft.variations || []));
       form.append('promotion', JSON.stringify(draft.promotion || { enabled: false, type: 'NONE' }));
+      form.append('commercial', JSON.stringify(draft.commercial || {}));
+      form.append('bestOffer', JSON.stringify(draft.bestOffer || { enabled: false }));
+      form.append('multiBuy', JSON.stringify(draft.multiBuy || { enabled: false, tiers: [] }));
       form.append('ebayAccount', draft.ebayAccount || '');
       form.append('marketplaceId', draft.marketplaceId || 'EBAY_GB');
       form.append('imageUrls', JSON.stringify(draft.imageUrls || []));

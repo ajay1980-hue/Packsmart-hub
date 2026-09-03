@@ -113,9 +113,56 @@
       <p class="hint">Untick a pack size to omit it. At least one enabled variation needs a valid price.</p>
     </section>
 
+    <section class="card" id="commercialSection">
+      <div class="section-head">
+        <div><h2>6. Profit & pricing engine</h2><p>Protect margin before publishing. Costs are remembered per Packsmart product on this device.</p></div>
+        <label class="guard-switch"><input type="checkbox" id="profitGuardEnabled" checked><span>Block low-margin live listings</span></label>
+      </div>
+
+      <div class="cost-grid">
+        <div class="cost-row cost-head"><strong>Pack</strong><span>Landed product cost</span><span>Packing cost</span><span>Actual delivery cost</span></div>
+        <div class="cost-row"><strong>50</strong><input id="cost50Landed" inputmode="decimal" placeholder="£ cost"><input id="cost50Packing" inputmode="decimal" placeholder="£ cost"><input id="cost50Shipping" inputmode="decimal" placeholder="£ cost"></div>
+        <div class="cost-row"><strong>100</strong><input id="cost100Landed" inputmode="decimal" placeholder="£ cost"><input id="cost100Packing" inputmode="decimal" placeholder="£ cost"><input id="cost100Shipping" inputmode="decimal" placeholder="£ cost"></div>
+        <div class="cost-row"><strong>200</strong><input id="cost200Landed" inputmode="decimal" placeholder="£ cost"><input id="cost200Packing" inputmode="decimal" placeholder="£ cost"><input id="cost200Shipping" inputmode="decimal" placeholder="£ cost"></div>
+      </div>
+
+      <div class="strategy-actions">
+        <button class="secondary strong" id="applySuggestedPrices" type="button">Apply target-margin prices</button>
+        <button class="secondary" id="applyShippingRecommendation" type="button">Apply shipping recommendation</button>
+      </div>
+
+      <div class="profit-summary" id="profitSummary" data-tone="neutral">Add costs to calculate profit.</div>
+      <div class="profit-rows" id="profitRows" aria-live="polite"></div>
+      <p class="hint" id="shippingRecommendation">Shipping recommendation will appear after costs are entered.</p>
+
+      <div class="form-grid strategy-options">
+        <label class="choice-card compact-choice"><input type="checkbox" id="multiBuyEnabled" checked><span><strong>Multi-buy</strong><small>2 = 3% • 3 = 5% • 4+ = 7%</small></span></label>
+        <label class="choice-card compact-choice"><input type="checkbox" id="bestOfferEnabled"><span><strong>Best Offer on larger packs</strong><small>Default max discount 5%</small></span></label>
+        <div><label for="multiBuy2">Buy 2 discount (%)</label><input id="multiBuy2" inputmode="decimal" value="3"></div>
+        <div><label for="multiBuy3">Buy 3 discount (%)</label><input id="multiBuy3" inputmode="decimal" value="5"></div>
+        <div><label for="multiBuy4">Buy 4+ discount (%)</label><input id="multiBuy4" inputmode="decimal" value="7"></div>
+        <div><label for="bestOfferMaxDiscountPercent">Best Offer max discount (%)</label><input id="bestOfferMaxDiscountPercent" inputmode="decimal" value="5"></div>
+      </div>
+      <p class="hint" id="offerFloorHint">Best Offer is off. Turn it on only for larger packs when you want negotiation room.</p>
+
+      <details class="advanced strategy-advanced">
+        <summary>Fee assumptions & margin rules</summary>
+        <p class="hint">Defaults are conservative UK business-seller assumptions. Change them whenever your eBay category or VAT treatment differs.</p>
+        <div class="form-grid">
+          <div><label for="feeFinalValuePercent">Final value fee (%)</label><input id="feeFinalValuePercent" inputmode="decimal" value="12.5"></div>
+          <div><label for="feeRegulatoryPercent">Regulatory fee (%)</label><input id="feeRegulatoryPercent" inputmode="decimal" value="0.35"></div>
+          <div><label for="feeVatPercent">VAT on eBay/ad fees (%)</label><input id="feeVatPercent" inputmode="decimal" value="20"></div>
+          <div><label for="fixedOrderFee">Fixed order fee (£)</label><input id="fixedOrderFee" inputmode="decimal" value="0.40"></div>
+          <div><label for="targetMarginPercent">Target net margin (%)</label><input id="targetMarginPercent" inputmode="decimal" value="25"></div>
+          <div><label for="hardFloorMarginPercent">Hard margin floor (%)</label><input id="hardFloorMarginPercent" inputmode="decimal" value="20"></div>
+          <div><label for="freeShippingThreshold">Prefer free shipping above (£)</label><input id="freeShippingThreshold" inputmode="decimal" value="12.99"></div>
+        </div>
+      </details>
+    </section>
+
     <section class="card" id="promotionSection">
       <div class="section-head">
-        <div><h2>6. eBay promotion</h2><p>Choose whether this listing should be submitted for Promoted Listings Standard.</p></div>
+        <div><h2>7. eBay promotion</h2><p>Choose whether this listing should be submitted for Promoted Listings Standard.</p></div>
       </div>
       <div class="form-grid">
         <div><label for="promotionType">Promotion</label><select id="promotionType"><option value="none">No promotion</option><option value="promoted-listings-standard">Promoted Listings Standard</option></select></div>
@@ -138,7 +185,7 @@
 
     <section class="card" id="labelSection">
       <div class="section-head">
-        <div><h2>7. Postage label</h2><p>Open and print a label PDF or image without attaching it to the product listing.</p></div>
+        <div><h2>8. Postage label</h2><p>Open and print a label PDF or image without attaching it to the product listing.</p></div>
       </div>
       <label class="dropzone compact-dropzone" id="labelDropzone" for="labelInput">
         <span class="drop-title">Add postage-label file</span>
@@ -160,7 +207,9 @@
     </section>
   </main>
   <script src="./core.js"></script>
+  <script src="./strategy.js"></script>
   <script src="./backend.js"></script>
+  <script src="./strategy-ui.js"></script>
   <script src="./app.js"></script>
 </body>
 </html>
