@@ -195,7 +195,9 @@
         multiBuyEnabled: checked('multiBuyEnabled', true),
         multiBuy2: val('multiBuy2'),
         multiBuy3: val('multiBuy3'),
-        multiBuy4: val('multiBuy4')
+        multiBuy4: val('multiBuy4'),
+        promotionType: val('promotionType', 'promoted-listings-standard'),
+        adRatePercent: val('adRatePercent', '3.0')
       })));
       localStorage.setItem(productStorageKey(), JSON.stringify({ costRows: costRows() }));
     } catch (_) {}
@@ -219,6 +221,31 @@
     setVal('multiBuy2', saved.multiBuy2 ?? 3);
     setVal('multiBuy3', saved.multiBuy3 ?? 5);
     setVal('multiBuy4', saved.multiBuy4 ?? 7);
+    setVal('promotionType', saved.promotionType ?? 'promoted-listings-standard');
+    setVal('adRatePercent', saved.adRatePercent ?? '3.0');
+  }
+
+  function applyLaunchPreset() {
+    const d = strategy.DEFAULTS;
+    setVal('feeFinalValuePercent', d.finalValuePercent);
+    setVal('feeRegulatoryPercent', d.regulatoryPercent);
+    setVal('feeVatPercent', d.feeVatPercent);
+    setVal('fixedOrderFee', d.fixedOrderFee);
+    setVal('targetMarginPercent', '25');
+    setVal('hardFloorMarginPercent', '20');
+    setVal('freeShippingThreshold', d.freeShippingThreshold);
+    if ($('profitGuardEnabled')) $('profitGuardEnabled').checked = true;
+    if ($('multiBuyEnabled')) $('multiBuyEnabled').checked = true;
+    setVal('multiBuy2', '3');
+    setVal('multiBuy3', '5');
+    setVal('multiBuy4', '7');
+    if ($('bestOfferEnabled')) $('bestOfferEnabled').checked = false;
+    setVal('bestOfferMaxDiscountPercent', '5');
+    setVal('promotionType', 'promoted-listings-standard');
+    setVal('adRatePercent', '3.0');
+    const promotion = $('promotionType');
+    if (promotion) promotion.dispatchEvent(new Event('change', { bubbles: true }));
+    render();
   }
 
   function loadProductProfile() {
@@ -270,6 +297,7 @@
     el.addEventListener('change', render);
   });
   document.querySelectorAll('input[name="postageMode"]').forEach(el => el.addEventListener('change', render));
+  $('applyLaunchPreset')?.addEventListener('click', applyLaunchPreset);
   $('applySuggestedPrices')?.addEventListener('click', applySuggestedPrices);
   $('applyShippingRecommendation')?.addEventListener('click', applyShippingRecommendation);
 
@@ -277,6 +305,7 @@
     collectFields,
     build,
     render,
+    applyLaunchPreset,
     applySuggestedPrices,
     applyShippingRecommendation,
     setProduct,
