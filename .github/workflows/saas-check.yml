@@ -20,7 +20,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Syntax check
+      - name: Browser syntax check
         run: node --check saas/app.js
-      - name: Safety and integration guard checks
+      - name: Server syntax check
+        run: npm --prefix saas/server run check
+      - name: Phase 1 safety and integration guards
         run: node saas/tests/saas-guard.test.cjs
+      - name: Phase 2 security and tenancy tests
+        run: npm --prefix saas/server test
