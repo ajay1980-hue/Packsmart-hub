@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: '22'
       - name: Browser syntax check
-        run: node --check saas/app.js
+        run: node --check saas/app.js && node --check saas/cloud.js
       - name: Server syntax check
         run: npm --prefix saas/server run check
       - name: Phase 1 safety and integration guards
