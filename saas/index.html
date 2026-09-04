@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#0b0b0c" />
+  <title>Packsmart Ops — SaaS Pilot</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">PS</div>
+        <div>
+          <strong>Packsmart Ops</strong>
+          <small>SaaS pilot</small>
+        </div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-view="overview">Overview</button>
+        <button class="nav-item" data-view="products">Products & Profit</button>
+        <button class="nav-item" data-view="automations">Automations</button>
+        <button class="nav-item" data-view="approvals">Approval Centre</button>
+        <button class="nav-item" data-view="connections">Connections</button>
+      </nav>
+      <div class="pilot-note">
+        <span class="status-dot"></span>
+        <div><b>Customer zero</b><br><small>Packsmart Solutions Ltd</small></div>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">COMMERCE OPERATIONS</p>
+          <h1 id="page-title">Command Centre</h1>
+        </div>
+        <div class="top-actions">
+          <span class="live-badge">Pilot</span>
+          <button id="refresh-products" class="secondary">Refresh catalogue</button>
+        </div>
+      </header>
+
+      <section id="view-overview" class="view active">
+        <div class="hero card">
+          <div>
+            <p class="eyebrow">TODAY'S OPERATIONS BRIEF</p>
+            <h2>Run Packsmart from one screen.</h2>
+            <p id="ops-brief">Loading Packsmart catalogue and commercial checks…</p>
+          </div>
+          <div class="hero-score">
+            <span id="readiness-score">—</span>
+            <small>readiness</small>
+          </div>
+        </div>
+
+        <div class="kpis">
+          <article class="card kpi"><span>Products</span><strong id="kpi-products">—</strong><small>Shopify catalogue</small></article>
+          <article class="card kpi"><span>Variants</span><strong id="kpi-variants">—</strong><small>sellable SKUs</small></article>
+          <article class="card kpi"><span>Cost coverage</span><strong id="kpi-cost-coverage">0%</strong><small>variants with economics</small></article>
+          <article class="card kpi"><span>Protected actions</span><strong id="kpi-protected">5</strong><small>approval-gated</small></article>
+        </div>
+
+        <div class="grid-2">
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">CHANNELS</p><h3>Operations map</h3></div></div>
+            <div id="channel-list" class="channel-list"></div>
+          </article>
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">NEXT ACTIONS</p><h3>AI-style priority queue</h3></div></div>
+            <ol id="priority-list" class="priority-list"></ol>
+          </article>
+        </div>
+      </section>
+
+      <section id="view-products" class="view">
+        <div class="card">
+          <div class="section-head stack-mobile">
+            <div><p class="eyebrow">UNIT ECONOMICS</p><h2>Products & Profit</h2><p class="muted">Enter landed cost, packing and outbound delivery. Figures save on this device for the pilot. Contribution is shown before channel/payment fees and tax.</p></div>
+            <div class="filters"><input id="product-search" type="search" placeholder="Search product or SKU" /><select id="pack-filter"><option value="all">All packs</option><option value="50">Pack 50</option><option value="100">Pack 100</option><option value="200">Pack 200</option></select></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Product / SKU</th><th>Sell price</th><th>Landed cost</th><th>Packing</th><th>Delivery</th><th>Contribution £</th><th>Contribution margin</th></tr></thead>
+              <tbody id="economics-body"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-automations" class="view">
+        <div class="card">
+          <p class="eyebrow">CONTROL LAYER</p><h2>Automation Rules</h2><p class="muted">Safe repetitive work can run automatically. Money/risk-sensitive actions stay approval-gated.</p>
+          <div id="automation-list" class="rule-list"></div>
+        </div>
+      </section>
+
+      <section id="view-approvals" class="view">
+        <div class="card">
+          <p class="eyebrow">HUMAN IN THE LOOP</p><h2>Approval Centre</h2>
+          <p class="muted">These action classes are deliberately blocked from automatic execution until approved.</p>
+          <div id="approval-list" class="approval-list"></div>
+        </div>
+      </section>
+
+      <section id="view-connections" class="view">
+        <div class="card">
+          <p class="eyebrow">INTEGRATIONS</p><h2>Connections</h2><p class="muted">The pilot only reports integrations proven by the existing Packsmart codebase. No credentials are exposed in the browser.</p>
+          <div id="connection-list" class="connection-list"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <template id="empty-row"><tr><td colspan="7" class="empty">No matching products.</td></tr></template>
+  <script src="./app.js"></script>
+</body>
+</html>

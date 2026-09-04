@@ -1,0 +1,26 @@
+name: Packsmart SaaS checks
+
+on:
+  push:
+    paths:
+      - 'saas/**'
+      - 'ebay-manager/shopify-products.json'
+      - '.github/workflows/saas-check.yml'
+  pull_request:
+    paths:
+      - 'saas/**'
+      - 'ebay-manager/shopify-products.json'
+      - '.github/workflows/saas-check.yml'
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Syntax check
+        run: node --check saas/app.js
+      - name: Safety and integration guard checks
+        run: node saas/tests/saas-guard.test.cjs
