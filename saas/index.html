@@ -77,7 +77,7 @@
       <section id="view-products" class="view">
         <div class="card">
           <div class="section-head stack-mobile">
-            <div><p class="eyebrow">UNIT ECONOMICS</p><h2>Products & Profit</h2><p class="muted">Enter landed cost, packing and outbound delivery. Figures save on this device for the pilot. Contribution is shown before channel/payment fees and tax.</p></div>
+            <div><p class="eyebrow">UNIT ECONOMICS</p><h2>Products & Profit</h2><p class="muted">Enter landed cost, packing and outbound delivery. Figures save locally and sync to the SaaS backend when signed in. Contribution is shown before channel/payment fees and tax.</p></div>
             <div class="filters"><input id="product-search" type="search" placeholder="Search product or SKU" /><select id="pack-filter"><option value="all">All packs</option><option value="50">Pack 50</option><option value="100">Pack 100</option><option value="200">Pack 200</option></select></div>
           </div>
           <div class="table-wrap">
@@ -101,13 +101,15 @@
           <p class="eyebrow">HUMAN IN THE LOOP</p><h2>Approval Centre</h2>
           <p class="muted">These action classes are deliberately blocked from automatic execution until approved.</p>
           <div id="approval-list" class="approval-list"></div>
+          <div id="cloud-approvals" class="cloud-panel"></div>
         </div>
       </section>
 
       <section id="view-connections" class="view">
         <div class="card">
-          <p class="eyebrow">INTEGRATIONS</p><h2>Connections</h2><p class="muted">The pilot only reports integrations proven by the existing Packsmart codebase. No credentials are exposed in the browser.</p>
+          <p class="eyebrow">INTEGRATIONS</p><h2>Connections</h2><p class="muted">No marketplace, payment or AI credentials are exposed in the browser. Cloud credentials are encrypted server-side.</p>
           <div id="connection-list" class="connection-list"></div>
+          <div id="cloud-account" class="cloud-panel"></div>
         </div>
       </section>
     </main>
@@ -115,5 +117,6 @@
 
   <template id="empty-row"><tr><td colspan="7" class="empty">No matching products.</td></tr></template>
   <script src="./app.js"></script>
+  <script src="./cloud.js"></script>
 </body>
 </html>
