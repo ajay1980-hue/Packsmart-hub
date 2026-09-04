@@ -1,0 +1,10 @@
+.git
+.github
+app
+build
+.gradle
+**/*.apk
+**/*.aab
+**/*.log
+saas/server/data
+saas/server/.env
