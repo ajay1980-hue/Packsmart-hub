@@ -28,3 +28,23 @@ jobs:
         run: node saas/tests/saas-guard.test.cjs
       - name: Phase 2 security and tenancy tests
         run: npm --prefix saas/server test
+      - name: Build production container
+        run: docker build -f saas/server/Dockerfile -t packsmart-ops:test .
+      - name: Boot container and smoke-test health
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --name packsmart-ops-test -p 8787:8787 \
+            -e PACKSMART_ADMIN_PASSWORD=test-password \
+            -e SESSION_SECRET=test-session-secret-long-enough \
+            -e CREDENTIALS_KEY=test-credentials-secret-long-enough \
+            packsmart-ops:test
+          trap 'docker rm -f packsmart-ops-test >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8787/api/health | grep -q '"ok":true'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs packsmart-ops-test
+          exit 1
