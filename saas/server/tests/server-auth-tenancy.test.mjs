@@ -67,6 +67,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   const appAsset = await request('/app.js');
   assert.equal(appAsset.response.status, 200);
   assert.match(appAsset.response.headers.get('content-type'), /javascript/);
+  assert.equal(appAsset.response.headers.get('cache-control'), 'no-cache');
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
 
   const protectedResponse = await request('/api/bootstrap');

@@ -229,8 +229,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
+      const cacheControl = ['/','/index.html','/app.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(200, {
-        ...headers(contentType, pathname === '/' || pathname === '/index.html' ? 'no-cache' : 'public, max-age=300'),
+        ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
       });
       res.end(body);
