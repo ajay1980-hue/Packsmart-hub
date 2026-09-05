@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: '22'
       - name: Browser syntax check
-        run: node --check saas/app.js && node --check saas/cloud.js
+        run: node --check saas/app.js
       - name: Server syntax check
         run: npm --prefix saas/server run check
       - name: Phase 1 safety and integration guards
@@ -35,13 +35,14 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name packsmart-ops-test -p 8787:8787 \
-            -e PACKSMART_ADMIN_PASSWORD=test-password \
-            -e SESSION_SECRET=test-session-secret-long-enough \
-            -e CREDENTIALS_KEY=test-credentials-secret-long-enough \
+            -e PACKSMART_ADMIN_EMAIL=sales@packsmartsolutions.com \
+            -e PACKSMART_ADMIN_PASSWORD='Packsmart-Test-Only!2026' \
+            -e SESSION_SECRET='test-session-secret-with-more-than-thirty-two-characters' \
+            -e CREDENTIALS_KEY='test-credential-key-with-more-than-thirty-two-characters' \
             packsmart-ops:test
           trap 'docker rm -f packsmart-ops-test >/dev/null 2>&1 || true' EXIT
           for attempt in {1..20}; do
-            if curl --fail --silent http://127.0.0.1:8787/api/health | grep -q '"ok":true'; then
+            if curl --fail --silent http://127.0.0.1:8787/api/health | grep -q '"authentication":true'; then
               exit 0
             fi
             sleep 1

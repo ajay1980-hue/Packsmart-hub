@@ -1,123 +1,232 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <meta name="theme-color" content="#0b0b0c" />
-  <title>Packsmart Ops — SaaS Pilot</title>
-  <link rel="stylesheet" href="./styles.css" />
-  <link rel="stylesheet" href="./cloud.css" />
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#09090b">
+  <meta name="color-scheme" content="dark">
+  <title>Packsmart Ops — Command Centre</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="brand-mark">PS</div>
-        <div>
-          <strong>Packsmart Ops</strong>
-          <small>SaaS pilot</small>
-        </div>
+  <section id="login-screen" class="auth-screen">
+    <div class="auth-glow"></div>
+    <div class="auth-card">
+      <div class="brand-lockup">
+        <span class="brand-mark">PS</span>
+        <div><strong>Packsmart Ops</strong><small>Private command centre</small></div>
       </div>
-      <nav>
-        <button class="nav-item active" data-view="overview">Overview</button>
-        <button class="nav-item" data-view="products">Products & Profit</button>
-        <button class="nav-item" data-view="automations">Automations</button>
-        <button class="nav-item" data-view="approvals">Approval Centre</button>
-        <button class="nav-item" data-view="connections">Connections</button>
+      <p class="eyebrow">CUSTOMER ZERO · PRODUCTION</p>
+      <h1>Run Packsmart from one secure cockpit.</h1>
+      <p class="muted">Sales, stock, true product economics, channel health, automations and approval controls.</p>
+      <form id="login-form" class="auth-form">
+        <label>Email<input id="login-email" name="email" type="email" autocomplete="username" value="sales@packsmartsolutions.com" required></label>
+        <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
+        <button class="primary full" type="submit">Sign in securely</button>
+        <p id="login-error" class="form-error" role="alert"></p>
+      </form>
+      <div class="security-note"><span>●</span> Secure, HTTP-only session · Packsmart Solutions Ltd</div>
+    </div>
+  </section>
+
+  <section id="password-screen" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="brand-lockup">
+        <span class="brand-mark">PS</span>
+        <div><strong>Secure your owner account</strong><small>One-time production setup</small></div>
+      </div>
+      <h1>Choose your private Packsmart password.</h1>
+      <p class="muted">Use at least 14 characters with upper-case, lower-case, a number and a symbol. Completing this revokes the temporary bootstrap session.</p>
+      <form id="password-form" class="auth-form">
+        <label>New password<input id="new-password" name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label>
+        <label>Confirm password<input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="14" required></label>
+        <button class="primary full" type="submit">Set owner password</button>
+        <p id="password-error" class="form-error" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <div class="brand-lockup">
+        <span class="brand-mark">PS</span>
+        <div><strong>Packsmart Ops</strong><small>Customer zero</small></div>
+      </div>
+      <nav id="main-nav" aria-label="Primary">
+        <button class="nav-item active" data-view="overview"><span>◆</span> Overview</button>
+        <button class="nav-item" data-view="profit"><span>£</span> Products & Profit</button>
+        <button class="nav-item" data-view="orders"><span>▤</span> Orders</button>
+        <button class="nav-item" data-view="approvals"><span>✓</span> Approval Centre <b id="nav-approval-count" class="nav-count hidden">0</b></button>
+        <button class="nav-item" data-view="automations"><span>⚙</span> Automations</button>
+        <button class="nav-item" data-view="channels"><span>◎</span> Sales Channels</button>
+        <button class="nav-item" data-view="audit"><span>↻</span> Audit & Account</button>
       </nav>
-      <div class="pilot-note">
+      <div class="customer-zero">
         <span class="status-dot"></span>
-        <div><b>Customer zero</b><br><small>Packsmart Solutions Ltd</small></div>
+        <div><b>Packsmart Solutions Ltd</b><small>Internal · no SaaS charge</small></div>
       </div>
     </aside>
 
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">COMMERCE OPERATIONS</p>
+          <p class="eyebrow">PACKSMART SOLUTIONS LTD</p>
           <h1 id="page-title">Command Centre</h1>
         </div>
         <div class="top-actions">
-          <span class="live-badge">Pilot</span>
-          <button id="refresh-products" class="secondary">Refresh catalogue</button>
+          <span id="storage-badge" class="tag neutral">Checking cloud</span>
+          <button id="refresh-all" class="secondary" type="button">Refresh data</button>
         </div>
       </header>
 
+      <div id="global-error" class="global-message error hidden" role="alert"></div>
+      <div id="global-success" class="global-message success hidden" role="status"></div>
+
       <section id="view-overview" class="view active">
-        <div class="hero card">
+        <article class="hero card">
           <div>
             <p class="eyebrow">TODAY'S OPERATIONS BRIEF</p>
-            <h2>Run Packsmart from one screen.</h2>
-            <p id="ops-brief">Loading Packsmart catalogue and commercial checks…</p>
+            <h2>What needs your attention now</h2>
+            <p id="brief-summary" class="hero-copy">Loading secure Packsmart data…</p>
+            <small id="brief-generated" class="muted"></small>
           </div>
-          <div class="hero-score">
-            <span id="readiness-score">—</span>
-            <small>readiness</small>
-          </div>
-        </div>
+          <div class="hero-score"><strong id="readiness-score">—</strong><span>readiness</span></div>
+        </article>
 
-        <div class="kpis">
-          <article class="card kpi"><span>Products</span><strong id="kpi-products">—</strong><small>Shopify catalogue</small></article>
-          <article class="card kpi"><span>Variants</span><strong id="kpi-variants">—</strong><small>sellable SKUs</small></article>
-          <article class="card kpi"><span>Cost coverage</span><strong id="kpi-cost-coverage">0%</strong><small>variants with economics</small></article>
-          <article class="card kpi"><span>Protected actions</span><strong id="kpi-protected">5</strong><small>approval-gated</small></article>
+        <div class="kpis kpis-six">
+          <article class="card kpi"><span>Paid revenue · 30d</span><strong id="kpi-revenue">—</strong><small>Shopify/eBay when connected</small></article>
+          <article class="card kpi"><span>Orders · 30d</span><strong id="kpi-orders">—</strong><small id="kpi-open-orders">— open</small></article>
+          <article class="card kpi"><span>Active catalogue</span><strong id="kpi-products">—</strong><small id="kpi-variants">— variants</small></article>
+          <article class="card kpi"><span>Stock risks</span><strong id="kpi-stock">—</strong><small>at/below threshold</small></article>
+          <article class="card kpi"><span>Cost coverage</span><strong id="kpi-coverage">—</strong><small id="kpi-missing-costs">— missing</small></article>
+          <article class="card kpi"><span>Average margin</span><strong id="kpi-margin">—</strong><small id="kpi-low-margin">— below floor</small></article>
         </div>
 
         <div class="grid-2">
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">CHANNELS</p><h3>Operations map</h3></div></div>
-            <div id="channel-list" class="channel-list"></div>
-          </article>
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">NEXT ACTIONS</p><h3>AI-style priority queue</h3></div></div>
+            <div class="section-head"><div><p class="eyebrow">PRIORITY QUEUE</p><h2>Recommended next actions</h2></div></div>
             <ol id="priority-list" class="priority-list"></ol>
           </article>
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">CONTROL STATUS</p><h2>Risk & automation</h2></div></div>
+            <div id="control-status" class="status-list"></div>
+          </article>
         </div>
+
+        <article class="card">
+          <div class="section-head"><div><p class="eyebrow">CHANNEL HEALTH</p><h2>Commerce overview</h2></div><button class="text-button" data-view-link="channels">View all channels</button></div>
+          <div id="overview-channels" class="channel-grid compact"></div>
+        </article>
       </section>
 
-      <section id="view-products" class="view">
-        <div class="card">
+      <section id="view-profit" class="view">
+        <article class="card">
           <div class="section-head stack-mobile">
-            <div><p class="eyebrow">UNIT ECONOMICS</p><h2>Products & Profit</h2><p class="muted">Enter landed cost, packing and outbound delivery. Figures save locally and sync to the SaaS backend when signed in. Contribution is shown before channel/payment fees and tax.</p></div>
-            <div class="filters"><input id="product-search" type="search" placeholder="Search product or SKU" /><select id="pack-filter"><option value="all">All packs</option><option value="50">Pack 50</option><option value="100">Pack 100</option><option value="200">Pack 200</option></select></div>
+            <div><p class="eyebrow">TRUE PRODUCT ECONOMICS</p><h2>Products & Profit</h2><p class="muted">Contribution = selling price minus landed, packing, delivery and channel costs. Tax treatment is not inferred.</p></div>
+            <div class="filters"><input id="product-search" type="search" placeholder="Search product or SKU"><select id="product-status"><option value="active">Active only</option><option value="all">All statuses</option></select></div>
           </div>
           <div class="table-wrap">
-            <table>
-              <thead><tr><th>Product / SKU</th><th>Sell price</th><th>Landed cost</th><th>Packing</th><th>Delivery</th><th>Contribution £</th><th>Contribution margin</th></tr></thead>
+            <table class="economics-table">
+              <thead><tr><th>Product</th><th>Price</th><th>Stock</th><th>Landed</th><th>Packing</th><th>Delivery</th><th>Channel</th><th>Contribution</th><th>Margin</th></tr></thead>
               <tbody id="economics-body"></tbody>
             </table>
           </div>
+        </article>
+      </section>
+
+      <section id="view-orders" class="view">
+        <div class="kpis">
+          <article class="card kpi"><span>Paid revenue · 30d</span><strong id="orders-revenue">—</strong><small>refunds excluded</small></article>
+          <article class="card kpi"><span>Recent orders</span><strong id="orders-total">—</strong><small>last 30 days</small></article>
+          <article class="card kpi"><span>Open orders</span><strong id="orders-open">—</strong><small>needs fulfilment review</small></article>
+          <article class="card kpi"><span>Refunded</span><strong id="orders-refunded">—</strong><small>last 30 days</small></article>
+        </div>
+        <article class="card">
+          <div class="section-head"><div><p class="eyebrow">ORDER FEED</p><h2>Recent orders</h2></div></div>
+          <div id="order-list" class="order-list"></div>
+        </article>
+      </section>
+
+      <section id="view-approvals" class="view">
+        <div class="grid-approval">
+          <article class="card">
+            <p class="eyebrow">HUMAN IN THE LOOP</p><h2>Request approval</h2>
+            <p class="muted">Approving records a decision only. No supplier order, refund, spend, price change or live marketplace action executes until its executor is separately connected and tested.</p>
+            <form id="approval-form" class="approval-form">
+              <label>Action class<select name="type" required>
+                <option value="supplier_order">Supplier order</option>
+                <option value="advertising_spend">Advertising spend</option>
+                <option value="refund">Customer refund</option>
+                <option value="major_price_change">Major price change</option>
+                <option value="paid_service_purchase">Paid-service purchase</option>
+                <option value="risky_marketplace_action">Risky marketplace action</option>
+                <option value="social_commerce_publish">Social-commerce publish</option>
+              </select></label>
+              <label>Proposed action<input name="action" maxlength="180" placeholder="What is being proposed?" required></label>
+              <label>Reason<textarea name="reason" maxlength="1000" placeholder="Why is this needed?" required></textarea></label>
+              <label>Financial impact (£)<input name="financialImpact" type="number" step="0.01" placeholder="0.00"></label>
+              <label>Expected benefit<textarea name="expectedBenefit" maxlength="1000" placeholder="What should Packsmart gain?" required></textarea></label>
+              <label>Risk<textarea name="risk" maxlength="1000" placeholder="What could go wrong?" required></textarea></label>
+              <button class="primary" type="submit">Create approval request</button>
+              <p id="approval-form-error" class="form-error" role="alert"></p>
+            </form>
+          </article>
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">DECISION QUEUE</p><h2>Approval requests</h2></div><select id="approval-filter"><option value="pending">Pending</option><option value="all">All records</option></select></div>
+            <div id="approval-list" class="approval-list"></div>
+          </article>
         </div>
       </section>
 
       <section id="view-automations" class="view">
-        <div class="card">
-          <p class="eyebrow">CONTROL LAYER</p><h2>Automation Rules</h2><p class="muted">Safe repetitive work can run automatically. Money/risk-sensitive actions stay approval-gated.</p>
+        <article class="card">
+          <p class="eyebrow">SAFE AUTOMATION</p><h2>Automation rules</h2>
+          <p class="muted">Monitoring, calculations and drafting can run automatically. Financial and externally risky actions always enter the Approval Centre.</p>
           <div id="automation-list" class="rule-list"></div>
-        </div>
+        </article>
       </section>
 
-      <section id="view-approvals" class="view">
-        <div class="card">
-          <p class="eyebrow">HUMAN IN THE LOOP</p><h2>Approval Centre</h2>
-          <p class="muted">These action classes are deliberately blocked from automatic execution until approved.</p>
-          <div id="approval-list" class="approval-list"></div>
-          <div id="cloud-approvals" class="cloud-panel"></div>
-        </div>
+      <section id="view-channels" class="view">
+        <article class="card">
+          <div class="section-head stack-mobile"><div><p class="eyebrow">INTEGRATION STATUS</p><h2>All sales channels</h2><p class="muted">Credentials stay encrypted server-side. Social publishing, ad spend, promotions and material commerce writes remain approval-gated.</p></div><button id="sync-shopify" class="secondary" type="button">Sync Shopify</button></div>
+          <div id="channel-grid" class="channel-grid"></div>
+        </article>
+        <article id="ebay-health-card" class="card">
+          <div class="section-head"><div><p class="eyebrow">EXISTING EBAY MANAGER</p><h2>Listings & mismatch health</h2></div><button id="sync-ebay" class="secondary" type="button">Check existing manager</button></div>
+          <div id="ebay-health" class="status-list"></div>
+        </article>
       </section>
 
-      <section id="view-connections" class="view">
-        <div class="card">
-          <p class="eyebrow">INTEGRATIONS</p><h2>Connections</h2><p class="muted">No marketplace, payment or AI credentials are exposed in the browser. Cloud credentials are encrypted server-side.</p>
-          <div id="connection-list" class="connection-list"></div>
-          <div id="cloud-account" class="cloud-panel"></div>
+      <section id="view-audit" class="view">
+        <div class="grid-2">
+          <article class="card">
+            <p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Packsmart Solutions Ltd</h2>
+            <div id="account-details" class="status-list"></div>
+            <div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div>
+            <form id="account-password-form" class="auth-form compact-form hidden">
+              <label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label>
+              <label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label>
+              <button class="primary" type="submit">Update password</button>
+              <p class="form-error" role="alert"></p>
+            </form>
+          </article>
+          <article class="card">
+            <p class="eyebrow">FUTURE BILLING</p><h2>Subscription architecture</h2>
+            <div id="billing-status" class="status-list"></div>
+            <div id="plan-grid" class="plan-grid"></div>
+            <p class="muted tiny">Indicative tier design only. Packsmart customer-zero is internal/free and checkout remains disabled.</p>
+          </article>
         </div>
+        <article class="card">
+          <div class="section-head"><div><p class="eyebrow">IMMUTABLE HISTORY</p><h2>Audit events</h2></div><button id="refresh-audit" class="secondary" type="button">Refresh</button></div>
+          <div id="audit-list" class="audit-list"></div>
+        </article>
       </section>
     </main>
   </div>
 
-  <template id="empty-row"><tr><td colspan="7" class="empty">No matching products.</td></tr></template>
-  <script src="./app.js"></script>
-  <script src="./cloud.js"></script>
+  <template id="empty-state"><div class="empty-state">No records to show.</div></template>
+  <script src="/app.js"></script>
 </body>
 </html>

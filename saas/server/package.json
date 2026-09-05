@@ -2,10 +2,10 @@
   "name": "packsmart-ops-server",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": { "node": "22.x" },
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check server.mjs && node --check lib/security.mjs && node --check lib/store.mjs"
+    "check": "node --check server.mjs && node --check lib/security.mjs && node --check lib/store.mjs && node --check lib/operations.mjs && node --check lib/integrations.mjs"
   }
 }
