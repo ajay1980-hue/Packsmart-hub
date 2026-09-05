@@ -313,7 +313,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           }
         };
       }
+      return true;
     }
+    return false;
   }
 
   function currentBrief(state) {
@@ -636,9 +638,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/bootstrap') {
-          await refreshOperationalState(auth.state);
+          const briefCountBefore = (auth.state.dailyBriefs || []).length;
+          const operationalStateChanged = await refreshOperationalState(auth.state);
           const payload = bootstrapPayload(auth.state, auth.user, auth.session.csrf);
-          await store.save(auth.session.workspaceId, auth.state);
+          const briefCreated = (auth.state.dailyBriefs || []).length > briefCountBefore;
+          if (operationalStateChanged || briefCreated) await store.save(auth.session.workspaceId, auth.state);
           send(res, 200, payload);
           return;
         }
@@ -771,8 +775,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/brief') {
+          const briefCountBefore = (auth.state.dailyBriefs || []).length;
           const brief = currentBrief(auth.state);
-          await store.save(auth.session.workspaceId, auth.state);
+          if ((auth.state.dailyBriefs || []).length > briefCountBefore) await store.save(auth.session.workspaceId, auth.state);
           send(res, 200, { brief });
           return;
         }

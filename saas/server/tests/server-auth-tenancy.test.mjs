@@ -111,6 +111,17 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(bootstrap.payload.storage, 'file');
   assert.equal(bootstrap.payload.integrations.some(item => item.id === 'meta'), true);
 
+  const originalSave = server.packsmart.store.save.bind(server.packsmart.store);
+  let redundantBootstrapSaves = 0;
+  server.packsmart.store.save = async (...args) => {
+    redundantBootstrapSaves += 1;
+    return originalSave(...args);
+  };
+  const repeatedBootstrap = await request('/api/bootstrap', { cookie });
+  assert.equal(repeatedBootstrap.response.status, 200);
+  assert.equal(redundantBootstrapSaves, 0, 'an unchanged read-only bootstrap must not rewrite persistence');
+  server.packsmart.store.save = originalSave;
+
   const economics = await request('/api/economics', {
     method: 'PUT',
     cookie,
