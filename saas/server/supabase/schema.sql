@@ -206,6 +206,17 @@ alter table public.saas_workspace_state enable row level security;
 revoke all on all tables in schema public from anon, authenticated;
 grant select, insert, update, delete on all tables in schema public to service_role;
 
+-- Supabase's optional automatic-RLS project setting creates this helper in the
+-- public schema. Keep the event trigger, but prevent browser roles from calling
+-- its SECURITY DEFINER function directly.
+do $$
+begin
+  if to_regprocedure('public.rls_auto_enable()') is not null then
+    execute 'revoke execute on function public.rls_auto_enable() from public, anon, authenticated';
+  end if;
+end
+$$;
+
 comment on table public.saas_workspace_state is
   'Server-only lossless workspace state used during Packsmart customer-zero and normalized-table migration.';
 comment on table public.audit_events is
