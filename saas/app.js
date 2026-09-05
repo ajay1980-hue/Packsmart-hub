@@ -16,6 +16,12 @@
     productStatus: 'active',
     approvalFilter: 'pending'
   };
+  let ownerActivationToken = '';
+  try {
+    const fragment = new URLSearchParams(window.location.hash.slice(1));
+    ownerActivationToken = String(fragment.get('activate') || '');
+    if (ownerActivationToken) window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  } catch {}
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
 
@@ -77,7 +83,7 @@
     }));
     let payload = {};
     try { payload = await response.json(); } catch {}
-    if (response.status === 401 && !path.endsWith('/login')) {
+    if (response.status === 401 && !path.endsWith('/login') && !path.endsWith('/activate-owner')) {
       state.session = null;
       state.data = null;
       state.csrf = '';
@@ -460,11 +466,16 @@
     }
     setBusy(button, true, 'Securing account…');
     try {
-      const payload = await request('/api/auth/change-password', {
+      const activation = Boolean(ownerActivationToken);
+      const payload = await request(activation ? '/api/auth/activate-owner' : '/api/auth/change-password', {
         method: 'POST',
-        body: JSON.stringify({ newPassword: form.newPassword.value })
+        body: JSON.stringify(activation
+          ? { token: ownerActivationToken, newPassword: form.newPassword.value }
+          : { newPassword: form.newPassword.value })
       });
+      state.session = payload;
       state.csrf = payload.csrf;
+      ownerActivationToken = '';
       form.reset();
       await loadBootstrap();
       showMessage('Owner password secured and temporary sessions revoked.');
@@ -656,6 +667,10 @@
     try {
       const health = await request('/api/health');
       if (!health.ok) throw new Error('Packsmart Ops health check is not ready.');
+      if (ownerActivationToken) {
+        showPasswordSetup();
+        return;
+      }
       if (await loadSession()) await loadBootstrap();
     } catch (error) {
       $('#login-error').textContent = error.status === 401 ? '' : error.message;

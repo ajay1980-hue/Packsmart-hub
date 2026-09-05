@@ -11,6 +11,7 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 const SESSION_SECRET = 'server-integration-session-secret-more-than-thirty-two-characters';
 const BOOTSTRAP_PASSWORD = 'BootstrapOnly!789Abc';
 const OWNER_PASSWORD = 'PacksmartOwner!2026Secure';
+const ACTIVATION_TOKEN = 'one-time-owner-activation-token-more-than-thirty-two-characters';
 
 function requestFactory(base) {
   return async function request(pathname, { method = 'GET', body, cookie, csrf } = {}) {
@@ -198,4 +199,77 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   });
   assert.equal(logout.response.status, 200);
   assert.match(logout.setCookie, /Max-Age=0/);
+});
+
+test('one-time owner activation sets a private password without exposing the bootstrap secret', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'packsmart-ops-activation-test-'));
+  const server = createPacksmartServer({
+    NODE_ENV: 'test',
+    APP_PUBLIC_URL: 'http://localhost:8787',
+    SAAS_STATE_FILE: path.join(directory, 'state.json'),
+    PACKSMART_ADMIN_EMAIL: 'sales@packsmartsolutions.com',
+    PACKSMART_ADMIN_PASSWORD: BOOTSTRAP_PASSWORD,
+    OWNER_ACTIVATION_TOKEN: ACTIVATION_TOKEN,
+    SESSION_SECRET,
+    CREDENTIALS_KEY: 'server-integration-credential-key-more-than-thirty-two-characters',
+    BETA_SIGNUPS_ENABLED: 'false',
+    BILLING_CHECKOUT_ENABLED: 'false'
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const request = requestFactory(base);
+
+  const invalid = await request('/api/auth/activate-owner', {
+    method: 'POST',
+    body: { token: 'wrong-token', newPassword: OWNER_PASSWORD }
+  });
+  assert.equal(invalid.response.status, 401);
+  assert.equal(invalid.payload.code, 'ACTIVATION_INVALID');
+
+  const weak = await request('/api/auth/activate-owner', {
+    method: 'POST',
+    body: { token: ACTIVATION_TOKEN, newPassword: 'too-weak' }
+  });
+  assert.equal(weak.response.status, 400);
+
+  const activated = await request('/api/auth/activate-owner', {
+    method: 'POST',
+    body: { token: ACTIVATION_TOKEN, newPassword: OWNER_PASSWORD }
+  });
+  assert.equal(activated.response.status, 200);
+  assert.equal(activated.payload.user.passwordChangeRequired, false);
+  assert.match(activated.setCookie, /HttpOnly/);
+  assert.match(activated.setCookie, /SameSite=Strict/);
+  const cookie = cookieValue(activated.setCookie);
+
+  const session = await request('/api/auth/session', { cookie });
+  assert.equal(session.response.status, 200);
+  assert.equal(session.payload.workspace.id, 'packsmart-solutions');
+
+  const reused = await request('/api/auth/activate-owner', {
+    method: 'POST',
+    body: { token: ACTIVATION_TOKEN, newPassword: 'AnotherOwner!2026Password' }
+  });
+  assert.equal(reused.response.status, 409);
+  assert.equal(reused.payload.code, 'ACTIVATION_USED');
+
+  const bootstrapLogin = await request('/api/auth/login', {
+    method: 'POST',
+    body: { email: 'sales@packsmartsolutions.com', password: BOOTSTRAP_PASSWORD }
+  });
+  assert.equal(bootstrapLogin.response.status, 401);
+  const ownerLogin = await request('/api/auth/login', {
+    method: 'POST',
+    body: { email: 'sales@packsmartsolutions.com', password: OWNER_PASSWORD }
+  });
+  assert.equal(ownerLogin.response.status, 200);
+
+  const audit = await request('/api/audit', { cookie });
+  assert.equal(audit.response.status, 200);
+  assert.equal(audit.payload.events.some(event => event.type === 'owner_account_activated'), true);
 });

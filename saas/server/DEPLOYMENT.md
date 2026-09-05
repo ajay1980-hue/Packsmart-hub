@@ -8,6 +8,7 @@ Store these as private platform environment variables; never commit their values
 
 - `PACKSMART_ADMIN_EMAIL` — `sales@packsmartsolutions.com` for customer-zero.
 - `PACKSMART_ADMIN_PASSWORD` — strong, temporary bootstrap password. On first login the owner must replace it; the database hash then takes precedence and old sessions are revoked.
+- `OWNER_ACTIVATION_TOKEN` — random 256-bit-or-stronger one-time setup token. It is delivered only as a URL fragment and becomes unusable as soon as the owner sets a password.
 - `SESSION_SECRET` — at least 32 random characters used to sign expiring sessions.
 - `CREDENTIALS_KEY` — separate value of at least 32 random characters used for AES-256-GCM connection credential encryption.
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` — dedicated server-only persistence connection.

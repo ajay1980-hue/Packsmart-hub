@@ -32,7 +32,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '3.0.0';
+const VERSION = '3.0.1';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -54,6 +54,7 @@ function truthy(value) {
 }
 
 function clamp(value, minimum, maximum, fallback) {
+  if (value === null || value === undefined || value === '') return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(minimum, Math.min(maximum, number)) : fallback;
 }
@@ -171,6 +172,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     limit: clamp(env.LOGIN_ATTEMPT_LIMIT, 3, 30, 8),
     windowMs: clamp(env.LOGIN_WINDOW_MS, 60000, 86400000, 15 * 60 * 1000),
     blockMs: clamp(env.LOGIN_BLOCK_MS, 60000, 86400000, 15 * 60 * 1000)
+  });
+  const activationLimiter = new SlidingWindowLimiter({
+    limit: clamp(env.ACTIVATION_ATTEMPT_LIMIT, 3, 20, 6),
+    windowMs: clamp(env.ACTIVATION_WINDOW_MS, 60000, 86400000, 15 * 60 * 1000),
+    blockMs: clamp(env.ACTIVATION_BLOCK_MS, 60000, 86400000, 30 * 60 * 1000)
   });
   const locks = new Map();
 
@@ -349,6 +355,65 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     };
   }
 
+  async function activateOwner(req, res) {
+    const configuredToken = String(env.OWNER_ACTIVATION_TOKEN || '');
+    if (configuredToken.length < 32 || !env.SESSION_SECRET || String(env.SESSION_SECRET).length < 32) {
+      send(res, 404, { error: 'Owner activation is unavailable', code: 'ACTIVATION_UNAVAILABLE' });
+      return;
+    }
+    const key = requestIp(req);
+    const rate = activationLimiter.check(key);
+    if (!rate.allowed) {
+      send(res, 429, { error: 'Too many activation attempts. Try again later.', code: 'ACTIVATION_RATE_LIMITED' }, {
+        'Retry-After': String(Math.ceil(rate.retryAfterMs / 1000))
+      });
+      return;
+    }
+    const body = await jsonBody(req, 32768);
+    if (!safeEqual(body.token, configuredToken)) {
+      activationLimiter.fail(key);
+      await new Promise(resolve => setTimeout(resolve, 120));
+      send(res, 401, { error: 'Activation link is invalid or expired', code: 'ACTIVATION_INVALID' });
+      return;
+    }
+    const passwordHash = hashPassword(body.newPassword);
+    const adminEmail = normalizeEmail(env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
+    const result = await withWorkspaceLock(CUSTOMER_ZERO_WORKSPACE, async () => {
+      const state = await getOrSeed(store, CUSTOMER_ZERO_WORKSPACE, env, {
+        email: adminEmail,
+        name: 'Packsmart Solutions Ltd',
+        slug: CUSTOMER_ZERO_WORKSPACE
+      });
+      const user = state.users.find(item => item.email === adminEmail && item.role === 'owner');
+      if (!user) throw Object.assign(new Error('Packsmart owner account was not found'), { status: 404, code: 'OWNER_NOT_FOUND' });
+      if (user.passwordHash || !user.passwordChangeRequired) {
+        throw Object.assign(new Error('Owner activation has already been completed'), { status: 409, code: 'ACTIVATION_USED' });
+      }
+      user.passwordHash = passwordHash;
+      user.passwordChangeRequired = false;
+      user.sessionVersion = Number(user.sessionVersion || 1) + 1;
+      user.updatedAt = new Date().toISOString();
+      addAudit(state, { type: 'owner_account_activated', actor: user.id, detail: { sessionsRevoked: true } });
+      await store.save(CUSTOMER_ZERO_WORKSPACE, state);
+      return { state, user };
+    });
+    activationLimiter.reset(key);
+    const token = createSessionToken({
+      userId: result.user.id,
+      workspaceId: CUSTOMER_ZERO_WORKSPACE,
+      email: result.user.email,
+      role: result.user.role,
+      sessionVersion: result.user.sessionVersion
+    }, env.SESSION_SECRET, clamp(env.SESSION_TTL_SECONDS, 900, 86400, 12 * 60 * 60));
+    const session = verifySessionToken(token, env.SESSION_SECRET);
+    send(res, 200, {
+      workspace: result.state.workspace,
+      user: publicUser(result.user),
+      csrf: session.csrf,
+      expiresAt: new Date(session.exp * 1000).toISOString()
+    }, { 'Set-Cookie': sessionCookie(token, { secure: secureCookies, maxAge: session.exp - Math.floor(Date.now() / 1000) }) });
+  }
+
   async function login(req, res) {
     if (!env.PACKSMART_ADMIN_PASSWORD || !env.SESSION_SECRET || String(env.SESSION_SECRET).length < 32) {
       send(res, 503, { error: 'Server authentication is not configured', code: 'AUTH_NOT_CONFIGURED' });
@@ -507,6 +572,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
       if (req.method === 'POST' && pathname === '/api/webhooks/stripe') {
         await stripeWebhook(req, res);
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/api/auth/activate-owner') {
+        await activateOwner(req, res);
         return;
       }
       if (req.method === 'POST' && pathname === '/api/auth/login') {
