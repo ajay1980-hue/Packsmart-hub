@@ -629,6 +629,16 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
 }
 .button-row { display: flex; flex-wrap: wrap; gap: .55rem; margin-top: 1rem; }
 .compact-form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.connection-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.25fr) minmax(180px, 1fr) minmax(180px, 1fr) auto;
+  align-items: end;
+  gap: .75rem;
+}
+.connection-form label { display: grid; gap: .4rem; color: var(--muted); font-size: .72rem; font-weight: 750; }
+.connection-form button { white-space: nowrap; }
+.connection-safety, .connection-form .form-error { grid-column: 1 / -1; }
+.connection-safety { margin: 0; color: #85858f; font-size: .68rem; line-height: 1.5; }
 .plan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .45rem; margin-top: .8rem; }
 .plan {
   display: grid;
@@ -788,6 +798,8 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
   .kpis-five { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .order-detail-grid { grid-template-columns: 1fr; }
   .cost-detail-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+  .connection-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .connection-form button { width: 100%; }
 }
 
 @media (max-width: 720px) {
@@ -849,6 +861,7 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
   .order-profit-card summary .order-state { grid-column: 1 / -1; grid-row: 2; }
   .order-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cost-detail-grid { grid-template-columns: 1fr; }
+  .connection-form { grid-template-columns: 1fr; }
   .detail-notes { grid-column: auto; }
   .audit-row { grid-template-columns: 12px 1fr; }
   .audit-row code { grid-column: 2; }

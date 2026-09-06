@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=4.0.0">
+  <link rel="stylesheet" href="/styles.css?v=4.1.0">
 </head>
 <body>
   <section id="login-screen" class="auth-screen">
@@ -152,6 +152,17 @@
 
       <section id="view-channels" class="view">
         <article class="card"><div class="section-head stack-mobile"><div><p class="eyebrow">INTEGRATION STATUS</p><h2>All sales &amp; social channels</h2><p class="muted">Credentials stay encrypted server-side. Publishing, campaigns, spend and material commerce writes remain approval-gated.</p></div><div class="button-row"><button id="sync-shopify" class="secondary" type="button">Sync Shopify</button><button id="sync-all-channels" class="primary" type="button">Read-only sync all</button></div></div><div id="channel-grid" class="channel-grid"></div></article>
+        <article id="shopify-connection-card" class="card">
+          <div class="section-head stack-mobile"><div><p class="eyebrow">SECURE SHOPIFY CONNECTION</p><h2>Connect the installed Packsmart Ops app</h2><p class="muted">Owner-only setup. Client credentials are sent directly to this server over HTTPS, encrypted before cloud storage, and never returned to the browser.</p></div><span id="shopify-connection-state" class="tag neutral">Not configured</span></div>
+          <form id="shopify-connection-form" class="connection-form" autocomplete="off">
+            <label>Permanent store domain<input name="storeDomain" type="text" value="wavtzm-vy.myshopify.com" maxlength="253" autocapitalize="none" spellcheck="false" inputmode="url" required></label>
+            <label>Client ID<input name="clientId" type="text" maxlength="200" autocapitalize="none" autocomplete="off" spellcheck="false" required></label>
+            <label>Client secret<input name="clientSecret" type="password" maxlength="512" autocapitalize="none" autocomplete="off" spellcheck="false" required></label>
+            <button class="primary" type="submit">Save &amp; verify read-only</button>
+            <p class="connection-safety">Read access only: products, variants, images, pricing, inventory and recent orders. Packsmart Ops has no Shopify write operation for products, prices, inventory or orders.</p>
+            <p id="shopify-connection-error" class="form-error" role="alert"></p>
+          </form>
+        </article>
         <div class="grid-2">
           <article id="ebay-health-card" class="card"><div class="section-head"><div><p class="eyebrow">EXISTING EBAY MANAGER</p><h2>Listings &amp; mismatch health</h2></div><button id="sync-ebay" class="secondary" type="button">Check manager</button></div><div id="ebay-health" class="status-list"></div></article>
           <article class="card"><p class="eyebrow">ADVERTISING ECONOMICS</p><h2>Record sourced spend</h2><p class="muted">Use only confirmed platform totals. Campaign changes still require approval.</p><form id="advertising-form" class="approval-form compact-form"><label>Channel<select name="channel"><option value="meta">Meta / Instagram</option><option value="tiktok_shop">TikTok</option><option value="google_youtube">Google / YouTube</option><option value="ebay">eBay promoted listings</option><option value="pinterest">Pinterest</option><option value="amazon">Amazon</option></select></label><label>Spend (£)<input name="spend" type="number" min="0" step="0.01" required></label><label>Attributable revenue (£)<input name="attributableRevenue" type="number" min="0" step="0.01"></label><label>Date<input name="date" type="date" required></label><button class="primary" type="submit">Record spend</button><p id="advertising-form-error" class="form-error" role="alert"></p></form></article>
@@ -180,6 +191,6 @@
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
-  <script src="/app.js?v=4.0.0"></script>
+  <script src="/app.js?v=4.1.0"></script>
 </body>
 </html>

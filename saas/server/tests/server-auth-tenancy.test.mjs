@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
-import { createSessionToken, sessionCookie } from '../lib/security.mjs';
+import { createSessionToken, decryptCredentials, sessionCookie } from '../lib/security.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 
 const SESSION_SECRET = 'server-integration-session-secret-more-than-thirty-two-characters';
@@ -71,7 +71,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=4\.0\.0/);
+  assert.match(String(home.payload), /app\.js\?v=4\.1\.0/);
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
@@ -178,6 +178,37 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(decision.response.status, 200);
   assert.equal(decision.payload.approval.status, 'approved');
   assert.equal(decision.payload.executedExternally, false);
+
+  const shopifySecret = 'shopify-client-secret-value-test-only';
+  const shopifyConnection = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: {
+      provider: 'shopify',
+      capabilities: ['write_products', 'write_inventory'],
+      credentials: {
+        storeDomain: 'wavtzm-vy.myshopify.com',
+        clientId: 'shopify-client-id-test',
+        clientSecret: shopifySecret
+      }
+    }
+  });
+  assert.equal(shopifyConnection.response.status, 200);
+  assert.deepEqual(shopifyConnection.payload.connection.capabilities, ['catalogue', 'inventory', 'orders']);
+  assert.equal(JSON.stringify(shopifyConnection.payload).includes(shopifySecret), false);
+  assert.equal(JSON.stringify(shopifyConnection.payload).includes('shopify-client-id-test'), false);
+
+  const publicConnections = await request('/api/connections', { cookie });
+  assert.equal(publicConnections.response.status, 200);
+  assert.equal(JSON.stringify(publicConnections.payload).includes(shopifySecret), false);
+  assert.equal(JSON.stringify(publicConnections.payload).includes('shopify-client-id-test'), false);
+  const persistedWithConnection = await server.packsmart.store.get('packsmart-solutions');
+  const persistedShopify = persistedWithConnection.connections.find(item => item.provider === 'shopify');
+  assert.equal(persistedShopify.encryptedCredentials.includes(shopifySecret), false);
+  assert.deepEqual(decryptCredentials(persistedShopify.encryptedCredentials, 'server-integration-credential-key-more-than-thirty-two-characters'), {
+    storeDomain: 'wavtzm-vy.myshopify.com',
+    clientId: 'shopify-client-id-test',
+    clientSecret: shopifySecret
+  });
 
   const changed = await request('/api/auth/change-password', {
     method: 'POST',

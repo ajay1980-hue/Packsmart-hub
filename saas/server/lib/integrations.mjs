@@ -1,4 +1,7 @@
 import fs from 'node:fs/promises';
+import { decryptCredentials } from './security.mjs';
+
+const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
 export const SHOPIFY_PRODUCTS_QUERY = `
   query PacksmartOpsProducts($first: Int!, $after: String) {
@@ -66,7 +69,7 @@ function integrationError(message, status = 502, code = 'INTEGRATION_ERROR') {
 
 function normalizeDomain(value) {
   const raw = String(value || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
-  if (!raw || !/^[a-z0-9][a-z0-9.-]+$/.test(raw)) throw integrationError('Invalid Shopify store domain', 503, 'SHOPIFY_CONFIG_INVALID');
+  if (!raw || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(raw)) throw integrationError('Invalid Shopify store domain', 503, 'SHOPIFY_CONFIG_INVALID');
   return raw;
 }
 
@@ -246,12 +249,19 @@ export class IntegrationService {
     this.env = env;
     this.fetch = fetchImpl;
     this.repoRoot = repoRoot;
-    this.shopifyTokenCache = { token: '', expiresAt: 0 };
-    this.shopifyTokenRequest = null;
+    this.shopifyTokenCache = new Map();
+    this.shopifyTokenRequests = new Map();
   }
 
-  shopifyConfigured() {
-    return Boolean(
+  shopifyConnection(state) {
+    return (state?.connections || []).find(connection => connection.provider === 'shopify' && connection.encryptedCredentials) || null;
+  }
+
+  shopifyConfigured(state) {
+    if (this.shopifyConnection(state)) return true;
+    const workspaceId = String(state?.workspace?.id || '');
+    const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    return workspaceId === environmentWorkspace && Boolean(
       this.env.SHOPIFY_STORE_DOMAIN && (
         this.env.SHOPIFY_ADMIN_ACCESS_TOKEN ||
         (this.env.SHOPIFY_CLIENT_ID && this.env.SHOPIFY_CLIENT_SECRET)
@@ -259,21 +269,74 @@ export class IntegrationService {
     );
   }
 
-  async shopifyAccessToken(domain) {
-    const configuredToken = String(this.env.SHOPIFY_ADMIN_ACCESS_TOKEN || '');
-    if (configuredToken) return configuredToken;
+  shopifyConfig(state) {
+    const workspaceId = String(state?.workspace?.id || '');
+    const connection = this.shopifyConnection(state);
+    if (connection) {
+      let credentials;
+      try {
+        credentials = decryptCredentials(connection.encryptedCredentials, this.env.CREDENTIALS_KEY);
+      } catch {
+        throw integrationError('Stored Shopify credentials are invalid', 503, 'SHOPIFY_CREDENTIALS_INVALID');
+      }
+      const domain = normalizeDomain(credentials.storeDomain);
+      const accessToken = String(credentials.accessToken || '');
+      const clientId = String(credentials.clientId || '');
+      const clientSecret = String(credentials.clientSecret || '');
+      if (!accessToken && (!clientId || !clientSecret)) {
+        throw integrationError('Stored Shopify credentials are incomplete', 503, 'SHOPIFY_CREDENTIALS_INVALID');
+      }
+      return {
+        workspaceId,
+        domain,
+        apiVersion: String(this.env.SHOPIFY_ADMIN_API_VERSION || '2026-07'),
+        accessToken,
+        clientId,
+        clientSecret,
+        cacheKey: `connection:${workspaceId}:${connection.id}:${connection.updatedAt || connection.createdAt || ''}`,
+        connection
+      };
+    }
 
+    const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    if (workspaceId !== environmentWorkspace) {
+      throw integrationError('Shopify Admin API is not configured for this workspace', 503, 'SHOPIFY_NOT_CONFIGURED');
+    }
+    const domain = normalizeDomain(this.env.SHOPIFY_STORE_DOMAIN);
+    const accessToken = String(this.env.SHOPIFY_ADMIN_ACCESS_TOKEN || '');
     const clientId = String(this.env.SHOPIFY_CLIENT_ID || '');
     const clientSecret = String(this.env.SHOPIFY_CLIENT_SECRET || '');
+    if (!accessToken && (!clientId || !clientSecret)) {
+      throw integrationError('Shopify Admin API is not configured', 503, 'SHOPIFY_NOT_CONFIGURED');
+    }
+    return {
+      workspaceId,
+      domain,
+      apiVersion: String(this.env.SHOPIFY_ADMIN_API_VERSION || '2026-07'),
+      accessToken,
+      clientId,
+      clientSecret,
+      cacheKey: `environment:${workspaceId}:${domain}:${clientId}`,
+      connection: null
+    };
+  }
+
+  async shopifyAccessToken(config) {
+    const configuredToken = String(config.accessToken || '');
+    if (configuredToken) return configuredToken;
+
+    const clientId = String(config.clientId || '');
+    const clientSecret = String(config.clientSecret || '');
     if (!clientId || !clientSecret) {
       throw integrationError('Shopify Admin API is not configured', 503, 'SHOPIFY_NOT_CONFIGURED');
     }
-    if (this.shopifyTokenCache.token && Date.now() + 60000 < this.shopifyTokenCache.expiresAt) {
-      return this.shopifyTokenCache.token;
+    const cached = this.shopifyTokenCache.get(config.cacheKey);
+    if (cached?.token && Date.now() + 60000 < cached.expiresAt) {
+      return cached.token;
     }
-    if (!this.shopifyTokenRequest) {
-      this.shopifyTokenRequest = (async () => {
-        const response = await this.fetch(`https://${domain}/admin/oauth/access_token`, {
+    if (!this.shopifyTokenRequests.has(config.cacheKey)) {
+      const request = (async () => {
+        const response = await this.fetch(`https://${config.domain}/admin/oauth/access_token`, {
           method: 'POST',
           headers: {
             'Accept': 'application/json',
@@ -293,20 +356,23 @@ export class IntegrationService {
         if (!token || !Number.isFinite(expiresIn) || expiresIn < 60) {
           throw integrationError('Shopify returned an invalid access token', 502, 'SHOPIFY_TOKEN_INVALID');
         }
-        this.shopifyTokenCache = { token, expiresAt: Date.now() + expiresIn * 1000 };
+        this.shopifyTokenCache.set(config.cacheKey, { token, expiresAt: Date.now() + expiresIn * 1000 });
         return token;
       })();
+      this.shopifyTokenRequests.set(config.cacheKey, request);
     }
-    try { return await this.shopifyTokenRequest; }
-    finally { this.shopifyTokenRequest = null; }
+    const request = this.shopifyTokenRequests.get(config.cacheKey);
+    try { return await request; }
+    finally {
+      if (this.shopifyTokenRequests.get(config.cacheKey) === request) this.shopifyTokenRequests.delete(config.cacheKey);
+    }
   }
 
-  async shopifyGraphql(query, variables) {
-    const domain = normalizeDomain(this.env.SHOPIFY_STORE_DOMAIN);
-    const version = String(this.env.SHOPIFY_ADMIN_API_VERSION || '2026-07');
+  async shopifyGraphql(query, variables, config) {
+    const version = String(config.apiVersion || '2026-07');
     if (!/^20\d\d-(01|04|07|10)$/.test(version)) throw integrationError('Invalid Shopify API version', 503, 'SHOPIFY_CONFIG_INVALID');
-    const token = await this.shopifyAccessToken(domain);
-    const response = await this.fetch(`https://${domain}/admin/api/${version}/graphql.json`, {
+    const token = await this.shopifyAccessToken(config);
+    const response = await this.fetch(`https://${config.domain}/admin/api/${version}/graphql.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -323,11 +389,11 @@ export class IntegrationService {
     return payload.data;
   }
 
-  async fetchShopifyProducts() {
+  async fetchShopifyProducts(config) {
     const products = [];
     let after = null;
     for (let page = 0; page < 10; page += 1) {
-      const data = await this.shopifyGraphql(SHOPIFY_PRODUCTS_QUERY, { first: 50, after });
+      const data = await this.shopifyGraphql(SHOPIFY_PRODUCTS_QUERY, { first: 50, after }, config);
       const connection = data?.products;
       products.push(...(connection?.nodes || []).map(mapAdminProduct));
       if (!connection?.pageInfo?.hasNextPage) break;
@@ -336,12 +402,12 @@ export class IntegrationService {
     return products;
   }
 
-  async fetchShopifyOrders() {
+  async fetchShopifyOrders(config) {
     const orders = [];
     let after = null;
     const cutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
     for (let page = 0; page < 10; page += 1) {
-      const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query: `created_at:>=${cutoff}` });
+      const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query: `created_at:>=${cutoff}` }, config);
       const connection = data?.orders;
       orders.push(...(connection?.nodes || []).map(mapOrder));
       if (!connection?.pageInfo?.hasNextPage) break;
@@ -364,10 +430,21 @@ export class IntegrationService {
 
   async syncShopify(state) {
     const now = new Date().toISOString();
-    if (this.shopifyConfigured()) {
-      const [products, orders] = await Promise.all([this.fetchShopifyProducts(), this.fetchShopifyOrders()]);
+    if (this.shopifyConfigured(state)) {
+      const config = this.shopifyConfig(state);
+      const [products, orders] = await Promise.all([this.fetchShopifyProducts(config), this.fetchShopifyOrders(config)]);
       state.products = products;
       state.orders = mergeProviderRecords(state.orders, 'shopify', orders);
+      if (config.connection) {
+        config.connection.status = 'connected';
+        config.connection.lastSyncAt = now;
+        config.connection.lastError = null;
+        config.connection.metadata = {
+          ...(config.connection.metadata || {}),
+          shopDomain: config.domain,
+          itemCount: products.length
+        };
+      }
       state.integrationStatus = {
         ...(state.integrationStatus || {}),
         shopify: {

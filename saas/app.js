@@ -332,6 +332,15 @@
 
   function renderChannels() {
     $('#channel-grid').innerHTML = (state.data.integrations || []).map(channelCard).join('');
+    const shopifyConnection = (state.data.connections || []).find(item => item.provider === 'shopify');
+    const shopifyStatus = (state.data.integrations || []).find(item => item.id === 'shopify');
+    const canConfigure = ['owner', 'admin'].includes(String(state.data.user?.role || ''));
+    $('#shopify-connection-card').classList.toggle('hidden', !canConfigure);
+    const connectionState = $('#shopify-connection-state');
+    connectionState.textContent = shopifyStatus?.status === 'connected' ? 'Connected · read-only' : shopifyConnection ? 'Saved · verification needed' : 'Not configured';
+    connectionState.className = 'tag ' + (shopifyStatus?.status === 'connected' ? 'good' : shopifyConnection ? 'warn' : 'neutral');
+    const savedDomain = shopifyConnection?.metadata?.shopDomain;
+    if (savedDomain) $('#shopify-connection-form').storeDomain.value = savedDomain;
     const ebay = state.data.ebay;
     if (!ebay) { $('#ebay-health').innerHTML = '<div class="empty-state">The existing eBay Manager has not yet been verified from Packsmart Ops. No duplicate OAuth setup will be created.</div>'; return; }
     $('#ebay-health').innerHTML = [
@@ -469,6 +478,25 @@
     try { await request('/api/advertising-costs', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); await loadBootstrap({ migrate: false }); showMessage('Confirmed advertising spend recorded. No campaign was changed.'); }
     catch (adError) { error.textContent = adError.message; }
     finally { setBusy(button, false); }
+  });
+
+  $('#shopify-connection-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#shopify-connection-error'); error.textContent = '';
+    const credentials = { storeDomain: form.storeDomain.value, clientId: form.clientId.value, clientSecret: form.clientSecret.value };
+    setBusy(button, true, 'Encrypting & verifying…');
+    try {
+      await request('/api/connections', { method: 'POST', body: JSON.stringify({ provider: 'shopify', credentials }) });
+      form.clientId.value = ''; form.clientSecret.value = '';
+      await request('/api/integrations/shopify/sync', { method: 'POST', body: '{}' });
+      await loadBootstrap({ migrate: false });
+      showMessage('Shopify connected. Live products, inventory and recent orders synced read-only.');
+    } catch (connectionError) { error.textContent = connectionError.message; }
+    finally {
+      credentials.clientId = ''; credentials.clientSecret = '';
+      form.clientSecret.value = '';
+      setBusy(button, false);
+    }
   });
 
   $('#approval-form').addEventListener('submit', async event => {

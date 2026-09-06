@@ -33,7 +33,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.0.0';
+const VERSION = '4.1.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -105,6 +105,19 @@ function cleanOrderCosts(value = {}) {
 
 function text(value, max = 200) {
   return String(value || '').trim().slice(0, max);
+}
+
+function cleanShopifyCredentials(value) {
+  const storeDomain = text(value?.storeDomain, 253).toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  const clientId = text(value?.clientId, 200);
+  const clientSecret = String(value?.clientSecret || '').trim();
+  if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(storeDomain)) {
+    throw Object.assign(new Error('Enter the permanent .myshopify.com store domain'), { status: 400, code: 'SHOPIFY_DOMAIN_INVALID' });
+  }
+  if (!/^[A-Za-z0-9_-]{8,200}$/.test(clientId) || clientSecret.length < 16 || clientSecret.length > 512 || /\s/.test(clientSecret)) {
+    throw Object.assign(new Error('Enter the Shopify Client ID and Client secret from the installed app'), { status: 400, code: 'SHOPIFY_CREDENTIALS_INVALID' });
+  }
+  return { storeDomain, clientId, clientSecret };
 }
 
 function validEmail(value) {
@@ -358,9 +371,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   async function refreshOperationalState(state, { force = false } = {}) {
     const lastShopify = Date.parse(state.integrationStatus?.shopify?.lastSyncAt || 0);
     const stale = !Number.isFinite(lastShopify) || Date.now() - lastShopify > clamp(env.SYNC_INTERVAL_MS, 60000, 86400000, 15 * 60 * 1000);
-    const shopifyLiveConfigured = Boolean(env.SHOPIFY_STORE_DOMAIN && (
-      env.SHOPIFY_ADMIN_ACCESS_TOKEN || (env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET)
-    ));
+    const shopifyLiveConfigured = integrations.shopifyConfigured(state);
     if (force || !state.products?.length || (shopifyLiveConfigured && stale)) {
       try { await integrations.syncShopify(state); }
       catch (error) {
@@ -957,7 +968,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const results = await mutate(auth, async state => {
             const output = {};
             try { output.shopify = await integrations.syncShopify(state); }
-            catch (error) { output.shopify = { status: 'error', detail: 'Shopify read sync failed; last known data was retained.', lastError: error.code || 'SHOPIFY_SYNC_FAILED' }; }
+            catch (error) {
+              output.shopify = { status: state.products?.length ? 'degraded' : 'error', detail: 'Shopify read sync failed; last known data was retained.', lastError: error.code || 'SHOPIFY_SYNC_FAILED' };
+              const connection = (state.connections || []).find(item => item.provider === 'shopify');
+              if (connection) { connection.status = 'error'; connection.lastError = output.shopify.lastError; }
+            }
             if (env.EBAY_MANAGER_BASE_URL) {
               try { output.ebay = await integrations.syncEbay(state); }
               catch (error) { output.ebay = { status: 'error', detail: 'Existing eBay Manager verification failed.', lastError: error.code || 'EBAY_SYNC_FAILED' }; }
@@ -971,12 +986,29 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'POST' && pathname === '/api/integrations/shopify/sync') {
-          const status = await mutate(auth, async state => {
-            const result = await integrations.syncShopify(state);
-            addAudit(state, { type: 'shopify_read_sync', actor: auth.user.id, detail: { status: result.status, source: result.source } });
-            return result;
+          const outcome = await mutate(auth, async state => {
+            try {
+              const result = await integrations.syncShopify(state);
+              addAudit(state, { type: 'shopify_read_sync', actor: auth.user.id, detail: { status: result.status, source: result.source } });
+              return { status: result, error: null };
+            } catch (error) {
+              const failedStatus = {
+                status: state.products?.length ? 'degraded' : 'error',
+                detail: 'The live Shopify read connection could not be verified; last known catalogue data was retained.',
+                lastSyncAt: state.integrationStatus?.shopify?.lastSyncAt || null,
+                lastError: error.code || 'SHOPIFY_SYNC_FAILED'
+              };
+              state.integrationStatus = { ...(state.integrationStatus || {}), shopify: failedStatus };
+              const connection = (state.connections || []).find(item => item.provider === 'shopify');
+              if (connection) { connection.status = 'error'; connection.lastError = failedStatus.lastError; }
+              addAudit(state, { type: 'shopify_read_sync_failed', actor: auth.user.id, detail: { code: failedStatus.lastError } });
+              return { status: failedStatus, error: { status: 422, code: failedStatus.lastError } };
+            }
           });
-          send(res, 200, { status, readOnly: true });
+          if (outcome.error) {
+            throw Object.assign(new Error('Shopify could not verify this read-only connection. Check the app is installed and the credentials are current.'), outcome.error);
+          }
+          send(res, 200, { status: outcome.status, readOnly: true });
           return;
         }
 
@@ -1021,18 +1053,22 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (!/^[a-z0-9_]+$/.test(provider) || !body.credentials || typeof body.credentials !== 'object' || Array.isArray(body.credentials)) {
             throw Object.assign(new Error('Provider and credentials are required'), { status: 400, code: 'VALIDATION_FAILED' });
           }
+          const credentials = provider === 'shopify' ? cleanShopifyCredentials(body.credentials) : body.credentials;
           const connection = await mutate(auth, async state => {
             const now = new Date().toISOString();
             const existing = (state.connections || []).find(item => item.provider === provider);
             const next = existing || { id: `conn_${crypto.randomUUID()}`, provider, createdAt: now };
-            next.label = text(body.label || provider, 100);
+            next.label = provider === 'shopify' ? 'Shopify' : text(body.label || provider, 100);
             next.status = 'configured';
-            next.capabilities = Array.isArray(body.capabilities) ? body.capabilities.map(item => text(item, 50)).slice(0, 20) : [];
-            next.metadata = {};
-            next.encryptedCredentials = encryptCredentials(body.credentials, env.CREDENTIALS_KEY);
+            next.capabilities = provider === 'shopify'
+              ? ['catalogue', 'inventory', 'orders']
+              : Array.isArray(body.capabilities) ? body.capabilities.map(item => text(item, 50)).slice(0, 20) : [];
+            next.metadata = provider === 'shopify' ? { shopDomain: credentials.storeDomain } : {};
+            next.lastError = null;
+            next.encryptedCredentials = encryptCredentials(credentials, env.CREDENTIALS_KEY);
             next.updatedAt = now;
             state.connections = [next, ...(state.connections || []).filter(item => item.id !== next.id)];
-            addAudit(state, { type: 'connection_configured', actor: auth.user.id, detail: { provider } });
+            addAudit(state, { type: 'connection_configured', actor: auth.user.id, detail: { provider, readOnly: provider === 'shopify' } });
             return next;
           });
           send(res, 200, { connection: publicConnection(connection), verified: false });

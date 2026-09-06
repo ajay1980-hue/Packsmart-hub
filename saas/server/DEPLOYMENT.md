@@ -18,8 +18,11 @@ Apply `saas/server/supabase/schema.sql` for a new project. For an existing Packs
 
 ## Read-only commerce integrations
 
-Shopify requires:
+The preferred Shopify production setup is the owner-only form in **Sales Channels**. It accepts the installed app's Client ID and Client secret over the authenticated same-origin HTTPS session, encrypts both with `CREDENTIALS_KEY`, stores them in the tenant's Supabase connection record and immediately verifies a read-only sync. Secrets are never returned to browser code.
 
+The optional customer-zero environment fallback requires:
+
+- `SHOPIFY_ENV_WORKSPACE_ID=packsmart-solutions` — prevents environment credentials from being inherited by future tenant workspaces.
 - `SHOPIFY_STORE_DOMAIN=wavtzm-vy.myshopify.com`
 - `SHOPIFY_ADMIN_API_VERSION=2026-07`
 - Current Shopify Dev Dashboard connection (recommended): `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET`. The installed app version must request only the read scopes needed for products, inventory and orders (`read_products`, `read_inventory`, `read_orders`; add other read scopes only when a proven data source requires them). Packsmart Ops exchanges these credentials server-side for a 24-hour token and renews it automatically.

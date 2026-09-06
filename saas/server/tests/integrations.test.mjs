@@ -6,12 +6,13 @@ import {
   SHOPIFY_ORDERS_QUERY,
   SHOPIFY_PRODUCTS_QUERY
 } from '../lib/integrations.mjs';
+import { encryptCredentials } from '../lib/security.mjs';
 
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 test('Shopify snapshot remains a safe server-side fallback', async () => {
   const service = new IntegrationService({}, { repoRoot });
-  const state = { products: [], orders: [], integrationStatus: {} };
+  const state = { workspace: { id: 'packsmart-solutions' }, products: [], orders: [], integrationStatus: {} };
   const status = await service.syncShopify(state);
   assert.equal(status.status, 'degraded');
   assert.equal(status.source, 'repository-snapshot');
@@ -80,7 +81,7 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
     SHOPIFY_ADMIN_API_VERSION: '2026-07',
     SHOPIFY_ADMIN_ACCESS_TOKEN: 'server-only-test-token'
   }, { fetchImpl, repoRoot });
-  const state = { products: [], orders: [], integrationStatus: {} };
+  const state = { workspace: { id: 'packsmart-solutions' }, products: [], orders: [], integrationStatus: {} };
   const status = await service.syncShopify(state);
   assert.equal(status.status, 'connected');
   assert.equal(status.source, 'admin-graphql');
@@ -126,13 +127,69 @@ test('Shopify client credentials are exchanged server-side and the short-lived t
     SHOPIFY_CLIENT_ID: 'server-client-id',
     SHOPIFY_CLIENT_SECRET: 'server-client-secret'
   }, { fetchImpl, repoRoot });
-  const state = { products: [], orders: [], integrationStatus: {} };
+  const state = { workspace: { id: 'packsmart-solutions' }, products: [], orders: [], integrationStatus: {} };
   const status = await service.syncShopify(state);
   assert.equal(status.status, 'connected');
   assert.equal(status.source, 'admin-graphql');
   assert.equal(requests.filter(request => request.url.endsWith('/admin/oauth/access_token')).length, 1);
   assert.equal(requests.filter(request => request.url.includes('/graphql.json')).length, 2);
   assert.ok(requests.filter(request => request.url.includes('/graphql.json')).every(request => !/\bmutation\b/i.test(JSON.parse(request.options.body).query)));
+});
+
+test('encrypted workspace Shopify credentials are decrypted only server-side and update the connection status', async () => {
+  const credentialKey = 'workspace-shopify-encryption-key-more-than-thirty-two-characters';
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith('/admin/oauth/access_token')) {
+      const form = new URLSearchParams(options.body);
+      assert.equal(form.get('client_id'), 'workspace-client-id');
+      assert.equal(form.get('client_secret'), 'workspace-client-secret-value');
+      return Response.json({ access_token: 'workspace-short-lived-token', expires_in: 86399 });
+    }
+    const body = JSON.parse(options.body);
+    assert.equal(options.headers['X-Shopify-Access-Token'], 'workspace-short-lived-token');
+    if (body.query.includes('PacksmartOpsProducts')) {
+      return Response.json({ data: { products: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
+    }
+    return Response.json({ data: { orders: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
+  };
+  const encryptedCredentials = encryptCredentials({
+    storeDomain: 'wavtzm-vy.myshopify.com',
+    clientId: 'workspace-client-id',
+    clientSecret: 'workspace-client-secret-value'
+  }, credentialKey);
+  const state = {
+    workspace: { id: 'packsmart-solutions' },
+    products: [], orders: [], integrationStatus: {},
+    connections: [{
+      id: 'conn-shopify', provider: 'shopify', status: 'configured', encryptedCredentials,
+      metadata: {}, createdAt: '2026-09-06T00:00:00.000Z', updatedAt: '2026-09-06T00:00:00.000Z'
+    }]
+  };
+  const service = new IntegrationService({ CREDENTIALS_KEY: credentialKey, SHOPIFY_ADMIN_API_VERSION: '2026-07' }, { fetchImpl, repoRoot });
+  const status = await service.syncShopify(state);
+  assert.equal(status.status, 'connected');
+  assert.equal(state.connections[0].status, 'connected');
+  assert.equal(state.connections[0].metadata.shopDomain, 'wavtzm-vy.myshopify.com');
+  assert.equal(state.connections[0].metadata.itemCount, 0);
+  assert.equal(requests.filter(request => request.url.endsWith('/admin/oauth/access_token')).length, 1);
+  assert.equal(JSON.stringify(state).includes('workspace-client-secret-value'), false);
+});
+
+test('a future tenant never inherits Packsmart Shopify environment credentials', async () => {
+  let remoteRequests = 0;
+  const service = new IntegrationService({
+    SHOPIFY_ENV_WORKSPACE_ID: 'packsmart-solutions',
+    SHOPIFY_STORE_DOMAIN: 'wavtzm-vy.myshopify.com',
+    SHOPIFY_CLIENT_ID: 'packsmart-client-id',
+    SHOPIFY_CLIENT_SECRET: 'packsmart-client-secret'
+  }, { fetchImpl: async () => { remoteRequests += 1; throw new Error('Tenant isolation failure'); }, repoRoot });
+  const state = { workspace: { id: 'beta-workspace' }, products: [], orders: [], integrationStatus: {}, connections: [] };
+  assert.equal(service.shopifyConfigured(state), false);
+  const status = await service.syncShopify(state);
+  assert.equal(status.source, 'repository-snapshot');
+  assert.equal(remoteRequests, 0);
 });
 
 test('eBay sync reuses and verifies the existing seller backend without writes', async () => {

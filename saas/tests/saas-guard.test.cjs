@@ -35,6 +35,10 @@ assert(html.includes('<option value="today">Today</option>'), 'Today order drill
 assert(!/(shpat_|sk_live_|service_role\s*[:=]\s*['\"]eyJ)/.test(js), 'Browser JavaScript must not contain private service credentials');
 assert(!/localStorage\.(?:setItem|getItem)\([^\n]*(?:token|secret|credential)/i.test(js), 'Browser JavaScript must not persist session or provider credentials');
 assert(!/headers\.set\(['\"]Authorization['\"]/.test(js), 'Browser authentication must use the HTTP-only session cookie');
+assert(html.includes('id="shopify-connection-form"'), 'Owner Shopify connection form must remain available');
+assert(html.includes('name="clientSecret" type="password"'), 'Shopify secret field must remain masked');
+assert(server.includes("? ['catalogue', 'inventory', 'orders']"), 'Shopify connection capabilities must remain read-only');
+assert(!/localStorage\.(?:setItem|getItem)\([^\n]*clientSecret/i.test(js), 'Shopify client secrets must never enter browser storage');
 assert(Array.isArray(catalogue.products) && catalogue.products.length > 0, 'Packsmart Shopify snapshot must contain products');
 assert(catalogue.products.every(product => Array.isArray(product.variants)), 'Every product must expose a variants array');
 
