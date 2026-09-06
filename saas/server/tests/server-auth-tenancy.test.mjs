@@ -71,7 +71,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=3\.0\.1/);
+  assert.match(String(home.payload), /app\.js\?v=4\.0\.0/);
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
@@ -110,6 +110,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(bootstrap.payload.products.length, 15);
   assert.equal(bootstrap.payload.storage, 'file');
   assert.equal(bootstrap.payload.integrations.some(item => item.id === 'meta'), true);
+  assert.equal(bootstrap.payload.suppliers.some(item => item.name === 'Europlast'), true);
 
   const originalSave = server.packsmart.store.save.bind(server.packsmart.store);
   let redundantBootstrapSaves = 0;
@@ -130,6 +131,25 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   });
   assert.equal(economics.response.status, 200);
   assert.equal(economics.payload.economics.landed, 2.1);
+
+  const supplier = await request('/api/suppliers', {
+    method: 'POST', cookie, csrf,
+    body: { name: 'Test Packaging Supplier', notes: 'Workspace-specific test supplier' }
+  });
+  assert.equal(supplier.response.status, 201);
+  assert.equal(supplier.payload.supplier.name, 'Test Packaging Supplier');
+
+  const advertising = await request('/api/advertising-costs', {
+    method: 'POST', cookie, csrf,
+    body: { channel: 'meta', spend: 12.5, attributableRevenue: 40, date: new Date().toISOString() }
+  });
+  assert.equal(advertising.response.status, 201);
+  assert.equal(advertising.payload.record.spend, 12.5);
+
+  const accounting = await request('/api/reports/accounting.csv', { cookie });
+  assert.equal(accounting.response.status, 200);
+  assert.match(accounting.response.headers.get('content-type'), /text\/csv/);
+  assert.match(String(accounting.payload), /operating_contribution/);
 
   const approval = await request('/api/actions', {
     method: 'POST',

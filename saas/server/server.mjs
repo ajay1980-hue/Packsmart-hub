@@ -20,6 +20,7 @@ import {
   verifySessionToken
 } from './lib/security.mjs';
 import { IntegrationService } from './lib/integrations.mjs';
+import { ECONOMICS_FIELDS, ECONOMICS_TEXT_FIELDS, calculateOrderProfit, hasAmount } from './lib/profit.mjs';
 import {
   APPROVAL_TYPES,
   AUTOMATION_DEFINITIONS,
@@ -32,7 +33,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '3.0.1';
+const VERSION = '4.0.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -61,15 +62,41 @@ function clamp(value, minimum, maximum, fallback) {
 
 function cleanEconomics(value = {}) {
   const clean = {};
-  for (const field of ['landed', 'packing', 'delivery', 'channelFee', 'marginFloor']) {
+  for (const field of ECONOMICS_FIELDS) {
+    if (!Object.hasOwn(value, field)) continue;
     const raw = value[field];
     if (raw === '' || raw === null || raw === undefined) clean[field] = '';
     else {
       const number = Number(raw);
-      const maximum = field === 'marginFloor' ? 100 : 1000000;
+      const maximum = ['marginFloor', 'supplierVatRate'].includes(field) ? 100 : field === 'boxQuantity' ? 100000000 : 1000000;
       if (!Number.isFinite(number) || number < 0 || number > maximum) {
         throw Object.assign(new Error(`Invalid ${field} value`), { status: 400, code: 'VALIDATION_FAILED' });
       }
+      clean[field] = Number(number.toFixed(4));
+    }
+  }
+  for (const field of ECONOMICS_TEXT_FIELDS) {
+    if (!Object.hasOwn(value, field)) continue;
+    clean[field] = text(value[field], field === 'notes' ? 1000 : 160);
+  }
+  if (Object.hasOwn(value, 'supplierVatRecoverable')) {
+    if (value.supplierVatRecoverable === '' || value.supplierVatRecoverable === null || value.supplierVatRecoverable === undefined) clean.supplierVatRecoverable = null;
+    else if (value.supplierVatRecoverable === true || value.supplierVatRecoverable === 'true') clean.supplierVatRecoverable = true;
+    else if (value.supplierVatRecoverable === false || value.supplierVatRecoverable === 'false') clean.supplierVatRecoverable = false;
+    else throw Object.assign(new Error('Invalid supplier VAT recovery treatment'), { status: 400, code: 'VALIDATION_FAILED' });
+  }
+  return clean;
+}
+
+function cleanOrderCosts(value = {}) {
+  const clean = {};
+  for (const field of ['actualShippingCost', 'paymentFees', 'channelFees', 'advertisingCost', 'otherVariableCosts']) {
+    if (!Object.hasOwn(value, field)) continue;
+    const raw = value[field];
+    if (raw === '' || raw === null || raw === undefined) clean[field] = null;
+    else {
+      const number = Number(raw);
+      if (!Number.isFinite(number) || number < 0 || number > 10000000) throw Object.assign(new Error(`Invalid ${field} value`), { status: 400, code: 'VALIDATION_FAILED' });
       clean[field] = Number(number.toFixed(4));
     }
   }
@@ -91,6 +118,37 @@ function publicUser(user) {
     role: user.role,
     passwordChangeRequired: Boolean(user.passwordChangeRequired)
   };
+}
+
+function csvCell(value) {
+  const string = value === null || value === undefined ? '' : String(value);
+  return /[",\r\n]/.test(string) ? `"${string.replaceAll('"', '""')}"` : string;
+}
+
+function accountingCsv(state) {
+  const headings = [
+    'order_id', 'order_date', 'channel', 'financial_status', 'gross_revenue', 'net_revenue',
+    'vat_tax', 'refunds', 'shipping_charged', 'landed_cost', 'packing_cost', 'handling_cost',
+    'actual_shipping_cost', 'payment_fees', 'channel_fees', 'advertising_cost', 'other_variable_cost',
+    'gross_profit', 'operating_contribution', 'margin_percent', 'profit_basis', 'missing_inputs'
+  ];
+  const rows = (state.orders || []).map(order => {
+    const profit = calculateOrderProfit(order, state.economics || {});
+    return [
+      order.name || order.id, order.createdAt, order.provider || 'shopify', order.financialStatus,
+      profit.grossRevenue, profit.netRevenue, profit.tax, profit.refunds, profit.shippingCharged,
+      profit.complete ? profit.breakdown.landed : null,
+      profit.complete ? profit.breakdown.packing : null,
+      profit.complete ? profit.breakdown.handling : null,
+      profit.complete ? profit.breakdown.delivery : null,
+      profit.complete ? profit.breakdown.paymentFee : null,
+      profit.complete ? profit.breakdown.channelFee : null,
+      profit.complete ? profit.breakdown.advertising : null,
+      profit.complete ? profit.breakdown.otherVariable : null,
+      profit.grossProfit, profit.contribution, profit.margin, profit.basis, profit.missingFields.join('; ')
+    ].map(csvCell).join(',');
+  });
+  return [headings.join(','), ...rows].join('\r\n') + '\r\n';
 }
 
 function stripeConfigured(env) {
@@ -320,13 +378,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   function currentBrief(state) {
     const today = new Date().toISOString().slice(0, 10);
-    const existing = (state.dailyBriefs || []).find(brief => String(brief.generatedAt || '').startsWith(today));
+    const existing = (state.dailyBriefs || []).find(brief => String(brief.generatedAt || '').startsWith(today) && brief.logic === 'deterministic-v2');
     if (existing) return existing;
     const brief = buildDailyBrief(state, {
       lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
       marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
     });
-    state.dailyBriefs = [brief, ...(state.dailyBriefs || [])].slice(0, 30);
+    state.dailyBriefs = [brief, ...(state.dailyBriefs || []).filter(item => !String(item.generatedAt || '').startsWith(today))].slice(0, 30);
     addAudit(state, { type: 'daily_operations_brief_generated', actor: 'system', detail: { briefId: brief.id, logic: brief.logic } });
     return brief;
   }
@@ -341,6 +399,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       products: state.products || [],
       orders: state.orders || [],
       economics: state.economics || {},
+      suppliers: state.suppliers || [],
+      costHistory: state.costHistory || [],
+      advertisingCosts: state.advertisingCosts || [],
+      shippingProviders: state.shippingProviders || [],
+      settings: state.settings || {},
       automations: state.automations || {},
       automationDefinitions: AUTOMATION_DEFINITIONS,
       approvals: state.approvals || [],
@@ -638,10 +701,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/bootstrap') {
-          const briefCountBefore = (auth.state.dailyBriefs || []).length;
+          const briefIdsBefore = new Set((auth.state.dailyBriefs || []).map(item => item.id));
           const operationalStateChanged = await refreshOperationalState(auth.state);
           const payload = bootstrapPayload(auth.state, auth.user, auth.session.csrf);
-          const briefCreated = (auth.state.dailyBriefs || []).length > briefCountBefore;
+          const briefCreated = !briefIdsBefore.has(payload.brief.id);
           if (operationalStateChanged || briefCreated) await store.save(auth.session.workspaceId, auth.state);
           send(res, 200, payload);
           return;
@@ -704,15 +767,106 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'PUT' && pathname === '/api/economics') {
+          requireOwner(auth);
           const body = await jsonBody(req, 32768);
           const sku = text(body.sku, 160);
           if (!sku) throw Object.assign(new Error('SKU is required'), { status: 400, code: 'VALIDATION_FAILED' });
-          const economics = cleanEconomics(body.economics);
-          await mutate(auth, async state => {
-            state.economics[sku] = economics;
-            addAudit(state, { type: 'economics_updated', actor: auth.user.id, detail: { sku } });
+          const incoming = cleanEconomics(body.economics);
+          const economics = await mutate(auth, async state => {
+            const before = { ...(state.economics[sku] || {}) };
+            const next = { ...before, ...incoming, updatedAt: new Date().toISOString() };
+            const changedFields = Object.keys(incoming).filter(field => JSON.stringify(before[field]) !== JSON.stringify(next[field]));
+            state.economics[sku] = next;
+            if (changedFields.length) {
+              state.costHistory = [{
+                id: `cost_${crypto.randomUUID()}`,
+                sku,
+                changedBy: auth.user.id,
+                changedFields,
+                before: Object.fromEntries(changedFields.map(field => [field, before[field] ?? null])),
+                after: Object.fromEntries(changedFields.map(field => [field, next[field] ?? null])),
+                createdAt: next.updatedAt
+              }, ...(state.costHistory || [])].slice(0, 5000);
+              addAudit(state, { type: 'economics_updated', actor: auth.user.id, detail: { sku, changedFields } });
+            }
+            return next;
           });
           send(res, 200, { sku, economics });
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/suppliers') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const name = text(body.name, 120);
+          if (name.length < 2) throw Object.assign(new Error('Supplier name is required'), { status: 400, code: 'VALIDATION_FAILED' });
+          const supplier = await mutate(auth, async state => {
+            if ((state.suppliers || []).some(item => item.name.toLowerCase() === name.toLowerCase())) throw Object.assign(new Error('This supplier already exists'), { status: 409, code: 'SUPPLIER_EXISTS' });
+            const now = new Date().toISOString();
+            const next = { id: `supplier_${crypto.randomUUID()}`, name, active: true, notes: text(body.notes, 1000), createdAt: now, updatedAt: now };
+            state.suppliers = [...(state.suppliers || []), next];
+            addAudit(state, { type: 'supplier_created', actor: auth.user.id, detail: { supplierId: next.id, name: next.name } });
+            return next;
+          });
+          send(res, 201, { supplier });
+          return;
+        }
+
+        const supplierMatch = pathname.match(/^\/api\/suppliers\/([^/]+)$/);
+        if (req.method === 'PUT' && supplierMatch) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const supplier = await mutate(auth, async state => {
+            const current = (state.suppliers || []).find(item => item.id === supplierMatch[1]);
+            if (!current) throw Object.assign(new Error('Supplier not found'), { status: 404, code: 'SUPPLIER_NOT_FOUND' });
+            if (Object.hasOwn(body, 'name')) {
+              const name = text(body.name, 120);
+              if (name.length < 2) throw Object.assign(new Error('Supplier name is required'), { status: 400, code: 'VALIDATION_FAILED' });
+              current.name = name;
+            }
+            if (Object.hasOwn(body, 'notes')) current.notes = text(body.notes, 1000);
+            if (Object.hasOwn(body, 'active')) current.active = Boolean(body.active);
+            current.updatedAt = new Date().toISOString();
+            addAudit(state, { type: 'supplier_updated', actor: auth.user.id, detail: { supplierId: current.id } });
+            return current;
+          });
+          send(res, 200, { supplier });
+          return;
+        }
+
+        const orderEconomicsMatch = pathname.match(/^\/api\/orders\/([^/]+)\/economics$/);
+        if (req.method === 'PUT' && orderEconomicsMatch) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const costs = cleanOrderCosts(body);
+          const result = await mutate(auth, async state => {
+            const order = (state.orders || []).find(item => item.id === orderEconomicsMatch[1]);
+            if (!order) throw Object.assign(new Error('Order not found'), { status: 404, code: 'ORDER_NOT_FOUND' });
+            Object.assign(order, costs, { costUpdatedAt: new Date().toISOString() });
+            addAudit(state, { type: 'order_costs_updated', actor: auth.user.id, detail: { orderId: order.id, changedFields: Object.keys(costs) } });
+            return { order, profitability: calculateOrderProfit(order, state.economics || {}) };
+          });
+          send(res, 200, result);
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/advertising-costs') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const channel = text(body.channel, 50).toLowerCase();
+          if (!/^[a-z0-9_]+$/.test(channel) || !hasAmount(body.spend)) throw Object.assign(new Error('Channel and spend are required'), { status: 400, code: 'VALIDATION_FAILED' });
+          const spend = Number(body.spend);
+          const attributableRevenue = body.attributableRevenue === '' || body.attributableRevenue === null || body.attributableRevenue === undefined ? null : Number(body.attributableRevenue);
+          const periodTimestamp = body.date ? Date.parse(body.date) : Date.now();
+          if (spend < 0 || spend > 10000000 || !Number.isFinite(periodTimestamp) || (attributableRevenue !== null && (!Number.isFinite(attributableRevenue) || attributableRevenue < 0 || attributableRevenue > 100000000))) throw Object.assign(new Error('Advertising amounts or date are invalid'), { status: 400, code: 'VALIDATION_FAILED' });
+          const record = await mutate(auth, async state => {
+            const now = new Date().toISOString();
+            const next = { id: `adcost_${crypto.randomUUID()}`, channel, spend: Number(spend.toFixed(2)), attributableRevenue: attributableRevenue === null ? null : Number(attributableRevenue.toFixed(2)), date: new Date(periodTimestamp).toISOString(), source: 'manual', createdAt: now, updatedAt: now };
+            state.advertisingCosts = [next, ...(state.advertisingCosts || [])].slice(0, 5000);
+            addAudit(state, { type: 'advertising_cost_recorded', actor: auth.user.id, detail: { recordId: next.id, channel, spend: next.spend } });
+            return next;
+          });
+          send(res, 201, { record });
           return;
         }
 
@@ -775,15 +929,41 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/brief') {
-          const briefCountBefore = (auth.state.dailyBriefs || []).length;
+          const briefIdsBefore = new Set((auth.state.dailyBriefs || []).map(item => item.id));
           const brief = currentBrief(auth.state);
-          if ((auth.state.dailyBriefs || []).length > briefCountBefore) await store.save(auth.session.workspaceId, auth.state);
+          if (!briefIdsBefore.has(brief.id)) await store.save(auth.session.workspaceId, auth.state);
           send(res, 200, { brief });
+          return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/reports/accounting.csv') {
+          const csv = accountingCsv(auth.state);
+          send(res, 200, csv, {
+            'Content-Type': 'text/csv; charset=utf-8',
+            'Content-Disposition': `attachment; filename="packsmart-operations-${new Date().toISOString().slice(0, 10)}.csv"`
+          });
           return;
         }
 
         if (req.method === 'GET' && pathname === '/api/integrations') {
           send(res, 200, { integrations: integrationMatrix(auth.state, env), ebay: auth.state.ebay || null });
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/integrations/sync') {
+          const results = await mutate(auth, async state => {
+            const output = {};
+            try { output.shopify = await integrations.syncShopify(state); }
+            catch (error) { output.shopify = { status: 'error', detail: 'Shopify read sync failed; last known data was retained.', lastError: error.code || 'SHOPIFY_SYNC_FAILED' }; }
+            if (env.EBAY_MANAGER_BASE_URL) {
+              try { output.ebay = await integrations.syncEbay(state); }
+              catch (error) { output.ebay = { status: 'error', detail: 'Existing eBay Manager verification failed.', lastError: error.code || 'EBAY_SYNC_FAILED' }; }
+            }
+            state.integrationStatus = { ...(state.integrationStatus || {}), ...output };
+            addAudit(state, { type: 'commerce_read_sync', actor: auth.user.id, detail: { providers: Object.keys(output), statuses: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, value.status])) } });
+            return output;
+          });
+          send(res, 200, { integrations: results, readOnly: true, writesEnabled: false });
           return;
         }
 

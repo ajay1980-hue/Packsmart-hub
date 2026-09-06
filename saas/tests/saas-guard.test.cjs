@@ -30,7 +30,11 @@ assert(operations.includes('TikTok Shop'), 'TikTok Shop must be present');
 assert(operations.includes('Pinterest Shopping'), 'Pinterest Shopping must be present');
 assert(operations.includes('Google & YouTube Shopping'), 'Google and YouTube Shopping must be present');
 assert(operations.includes('WhatsApp Business'), 'WhatsApp Business must be present');
+assert(operations.includes("id: 'amazon'"), 'Amazon marketplace architecture must be present');
+assert(html.includes('<option value="today">Today</option>'), 'Today order drill-down must be selectable');
 assert(!/(shpat_|sk_live_|service_role\s*[:=]\s*['\"]eyJ)/.test(js), 'Browser JavaScript must not contain private service credentials');
+assert(!/localStorage\.(?:setItem|getItem)\([^\n]*(?:token|secret|credential)/i.test(js), 'Browser JavaScript must not persist session or provider credentials');
+assert(!/headers\.set\(['\"]Authorization['\"]/.test(js), 'Browser authentication must use the HTTP-only session cookie');
 assert(Array.isArray(catalogue.products) && catalogue.products.length > 0, 'Packsmart Shopify snapshot must contain products');
 assert(catalogue.products.every(product => Array.isArray(product.variants)), 'Every product must expose a variants array');
 

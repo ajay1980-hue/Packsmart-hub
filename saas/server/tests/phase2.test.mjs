@@ -126,7 +126,7 @@ test('daily brief is deterministic and covers all requested operating signals', 
   }];
   state.orders = [{ id: 'o1', createdAt: new Date().toISOString(), financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED', total: 10 }];
   const brief = buildDailyBrief(state);
-  assert.equal(brief.logic, 'deterministic-v1');
+  assert.equal(brief.logic, 'deterministic-v2');
   assert.equal(brief.orders30d, 1);
   assert.equal(brief.stockRisks, 1);
   assert.equal(brief.missingCosts, 1);

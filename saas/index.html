@@ -5,39 +5,33 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#09090b">
   <meta name="color-scheme" content="dark">
-  <title>Packsmart Ops — Command Centre</title>
+  <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=3.0.1">
+  <link rel="stylesheet" href="/styles.css?v=4.0.0">
 </head>
 <body>
   <section id="login-screen" class="auth-screen">
     <div class="auth-glow"></div>
     <div class="auth-card">
-      <div class="brand-lockup">
-        <span class="brand-mark">PS</span>
-        <div><strong>Packsmart Ops</strong><small>Private command centre</small></div>
-      </div>
+      <div class="brand-lockup"><span class="brand-mark">PS</span><div><strong>Packsmart Ops</strong><small>Powered by Runvara</small></div></div>
       <p class="eyebrow">CUSTOMER ZERO · PRODUCTION</p>
       <h1>Run Packsmart from one secure cockpit.</h1>
-      <p class="muted">Sales, stock, true product economics, channel health, automations and approval controls.</p>
+      <p class="muted">Sales, orders, stock, true product economics, channel health, automations and human approval controls.</p>
       <form id="login-form" class="auth-form">
         <label>Email<input id="login-email" name="email" type="email" autocomplete="username" value="sales@packsmartsolutions.com" required></label>
         <label>Password<input id="login-password" name="password" type="password" autocomplete="current-password" required></label>
         <button class="primary full" type="submit">Sign in securely</button>
         <p id="login-error" class="form-error" role="alert"></p>
       </form>
-      <div class="security-note"><span>●</span> Secure, HTTP-only session · Packsmart Solutions Ltd</div>
+      <div class="security-note"><span>●</span> Secure HTTP-only session · Packsmart Solutions Ltd</div>
     </div>
   </section>
 
   <section id="password-screen" class="auth-screen hidden">
     <div class="auth-card">
-      <div class="brand-lockup">
-        <span class="brand-mark">PS</span>
-        <div><strong>Secure your owner account</strong><small>One-time production setup</small></div>
-      </div>
+      <div class="brand-lockup"><span class="brand-mark">PS</span><div><strong>Secure your owner account</strong><small>One-time production setup</small></div></div>
       <h1>Choose your private Packsmart password.</h1>
-      <p class="muted">Use at least 14 characters with upper-case, lower-case, a number and a symbol. Completing this revokes the temporary bootstrap session.</p>
+      <p class="muted">Use at least 14 characters with upper-case, lower-case, a number and a symbol.</p>
       <form id="password-form" class="auth-form">
         <label>New password<input id="new-password" name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label>
         <label>Confirm password<input id="confirm-password" name="confirmPassword" type="password" autocomplete="new-password" minlength="14" required></label>
@@ -49,184 +43,143 @@
 
   <div id="app-shell" class="app-shell hidden">
     <aside class="sidebar">
-      <div class="brand-lockup">
-        <span class="brand-mark">PS</span>
-        <div><strong>Packsmart Ops</strong><small>Customer zero</small></div>
-      </div>
+      <div class="brand-lockup"><span class="brand-mark">PS</span><div><strong>Packsmart Ops</strong><small>Runvara customer zero</small></div></div>
       <nav id="main-nav" aria-label="Primary">
         <button class="nav-item active" data-view="overview"><span>◆</span> Overview</button>
-        <button class="nav-item" data-view="profit"><span>£</span> Products & Profit</button>
+        <button class="nav-item" data-view="profit"><span>£</span> Products &amp; Profit</button>
         <button class="nav-item" data-view="orders"><span>▤</span> Orders</button>
+        <button class="nav-item" data-view="suppliers"><span>▣</span> Suppliers &amp; Costs</button>
+        <button class="nav-item" data-view="channels"><span>◎</span> Sales Channels</button>
         <button class="nav-item" data-view="approvals"><span>✓</span> Approval Centre <b id="nav-approval-count" class="nav-count hidden">0</b></button>
         <button class="nav-item" data-view="automations"><span>⚙</span> Automations</button>
-        <button class="nav-item" data-view="channels"><span>◎</span> Sales Channels</button>
-        <button class="nav-item" data-view="audit"><span>↻</span> Audit & Account</button>
+        <button class="nav-item" data-view="issues"><span>!</span> Issues</button>
+        <button class="nav-item" data-view="audit"><span>↻</span> Audit &amp; Account</button>
       </nav>
-      <div class="customer-zero">
-        <span class="status-dot"></span>
-        <div><b>Packsmart Solutions Ltd</b><small>Internal · no SaaS charge</small></div>
-      </div>
+      <div class="customer-zero"><span class="status-dot"></span><div><b>Packsmart Solutions Ltd</b><small>Internal · no SaaS charge</small></div></div>
     </aside>
 
     <main>
       <header class="topbar">
-        <div>
-          <p class="eyebrow">PACKSMART SOLUTIONS LTD</p>
-          <h1 id="page-title">Command Centre</h1>
-        </div>
-        <div class="top-actions">
-          <span id="storage-badge" class="tag neutral">Checking cloud</span>
-          <button id="refresh-all" class="secondary" type="button">Refresh data</button>
-        </div>
+        <div><p class="eyebrow">PACKSMART SOLUTIONS LTD</p><h1 id="page-title">Command Centre</h1></div>
+        <div class="top-actions"><span id="storage-badge" class="tag neutral">Checking cloud</span><button id="refresh-all" class="secondary" type="button">Refresh all</button></div>
       </header>
-
       <div id="global-error" class="global-message error hidden" role="alert"></div>
       <div id="global-success" class="global-message success hidden" role="status"></div>
 
       <section id="view-overview" class="view active">
         <article class="hero card">
-          <div>
-            <p class="eyebrow">TODAY'S OPERATIONS BRIEF</p>
-            <h2>What needs your attention now</h2>
-            <p id="brief-summary" class="hero-copy">Loading secure Packsmart data…</p>
-            <small id="brief-generated" class="muted"></small>
-          </div>
+          <div><p class="eyebrow">TODAY'S OPERATIONS BRIEF</p><h2>What needs your attention now</h2><p id="brief-summary" class="hero-copy">Loading secure Packsmart data…</p><small id="brief-generated" class="muted"></small></div>
           <div class="hero-score"><strong id="readiness-score">—</strong><span>readiness</span></div>
         </article>
 
-        <div class="kpis kpis-six">
-          <article class="card kpi"><span>Paid revenue · 30d</span><strong id="kpi-revenue">—</strong><small>Shopify/eBay when connected</small></article>
-          <article class="card kpi"><span>Orders · 30d</span><strong id="kpi-orders">—</strong><small id="kpi-open-orders">— open</small></article>
-          <article class="card kpi"><span>Active catalogue</span><strong id="kpi-products">—</strong><small id="kpi-variants">— variants</small></article>
-          <article class="card kpi"><span>Stock risks</span><strong id="kpi-stock">—</strong><small>at/below threshold</small></article>
-          <article class="card kpi"><span>Cost coverage</span><strong id="kpi-coverage">—</strong><small id="kpi-missing-costs">— missing</small></article>
-          <article class="card kpi"><span>Average margin</span><strong id="kpi-margin">—</strong><small id="kpi-low-margin">— below floor</small></article>
+        <div class="period-block">
+          <div class="period-heading"><p class="eyebrow">TODAY</p><small>Settled source data</small></div>
+          <div class="kpis kpis-four">
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><span>Sales</span><strong id="today-revenue">—</strong><small>net collected revenue</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><span>Orders</span><strong id="today-orders">—</strong><small id="today-open">— open</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="profitable"><span>Operating contribution</span><strong id="today-profit">—</strong><small id="today-profit-coverage">coverage —</small></button>
+            <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="all"><span>Margin</span><strong id="today-margin">—</strong><small>on profit-covered orders</small></button>
+          </div>
         </div>
 
         <div class="grid-2">
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">PRIORITY QUEUE</p><h2>Recommended next actions</h2></div></div>
-            <ol id="priority-list" class="priority-list"></ol>
-          </article>
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">CONTROL STATUS</p><h2>Risk & automation</h2></div></div>
-            <div id="control-status" class="status-list"></div>
-          </article>
+          <article class="card period-card"><p class="eyebrow">LAST 7 DAYS</p><div id="week-metrics" class="metric-grid"></div></article>
+          <article class="card period-card"><p class="eyebrow">LAST 30 DAYS</p><div id="month-metrics" class="metric-grid"></div></article>
         </div>
 
-        <article class="card">
-          <div class="section-head"><div><p class="eyebrow">CHANNEL HEALTH</p><h2>Commerce overview</h2></div><button class="text-button" data-view-link="channels">View all channels</button></div>
-          <div id="overview-channels" class="channel-grid compact"></div>
-        </article>
+        <div class="kpis kpis-six">
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="active"><span>Active catalogue</span><strong id="kpi-products">—</strong><small id="kpi-variants">— variants</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="low-stock"><span>Low stock</span><strong id="kpi-stock">—</strong><small id="kpi-out-stock">— out of stock</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="missing-costs"><span>Cost coverage</span><strong id="kpi-coverage">—</strong><small id="kpi-missing-costs">— missing</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="below-floor"><span>Average margin</span><strong id="kpi-margin">—</strong><small id="kpi-low-margin">— below floor</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="loss-making"><span>Loss-making</span><strong id="kpi-loss">—</strong><small>fully costed SKUs</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="active"><span>Stock value at cost</span><strong id="kpi-stock-value">—</strong><small id="kpi-stock-value-coverage">coverage —</small></button>
+        </div>
+
+        <div class="grid-2">
+          <article class="card"><div class="section-head"><div><p class="eyebrow">PRIORITY QUEUE</p><h2>Recommended next actions</h2></div></div><ol id="priority-list" class="priority-list"></ol></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">CONTROL STATUS</p><h2>Risk &amp; automation</h2></div></div><div id="control-status" class="status-list"></div></article>
+        </div>
+
+        <article class="card"><div class="section-head"><div><p class="eyebrow">CHANNEL ECONOMICS · 30 DAYS</p><h2>Sales and profit by channel</h2></div><button class="text-button" data-view-link="channels">Manage channels</button></div><div id="overview-channels" class="channel-grid compact"></div></article>
+        <div class="grid-2">
+          <article class="card"><div class="section-head"><div><p class="eyebrow">PRODUCT ECONOMICS</p><h2>Most profitable</h2></div><button class="text-button" data-view-link="profit" data-target-filter="profitable">View products</button></div><div id="best-products" class="ranking-list"></div></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">MARGIN RISK</p><h2>Needs attention</h2></div><button class="text-button" data-view-link="profit" data-target-filter="below-floor">Review</button></div><div id="risk-products" class="ranking-list"></div></article>
+        </div>
       </section>
 
       <section id="view-profit" class="view">
         <article class="card">
           <div class="section-head stack-mobile">
-            <div><p class="eyebrow">TRUE PRODUCT ECONOMICS</p><h2>Products & Profit</h2><p class="muted">Contribution = selling price minus landed, packing, delivery and channel costs. Tax treatment is not inferred.</p></div>
-            <div class="filters"><input id="product-search" type="search" placeholder="Search product or SKU"><select id="product-status"><option value="active">Active only</option><option value="all">All statuses</option></select></div>
+            <div><p class="eyebrow">TRUE PRODUCT ECONOMICS</p><h2>Products &amp; Profit</h2><p class="muted">Contribution = selling price minus landed, packing, delivery and channel costs. Handling, payment, advertising and other variable costs are also required; unknowns are never treated as zero. This is operating contribution, not statutory accounting profit.</p></div>
+            <div class="button-row"><a class="secondary button-link" href="/api/reports/accounting.csv">Export accounting CSV</a></div>
           </div>
-          <div class="table-wrap">
-            <table class="economics-table">
-              <thead><tr><th>Product</th><th>Price</th><th>Stock</th><th>Landed</th><th>Packing</th><th>Delivery</th><th>Channel</th><th>Contribution</th><th>Margin</th></tr></thead>
-              <tbody id="economics-body"></tbody>
-            </table>
+          <div class="filters filters-wide">
+            <input id="product-search" type="search" placeholder="Search product, variant or SKU">
+            <select id="product-status">
+              <option value="active">Active</option><option value="all">All</option><option value="missing-costs">Missing costs</option><option value="profitable">Profitable</option><option value="below-floor">Below margin floor</option><option value="loss-making">Loss-making</option><option value="low-stock">Low stock</option><option value="out-of-stock">Out of stock</option>
+            </select>
+            <select id="product-sort"><option value="product">Sort: product</option><option value="contribution-desc">Profit £ high-low</option><option value="margin-desc">Margin % high-low</option><option value="revenue-desc">Revenue high-low</option><option value="units-desc">Sales volume high-low</option><option value="stock-asc">Stock low-high</option></select>
           </div>
+          <div class="table-wrap"><table class="economics-table"><thead><tr><th>Product / SKU</th><th>Price</th><th>Stock</th><th>Supplier</th><th>Landed</th><th>Packing</th><th>Handling</th><th>Postage</th><th>Payment</th><th>Channel</th><th>Ads</th><th>Other</th><th>Total variable</th><th>Contribution</th><th>Margin</th><th>Status</th></tr></thead><tbody id="economics-body"></tbody></table></div>
         </article>
       </section>
 
       <section id="view-orders" class="view">
-        <div class="kpis">
-          <article class="card kpi"><span>Paid revenue · 30d</span><strong id="orders-revenue">—</strong><small>refunds excluded</small></article>
-          <article class="card kpi"><span>Recent orders</span><strong id="orders-total">—</strong><small>last 30 days</small></article>
-          <article class="card kpi"><span>Open orders</span><strong id="orders-open">—</strong><small>needs fulfilment review</small></article>
-          <article class="card kpi"><span>Refunded</span><strong id="orders-refunded">—</strong><small>last 30 days</small></article>
+        <div class="kpis kpis-five">
+          <article class="card kpi"><span>Revenue · 30d</span><strong id="orders-revenue">—</strong><small>net after refunds</small></article>
+          <article class="card kpi"><span>Orders · 30d</span><strong id="orders-total">—</strong><small id="orders-open">— open</small></article>
+          <article class="card kpi"><span>Refunds · 30d</span><strong id="orders-refunds-value">—</strong><small id="orders-refunded">— affected orders</small></article>
+          <article class="card kpi"><span>Operating contribution</span><strong id="orders-profit">—</strong><small>covered orders only</small></article>
+          <article class="card kpi"><span>Profit coverage</span><strong id="orders-profit-coverage">—</strong><small>unknowns withheld</small></article>
         </div>
         <article class="card">
-          <div class="section-head"><div><p class="eyebrow">ORDER FEED</p><h2>Recent orders</h2></div></div>
-          <div id="order-list" class="order-list"></div>
+          <div class="section-head stack-mobile"><div><p class="eyebrow">ORDER PROFITABILITY</p><h2>Recent orders</h2><p class="muted">Open a record to see source revenue, refunds, VAT, line costs, channel fees and contribution.</p></div><div class="filters"><select id="order-filter"><option value="all">All orders</option><option value="today">Today</option><option value="open">Open</option><option value="refunded">Refunded</option><option value="missing-profit">Missing profit inputs</option><option value="profitable">Profitable</option><option value="loss-making">Loss-making</option></select><a class="secondary button-link" href="/api/reports/accounting.csv">Export CSV</a></div></div>
+          <div id="order-list" class="order-profit-list"></div>
         </article>
+      </section>
+
+      <section id="view-suppliers" class="view">
+        <div class="grid-2">
+          <article class="card"><p class="eyebrow">SUPPLIER DIRECTORY</p><h2>Suppliers</h2><p class="muted">Workspace-specific supplier records; Runvara remains generic for future customers.</p><div id="supplier-list" class="supplier-list"></div></article>
+          <article class="card"><p class="eyebrow">ADD SUPPLIER</p><h2>New supplier</h2><form id="supplier-form" class="approval-form"><label>Supplier name<input name="name" maxlength="120" required></label><label>Notes<textarea name="notes" maxlength="1000" placeholder="Terms, contact or source notes"></textarea></label><button class="primary" type="submit">Add supplier</button><p id="supplier-form-error" class="form-error" role="alert"></p></form></article>
+        </div>
+        <div class="grid-2">
+          <article class="card"><p class="eyebrow">SHIPPING ECONOMICS</p><h2>Delivery providers</h2><div id="shipping-provider-list" class="status-list"></div><p class="muted tiny">Customer shipping charged is kept separate from Packsmart's actual Royal Mail/courier cost.</p></article>
+          <article class="card"><p class="eyebrow">COST HISTORY</p><h2>Recent changes</h2><div id="cost-history-list" class="audit-list"></div></article>
+        </div>
+      </section>
+
+      <section id="view-channels" class="view">
+        <article class="card"><div class="section-head stack-mobile"><div><p class="eyebrow">INTEGRATION STATUS</p><h2>All sales &amp; social channels</h2><p class="muted">Credentials stay encrypted server-side. Publishing, campaigns, spend and material commerce writes remain approval-gated.</p></div><div class="button-row"><button id="sync-shopify" class="secondary" type="button">Sync Shopify</button><button id="sync-all-channels" class="primary" type="button">Read-only sync all</button></div></div><div id="channel-grid" class="channel-grid"></div></article>
+        <div class="grid-2">
+          <article id="ebay-health-card" class="card"><div class="section-head"><div><p class="eyebrow">EXISTING EBAY MANAGER</p><h2>Listings &amp; mismatch health</h2></div><button id="sync-ebay" class="secondary" type="button">Check manager</button></div><div id="ebay-health" class="status-list"></div></article>
+          <article class="card"><p class="eyebrow">ADVERTISING ECONOMICS</p><h2>Record sourced spend</h2><p class="muted">Use only confirmed platform totals. Campaign changes still require approval.</p><form id="advertising-form" class="approval-form compact-form"><label>Channel<select name="channel"><option value="meta">Meta / Instagram</option><option value="tiktok_shop">TikTok</option><option value="google_youtube">Google / YouTube</option><option value="ebay">eBay promoted listings</option><option value="pinterest">Pinterest</option><option value="amazon">Amazon</option></select></label><label>Spend (£)<input name="spend" type="number" min="0" step="0.01" required></label><label>Attributable revenue (£)<input name="attributableRevenue" type="number" min="0" step="0.01"></label><label>Date<input name="date" type="date" required></label><button class="primary" type="submit">Record spend</button><p id="advertising-form-error" class="form-error" role="alert"></p></form></article>
+        </div>
       </section>
 
       <section id="view-approvals" class="view">
         <div class="grid-approval">
-          <article class="card">
-            <p class="eyebrow">HUMAN IN THE LOOP</p><h2>Request approval</h2>
-            <p class="muted">Approving records a decision only. No supplier order, refund, spend, price change or live marketplace action executes until its executor is separately connected and tested.</p>
-            <form id="approval-form" class="approval-form">
-              <label>Action class<select name="type" required>
-                <option value="supplier_order">Supplier order</option>
-                <option value="advertising_spend">Advertising spend</option>
-                <option value="refund">Customer refund</option>
-                <option value="major_price_change">Major price change</option>
-                <option value="paid_service_purchase">Paid-service purchase</option>
-                <option value="risky_marketplace_action">Risky marketplace action</option>
-                <option value="social_commerce_publish">Social-commerce publish</option>
-              </select></label>
-              <label>Proposed action<input name="action" maxlength="180" placeholder="What is being proposed?" required></label>
-              <label>Reason<textarea name="reason" maxlength="1000" placeholder="Why is this needed?" required></textarea></label>
-              <label>Financial impact (£)<input name="financialImpact" type="number" step="0.01" placeholder="0.00"></label>
-              <label>Expected benefit<textarea name="expectedBenefit" maxlength="1000" placeholder="What should Packsmart gain?" required></textarea></label>
-              <label>Risk<textarea name="risk" maxlength="1000" placeholder="What could go wrong?" required></textarea></label>
-              <button class="primary" type="submit">Create approval request</button>
-              <p id="approval-form-error" class="form-error" role="alert"></p>
-            </form>
-          </article>
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">DECISION QUEUE</p><h2>Approval requests</h2></div><select id="approval-filter"><option value="pending">Pending</option><option value="all">All records</option></select></div>
-            <div id="approval-list" class="approval-list"></div>
-          </article>
+          <article class="card"><p class="eyebrow">HUMAN IN THE LOOP</p><h2>Request approval</h2><p class="muted">Approval records a decision only. No supplier order, refund, spend, price change, marketplace or social action executes until its executor is separately connected and tested.</p><form id="approval-form" class="approval-form"><label>Action class<select name="type" required><option value="supplier_order">Supplier order</option><option value="advertising_spend">Advertising spend</option><option value="refund">Customer refund</option><option value="major_price_change">Major price change</option><option value="paid_service_purchase">Paid-service purchase</option><option value="risky_marketplace_action">Risky marketplace action</option><option value="social_commerce_publish">Social-commerce publish</option><option value="social_advertising_change">Social advertising change</option></select></label><label>Proposed action<input name="action" maxlength="180" required></label><label>Reason<textarea name="reason" maxlength="1000" required></textarea></label><label>Financial impact (£)<input name="financialImpact" type="number" step="0.01"></label><label>Expected benefit<textarea name="expectedBenefit" maxlength="1000" required></textarea></label><label>Risk<textarea name="risk" maxlength="1000" required></textarea></label><button class="primary" type="submit">Create approval request</button><p id="approval-form-error" class="form-error" role="alert"></p></form></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">DECISION QUEUE</p><h2>Approval requests</h2></div><select id="approval-filter"><option value="pending">Pending</option><option value="all">All records</option></select></div><div id="approval-list" class="approval-list"></div></article>
         </div>
       </section>
 
-      <section id="view-automations" class="view">
-        <article class="card">
-          <p class="eyebrow">SAFE AUTOMATION</p><h2>Automation rules</h2>
-          <p class="muted">Monitoring, calculations and drafting can run automatically. Financial and externally risky actions always enter the Approval Centre.</p>
-          <div id="automation-list" class="rule-list"></div>
-        </article>
-      </section>
+      <section id="view-automations" class="view"><article class="card"><p class="eyebrow">SAFE AUTOMATION</p><h2>Automation rules</h2><p class="muted">Monitoring, calculations and drafting can run automatically. Financial and externally risky actions always enter the Approval Centre.</p><div id="automation-list" class="rule-list"></div></article></section>
 
-      <section id="view-channels" class="view">
-        <article class="card">
-          <div class="section-head stack-mobile"><div><p class="eyebrow">INTEGRATION STATUS</p><h2>All sales channels</h2><p class="muted">Credentials stay encrypted server-side. Social publishing, ad spend, promotions and material commerce writes remain approval-gated.</p></div><button id="sync-shopify" class="secondary" type="button">Sync Shopify</button></div>
-          <div id="channel-grid" class="channel-grid"></div>
-        </article>
-        <article id="ebay-health-card" class="card">
-          <div class="section-head"><div><p class="eyebrow">EXISTING EBAY MANAGER</p><h2>Listings & mismatch health</h2></div><button id="sync-ebay" class="secondary" type="button">Check existing manager</button></div>
-          <div id="ebay-health" class="status-list"></div>
-        </article>
+      <section id="view-issues" class="view">
+        <div class="grid-2"><article class="card"><p class="eyebrow">CATALOGUE QUALITY</p><h2>SEO issues</h2><div id="seo-issue-list" class="issue-list"></div></article><article class="card"><p class="eyebrow">CUSTOMER SERVICE</p><h2>Order issues</h2><div id="customer-issue-list" class="issue-list"></div></article></div>
+        <div class="grid-2"><article class="card"><p class="eyebrow">STOCK</p><h2>Stock risks</h2><div id="stock-issue-list" class="issue-list"></div></article><article class="card"><p class="eyebrow">PROFIT COVERAGE</p><h2>Missing cost inputs</h2><div id="cost-issue-list" class="issue-list"></div></article></div>
       </section>
 
       <section id="view-audit" class="view">
-        <div class="grid-2">
-          <article class="card">
-            <p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Packsmart Solutions Ltd</h2>
-            <div id="account-details" class="status-list"></div>
-            <div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div>
-            <form id="account-password-form" class="auth-form compact-form hidden">
-              <label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label>
-              <label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label>
-              <button class="primary" type="submit">Update password</button>
-              <p class="form-error" role="alert"></p>
-            </form>
-          </article>
-          <article class="card">
-            <p class="eyebrow">FUTURE BILLING</p><h2>Subscription architecture</h2>
-            <div id="billing-status" class="status-list"></div>
-            <div id="plan-grid" class="plan-grid"></div>
-            <p class="muted tiny">Indicative tier design only. Packsmart customer-zero is internal/free and checkout remains disabled.</p>
-          </article>
-        </div>
-        <article class="card">
-          <div class="section-head"><div><p class="eyebrow">IMMUTABLE HISTORY</p><h2>Audit events</h2></div><button id="refresh-audit" class="secondary" type="button">Refresh</button></div>
-          <div id="audit-list" class="audit-list"></div>
-        </article>
+        <div class="grid-2"><article class="card"><p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Packsmart Solutions Ltd</h2><div id="account-details" class="status-list"></div><div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div><form id="account-password-form" class="auth-form compact-form hidden"><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label><button class="primary" type="submit">Update password</button><p class="form-error" role="alert"></p></form></article><article class="card"><p class="eyebrow">FUTURE BILLING</p><h2>Subscription architecture</h2><div id="billing-status" class="status-list"></div><div id="plan-grid" class="plan-grid"></div><p class="muted tiny">Indicative tiers only. Packsmart customer-zero remains internal/free and charging is disabled.</p></article></div>
+        <article class="card"><div class="section-head"><div><p class="eyebrow">IMMUTABLE HISTORY</p><h2>Audit events</h2></div><button id="refresh-audit" class="secondary" type="button">Refresh</button></div><div id="audit-list" class="audit-list"></div></article>
       </section>
     </main>
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
-  <script src="/app.js?v=3.0.1"></script>
+  <script src="/app.js?v=4.0.0"></script>
 </body>
 </html>

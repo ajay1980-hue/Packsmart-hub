@@ -11,7 +11,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     workspace: {
       id: workspaceId,
       name: options.name || (workspaceId === 'packsmart-solutions' ? 'Packsmart Solutions Ltd' : 'New business'),
@@ -33,6 +33,29 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     products: [],
     orders: [],
     economics: {},
+    suppliers: workspaceId === 'packsmart-solutions' ? [{
+      id: 'supplier_europlast',
+      name: 'Europlast',
+      active: true,
+      notes: 'Primary Packsmart packaging supplier.',
+      createdAt: now,
+      updatedAt: now
+    }] : [],
+    costHistory: [],
+    advertisingCosts: [],
+    shippingProviders: workspaceId === 'packsmart-solutions' ? [{
+      id: 'shipping_royal_mail',
+      name: 'Royal Mail',
+      active: true,
+      createdAt: now,
+      updatedAt: now
+    }] : [],
+    settings: {
+      currency: 'GBP',
+      marginFloor: 20,
+      lowStockThreshold: 20
+    },
+    marketplaceSettings: {},
     automations: defaultAutomations(),
     approvals: [],
     audit: [{
@@ -85,7 +108,7 @@ export function upgradeState(state, env = process.env) {
   const upgraded = {
     ...seeded,
     ...(state || {}),
-    schemaVersion: 3,
+    schemaVersion: 4,
     workspace: { ...seeded.workspace, ...(state?.workspace || {}), updatedAt: state?.workspace?.updatedAt || new Date().toISOString() },
     users: Array.isArray(state?.users) && state.users.length ? state.users.map(user => {
       const upgradedUser = { active: true, sessionVersion: 1, passwordHash: null, ...user };
@@ -97,6 +120,12 @@ export function upgradeState(state, env = process.env) {
     products: Array.isArray(state?.products) ? state.products : [],
     orders: Array.isArray(state?.orders) ? state.orders : [],
     economics: state?.economics && typeof state.economics === 'object' ? state.economics : {},
+    suppliers: Array.isArray(state?.suppliers) ? state.suppliers : seeded.suppliers,
+    costHistory: Array.isArray(state?.costHistory) ? state.costHistory : [],
+    advertisingCosts: Array.isArray(state?.advertisingCosts) ? state.advertisingCosts : [],
+    shippingProviders: Array.isArray(state?.shippingProviders) ? state.shippingProviders : seeded.shippingProviders,
+    settings: { ...seeded.settings, ...(state?.settings || {}) },
+    marketplaceSettings: state?.marketplaceSettings && typeof state.marketplaceSettings === 'object' ? state.marketplaceSettings : {},
     automations: { ...defaultAutomations(), ...(state?.automations || {}) },
     approvals: Array.isArray(state?.approvals) ? state.approvals : [],
     audit: Array.isArray(state?.audit) ? state.audit : seeded.audit,
@@ -210,6 +239,13 @@ class SupabaseStore {
     });
   }
 
+  async upsertOptional(table, rows, conflict) {
+    try { await this.upsert(table, rows, conflict); }
+    catch (error) {
+      if (error.code !== 'SUPABASE_PERSISTENCE_FAILED') throw error;
+    }
+  }
+
   async mirrorNormalized(workspaceId, state) {
     const workspace = state.workspace;
     await this.upsert('workspaces', [{
@@ -274,7 +310,7 @@ class SupabaseStore {
       external_id: variant.externalId || variant.id || '',
       sku: variant.sku || '',
       title: variant.title || 'Default',
-      price: Number(variant.price || 0),
+      price: numericOrNull(variant.price) ?? 0,
       inventory_quantity: variant.inventory,
       available: variant.available !== false,
       image_url: variant.image || product.image || null,
@@ -295,6 +331,35 @@ class SupabaseStore {
       margin_floor: numericOrNull(economics.marginFloor),
       updated_at: new Date().toISOString()
     })), 'workspace_id,sku');
+
+    await this.upsertOptional('product_cost_profiles', Object.entries(state.economics || {}).map(([sku, economics]) => ({
+      workspace_id: workspaceId,
+      sku,
+      cost_data: economics,
+      updated_at: economics.updatedAt || new Date().toISOString()
+    })), 'workspace_id,sku');
+
+    await this.upsertOptional('suppliers', (state.suppliers || []).map(supplier => ({
+      id: supplier.id,
+      workspace_id: workspaceId,
+      name: supplier.name,
+      active: supplier.active !== false,
+      notes: supplier.notes || '',
+      metadata: supplier.metadata || {},
+      created_at: supplier.createdAt,
+      updated_at: supplier.updatedAt || supplier.createdAt
+    })), 'id');
+
+    await this.upsertOptional('cost_history', (state.costHistory || []).slice(0, 5000).map(event => ({
+      id: event.id,
+      workspace_id: workspaceId,
+      sku: event.sku,
+      changed_by: event.changedBy || 'system',
+      changed_fields: event.changedFields || [],
+      before_data: event.before || {},
+      after_data: event.after || {},
+      created_at: event.createdAt
+    })), 'id');
 
     await this.upsert('automation_rules', Object.entries(state.automations || {}).map(([ruleId, enabled]) => ({
       workspace_id: workspaceId,
@@ -352,13 +417,48 @@ class SupabaseStore {
       order_name: order.name || '',
       financial_status: order.financialStatus || 'UNKNOWN',
       fulfillment_status: order.fulfillmentStatus || 'UNKNOWN',
-      total: Number(order.total || 0),
+      total: numericOrNull(order.total) ?? 0,
       currency: order.currency || 'GBP',
       ordered_at: order.createdAt,
       source_updated_at: order.updatedAt || order.createdAt,
       cancelled_at: order.cancelledAt || null,
       updated_at: new Date().toISOString()
     })), 'workspace_id,id');
+
+    await this.upsertOptional('order_financials', (state.orders || []).map(order => ({
+      workspace_id: workspaceId,
+      order_id: order.id,
+      provider: order.provider || 'shopify',
+      financial_data: {
+        currentTotal: order.currentTotal,
+        discounts: order.discounts,
+        refunds: order.refunds,
+        tax: order.tax,
+        currentTax: order.currentTax,
+        shippingCharged: order.shippingCharged,
+        actualShippingCost: order.actualShippingCost,
+        paymentFees: order.paymentFees,
+        channelFees: order.channelFees,
+        advertisingCost: order.advertisingCost,
+        otherVariableCosts: order.otherVariableCosts,
+        paymentGatewayNames: order.paymentGatewayNames || []
+      },
+      line_items: order.lineItems || [],
+      updated_at: order.updatedAt || new Date().toISOString()
+    })), 'workspace_id,order_id');
+
+    await this.upsertOptional('advertising_costs', (state.advertisingCosts || []).map(record => ({
+      id: record.id,
+      workspace_id: workspaceId,
+      channel: record.channel,
+      spend: numericOrNull(record.spend),
+      attributable_revenue: numericOrNull(record.attributableRevenue),
+      period_date: record.date || record.createdAt,
+      source: record.source || 'manual',
+      metadata: record.metadata || {},
+      created_at: record.createdAt,
+      updated_at: record.updatedAt || record.createdAt
+    })), 'id');
 
     await this.upsert('operations_briefs', (state.dailyBriefs || []).slice(0, 30).map(brief => ({
       id: brief.id,

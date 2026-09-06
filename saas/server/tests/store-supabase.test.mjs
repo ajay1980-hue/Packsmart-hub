@@ -86,6 +86,14 @@ test('Supabase persistence mirrors every production table and restores lossless 
     cancelledAt: null
   }];
   state.economics['PS-TEST-11'] = { landed: 4, packing: 0.4, delivery: 2.5, channelFee: 0.8, marginFloor: 20 };
+  state.costHistory = [{
+    id: 'cost_history_test', sku: 'PS-TEST-11', changedBy: 'packsmart-admin',
+    changedFields: ['landed'], before: { landed: null }, after: { landed: 4 }, createdAt: now
+  }];
+  state.advertisingCosts = [{
+    id: 'adcost_test', channel: 'meta', spend: 10, attributableRevenue: 25,
+    date: now, source: 'manual', createdAt: now, updatedAt: now
+  }];
   state.connections = [{
     id: 'conn_test',
     provider: 'meta',
@@ -123,7 +131,8 @@ test('Supabase persistence mirrors every production table and restores lossless 
   for (const table of [
     'workspaces', 'users', 'connections', 'products', 'variants', 'economics',
     'automation_rules', 'approval_requests', 'audit_events', 'subscriptions',
-    'orders', 'operations_briefs', 'saas_workspace_state'
+    'orders', 'operations_briefs', 'saas_workspace_state', 'suppliers',
+    'product_cost_profiles', 'cost_history', 'order_financials', 'advertising_costs'
   ]) {
     assert.ok(writtenTables.has(table), `${table} must be mirrored`);
   }

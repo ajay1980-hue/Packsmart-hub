@@ -14,7 +14,7 @@ Store these as private platform environment variables; never commit their values
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` — dedicated server-only persistence connection.
 - `APP_PUBLIC_URL` — `https://packsmart-ops.onrender.com`.
 
-Apply `saas/server/supabase/schema.sql` before adding the Supabase variables. The schema enables row-level security and removes browser-role access. Only the Node service uses the service-role credential.
+Apply `saas/server/supabase/schema.sql` for a new project. For an existing Packsmart Ops project, apply each file under `saas/server/supabase/migrations/` in filename order. Schema v4 adds server-only mirrors for product cost profiles, suppliers, cost history, order financials and advertising costs. The authoritative workspace state and every mirror table remain tenant keyed. Row-level security is enabled and browser roles have no access; only the Node service uses the service-role credential.
 
 ## Read-only commerce integrations
 
@@ -22,7 +22,7 @@ Shopify requires:
 
 - `SHOPIFY_STORE_DOMAIN=wavtzm-vy.myshopify.com`
 - `SHOPIFY_ADMIN_API_VERSION=2026-07`
-- `SHOPIFY_ADMIN_ACCESS_TOKEN` with only the read scopes needed for products, inventory and orders.
+- `SHOPIFY_ADMIN_ACCESS_TOKEN` with only the read scopes needed for products, inventory and orders (`read_products`, `read_inventory`, `read_orders`; add `read_marketplace_orders` and `read_quick_sale` only when those order sources are required).
 
 The existing eBay Manager adapter requires:
 
@@ -30,7 +30,11 @@ The existing eBay Manager adapter requires:
 - `EBAY_MANAGER_API_TOKEN` — optional backend-to-backend access token.
 - `EBAY_EXPECTED_ACCOUNT=packsmartsolutions20`
 
-Both adapters make read requests only. No listing, price, inventory, promotion or product write is implemented.
+Both adapters make read requests only. No listing, price, inventory, promotion or product write is implemented. Shopify imports source order totals, discounts, tax, shipping, refunds and line items. The eBay adapter reuses the existing Manager's connected seller identity and commercial guard, and can consume its read-only orders, fees and promotion endpoints when present.
+
+## Social-commerce channel contract
+
+Meta/Facebook Shops, Instagram Shopping, TikTok Shop, Pinterest, Google Merchant/YouTube, WhatsApp and Amazon are represented as isolated, tenant-scoped connection records. Their status, sync error and metrics can appear in the command centre without credentials reaching browser code. A provider is not marked connected until its server-side OAuth or service credential has been installed and a read test succeeds. No social or marketplace write executor is enabled; material price, inventory, listing, advertising, refund and purchasing actions remain approval-gated even after a read connection is added.
 
 ## Billing and beta flags
 

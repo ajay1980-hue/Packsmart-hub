@@ -39,7 +39,22 @@ export const SHOPIFY_ORDERS_QUERY = `
         cancelledAt
         displayFinancialStatus
         displayFulfillmentStatus
+        totalPriceSet { shopMoney { amount currencyCode } }
         currentTotalPriceSet { shopMoney { amount currencyCode } }
+        currentTotalTaxSet { shopMoney { amount currencyCode } }
+        currentTotalDiscountsSet { shopMoney { amount currencyCode } }
+        currentShippingPriceSet { shopMoney { amount currencyCode } }
+        paymentGatewayNames
+        lineItems(first: 100) {
+          nodes {
+            id
+            name
+            sku
+            quantity
+            originalTotalSet { shopMoney { amount currencyCode } }
+            discountedTotalSet { shopMoney { amount currencyCode } }
+          }
+        }
       }
       pageInfo { hasNextPage endCursor }
     }
@@ -119,6 +134,10 @@ function mapSnapshotProduct(product) {
 }
 
 function mapOrder(order) {
+  const originalTotal = order.totalPriceSet?.shopMoney || order.currentTotalPriceSet?.shopMoney || {};
+  const currentTotal = order.currentTotalPriceSet?.shopMoney || originalTotal;
+  const gross = Number(originalTotal.amount || 0);
+  const current = Number(currentTotal.amount || 0);
   return {
     id: String(order.id),
     externalId: String(order.id),
@@ -129,8 +148,84 @@ function mapOrder(order) {
     cancelledAt: order.cancelledAt || null,
     financialStatus: String(order.displayFinancialStatus || 'UNKNOWN'),
     fulfillmentStatus: String(order.displayFulfillmentStatus || 'UNFULFILLED'),
-    total: Number(order.currentTotalPriceSet?.shopMoney?.amount || 0),
-    currency: String(order.currentTotalPriceSet?.shopMoney?.currencyCode || 'GBP')
+    total: gross,
+    currentTotal: current,
+    currency: String(currentTotal.currencyCode || originalTotal.currencyCode || 'GBP'),
+    refunds: Number(Math.max(0, gross - current).toFixed(2)),
+    tax: order.currentTotalTaxSet?.shopMoney ? Number(order.currentTotalTaxSet.shopMoney.amount || 0) : null,
+    currentTax: order.currentTotalTaxSet?.shopMoney ? Number(order.currentTotalTaxSet.shopMoney.amount || 0) : null,
+    discounts: order.currentTotalDiscountsSet?.shopMoney ? Number(order.currentTotalDiscountsSet.shopMoney.amount || 0) : null,
+    shippingCharged: order.currentShippingPriceSet?.shopMoney ? Number(order.currentShippingPriceSet.shopMoney.amount || 0) : null,
+    paymentGatewayNames: Array.isArray(order.paymentGatewayNames) ? order.paymentGatewayNames.map(String).slice(0, 10) : [],
+    paymentFees: null,
+    channelFees: null,
+    advertisingCost: null,
+    actualShippingCost: null,
+    otherVariableCosts: null,
+    lineItems: (order.lineItems?.nodes || []).map(line => ({
+      id: String(line.id || ''),
+      name: String(line.name || ''),
+      sku: String(line.sku || ''),
+      quantity: Number(line.quantity || 0),
+      gross: line.originalTotalSet?.shopMoney ? Number(line.originalTotalSet.shopMoney.amount || 0) : null,
+      net: line.discountedTotalSet?.shopMoney ? Number(line.discountedTotalSet.shopMoney.amount || 0) : null
+    }))
+  };
+}
+
+function mergeProviderRecords(existing = [], provider, incoming = []) {
+  return [...incoming, ...existing.filter(item => String(item.provider || '') !== provider)];
+}
+
+function payloadItems(payload, keys = []) {
+  if (Array.isArray(payload)) return payload;
+  for (const key of keys) if (Array.isArray(payload?.[key])) return payload[key];
+  return [];
+}
+
+function nullableNumber(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const parsed = Number(value?.value ?? value?.amount ?? value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function mapEbayOrder(order) {
+  const total = nullableNumber(order.total ?? order.orderTotal ?? order.pricingSummary?.total);
+  const refunds = nullableNumber(order.refunds ?? order.refundAmount ?? order.pricingSummary?.refunds);
+  const channelFees = nullableNumber(order.channelFees ?? order.ebayFees ?? order.fees);
+  const advertisingCost = nullableNumber(order.advertisingCost ?? order.promotedListingFee ?? order.adFees);
+  const currentTotal = total === null ? null : Math.max(0, total - (refunds || 0));
+  return {
+    id: String(order.id || order.orderId || order.legacyOrderId || ''),
+    externalId: String(order.externalId || order.orderId || order.id || ''),
+    provider: 'ebay',
+    name: String(order.name || order.orderId || order.id || ''),
+    createdAt: order.createdAt || order.creationDate || order.orderDate || new Date().toISOString(),
+    updatedAt: order.updatedAt || order.lastModifiedDate || order.createdAt || new Date().toISOString(),
+    cancelledAt: order.cancelledAt || null,
+    financialStatus: String(order.financialStatus || order.paymentStatus || (refunds && total && refunds >= total ? 'REFUNDED' : 'PAID')).toUpperCase(),
+    fulfillmentStatus: String(order.fulfillmentStatus || order.orderFulfillmentStatus || 'UNFULFILLED').toUpperCase(),
+    total,
+    currentTotal,
+    currency: String(order.currency || order.pricingSummary?.total?.currency || 'GBP'),
+    refunds,
+    tax: nullableNumber(order.tax ?? order.taxAmount),
+    currentTax: nullableNumber(order.currentTax ?? order.tax ?? order.taxAmount),
+    discounts: nullableNumber(order.discounts ?? order.discountAmount),
+    shippingCharged: nullableNumber(order.shippingCharged ?? order.deliveryCost ?? order.pricingSummary?.deliveryCost),
+    actualShippingCost: nullableNumber(order.actualShippingCost ?? order.postageCost),
+    paymentFees: nullableNumber(order.paymentFees ?? order.paymentProcessingFees),
+    channelFees,
+    advertisingCost,
+    otherVariableCosts: nullableNumber(order.otherVariableCosts),
+    lineItems: payloadItems(order.lineItems || order.items || order.orderLines, ['lineItems', 'items']).map(line => ({
+      id: String(line.id || line.lineItemId || ''),
+      name: String(line.name || line.title || ''),
+      sku: String(line.sku || line.legacyItemId || ''),
+      quantity: Number(line.quantity || 0),
+      gross: nullableNumber(line.gross ?? line.total ?? line.lineItemCost),
+      net: nullableNumber(line.net ?? line.total ?? line.lineItemCost)
+    }))
   };
 }
 
@@ -164,7 +259,7 @@ export class IntegrationService {
       headers: {
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': token,
-        'User-Agent': 'Packsmart-Ops/3.0'
+        'User-Agent': 'Packsmart-Ops/4.0'
       },
       body: JSON.stringify({ query, variables }),
       signal: AbortSignal.timeout(20000)
@@ -220,7 +315,7 @@ export class IntegrationService {
     if (this.env.SHOPIFY_ADMIN_ACCESS_TOKEN && this.env.SHOPIFY_STORE_DOMAIN) {
       const [products, orders] = await Promise.all([this.fetchShopifyProducts(), this.fetchShopifyOrders()]);
       state.products = products;
-      state.orders = orders;
+      state.orders = mergeProviderRecords(state.orders, 'shopify', orders);
       state.integrationStatus = {
         ...(state.integrationStatus || {}),
         shopify: {
@@ -251,7 +346,7 @@ export class IntegrationService {
   }
 
   ebayHeaders() {
-    const headers = { Accept: 'application/json', 'User-Agent': 'Packsmart-Ops/3.0' };
+    const headers = { Accept: 'application/json', 'User-Agent': 'Packsmart-Ops/4.0' };
     if (this.env.EBAY_MANAGER_API_TOKEN) headers.Authorization = `Bearer ${this.env.EBAY_MANAGER_API_TOKEN}`;
     return headers;
   }
@@ -291,12 +386,19 @@ export class IntegrationService {
     if (!connected || !account) throw integrationError('eBay Manager did not confirm its connected account', 502, 'EBAY_ACCOUNT_UNCONFIRMED');
     if (account.toLowerCase() !== expected) throw integrationError('eBay Manager reported the wrong seller account', 502, 'EBAY_ACCOUNT_MISMATCH');
 
-    const [listingPayload, draftPayload] = await Promise.all([
+    const [listingPayload, draftPayload, orderPayload, feePayload, promotionPayload] = await Promise.all([
       this.ebayGet(base, ['/api/ebay/listings', '/api/listings']).catch(() => ({ listings: [] })),
-      this.ebayGet(base, ['/api/ebay/drafts', '/api/drafts']).catch(() => ({ drafts: [] }))
+      this.ebayGet(base, ['/api/ebay/drafts', '/api/drafts']).catch(() => ({ drafts: [] })),
+      this.ebayGet(base, ['/api/ebay/orders', '/api/orders']).catch(() => ({ orders: [] })),
+      this.ebayGet(base, ['/api/ebay/fees', '/api/fees']).catch(() => ({ fees: [] })),
+      this.ebayGet(base, ['/api/ebay/promotions', '/api/promotions']).catch(() => ({ promotions: [] }))
     ]);
-    const listings = Array.isArray(listingPayload) ? listingPayload : listingPayload.listings || listingPayload.items || [];
-    const drafts = Array.isArray(draftPayload) ? draftPayload : draftPayload.drafts || draftPayload.items || [];
+    const listings = payloadItems(listingPayload, ['listings', 'items']);
+    const drafts = payloadItems(draftPayload, ['drafts', 'items']);
+    const orders = payloadItems(orderPayload, ['orders', 'items']).map(mapEbayOrder).filter(order => order.id);
+    const fees = payloadItems(feePayload, ['fees', 'items']);
+    const promotions = payloadItems(promotionPayload, ['promotions', 'campaigns', 'items']);
+    state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
     const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
     const listingSkus = new Set(listings.map(item => item.sku).filter(Boolean));
     const missingOnEbay = [...shopifySkus].filter(sku => !listingSkus.has(sku));
@@ -312,18 +414,24 @@ export class IntegrationService {
         quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : null,
         status: String(item.status || 'unknown'),
         adRate: Number.isFinite(Number(item.adRate ?? item.promotionRate)) ? Number(item.adRate ?? item.promotionRate) : null,
+        buyerShippingCharge: nullableNumber(item.buyerShippingCharge ?? item.shippingCost),
         listingUrl: item.listingUrl || item.url || null
       })),
       drafts: drafts.slice(0, 500).map(item => ({ id: String(item.id || ''), title: String(item.title || ''), sku: String(item.sku || ''), updatedAt: item.updatedAt || null })),
+      fees: fees.slice(0, 1000),
+      promotions: promotions.slice(0, 500),
       health: { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
       syncedAt: now
     };
     const status = {
       status: 'connected',
-      detail: `${listings.length} listings and ${drafts.length} drafts read from the existing ${account} backend. Writes remain disabled.`,
+      detail: `${listings.length} listings, ${drafts.length} drafts and ${orders.length} orders read from the existing ${account} backend. Writes remain disabled.`,
       account,
       listingCount: listings.length,
       draftCount: drafts.length,
+      orderCount: orders.length,
+      feeRecordCount: fees.length,
+      promotionCount: promotions.length,
       mismatchCount: missingOnEbay.length + staleOnEbay.length,
       lastSyncAt: now,
       lastError: null

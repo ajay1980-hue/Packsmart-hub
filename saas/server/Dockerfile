@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY saas ./saas
 COPY ebay-manager/shopify-products.json ./ebay-manager/shopify-products.json
+COPY ebay-manager/strategy.js ./ebay-manager/strategy.js
 
 RUN mkdir -p /app/saas/server/data && chown -R node:node /app
 
