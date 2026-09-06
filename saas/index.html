@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=4.1.0">
+  <link rel="stylesheet" href="/styles.css?v=4.2.0">
 </head>
 <body>
   <section id="login-screen" class="auth-screen">
@@ -164,7 +164,18 @@
           </form>
         </article>
         <div class="grid-2">
-          <article id="ebay-health-card" class="card"><div class="section-head"><div><p class="eyebrow">EXISTING EBAY MANAGER</p><h2>Listings &amp; mismatch health</h2></div><button id="sync-ebay" class="secondary" type="button">Check manager</button></div><div id="ebay-health" class="status-list"></div></article>
+          <article id="ebay-health-card" class="card">
+            <div class="section-head stack-mobile"><div><p class="eyebrow">EXISTING EBAY MANAGER</p><h2>Listings &amp; mismatch health</h2><p class="muted">Reuses the hosted server-side OAuth manager. This connection only reads status, listings, drafts, orders, fees and promotions.</p></div><div class="connection-actions"><span id="ebay-connection-state" class="tag neutral">Not configured</span><button id="sync-ebay" class="secondary" type="button">Check manager</button></div></div>
+            <div id="ebay-health" class="status-list"></div>
+            <form id="ebay-connection-form" class="approval-form compact-form" autocomplete="off">
+              <label>Existing backend URL<input name="baseUrl" type="url" maxlength="2048" placeholder="https://your-existing-manager.example" autocapitalize="none" autocomplete="off" spellcheck="false" required></label>
+              <label>Expected seller account<input name="expectedAccount" type="text" value="packsmartsolutions20" maxlength="100" autocapitalize="none" autocomplete="off" spellcheck="false" required></label>
+              <label>Server token, if required<input name="apiToken" type="password" maxlength="2048" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
+              <button class="primary" type="submit">Save &amp; verify existing manager</button>
+              <p class="connection-safety">No eBay OAuth grant is created or replaced. Credentials stay encrypted server-side, every verification request is GET-only, and live listing writes remain disabled in Packsmart Ops.</p>
+              <p id="ebay-connection-error" class="form-error" role="alert"></p>
+            </form>
+          </article>
           <article class="card"><p class="eyebrow">ADVERTISING ECONOMICS</p><h2>Record sourced spend</h2><p class="muted">Use only confirmed platform totals. Campaign changes still require approval.</p><form id="advertising-form" class="approval-form compact-form"><label>Channel<select name="channel"><option value="meta">Meta / Instagram</option><option value="tiktok_shop">TikTok</option><option value="google_youtube">Google / YouTube</option><option value="ebay">eBay promoted listings</option><option value="pinterest">Pinterest</option><option value="amazon">Amazon</option></select></label><label>Spend (£)<input name="spend" type="number" min="0" step="0.01" required></label><label>Attributable revenue (£)<input name="attributableRevenue" type="number" min="0" step="0.01"></label><label>Date<input name="date" type="date" required></label><button class="primary" type="submit">Record spend</button><p id="advertising-form-error" class="form-error" role="alert"></p></form></article>
         </div>
       </section>
@@ -191,6 +202,6 @@
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
-  <script src="/app.js?v=4.1.0"></script>
+  <script src="/app.js?v=4.2.0"></script>
 </body>
 </html>

@@ -211,6 +211,7 @@ test('eBay sync reuses and verifies the existing seller backend without writes',
     EBAY_EXPECTED_ACCOUNT: 'packsmartsolutions20'
   }, { fetchImpl });
   const state = {
+    workspace: { id: 'packsmart-solutions' },
     products: [{ variants: [{ sku: 'TAPE-BROWN' }, { sku: 'MAILER-2' }] }],
     integrationStatus: {}
   };
@@ -224,6 +225,7 @@ test('eBay sync reuses and verifies the existing seller backend without writes',
   assert.equal(state.ebay.fees.length, 1);
   assert.equal(state.ebay.promotions.length, 1);
   assert.ok(requests.every(request => request.options.method === 'GET'));
+  assert.ok(requests.every(request => request.options.redirect === 'error'));
   assert.ok(requests.every(request => request.options.headers.Authorization === 'Bearer private-backend-token'));
 });
 
@@ -235,5 +237,70 @@ test('eBay sync rejects an unexpected seller account', async () => {
   }, {
     fetchImpl: async () => Response.json({ connected: true, account: 'another-seller' })
   });
-  await assert.rejects(() => service.syncEbay({ integrationStatus: {} }), error => error.code === 'EBAY_ACCOUNT_MISMATCH');
+  await assert.rejects(() => service.syncEbay({ workspace: { id: 'packsmart-solutions' }, integrationStatus: {} }), error => error.code === 'EBAY_ACCOUNT_MISMATCH');
+});
+
+test('encrypted workspace eBay Manager credentials stay server-side and preserve the existing OAuth backend', async () => {
+  const credentialKey = 'workspace-ebay-encryption-key-more-than-thirty-two-characters';
+  const privateToken = 'private-existing-manager-token';
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith('/api/ebay/status')) {
+      return Response.json({ connected: true, account: 'packsmartsolutions20', marketplaceId: 'EBAY_GB' });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const state = {
+    workspace: { id: 'packsmart-solutions' },
+    products: [], orders: [], integrationStatus: {},
+    connections: [{
+      id: 'conn-ebay', provider: 'ebay', status: 'configured',
+      encryptedCredentials: encryptCredentials({
+        baseUrl: 'https://existing-ebay-manager.example.test',
+        expectedAccount: 'packsmartsolutions20',
+        apiToken: privateToken
+      }, credentialKey),
+      metadata: {}, createdAt: '2026-09-06T00:00:00.000Z', updatedAt: '2026-09-06T00:00:00.000Z'
+    }]
+  };
+  const service = new IntegrationService({ NODE_ENV: 'production', CREDENTIALS_KEY: credentialKey }, { fetchImpl });
+  const status = await service.syncEbay(state);
+  assert.equal(status.status, 'connected');
+  assert.equal(state.connections[0].status, 'connected');
+  assert.equal(state.connections[0].metadata.account, 'packsmartsolutions20');
+  assert.equal(state.connections[0].metadata.listingCount, 0);
+  assert.ok(requests.length > 0);
+  assert.ok(requests.every(request => request.options.method === 'GET'));
+  assert.ok(requests.every(request => request.options.headers.Authorization === `Bearer ${privateToken}`));
+  assert.equal(JSON.stringify(state).includes(privateToken), false);
+});
+
+test('a future tenant never inherits the Packsmart eBay Manager environment connection', async () => {
+  let remoteRequests = 0;
+  const service = new IntegrationService({
+    NODE_ENV: 'production',
+    EBAY_ENV_WORKSPACE_ID: 'packsmart-solutions',
+    EBAY_MANAGER_BASE_URL: 'https://existing-ebay-manager.example.test',
+    EBAY_MANAGER_API_TOKEN: 'packsmart-only-token'
+  }, { fetchImpl: async () => { remoteRequests += 1; throw new Error('Tenant isolation failure'); } });
+  const state = { workspace: { id: 'beta-workspace' }, products: [], orders: [], integrationStatus: {}, connections: [] };
+  assert.equal(service.ebayConfigured(state), false);
+  const status = await service.syncEbay(state);
+  assert.equal(status.status, 'not_configured');
+  assert.equal(remoteRequests, 0);
+});
+
+test('eBay Manager rejects private network targets before making a request', async () => {
+  let remoteRequests = 0;
+  const service = new IntegrationService({
+    NODE_ENV: 'production',
+    EBAY_MANAGER_BASE_URL: 'https://127.0.0.1',
+    EBAY_EXPECTED_ACCOUNT: 'packsmartsolutions20'
+  }, { fetchImpl: async () => { remoteRequests += 1; return Response.json({}); } });
+  await assert.rejects(
+    () => service.syncEbay({ workspace: { id: 'packsmart-solutions' }, integrationStatus: {} }),
+    error => error.code === 'INTEGRATION_CONFIG_INVALID'
+  );
+  assert.equal(remoteRequests, 0);
 });

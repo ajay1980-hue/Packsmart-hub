@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
+import { isIP } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import {
   SlidingWindowLimiter,
@@ -33,7 +34,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.1.0';
+const VERSION = '4.2.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -118,6 +119,30 @@ function cleanShopifyCredentials(value) {
     throw Object.assign(new Error('Enter the Shopify Client ID and Client secret from the installed app'), { status: 400, code: 'SHOPIFY_CREDENTIALS_INVALID' });
   }
   return { storeDomain, clientId, clientSecret };
+}
+
+function cleanEbayCredentials(value) {
+  let parsed;
+  try { parsed = new URL(text(value?.baseUrl, 2048)); }
+  catch { throw Object.assign(new Error('Enter the HTTPS URL of the existing eBay Manager backend'), { status: 400, code: 'EBAY_URL_INVALID' }); }
+  const hostname = parsed.hostname.toLowerCase();
+  const ipHostname = hostname.replace(/^\[|\]$/g, '');
+  if (
+    parsed.protocol !== 'https:' || parsed.username || parsed.password ||
+    isIP(ipHostname) || hostname === 'localhost' || hostname.endsWith('.localhost') ||
+    hostname.endsWith('.local') || hostname.endsWith('.internal')
+  ) {
+    throw Object.assign(new Error('The eBay Manager must use a public HTTPS URL without embedded credentials'), { status: 400, code: 'EBAY_URL_INVALID' });
+  }
+  const expectedAccount = text(value?.expectedAccount || 'packsmartsolutions20', 100);
+  if (!/^[A-Za-z0-9._-]{2,100}$/.test(expectedAccount)) {
+    throw Object.assign(new Error('Enter the expected eBay seller username'), { status: 400, code: 'EBAY_ACCOUNT_INVALID' });
+  }
+  const apiToken = String(value?.apiToken || '').trim();
+  if (apiToken.length > 2048 || /[\r\n]/.test(apiToken)) {
+    throw Object.assign(new Error('The eBay Manager API token is invalid'), { status: 400, code: 'EBAY_TOKEN_INVALID' });
+  }
+  return { baseUrl: parsed.origin, expectedAccount, apiToken };
 }
 
 function validEmail(value) {
@@ -973,9 +998,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               const connection = (state.connections || []).find(item => item.provider === 'shopify');
               if (connection) { connection.status = 'error'; connection.lastError = output.shopify.lastError; }
             }
-            if (env.EBAY_MANAGER_BASE_URL) {
+            if (integrations.ebayConfigured(state)) {
               try { output.ebay = await integrations.syncEbay(state); }
-              catch (error) { output.ebay = { status: 'error', detail: 'Existing eBay Manager verification failed.', lastError: error.code || 'EBAY_SYNC_FAILED' }; }
+              catch (error) {
+                output.ebay = { status: 'error', detail: 'Existing eBay Manager verification failed.', lastError: error.code || 'EBAY_SYNC_FAILED' };
+                const connection = (state.connections || []).find(item => item.provider === 'ebay');
+                if (connection) { connection.status = 'error'; connection.lastError = output.ebay.lastError; }
+              }
             }
             state.integrationStatus = { ...(state.integrationStatus || {}), ...output };
             addAudit(state, { type: 'commerce_read_sync', actor: auth.user.id, detail: { providers: Object.keys(output), statuses: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, value.status])) } });
@@ -1029,12 +1058,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 ...(state.integrationStatus || {}),
                 ebay: failedStatus
               };
+              const connection = (state.connections || []).find(item => item.provider === 'ebay');
+              if (connection) { connection.status = 'error'; connection.lastError = failedStatus.lastError; }
               addAudit(state, { type: 'ebay_read_sync_failed', actor: auth.user.id, detail: { code: error.code || 'EBAY_SYNC_FAILED' } });
-              return { status: failedStatus, error: { status: error.status || 502, code: error.code || 'EBAY_SYNC_FAILED' } };
+              return { status: failedStatus, error: { status: 422, code: error.code || 'EBAY_SYNC_FAILED' } };
             }
           });
           if (outcome.error) {
-            throw Object.assign(new Error('The existing eBay Manager could not be verified'), outcome.error);
+            throw Object.assign(new Error('The existing eBay Manager could not be verified. Check its URL, server token and connected seller account.'), outcome.error);
           }
           send(res, 200, { status: outcome.status, readOnly: true, writesEnabled: false });
           return;
@@ -1050,25 +1081,27 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (!env.CREDENTIALS_KEY || String(env.CREDENTIALS_KEY).length < 32) throw Object.assign(new Error('Credential encryption is not configured'), { status: 503, code: 'ENCRYPTION_NOT_CONFIGURED' });
           const body = await jsonBody(req, 128 * 1024);
           const provider = text(body.provider, 50).toLowerCase();
-          if (!/^[a-z0-9_]+$/.test(provider) || !body.credentials || typeof body.credentials !== 'object' || Array.isArray(body.credentials)) {
+          if (!['shopify', 'ebay'].includes(provider) || !body.credentials || typeof body.credentials !== 'object' || Array.isArray(body.credentials)) {
             throw Object.assign(new Error('Provider and credentials are required'), { status: 400, code: 'VALIDATION_FAILED' });
           }
-          const credentials = provider === 'shopify' ? cleanShopifyCredentials(body.credentials) : body.credentials;
+          const credentials = provider === 'shopify' ? cleanShopifyCredentials(body.credentials) : cleanEbayCredentials(body.credentials);
           const connection = await mutate(auth, async state => {
             const now = new Date().toISOString();
             const existing = (state.connections || []).find(item => item.provider === provider);
             const next = existing || { id: `conn_${crypto.randomUUID()}`, provider, createdAt: now };
-            next.label = provider === 'shopify' ? 'Shopify' : text(body.label || provider, 100);
+            next.label = provider === 'shopify' ? 'Shopify' : 'eBay Manager';
             next.status = 'configured';
             next.capabilities = provider === 'shopify'
               ? ['catalogue', 'inventory', 'orders']
-              : Array.isArray(body.capabilities) ? body.capabilities.map(item => text(item, 50)).slice(0, 20) : [];
-            next.metadata = provider === 'shopify' ? { shopDomain: credentials.storeDomain } : {};
+              : ['status', 'listings', 'drafts', 'orders', 'fees', 'promotions'];
+            next.metadata = provider === 'shopify'
+              ? { shopDomain: credentials.storeDomain }
+              : { account: credentials.expectedAccount, marketplaceId: 'EBAY_GB' };
             next.lastError = null;
             next.encryptedCredentials = encryptCredentials(credentials, env.CREDENTIALS_KEY);
             next.updatedAt = now;
             state.connections = [next, ...(state.connections || []).filter(item => item.id !== next.id)];
-            addAudit(state, { type: 'connection_configured', actor: auth.user.id, detail: { provider, readOnly: provider === 'shopify' } });
+            addAudit(state, { type: 'connection_configured', actor: auth.user.id, detail: { provider, readOnly: true } });
             return next;
           });
           send(res, 200, { connection: publicConnection(connection), verified: false });

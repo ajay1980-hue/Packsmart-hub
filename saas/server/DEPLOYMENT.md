@@ -28,8 +28,11 @@ The optional customer-zero environment fallback requires:
 - Current Shopify Dev Dashboard connection (recommended): `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET`. The installed app version must request only the read scopes needed for products, inventory and orders (`read_products`, `read_inventory`, `read_orders`; add other read scopes only when a proven data source requires them). Packsmart Ops exchanges these credentials server-side for a 24-hour token and renews it automatically.
 - Legacy existing connection only: `SHOPIFY_ADMIN_ACCESS_TOKEN`. This remains supported for an already-issued admin-created custom-app token, but new admin-created custom apps are no longer available.
 
-The existing eBay Manager adapter requires:
+The preferred eBay production setup is the owner-only form in **Sales Channels**. It stores the existing backend URL and optional server token in the encrypted tenant connection record; it does not create, replace or expose the backend's eBay OAuth grant.
 
+The optional customer-zero environment fallback requires:
+
+- `EBAY_ENV_WORKSPACE_ID=packsmart-solutions` — prevents Packsmart's manager connection from being inherited by future tenant workspaces.
 - `EBAY_MANAGER_BASE_URL` — HTTPS URL of the existing server-side OAuth backend.
 - `EBAY_MANAGER_API_TOKEN` — optional backend-to-backend access token.
 - `EBAY_EXPECTED_ACCOUNT=packsmartsolutions20`

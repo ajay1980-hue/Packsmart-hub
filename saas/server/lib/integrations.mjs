@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { decryptCredentials } from './security.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
@@ -79,6 +80,17 @@ function validateRemoteBase(value, { allowLocal = false } = {}) {
   if (parsed.username || parsed.password) throw integrationError('Integration URL must not contain credentials', 503, 'INTEGRATION_CONFIG_INVALID');
   if (parsed.protocol !== 'https:' && !(allowLocal && parsed.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(parsed.hostname))) {
     throw integrationError('Integration URL must use HTTPS', 503, 'INTEGRATION_CONFIG_INVALID');
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  const ipHostname = hostname.replace(/^\[|\]$/g, '');
+  if (!allowLocal && (
+    isIP(ipHostname) ||
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname.endsWith('.local') ||
+    hostname.endsWith('.internal')
+  )) {
+    throw integrationError('Integration URL must use a public HTTPS hostname', 503, 'INTEGRATION_CONFIG_INVALID');
   }
   return parsed.origin;
 }
@@ -257,6 +269,10 @@ export class IntegrationService {
     return (state?.connections || []).find(connection => connection.provider === 'shopify' && connection.encryptedCredentials) || null;
   }
 
+  ebayConnection(state) {
+    return (state?.connections || []).find(connection => connection.provider === 'ebay' && connection.encryptedCredentials) || null;
+  }
+
   shopifyConfigured(state) {
     if (this.shopifyConnection(state)) return true;
     const workspaceId = String(state?.workspace?.id || '');
@@ -341,7 +357,7 @@ export class IntegrationService {
           headers: {
             'Accept': 'application/json',
             'Content-Type': 'application/x-www-form-urlencoded',
-            'User-Agent': 'Packsmart-Ops/4.0'
+            'User-Agent': 'Packsmart-Ops/4.2'
           },
           body: new URLSearchParams({
             grant_type: 'client_credentials',
@@ -377,7 +393,7 @@ export class IntegrationService {
       headers: {
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': token,
-        'User-Agent': 'Packsmart-Ops/4.0'
+        'User-Agent': 'Packsmart-Ops/4.2'
       },
       body: JSON.stringify({ query, variables }),
       signal: AbortSignal.timeout(20000)
@@ -474,18 +490,58 @@ export class IntegrationService {
     return state.integrationStatus.shopify;
   }
 
-  ebayHeaders() {
-    const headers = { Accept: 'application/json', 'User-Agent': 'Packsmart-Ops/4.0' };
-    if (this.env.EBAY_MANAGER_API_TOKEN) headers.Authorization = `Bearer ${this.env.EBAY_MANAGER_API_TOKEN}`;
+  ebayConfigured(state) {
+    if (this.ebayConnection(state)) return true;
+    const workspaceId = String(state?.workspace?.id || '');
+    const environmentWorkspace = String(this.env.EBAY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    return workspaceId === environmentWorkspace && Boolean(this.env.EBAY_MANAGER_BASE_URL);
+  }
+
+  ebayConfig(state) {
+    const workspaceId = String(state?.workspace?.id || '');
+    const connection = this.ebayConnection(state);
+    if (connection) {
+      let credentials;
+      try {
+        credentials = decryptCredentials(connection.encryptedCredentials, this.env.CREDENTIALS_KEY);
+      } catch {
+        throw integrationError('Stored eBay Manager credentials are invalid', 503, 'EBAY_CREDENTIALS_INVALID');
+      }
+      return {
+        workspaceId,
+        base: validateRemoteBase(credentials.baseUrl, { allowLocal: this.env.NODE_ENV !== 'production' }),
+        apiToken: String(credentials.apiToken || ''),
+        expectedAccount: String(credentials.expectedAccount || 'packsmartsolutions20'),
+        connection
+      };
+    }
+
+    const environmentWorkspace = String(this.env.EBAY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    if (workspaceId !== environmentWorkspace || !this.env.EBAY_MANAGER_BASE_URL) {
+      throw integrationError('eBay Manager is not configured for this workspace', 503, 'EBAY_NOT_CONFIGURED');
+    }
+    return {
+      workspaceId,
+      base: validateRemoteBase(this.env.EBAY_MANAGER_BASE_URL, { allowLocal: this.env.NODE_ENV !== 'production' }),
+      apiToken: String(this.env.EBAY_MANAGER_API_TOKEN || ''),
+      expectedAccount: String(this.env.EBAY_EXPECTED_ACCOUNT || 'packsmartsolutions20'),
+      connection: null
+    };
+  }
+
+  ebayHeaders(config) {
+    const headers = { Accept: 'application/json', 'User-Agent': 'Packsmart-Ops/4.2' };
+    if (config.apiToken) headers.Authorization = `Bearer ${config.apiToken}`;
     return headers;
   }
 
-  async ebayGet(base, paths) {
+  async ebayGet(config, paths) {
     let lastStatus = 0;
     for (const path of paths) {
-      const response = await this.fetch(`${base}${path}`, {
+      const response = await this.fetch(`${config.base}${path}`, {
         method: 'GET',
-        headers: this.ebayHeaders(),
+        headers: this.ebayHeaders(config),
+        redirect: 'error',
         signal: AbortSignal.timeout(15000)
       });
       lastStatus = response.status;
@@ -497,7 +553,7 @@ export class IntegrationService {
 
   async syncEbay(state) {
     const now = new Date().toISOString();
-    if (!this.env.EBAY_MANAGER_BASE_URL) {
+    if (!this.ebayConfigured(state)) {
       const status = {
         status: 'not_configured',
         detail: 'Existing eBay Manager backend URL is required; no duplicate OAuth connection has been created.',
@@ -507,20 +563,20 @@ export class IntegrationService {
       state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
       return status;
     }
-    const base = validateRemoteBase(this.env.EBAY_MANAGER_BASE_URL, { allowLocal: this.env.NODE_ENV !== 'production' });
-    const statusPayload = await this.ebayGet(base, ['/api/ebay/status', '/api/status', '/api/health']);
+    const config = this.ebayConfig(state);
+    const statusPayload = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
     const account = String(statusPayload.account || statusPayload.username || statusPayload.ebayUser || '');
     const connected = statusPayload.connected === true || statusPayload.authenticated === true || statusPayload.ebayConnected === true;
-    const expected = String(this.env.EBAY_EXPECTED_ACCOUNT || 'packsmartsolutions20').toLowerCase();
+    const expected = config.expectedAccount.toLowerCase();
     if (!connected || !account) throw integrationError('eBay Manager did not confirm its connected account', 502, 'EBAY_ACCOUNT_UNCONFIRMED');
     if (account.toLowerCase() !== expected) throw integrationError('eBay Manager reported the wrong seller account', 502, 'EBAY_ACCOUNT_MISMATCH');
 
     const [listingPayload, draftPayload, orderPayload, feePayload, promotionPayload] = await Promise.all([
-      this.ebayGet(base, ['/api/ebay/listings', '/api/listings']).catch(() => ({ listings: [] })),
-      this.ebayGet(base, ['/api/ebay/drafts', '/api/drafts']).catch(() => ({ drafts: [] })),
-      this.ebayGet(base, ['/api/ebay/orders', '/api/orders']).catch(() => ({ orders: [] })),
-      this.ebayGet(base, ['/api/ebay/fees', '/api/fees']).catch(() => ({ fees: [] })),
-      this.ebayGet(base, ['/api/ebay/promotions', '/api/promotions']).catch(() => ({ promotions: [] }))
+      this.ebayGet(config, ['/api/ebay/listings', '/api/listings']).catch(() => ({ listings: [] })),
+      this.ebayGet(config, ['/api/ebay/drafts', '/api/drafts']).catch(() => ({ drafts: [] })),
+      this.ebayGet(config, ['/api/ebay/orders', '/api/orders']).catch(() => ({ orders: [] })),
+      this.ebayGet(config, ['/api/ebay/fees', '/api/fees']).catch(() => ({ fees: [] })),
+      this.ebayGet(config, ['/api/ebay/promotions', '/api/promotions']).catch(() => ({ promotions: [] }))
     ]);
     const listings = payloadItems(listingPayload, ['listings', 'items']);
     const drafts = payloadItems(draftPayload, ['drafts', 'items']);
@@ -552,6 +608,18 @@ export class IntegrationService {
       health: { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
       syncedAt: now
     };
+    if (config.connection) {
+      config.connection.status = 'connected';
+      config.connection.lastSyncAt = now;
+      config.connection.lastError = null;
+      config.connection.metadata = {
+        ...(config.connection.metadata || {}),
+        account,
+        marketplaceId: statusPayload.marketplaceId || 'EBAY_GB',
+        listingCount: listings.length,
+        draftCount: drafts.length
+      };
+    }
     const status = {
       status: 'connected',
       detail: `${listings.length} listings, ${drafts.length} drafts and ${orders.length} orders read from the existing ${account} backend. Writes remain disabled.`,

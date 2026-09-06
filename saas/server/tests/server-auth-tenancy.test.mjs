@@ -71,7 +71,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=4\.1\.0/);
+  assert.match(String(home.payload), /app\.js\?v=4\.2\.0/);
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
@@ -201,6 +201,31 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(publicConnections.response.status, 200);
   assert.equal(JSON.stringify(publicConnections.payload).includes(shopifySecret), false);
   assert.equal(JSON.stringify(publicConnections.payload).includes('shopify-client-id-test'), false);
+
+  const ebaySecret = 'existing-ebay-manager-token-test-only';
+  const ebayConnection = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: {
+      provider: 'ebay',
+      capabilities: ['create_listing', 'change_price'],
+      credentials: {
+        baseUrl: 'https://existing-ebay-manager.example.test/path-is-normalized',
+        expectedAccount: 'packsmartsolutions20',
+        apiToken: ebaySecret
+      }
+    }
+  });
+  assert.equal(ebayConnection.response.status, 200);
+  assert.deepEqual(ebayConnection.payload.connection.capabilities, ['status', 'listings', 'drafts', 'orders', 'fees', 'promotions']);
+  assert.equal(JSON.stringify(ebayConnection.payload).includes(ebaySecret), false);
+  assert.equal(JSON.stringify(ebayConnection.payload).includes('existing-ebay-manager.example.test'), false);
+
+  const unsupportedConnection = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: { provider: 'meta', credentials: { token: 'must-not-be-stored-without-an-adapter' } }
+  });
+  assert.equal(unsupportedConnection.response.status, 400);
+
   const persistedWithConnection = await server.packsmart.store.get('packsmart-solutions');
   const persistedShopify = persistedWithConnection.connections.find(item => item.provider === 'shopify');
   assert.equal(persistedShopify.encryptedCredentials.includes(shopifySecret), false);
@@ -208,6 +233,13 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
     storeDomain: 'wavtzm-vy.myshopify.com',
     clientId: 'shopify-client-id-test',
     clientSecret: shopifySecret
+  });
+  const persistedEbay = persistedWithConnection.connections.find(item => item.provider === 'ebay');
+  assert.equal(persistedEbay.encryptedCredentials.includes(ebaySecret), false);
+  assert.deepEqual(decryptCredentials(persistedEbay.encryptedCredentials, 'server-integration-credential-key-more-than-thirty-two-characters'), {
+    baseUrl: 'https://existing-ebay-manager.example.test',
+    expectedAccount: 'packsmartsolutions20',
+    apiToken: ebaySecret
   });
 
   const changed = await request('/api/auth/change-password', {

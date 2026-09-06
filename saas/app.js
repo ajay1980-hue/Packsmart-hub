@@ -341,6 +341,14 @@
     connectionState.className = 'tag ' + (shopifyStatus?.status === 'connected' ? 'good' : shopifyConnection ? 'warn' : 'neutral');
     const savedDomain = shopifyConnection?.metadata?.shopDomain;
     if (savedDomain) $('#shopify-connection-form').storeDomain.value = savedDomain;
+    const ebayConnection = (state.data.connections || []).find(item => item.provider === 'ebay');
+    const ebayStatus = (state.data.integrations || []).find(item => item.id === 'ebay');
+    $('#ebay-connection-form').classList.toggle('hidden', !canConfigure);
+    const ebayConnectionState = $('#ebay-connection-state');
+    ebayConnectionState.textContent = ebayStatus?.status === 'connected' ? 'Connected · read-only' : ebayConnection ? 'Saved · verification needed' : 'Not configured';
+    ebayConnectionState.className = 'tag ' + (ebayStatus?.status === 'connected' ? 'good' : ebayConnection ? 'warn' : 'neutral');
+    const savedAccount = ebayConnection?.metadata?.account;
+    if (savedAccount) $('#ebay-connection-form').expectedAccount.value = savedAccount;
     const ebay = state.data.ebay;
     if (!ebay) { $('#ebay-health').innerHTML = '<div class="empty-state">The existing eBay Manager has not yet been verified from Packsmart Ops. No duplicate OAuth setup will be created.</div>'; return; }
     $('#ebay-health').innerHTML = [
@@ -495,6 +503,25 @@
     finally {
       credentials.clientId = ''; credentials.clientSecret = '';
       form.clientSecret.value = '';
+      setBusy(button, false);
+    }
+  });
+
+  $('#ebay-connection-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#ebay-connection-error'); error.textContent = '';
+    const credentials = { baseUrl: form.baseUrl.value, expectedAccount: form.expectedAccount.value, apiToken: form.apiToken.value };
+    setBusy(button, true, 'Encrypting & verifying…');
+    try {
+      await request('/api/connections', { method: 'POST', body: JSON.stringify({ provider: 'ebay', credentials }) });
+      form.apiToken.value = '';
+      await request('/api/integrations/ebay/sync', { method: 'POST', body: '{}' });
+      await loadBootstrap({ migrate: false });
+      showMessage('Existing eBay Manager verified read-only. Its OAuth and live listing controls were not changed.');
+    } catch (connectionError) { error.textContent = connectionError.message; }
+    finally {
+      credentials.apiToken = '';
+      form.apiToken.value = '';
       setBusy(button, false);
     }
   });

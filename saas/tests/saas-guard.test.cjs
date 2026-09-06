@@ -37,8 +37,12 @@ assert(!/localStorage\.(?:setItem|getItem)\([^\n]*(?:token|secret|credential)/i.
 assert(!/headers\.set\(['\"]Authorization['\"]/.test(js), 'Browser authentication must use the HTTP-only session cookie');
 assert(html.includes('id="shopify-connection-form"'), 'Owner Shopify connection form must remain available');
 assert(html.includes('name="clientSecret" type="password"'), 'Shopify secret field must remain masked');
+assert(html.includes('id="ebay-connection-form"'), 'Existing eBay Manager connection form must remain available');
+assert(html.includes('name="apiToken" type="password"'), 'eBay Manager server token field must remain masked');
 assert(server.includes("? ['catalogue', 'inventory', 'orders']"), 'Shopify connection capabilities must remain read-only');
+assert(server.includes("['status', 'listings', 'drafts', 'orders', 'fees', 'promotions']"), 'eBay connection capabilities must remain read-only');
 assert(!/localStorage\.(?:setItem|getItem)\([^\n]*clientSecret/i.test(js), 'Shopify client secrets must never enter browser storage');
+assert(!/localStorage\.(?:setItem|getItem)\([^\n]*apiToken/i.test(js), 'eBay Manager tokens must never enter browser storage');
 assert(Array.isArray(catalogue.products) && catalogue.products.length > 0, 'Packsmart Shopify snapshot must contain products');
 assert(catalogue.products.every(product => Array.isArray(product.variants)), 'Every product must expose a variants array');
 

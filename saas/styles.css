@@ -357,6 +357,7 @@ main {
   margin-bottom: .9rem;
 }
 .section-head h2, .section-head p { margin-bottom: 0; }
+.connection-actions { display: grid; justify-items: end; gap: .55rem; }
 .filters { display: flex; gap: .55rem; }
 .filters input { width: min(260px, 50vw); }
 .filters select { width: auto; min-width: 135px; }
@@ -862,6 +863,7 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
   .order-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cost-detail-grid { grid-template-columns: 1fr; }
   .connection-form { grid-template-columns: 1fr; }
+  .connection-actions { width: 100%; grid-template-columns: 1fr auto; align-items: center; justify-items: start; }
   .detail-notes { grid-column: auto; }
   .audit-row { grid-template-columns: 12px 1fr; }
   .audit-row code { grid-column: 2; }
