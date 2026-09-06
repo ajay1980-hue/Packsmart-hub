@@ -22,7 +22,8 @@ Shopify requires:
 
 - `SHOPIFY_STORE_DOMAIN=wavtzm-vy.myshopify.com`
 - `SHOPIFY_ADMIN_API_VERSION=2026-07`
-- `SHOPIFY_ADMIN_ACCESS_TOKEN` with only the read scopes needed for products, inventory and orders (`read_products`, `read_inventory`, `read_orders`; add `read_marketplace_orders` and `read_quick_sale` only when those order sources are required).
+- Current Shopify Dev Dashboard connection (recommended): `SHOPIFY_CLIENT_ID` and `SHOPIFY_CLIENT_SECRET`. The installed app version must request only the read scopes needed for products, inventory and orders (`read_products`, `read_inventory`, `read_orders`; add other read scopes only when a proven data source requires them). Packsmart Ops exchanges these credentials server-side for a 24-hour token and renews it automatically.
+- Legacy existing connection only: `SHOPIFY_ADMIN_ACCESS_TOKEN`. This remains supported for an already-issued admin-created custom-app token, but new admin-created custom apps are no longer available.
 
 The existing eBay Manager adapter requires:
 

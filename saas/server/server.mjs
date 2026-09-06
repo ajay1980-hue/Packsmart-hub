@@ -358,7 +358,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   async function refreshOperationalState(state, { force = false } = {}) {
     const lastShopify = Date.parse(state.integrationStatus?.shopify?.lastSyncAt || 0);
     const stale = !Number.isFinite(lastShopify) || Date.now() - lastShopify > clamp(env.SYNC_INTERVAL_MS, 60000, 86400000, 15 * 60 * 1000);
-    if (force || !state.products?.length || (env.SHOPIFY_ADMIN_ACCESS_TOKEN && stale)) {
+    const shopifyLiveConfigured = Boolean(env.SHOPIFY_STORE_DOMAIN && (
+      env.SHOPIFY_ADMIN_ACCESS_TOKEN || (env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET)
+    ));
+    if (force || !state.products?.length || (shopifyLiveConfigured && stale)) {
       try { await integrations.syncShopify(state); }
       catch (error) {
         state.integrationStatus = {

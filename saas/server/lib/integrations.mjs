@@ -246,14 +246,66 @@ export class IntegrationService {
     this.env = env;
     this.fetch = fetchImpl;
     this.repoRoot = repoRoot;
+    this.shopifyTokenCache = { token: '', expiresAt: 0 };
+    this.shopifyTokenRequest = null;
+  }
+
+  shopifyConfigured() {
+    return Boolean(
+      this.env.SHOPIFY_STORE_DOMAIN && (
+        this.env.SHOPIFY_ADMIN_ACCESS_TOKEN ||
+        (this.env.SHOPIFY_CLIENT_ID && this.env.SHOPIFY_CLIENT_SECRET)
+      )
+    );
+  }
+
+  async shopifyAccessToken(domain) {
+    const configuredToken = String(this.env.SHOPIFY_ADMIN_ACCESS_TOKEN || '');
+    if (configuredToken) return configuredToken;
+
+    const clientId = String(this.env.SHOPIFY_CLIENT_ID || '');
+    const clientSecret = String(this.env.SHOPIFY_CLIENT_SECRET || '');
+    if (!clientId || !clientSecret) {
+      throw integrationError('Shopify Admin API is not configured', 503, 'SHOPIFY_NOT_CONFIGURED');
+    }
+    if (this.shopifyTokenCache.token && Date.now() + 60000 < this.shopifyTokenCache.expiresAt) {
+      return this.shopifyTokenCache.token;
+    }
+    if (!this.shopifyTokenRequest) {
+      this.shopifyTokenRequest = (async () => {
+        const response = await this.fetch(`https://${domain}/admin/oauth/access_token`, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Packsmart-Ops/4.0'
+          },
+          body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: clientId,
+            client_secret: clientSecret
+          }).toString(),
+          signal: AbortSignal.timeout(20000)
+        });
+        const payload = await responseJson(response, 'Shopify token');
+        const token = String(payload.access_token || '');
+        const expiresIn = Number(payload.expires_in || 0);
+        if (!token || !Number.isFinite(expiresIn) || expiresIn < 60) {
+          throw integrationError('Shopify returned an invalid access token', 502, 'SHOPIFY_TOKEN_INVALID');
+        }
+        this.shopifyTokenCache = { token, expiresAt: Date.now() + expiresIn * 1000 };
+        return token;
+      })();
+    }
+    try { return await this.shopifyTokenRequest; }
+    finally { this.shopifyTokenRequest = null; }
   }
 
   async shopifyGraphql(query, variables) {
     const domain = normalizeDomain(this.env.SHOPIFY_STORE_DOMAIN);
     const version = String(this.env.SHOPIFY_ADMIN_API_VERSION || '2026-07');
     if (!/^20\d\d-(01|04|07|10)$/.test(version)) throw integrationError('Invalid Shopify API version', 503, 'SHOPIFY_CONFIG_INVALID');
-    const token = String(this.env.SHOPIFY_ADMIN_ACCESS_TOKEN || '');
-    if (!token) throw integrationError('Shopify Admin API is not configured', 503, 'SHOPIFY_NOT_CONFIGURED');
+    const token = await this.shopifyAccessToken(domain);
     const response = await this.fetch(`https://${domain}/admin/api/${version}/graphql.json`, {
       method: 'POST',
       headers: {
@@ -312,7 +364,7 @@ export class IntegrationService {
 
   async syncShopify(state) {
     const now = new Date().toISOString();
-    if (this.env.SHOPIFY_ADMIN_ACCESS_TOKEN && this.env.SHOPIFY_STORE_DOMAIN) {
+    if (this.shopifyConfigured()) {
       const [products, orders] = await Promise.all([this.fetchShopifyProducts(), this.fetchShopifyOrders()]);
       state.products = products;
       state.orders = mergeProviderRecords(state.orders, 'shopify', orders);

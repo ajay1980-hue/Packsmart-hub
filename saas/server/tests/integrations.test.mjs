@@ -100,6 +100,41 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
   assert.ok(!SHOPIFY_ORDERS_QUERY.includes('mutation'));
 });
 
+test('Shopify client credentials are exchanged server-side and the short-lived token is reused', async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    if (url.endsWith('/admin/oauth/access_token')) {
+      assert.equal(options.method, 'POST');
+      assert.equal(options.headers['Content-Type'], 'application/x-www-form-urlencoded');
+      const form = new URLSearchParams(options.body);
+      assert.equal(form.get('grant_type'), 'client_credentials');
+      assert.equal(form.get('client_id'), 'server-client-id');
+      assert.equal(form.get('client_secret'), 'server-client-secret');
+      return Response.json({ access_token: 'short-lived-server-token', scope: 'read_products,read_inventory,read_orders', expires_in: 86399 });
+    }
+    const body = JSON.parse(options.body);
+    assert.equal(options.headers['X-Shopify-Access-Token'], 'short-lived-server-token');
+    if (body.query.includes('PacksmartOpsProducts')) {
+      return Response.json({ data: { products: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
+    }
+    return Response.json({ data: { orders: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } } } });
+  };
+  const service = new IntegrationService({
+    SHOPIFY_STORE_DOMAIN: 'wavtzm-vy.myshopify.com',
+    SHOPIFY_ADMIN_API_VERSION: '2026-07',
+    SHOPIFY_CLIENT_ID: 'server-client-id',
+    SHOPIFY_CLIENT_SECRET: 'server-client-secret'
+  }, { fetchImpl, repoRoot });
+  const state = { products: [], orders: [], integrationStatus: {} };
+  const status = await service.syncShopify(state);
+  assert.equal(status.status, 'connected');
+  assert.equal(status.source, 'admin-graphql');
+  assert.equal(requests.filter(request => request.url.endsWith('/admin/oauth/access_token')).length, 1);
+  assert.equal(requests.filter(request => request.url.includes('/graphql.json')).length, 2);
+  assert.ok(requests.filter(request => request.url.includes('/graphql.json')).every(request => !/\bmutation\b/i.test(JSON.parse(request.options.body).query)));
+});
+
 test('eBay sync reuses and verifies the existing seller backend without writes', async () => {
   const requests = [];
   const fetchImpl = async (url, options) => {
