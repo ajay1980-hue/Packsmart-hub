@@ -7,6 +7,7 @@ import {
   SlidingWindowLimiter,
   assertCsrf,
   clearSessionCookie,
+  createEbayOAuthStateToken,
   createSessionToken,
   encryptCredentials,
   hashPassword,
@@ -17,6 +18,7 @@ import {
   sessionCookie,
   tokenFromRequest,
   validatePassword,
+  verifyEbayOAuthStateToken,
   verifyPassword,
   verifySessionToken
 } from './lib/security.mjs';
@@ -34,7 +36,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.2.0';
+const VERSION = '4.3.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -296,6 +298,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     res.end(payload);
   }
 
+  function redirectHome(res, ebayResult) {
+    const location = new URL('/', publicUrl);
+    location.searchParams.set('ebay', ebayResult);
+    res.writeHead(303, {
+      ...headers('text/plain; charset=utf-8'),
+      Location: location.toString()
+    });
+    res.end('Returning to Packsmart Ops');
+  }
+
   async function rawBody(req, maxBytes = 1024 * 1024) {
     const chunks = [];
     let total = 0;
@@ -449,6 +461,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
       integrations: integrationMatrix(state, env),
+      ebayOAuth: integrations.ebayOAuthStatus(state),
       ebay: state.ebay || null,
       dashboard: deriveOperations(state, {
         lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
@@ -604,6 +617,93 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     });
   }
 
+  async function ebayOAuthCallback(url, res) {
+    const token = String(url.searchParams.get('state') || '');
+    const oauthState = verifyEbayOAuthStateToken(token, env.SESSION_SECRET);
+    if (!oauthState) {
+      send(res, 400, { error: 'eBay connection request is invalid or expired', code: 'EBAY_OAUTH_STATE_INVALID' });
+      return;
+    }
+
+    await withWorkspaceLock(oauthState.workspaceId, async () => {
+      const state = await store.get(oauthState.workspaceId);
+      const challenge = state?.oauthChallenges?.find(item =>
+        item.provider === 'ebay' && item.nonce === oauthState.nonce && item.userId === oauthState.userId
+      );
+      const user = state?.users?.find(item => item.id === oauthState.userId && item.active !== false);
+      if (!state || !challenge || Date.parse(challenge.expiresAt || 0) <= Date.now() || !user || !['owner', 'admin'].includes(user.role)) {
+        send(res, 400, { error: 'eBay connection request is invalid or expired', code: 'EBAY_OAUTH_CHALLENGE_INVALID' });
+        return;
+      }
+
+      state.oauthChallenges = (state.oauthChallenges || []).filter(item => item.nonce !== oauthState.nonce);
+      if (url.searchParams.get('error')) {
+        addAudit(state, { type: 'ebay_oauth_declined', actor: user.id, detail: { readOnly: true } });
+        await store.save(oauthState.workspaceId, state);
+        redirectHome(res, 'declined');
+        return;
+      }
+
+      const code = String(url.searchParams.get('code') || '');
+      if (!code) {
+        addAudit(state, { type: 'ebay_oauth_failed', actor: user.id, detail: { code: 'EBAY_AUTHORIZATION_CODE_MISSING' } });
+        await store.save(oauthState.workspaceId, state);
+        redirectHome(res, 'error');
+        return;
+      }
+
+      try {
+        const authorization = await integrations.exchangeEbayAuthorizationCode(code);
+        const identity = await integrations.ebayIdentity(authorization.accessToken);
+        const account = String(identity.username || '');
+        const expectedAccount = String(env.EBAY_EXPECTED_ACCOUNT || 'packsmartsolutions20');
+        if (!account || account.toLowerCase() !== expectedAccount.toLowerCase()) {
+          throw Object.assign(new Error('Unexpected eBay seller account'), { status: 403, code: 'EBAY_ACCOUNT_MISMATCH' });
+        }
+        const now = new Date().toISOString();
+        const marketplaceId = String(env.EBAY_MARKETPLACE_ID || 'EBAY_GB');
+        const existing = (state.connections || []).find(item => item.provider === 'ebay_oauth');
+        const connection = existing || { id: `conn_${crypto.randomUUID()}`, provider: 'ebay_oauth', createdAt: now };
+        connection.label = 'eBay read-only OAuth';
+        connection.status = 'configured';
+        connection.capabilities = ['identity', 'inventory', 'listings', 'drafts', 'orders', 'fees', 'promotions'];
+        connection.metadata = { account, marketplaceId, listingCount: 0, draftCount: 0, channel: 'direct_oauth' };
+        connection.lastError = null;
+        connection.encryptedCredentials = encryptCredentials({
+          mode: 'direct_oauth',
+          refreshToken: authorization.refreshToken,
+          scopes: authorization.scopes,
+          expectedAccount,
+          marketplaceId,
+          refreshTokenExpiresAt: authorization.refreshTokenExpiresIn > 0
+            ? new Date(Date.now() + authorization.refreshTokenExpiresIn * 1000).toISOString()
+            : null
+        }, env.CREDENTIALS_KEY);
+        connection.updatedAt = now;
+        state.connections = [connection, ...(state.connections || []).filter(item => item.id !== connection.id)];
+        addAudit(state, { type: 'ebay_oauth_connected', actor: user.id, detail: { account, marketplaceId, readOnly: true, existingManagerPreserved: true } });
+        try {
+          const status = await integrations.syncEbay(state);
+          addAudit(state, { type: 'ebay_read_sync', actor: user.id, detail: { status: status.status, source: status.source || 'manager' } });
+        } catch (syncError) {
+          connection.status = 'error';
+          connection.lastError = syncError.code || 'EBAY_SYNC_FAILED';
+          state.integrationStatus = {
+            ...(state.integrationStatus || {}),
+            ebay: { status: 'error', detail: 'eBay authorization was saved, but its first read sync needs retrying.', lastSyncAt: null, lastError: connection.lastError }
+          };
+          addAudit(state, { type: 'ebay_read_sync_failed', actor: user.id, detail: { code: connection.lastError } });
+        }
+        await store.save(oauthState.workspaceId, state);
+        redirectHome(res, 'connected');
+      } catch (error) {
+        addAudit(state, { type: 'ebay_oauth_failed', actor: user.id, detail: { code: error.code || 'EBAY_OAUTH_FAILED' } });
+        await store.save(oauthState.workspaceId, state);
+        redirectHome(res, error.code === 'EBAY_ACCOUNT_MISMATCH' ? 'account-mismatch' : 'error');
+      }
+    });
+  }
+
   async function stripeWebhook(req, res) {
     const raw = await rawBody(req, 2 * 1024 * 1024);
     if (!verifyStripeSignature(env, raw, req.headers['stripe-signature'])) {
@@ -689,6 +789,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
       if (req.method === 'POST' && pathname === '/api/auth/signup') {
         await signup(req, res);
+        return;
+      }
+      if (req.method === 'GET' && pathname === '/api/integrations/ebay/oauth/callback') {
+        await ebayOAuthCallback(url, res);
         return;
       }
 
@@ -985,7 +1089,35 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/integrations') {
-          send(res, 200, { integrations: integrationMatrix(auth.state, env), ebay: auth.state.ebay || null });
+          send(res, 200, { integrations: integrationMatrix(auth.state, env), ebayOAuth: integrations.ebayOAuthStatus(auth.state), ebay: auth.state.ebay || null });
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/integrations/ebay/oauth/start') {
+          requireOwner(auth);
+          if (!integrations.ebayOAuthReady(auth.state)) {
+            throw Object.assign(new Error('eBay read-only sign-in is not ready yet'), { status: 503, code: 'EBAY_OAUTH_NOT_CONFIGURED' });
+          }
+          const nonce = crypto.randomBytes(32).toString('base64url');
+          const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+          const stateToken = createEbayOAuthStateToken({
+            workspaceId: auth.session.workspaceId,
+            userId: auth.user.id,
+            nonce
+          }, env.SESSION_SECRET, 10 * 60);
+          await mutate(auth, async state => {
+            state.oauthChallenges = [
+              { provider: 'ebay', nonce, userId: auth.user.id, expiresAt, createdAt: new Date().toISOString() },
+              ...(state.oauthChallenges || []).filter(item => Date.parse(item.expiresAt || 0) > Date.now() && item.provider !== 'ebay')
+            ].slice(0, 10);
+            addAudit(state, { type: 'ebay_oauth_started', actor: auth.user.id, detail: { readOnly: true, existingManagerPreserved: true } });
+          });
+          send(res, 200, {
+            authorizationUrl: integrations.ebayAuthorizationUrl(stateToken, auth.state),
+            expiresAt,
+            readOnly: true,
+            existingManagerPreserved: true
+          });
           return;
         }
 
@@ -1001,8 +1133,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             if (integrations.ebayConfigured(state)) {
               try { output.ebay = await integrations.syncEbay(state); }
               catch (error) {
-                output.ebay = { status: 'error', detail: 'Existing eBay Manager verification failed.', lastError: error.code || 'EBAY_SYNC_FAILED' };
-                const connection = (state.connections || []).find(item => item.provider === 'ebay');
+                output.ebay = { status: 'error', detail: 'eBay read sync failed; the existing Manager was not changed.', lastError: error.code || 'EBAY_SYNC_FAILED' };
+                const connection = integrations.ebayConnection(state);
                 if (connection) { connection.status = 'error'; connection.lastError = output.ebay.lastError; }
               }
             }
@@ -1050,7 +1182,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             } catch (error) {
               const failedStatus = {
                 status: 'error',
-                detail: 'The existing eBay Manager could not be verified.',
+                detail: 'The eBay read connection could not be verified; the existing Manager was not changed.',
                 lastSyncAt: null,
                 lastError: error.code || 'EBAY_SYNC_FAILED'
               };
@@ -1058,14 +1190,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 ...(state.integrationStatus || {}),
                 ebay: failedStatus
               };
-              const connection = (state.connections || []).find(item => item.provider === 'ebay');
+              const connection = integrations.ebayConnection(state);
               if (connection) { connection.status = 'error'; connection.lastError = failedStatus.lastError; }
               addAudit(state, { type: 'ebay_read_sync_failed', actor: auth.user.id, detail: { code: error.code || 'EBAY_SYNC_FAILED' } });
               return { status: failedStatus, error: { status: 422, code: error.code || 'EBAY_SYNC_FAILED' } };
             }
           });
           if (outcome.error) {
-            throw Object.assign(new Error('The existing eBay Manager could not be verified. Check its URL, server token and connected seller account.'), outcome.error);
+            throw Object.assign(new Error('The eBay read connection could not be verified. Check the saved connection and seller account.'), outcome.error);
           }
           send(res, 200, { status: outcome.status, readOnly: true, writesEnabled: false });
           return;

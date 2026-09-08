@@ -9,7 +9,7 @@ Packsmart Ops is the private customer-zero operations cockpit for Packsmart Solu
 - Supabase persistence using a server-only service-role credential. Workspace state is stored losslessly and mirrored into normalized reporting tables.
 - Read-only Shopify Admin GraphQL sync for products, variants, SKUs, prices, inventory, images, status and recent orders.
 - Safe repository Shopify snapshot fallback when the live Admin connection is unavailable.
-- Read-only adapter for the existing Packsmart eBay Manager; the existing OAuth backend is reused and the expected seller account is verified before data is accepted.
+- Read-only adapter for the existing Packsmart eBay Manager plus a dormant direct OAuth fallback that reuses the same eBay developer app, preserves the Manager callback and verifies the expected seller before data is accepted.
 - True per-SKU economics for landed, packing, delivery and channel costs, plus margin visibility and profit guard recommendations.
 - Human approval records for supplier orders, advertising spend, refunds, major price changes, paid services, risky marketplace actions and social-commerce publishing.
 - Deterministic daily operations brief covering sales, orders, stock, margins, pricing, SEO, customer-service proxies, approvals and recommended actions.

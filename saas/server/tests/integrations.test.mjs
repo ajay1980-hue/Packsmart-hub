@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
+  EBAY_READONLY_SCOPES,
   IntegrationService,
   SHOPIFY_ORDERS_QUERY,
   SHOPIFY_PRODUCTS_QUERY
@@ -227,6 +228,114 @@ test('eBay sync reuses and verifies the existing seller backend without writes',
   assert.ok(requests.every(request => request.options.method === 'GET'));
   assert.ok(requests.every(request => request.options.redirect === 'error'));
   assert.ok(requests.every(request => request.options.headers.Authorization === 'Bearer private-backend-token'));
+});
+
+test('direct eBay OAuth sync uses only read scopes and read API methods while preserving encrypted refresh credentials', async () => {
+  const credentialKey = 'direct-ebay-oauth-encryption-key-more-than-thirty-two-characters';
+  const refreshToken = 'long-lived-refresh-token-test-only';
+  const accessToken = 'short-lived-access-token-test-only';
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url: String(url), options });
+    if (String(url) === 'https://api.ebay.com/identity/v1/oauth2/token') {
+      assert.equal(options.method, 'POST');
+      assert.match(options.headers.Authorization, /^Basic /);
+      const form = new URLSearchParams(options.body);
+      assert.equal(form.get('grant_type'), 'refresh_token');
+      assert.equal(form.get('refresh_token'), refreshToken);
+      assert.deepEqual(form.get('scope').split(' '), EBAY_READONLY_SCOPES);
+      return Response.json({ access_token: accessToken, expires_in: 7200, token_type: 'User Access Token' });
+    }
+    assert.equal(options.method, 'GET');
+    assert.equal(options.headers.Authorization, `Bearer ${accessToken}`);
+    if (String(url) === 'https://apiz.ebay.com/commerce/identity/v1/user/') {
+      return Response.json({ username: 'packsmartsolutions20', userId: 'immutable-user-id' });
+    }
+    if (String(url).startsWith('https://api.ebay.com/sell/fulfillment/v1/order?')) {
+      return Response.json({ total: 1, orders: [{
+        orderId: 'ebay-order-oauth-1', creationDate: '2026-09-06T12:00:00.000Z', orderPaymentStatus: 'PAID', orderFulfillmentStatus: 'NOT_STARTED',
+        pricingSummary: { total: { value: '12.99', currency: 'GBP' }, tax: { value: '2.16', currency: 'GBP' }, deliveryCost: { value: '3.20', currency: 'GBP' } },
+        totalMarketplaceFee: { value: '1.50', currency: 'GBP' },
+        lineItems: [{ lineItemId: 'line-oauth-1', title: 'Packing tape', sku: 'TAPE-BROWN', quantity: 1, lineItemCost: { value: '9.79', currency: 'GBP' } }]
+      }] });
+    }
+    if (String(url).startsWith('https://api.ebay.com/sell/inventory/v1/inventory_item?')) {
+      return Response.json({ total: 1, inventoryItems: [{
+        sku: 'TAPE-BROWN', product: { title: 'Packing tape', imageUrls: ['https://i.ebayimg.com/tape.jpg'] },
+        availability: { shipToLocationAvailability: { quantity: 40 } }
+      }] });
+    }
+    if (String(url).startsWith('https://api.ebay.com/sell/inventory/v1/offer?')) {
+      return Response.json({ total: 1, offers: [{
+        offerId: 'offer-44', sku: 'TAPE-BROWN', marketplaceId: 'EBAY_GB', status: 'PUBLISHED', availableQuantity: 38,
+        pricingSummary: { price: { value: '3.49', currency: 'GBP' } }, listing: { listingId: '44', soldQuantity: 2 }
+      }] });
+    }
+    if (String(url).startsWith('https://api.ebay.com/sell/marketing/v1/ad_campaign?')) {
+      assert.equal(options.headers['X-EBAY-C-MARKETPLACE-ID'], 'EBAY_GB');
+      return Response.json({ campaigns: [{ campaignId: 'campaign-1', campaignName: 'Core products', campaignStatus: 'RUNNING', marketplaceId: 'EBAY_GB' }] });
+    }
+    if (String(url).includes('/sell/marketing/v1/ad_campaign/campaign-1/ad?')) {
+      return Response.json({ ads: [{ adId: 'ad-1', listingId: '44', bidPercentage: '4.5', adStatus: 'ACTIVE' }] });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const connection = {
+    id: 'conn-ebay-oauth', provider: 'ebay_oauth', label: 'eBay read-only OAuth', status: 'configured',
+    encryptedCredentials: encryptCredentials({
+      mode: 'direct_oauth', refreshToken, scopes: EBAY_READONLY_SCOPES,
+      expectedAccount: 'packsmartsolutions20', marketplaceId: 'EBAY_GB'
+    }, credentialKey),
+    metadata: {}, createdAt: '2026-09-06T00:00:00.000Z', updatedAt: '2026-09-06T00:00:00.000Z'
+  };
+  const state = {
+    workspace: { id: 'packsmart-solutions' },
+    products: [{ variants: [{ sku: 'TAPE-BROWN' }, { sku: 'MAILER-2' }] }],
+    orders: [], connections: [connection], integrationStatus: {}
+  };
+  const service = new IntegrationService({
+    NODE_ENV: 'production', CREDENTIALS_KEY: credentialKey, EBAY_OAUTH_ENABLED: 'true',
+    EBAY_ENV_WORKSPACE_ID: 'packsmart-solutions', EBAY_CLIENT_ID: 'production-client-id',
+    EBAY_CLIENT_SECRET: 'production-client-secret-value', EBAY_REDIRECT_URI_NAME: 'Packsmart-Operations-ReadOnly-RuName',
+    EBAY_EXPECTED_ACCOUNT: 'packsmartsolutions20', EBAY_MARKETPLACE_ID: 'EBAY_GB'
+  }, { fetchImpl });
+
+  assert.equal(service.ebayOAuthReady(state), true);
+  const status = await service.syncEbay(state);
+  assert.equal(status.status, 'connected');
+  assert.equal(status.source, 'ebay-oauth-readonly');
+  assert.equal(state.ebay.account, 'packsmartsolutions20');
+  assert.equal(state.ebay.listings[0].sku, 'TAPE-BROWN');
+  assert.equal(state.ebay.listings[0].adRate, 4.5);
+  assert.equal(state.ebay.listings[0].quantity, 38);
+  assert.deepEqual(state.ebay.health.missingOnEbay, ['MAILER-2']);
+  assert.equal(state.orders[0].total, 12.99);
+  assert.equal(state.orders[0].channelFees, 1.5);
+  assert.equal(state.ebay.fees[0].amount, 1.5);
+  assert.equal(state.ebay.promotions.length, 1);
+  assert.equal(connection.status, 'connected');
+  assert.equal(JSON.stringify(state).includes(refreshToken), false);
+  assert.equal(JSON.stringify(state).includes(accessToken), false);
+  assert.equal(requests.filter(request => request.options.method === 'POST').length, 1);
+  assert.ok(requests.filter(request => request.options.method === 'GET').every(request => request.options.redirect === 'error'));
+});
+
+test('eBay authorization URL is purpose-scoped to read-only consent', () => {
+  const service = new IntegrationService({
+    CREDENTIALS_KEY: 'oauth-url-credential-key-more-than-thirty-two-characters',
+    EBAY_OAUTH_ENABLED: 'true', EBAY_ENV_WORKSPACE_ID: 'packsmart-solutions',
+    EBAY_CLIENT_ID: 'production-client-id', EBAY_CLIENT_SECRET: 'production-client-secret-value',
+    EBAY_REDIRECT_URI_NAME: 'Packsmart-Operations-ReadOnly-RuName'
+  });
+  const state = { workspace: { id: 'packsmart-solutions' } };
+  const url = new URL(service.ebayAuthorizationUrl('signed-oauth-state-value-more-than-thirty-two-characters', state));
+  assert.equal(url.origin, 'https://auth.ebay.com');
+  assert.equal(url.pathname, '/oauth2/authorize');
+  assert.equal(url.searchParams.get('response_type'), 'code');
+  assert.deepEqual(url.searchParams.get('scope').split(' '), EBAY_READONLY_SCOPES);
+  assert.ok(EBAY_READONLY_SCOPES.every(scope => scope.endsWith('.readonly')));
+  assert.equal(url.searchParams.get('redirect_uri'), 'Packsmart-Operations-ReadOnly-RuName');
+  assert.equal(url.searchParams.get('state'), 'signed-oauth-state-value-more-than-thirty-two-characters');
 });
 
 test('eBay sync rejects an unexpected seller account', async () => {

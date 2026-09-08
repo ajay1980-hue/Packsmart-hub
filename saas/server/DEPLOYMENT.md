@@ -37,7 +37,16 @@ The optional customer-zero environment fallback requires:
 - `EBAY_MANAGER_API_TOKEN` — optional backend-to-backend access token.
 - `EBAY_EXPECTED_ACCOUNT=packsmartsolutions20`
 
-Both adapters make read requests only. No listing, price, inventory, promotion or product write is implemented. Shopify imports source order totals, discounts, tax, shipping, refunds and line items. The eBay adapter reuses the existing Manager's connected seller identity and commercial guard, and can consume its read-only orders, fees and promotion endpoints when present.
+When the private hosted Manager cannot accept backend-to-backend requests, Packsmart Ops also supports a direct read-only OAuth connection using the same eBay developer application. Keep it dormant until a second Production RuName is configured; do not alter the existing Manager RuName or callback. The required private variables are:
+
+- `EBAY_OAUTH_ENABLED=true`
+- `EBAY_CLIENT_ID` and `EBAY_CLIENT_SECRET` — server-only Production application credentials.
+- `EBAY_REDIRECT_URI_NAME` — the new Production RuName whose accepted and declined URL is `https://packsmart-ops.onrender.com/api/integrations/ebay/oauth/callback`.
+- `EBAY_MARKETPLACE_ID=EBAY_GB`
+
+The consent flow requests only eBay's identity, fulfillment, inventory and marketing read-only scopes. Its long-lived refresh token is AES-256-GCM encrypted in the workspace connection record; short-lived access tokens remain in server memory. The existing Manager credential and callback are not overwritten.
+
+All commerce adapters expose read operations only. No listing, price, inventory, promotion or product write is implemented. Shopify imports source order totals, discounts, tax, shipping, refunds and line items. The eBay adapters retain the existing commercial guard and can read orders, fees, inventory offers and promotion records when the connected source provides them.
 
 ## Social-commerce channel contract
 

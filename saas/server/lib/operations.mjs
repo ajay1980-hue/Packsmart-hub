@@ -318,7 +318,7 @@ export function integrationMatrix(state, env = process.env) {
   };
   const core = [
     { id: 'shopify', name: 'Shopify', kind: 'commerce', capabilities: ['catalogue', 'inventory', 'orders', 'refunds', 'tax', 'payments'], status: statuses.shopify?.status || 'not_configured', detail: statuses.shopify?.detail || 'Secure Admin API connection required for live orders, fees and inventory.', lastSyncAt: statuses.shopify?.lastSyncAt || null, lastError: statuses.shopify?.lastError || null, metrics30d: metricMap.get('shopify') || null },
-    { id: 'ebay', name: 'eBay Manager', kind: 'marketplace', capabilities: ['listings', 'drafts', 'orders', 'fees', 'promotions', 'profit-guard'], status: statuses.ebay?.status || 'not_configured', detail: statuses.ebay?.detail || 'Existing server-side OAuth manager connection will be reused.', lastSyncAt: statuses.ebay?.lastSyncAt || null, lastError: statuses.ebay?.lastError || null, metrics30d: metricMap.get('ebay') || null }
+    { id: 'ebay', name: 'eBay', kind: 'marketplace', capabilities: ['listings', 'drafts', 'orders', 'fees', 'promotions', 'profit-guard'], status: statuses.ebay?.status || 'not_configured', detail: statuses.ebay?.detail || 'Secure read-only access can use the existing eBay app without changing the current Manager.', lastSyncAt: statuses.ebay?.lastSyncAt || null, lastError: statuses.ebay?.lastError || null, metrics30d: metricMap.get('ebay') || null }
   ];
   return [
     ...core, ...SOCIAL_COMMERCE_CHANNELS.map(makeChannel), ...MARKETPLACE_CHANNELS.map(makeChannel),

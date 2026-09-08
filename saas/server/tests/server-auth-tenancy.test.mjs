@@ -14,7 +14,7 @@ const OWNER_PASSWORD = 'PacksmartOwner!2026Secure';
 const ACTIVATION_TOKEN = 'one-time-owner-activation-token-more-than-thirty-two-characters';
 
 function requestFactory(base) {
-  return async function request(pathname, { method = 'GET', body, cookie, csrf } = {}) {
+  return async function request(pathname, { method = 'GET', body, cookie, csrf, redirect } = {}) {
     const headers = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (cookie) headers.Cookie = cookie;
@@ -22,7 +22,8 @@ function requestFactory(base) {
     const response = await fetch(base + pathname, {
       method,
       headers,
-      body: body === undefined ? undefined : JSON.stringify(body)
+      body: body === undefined ? undefined : JSON.stringify(body),
+      redirect
     });
     const text = await response.text();
     let payload = {};
@@ -71,7 +72,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=4\.2\.0/);
+  assert.match(String(home.payload), /app\.js\?v=4\.3\.0/);
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
@@ -297,6 +298,120 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   });
   assert.equal(logout.response.status, 200);
   assert.match(logout.setCookie, /Max-Age=0/);
+});
+
+test('eBay read-only OAuth uses a one-time callback while preserving the existing Manager', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'packsmart-ops-ebay-oauth-test-'));
+  const credentialsKey = 'server-integration-credential-key-more-than-thirty-two-characters';
+  const managerSecret = 'existing-manager-secret-test-only';
+  const refreshSecret = 'ebay-refresh-token-test-only';
+  const calls = [];
+  const fetchImpl = async (url, options = {}) => {
+    const href = String(url);
+    const method = options.method || 'GET';
+    calls.push({ href, method, body: String(options.body || '') });
+    const json = payload => new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+    if (href === 'https://api.ebay.com/identity/v1/oauth2/token') {
+      const form = new URLSearchParams(String(options.body || ''));
+      if (form.get('grant_type') === 'authorization_code') {
+        return json({
+          access_token: 'initial-access-token-test-only',
+          expires_in: 7200,
+          refresh_token: refreshSecret,
+          refresh_token_expires_in: 47304000
+        });
+      }
+      return json({ access_token: 'refreshed-access-token-test-only', expires_in: 7200 });
+    }
+    if (href === 'https://apiz.ebay.com/commerce/identity/v1/user/') return json({ username: 'packsmartsolutions20' });
+    if (href.includes('/sell/fulfillment/v1/order?')) return json({ total: 0, orders: [] });
+    if (href.includes('/sell/inventory/v1/inventory_item?')) return json({ total: 0, inventoryItems: [] });
+    if (href.includes('/sell/marketing/v1/ad_campaign?')) return json({ total: 0, campaigns: [] });
+    throw new Error(`Unexpected eBay test request: ${method} ${href}`);
+  };
+  const server = createPacksmartServer({
+    NODE_ENV: 'test',
+    APP_PUBLIC_URL: 'http://localhost:8787',
+    SAAS_STATE_FILE: path.join(directory, 'state.json'),
+    PACKSMART_ADMIN_EMAIL: 'sales@packsmartsolutions.com',
+    PACKSMART_ADMIN_PASSWORD: BOOTSTRAP_PASSWORD,
+    SESSION_SECRET,
+    CREDENTIALS_KEY: credentialsKey,
+    BETA_SIGNUPS_ENABLED: 'false',
+    BILLING_CHECKOUT_ENABLED: 'false',
+    EBAY_OAUTH_ENABLED: 'true',
+    EBAY_CLIENT_ID: 'packsmart-client-id-test',
+    EBAY_CLIENT_SECRET: 'packsmart-client-secret-test-only',
+    EBAY_REDIRECT_URI_NAME: 'Packsmart-Ops-Read-Only-Test-RuName',
+    EBAY_EXPECTED_ACCOUNT: 'packsmartsolutions20',
+    EBAY_MARKETPLACE_ID: 'EBAY_GB'
+  }, { fetchImpl });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(async () => {
+    await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  const request = requestFactory(`http://127.0.0.1:${server.address().port}`);
+  const login = await request('/api/auth/login', {
+    method: 'POST',
+    body: { email: 'sales@packsmartsolutions.com', password: BOOTSTRAP_PASSWORD }
+  });
+  assert.equal(login.response.status, 200);
+  const cookie = cookieValue(login.setCookie);
+  const csrf = login.payload.csrf;
+
+  const manager = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: {
+      provider: 'ebay',
+      credentials: {
+        baseUrl: 'https://existing-ebay-manager.example.test',
+        expectedAccount: 'packsmartsolutions20',
+        apiToken: managerSecret
+      }
+    }
+  });
+  assert.equal(manager.response.status, 200);
+
+  const started = await request('/api/integrations/ebay/oauth/start', { method: 'POST', cookie, csrf, body: {} });
+  assert.equal(started.response.status, 200);
+  assert.equal(started.payload.readOnly, true);
+  assert.equal(started.payload.existingManagerPreserved, true);
+  const authorizationUrl = new URL(started.payload.authorizationUrl);
+  assert.equal(authorizationUrl.origin, 'https://auth.ebay.com');
+  const oauthState = authorizationUrl.searchParams.get('state');
+  assert.ok(oauthState);
+
+  const forged = await request(`/api/integrations/ebay/oauth/callback?state=${encodeURIComponent(`${oauthState}x`)}&code=forged`, { redirect: 'manual' });
+  assert.equal(forged.response.status, 400);
+
+  const callback = await request(`/api/integrations/ebay/oauth/callback?state=${encodeURIComponent(oauthState)}&code=authorized-code`, { redirect: 'manual' });
+  assert.equal(callback.response.status, 303);
+  assert.equal(callback.response.headers.get('location'), 'http://localhost:8787/?ebay=connected');
+  assert.equal(String(callback.payload).includes(refreshSecret), false);
+
+  const persisted = await server.packsmart.store.get('packsmart-solutions');
+  const managerConnection = persisted.connections.find(item => item.provider === 'ebay');
+  const oauthConnection = persisted.connections.find(item => item.provider === 'ebay_oauth');
+  assert.ok(managerConnection, 'the existing eBay Manager connection must remain stored');
+  assert.ok(oauthConnection, 'the read-only connection must be stored separately');
+  assert.equal(oauthConnection.encryptedCredentials.includes(refreshSecret), false);
+  assert.equal(decryptCredentials(oauthConnection.encryptedCredentials, credentialsKey).refreshToken, refreshSecret);
+  assert.equal(decryptCredentials(managerConnection.encryptedCredentials, credentialsKey).apiToken, managerSecret);
+  assert.equal(persisted.oauthChallenges.length, 0, 'the callback challenge must be consumed exactly once');
+  assert.equal(persisted.audit.some(event => event.type === 'ebay_oauth_connected'), true);
+  assert.equal(persisted.audit.some(event => event.type === 'ebay_read_sync'), true);
+
+  const replay = await request(`/api/integrations/ebay/oauth/callback?state=${encodeURIComponent(oauthState)}&code=replayed-code`, { redirect: 'manual' });
+  assert.equal(replay.response.status, 400);
+  const publicConnections = await request('/api/connections', { cookie });
+  assert.equal(JSON.stringify(publicConnections.payload).includes(refreshSecret), false);
+  assert.equal(JSON.stringify(publicConnections.payload).includes(managerSecret), false);
+  assert.equal(calls.filter(call => call.href.includes('/sell/') || call.href.includes('/commerce/')).every(call => call.method === 'GET'), true);
 });
 
 test('one-time owner activation sets a private password without exposing the bootstrap secret', async t => {

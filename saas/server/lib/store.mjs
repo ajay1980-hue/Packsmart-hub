@@ -75,6 +75,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
       updatedAt: now
     },
     connections: [],
+    oauthChallenges: [],
     integrationStatus: {},
     migrations: {},
     storageReady: false
@@ -132,6 +133,7 @@ export function upgradeState(state, env = process.env) {
     dailyBriefs: Array.isArray(state?.dailyBriefs) ? state.dailyBriefs : [],
     subscription: { ...seeded.subscription, ...(state?.subscription || {}) },
     connections: Array.isArray(state?.connections) ? state.connections : [],
+    oauthChallenges: Array.isArray(state?.oauthChallenges) ? state.oauthChallenges : [],
     integrationStatus: state?.integrationStatus && typeof state.integrationStatus === 'object' ? state.integrationStatus : {},
     migrations: state?.migrations && typeof state.migrations === 'object' ? state.migrations : {}
   };

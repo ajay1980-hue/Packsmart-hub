@@ -17,6 +17,15 @@
     ownerActivationToken = String(fragment.get('activate') || '');
     if (ownerActivationToken) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   } catch {}
+  let ebayReturnResult = '';
+  try {
+    const current = new URL(window.location.href);
+    ebayReturnResult = String(current.searchParams.get('ebay') || '');
+    if (ebayReturnResult) {
+      current.searchParams.delete('ebay');
+      window.history.replaceState(null, '', current.pathname + current.search + current.hash);
+    }
+  } catch {}
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
@@ -341,16 +350,21 @@
     connectionState.className = 'tag ' + (shopifyStatus?.status === 'connected' ? 'good' : shopifyConnection ? 'warn' : 'neutral');
     const savedDomain = shopifyConnection?.metadata?.shopDomain;
     if (savedDomain) $('#shopify-connection-form').storeDomain.value = savedDomain;
-    const ebayConnection = (state.data.connections || []).find(item => item.provider === 'ebay');
+    const ebayOauth = state.data.ebayOAuth || {};
+    const ebayOauthConnection = (state.data.connections || []).find(item => item.provider === 'ebay_oauth');
+    const ebayManagerConnection = (state.data.connections || []).find(item => item.provider === 'ebay');
+    const ebayConnection = ebayOauthConnection || ebayManagerConnection;
     const ebayStatus = (state.data.integrations || []).find(item => item.id === 'ebay');
-    $('#ebay-connection-form').classList.toggle('hidden', !canConfigure);
+    $('#ebay-connection-form').classList.toggle('hidden', !canConfigure || ebayOauth.ready);
+    const ebayOauthButton = $('#connect-ebay-oauth');
+    ebayOauthButton.classList.toggle('hidden', !canConfigure || !ebayOauth.ready || ebayOauth.connected);
     const ebayConnectionState = $('#ebay-connection-state');
     ebayConnectionState.textContent = ebayStatus?.status === 'connected' ? 'Connected · read-only' : ebayConnection ? 'Saved · verification needed' : 'Not configured';
     ebayConnectionState.className = 'tag ' + (ebayStatus?.status === 'connected' ? 'good' : ebayConnection ? 'warn' : 'neutral');
     const savedAccount = ebayConnection?.metadata?.account;
     if (savedAccount) $('#ebay-connection-form').expectedAccount.value = savedAccount;
     const ebay = state.data.ebay;
-    if (!ebay) { $('#ebay-health').innerHTML = '<div class="empty-state">The existing eBay Manager has not yet been verified from Packsmart Ops. No duplicate OAuth setup will be created.</div>'; return; }
+    if (!ebay) { $('#ebay-health').innerHTML = '<div class="empty-state">eBay is ready for a secure read-only connection. The existing Manager remains available and unchanged.</div>'; return; }
     $('#ebay-health').innerHTML = [
       ['Connected account', ebay.account || '—'], ['Listings', ebay.listings && ebay.listings.length || 0], ['Drafts', ebay.drafts && ebay.drafts.length || 0],
       ['Orders', (state.data.orders || []).filter(order => order.provider === 'ebay').length], ['Fee records', ebay.fees && ebay.fees.length || 0], ['Promotions', ebay.promotions && ebay.promotions.length || 0],
@@ -526,6 +540,19 @@
     }
   });
 
+  $('#connect-ebay-oauth').addEventListener('click', async event => {
+    const button = event.currentTarget; const error = $('#ebay-oauth-error'); error.textContent = '';
+    setBusy(button, true, 'Opening secure eBay sign-in…');
+    try {
+      const payload = await request('/api/integrations/ebay/oauth/start', { method: 'POST', body: '{}' });
+      if (!payload.authorizationUrl) throw new Error('eBay sign-in could not be opened.');
+      window.location.assign(payload.authorizationUrl);
+    } catch (oauthError) {
+      error.textContent = oauthError.message;
+      setBusy(button, false);
+    }
+  });
+
   $('#approval-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); $('#approval-form-error').textContent = ''; setBusy(button, true, 'Creating request…');
     const values = Object.fromEntries(new FormData(form));
@@ -555,7 +582,18 @@
   });
 
   (async () => {
-    try { const health = await request('/api/health'); if (!health.ok) throw new Error('Packsmart Ops health check is not ready.'); if (ownerActivationToken) { showPasswordSetup(); return; } if (await loadSession()) await loadBootstrap(); }
+    try {
+      const health = await request('/api/health');
+      if (!health.ok) throw new Error('Packsmart Ops health check is not ready.');
+      if (ownerActivationToken) { showPasswordSetup(); return; }
+      if (await loadSession()) {
+        await loadBootstrap();
+        if (ebayReturnResult === 'connected') showMessage('eBay connected read-only. Live writes remain disabled and the existing Manager was not changed.');
+        else if (ebayReturnResult === 'declined') showMessage('eBay connection was cancelled. Nothing was changed.', 'error');
+        else if (ebayReturnResult === 'account-mismatch') showMessage('The eBay account did not match Packsmart, so no credential was saved.', 'error');
+        else if (ebayReturnResult === 'error') showMessage('eBay sign-in could not be completed. No marketplace change was made.', 'error');
+      }
+    }
     catch (error) { $('#login-error').textContent = error.status === 401 ? '' : error.message; showLogin(); }
   })();
 })();

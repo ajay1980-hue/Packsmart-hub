@@ -38,6 +38,39 @@ function sign(value, secret) {
   return crypto.createHmac('sha256', secret).update(value).digest('base64url');
 }
 
+export function createEbayOAuthStateToken({ workspaceId, userId, nonce }, secret, ttlSeconds = 10 * 60) {
+  if (!secret || String(secret).length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters');
+  const now = Math.floor(Date.now() / 1000);
+  const payload = {
+    purpose: 'ebay-readonly-oauth',
+    workspaceId: String(workspaceId || ''),
+    userId: String(userId || ''),
+    nonce: String(nonce || ''),
+    iat: now,
+    exp: now + Math.max(60, Math.min(15 * 60, Number(ttlSeconds) || 10 * 60))
+  };
+  if (!payload.workspaceId || !payload.userId || payload.nonce.length < 24) throw new Error('Invalid eBay OAuth state input');
+  const encoded = b64url(JSON.stringify(payload));
+  return `${encoded}.${sign(`ebay-oauth.${encoded}`, secret)}`;
+}
+
+export function verifyEbayOAuthStateToken(token, secret, nowSeconds = Math.floor(Date.now() / 1000)) {
+  if (!token || !secret || String(secret).length < 32) return null;
+  const [encoded, signature, extra] = String(token).split('.');
+  if (!encoded || !signature || extra) return null;
+  const expected = sign(`ebay-oauth.${encoded}`, secret);
+  if (!safeEqual(signature, expected)) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (payload.purpose !== 'ebay-readonly-oauth') return null;
+    if (!payload.exp || payload.exp <= nowSeconds || payload.iat > nowSeconds + 60) return null;
+    if (!payload.workspaceId || !payload.userId || String(payload.nonce || '').length < 24) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 export function createSessionToken({ userId, workspaceId, email, role = 'member', csrf, sessionVersion = 1 }, secret, ttlSeconds = 60 * 60 * 12) {
   if (!secret || String(secret).length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters');
   const now = Math.floor(Date.now() / 1000);

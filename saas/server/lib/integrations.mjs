@@ -4,6 +4,22 @@ import { decryptCredentials } from './security.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
+export const EBAY_READONLY_SCOPES = Object.freeze([
+  'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly',
+  'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
+  'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
+  'https://api.ebay.com/oauth/api_scope/sell.marketing.readonly'
+]);
+
+const EBAY_PRODUCTION = Object.freeze({
+  authorize: 'https://auth.ebay.com/oauth2/authorize',
+  token: 'https://api.ebay.com/identity/v1/oauth2/token',
+  identity: 'https://apiz.ebay.com/commerce/identity/v1/user/',
+  fulfillment: 'https://api.ebay.com/sell/fulfillment/v1',
+  inventory: 'https://api.ebay.com/sell/inventory/v1',
+  marketing: 'https://api.ebay.com/sell/marketing/v1'
+});
+
 export const SHOPIFY_PRODUCTS_QUERY = `
   query PacksmartOpsProducts($first: Int!, $after: String) {
     products(first: $first, after: $after, sortKey: UPDATED_AT, reverse: true) {
@@ -204,10 +220,19 @@ function nullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function sumAmounts(items, selector = value => value) {
+  if (!Array.isArray(items) || !items.length) return null;
+  const values = items.map(item => nullableNumber(selector(item))).filter(value => value !== null);
+  if (!values.length) return null;
+  return Number(values.reduce((sum, value) => sum + value, 0).toFixed(2));
+}
+
 function mapEbayOrder(order) {
   const total = nullableNumber(order.total ?? order.orderTotal ?? order.pricingSummary?.total);
-  const refunds = nullableNumber(order.refunds ?? order.refundAmount ?? order.pricingSummary?.refunds);
-  const channelFees = nullableNumber(order.channelFees ?? order.ebayFees ?? order.fees);
+  const refunds = nullableNumber(order.refunds ?? order.refundAmount ?? order.pricingSummary?.refunds) ??
+    sumAmounts(order.paymentSummary?.refunds, refund => refund.refundAmount ?? refund.amount) ??
+    sumAmounts(order.lineItems?.flatMap(line => line.refunds || []), refund => refund.refundAmount ?? refund.amount);
+  const channelFees = nullableNumber(order.channelFees ?? order.ebayFees ?? order.fees ?? order.totalMarketplaceFee);
   const advertisingCost = nullableNumber(order.advertisingCost ?? order.promotedListingFee ?? order.adFees);
   const currentTotal = total === null ? null : Math.max(0, total - (refunds || 0));
   return {
@@ -224,9 +249,9 @@ function mapEbayOrder(order) {
     currentTotal,
     currency: String(order.currency || order.pricingSummary?.total?.currency || 'GBP'),
     refunds,
-    tax: nullableNumber(order.tax ?? order.taxAmount),
-    currentTax: nullableNumber(order.currentTax ?? order.tax ?? order.taxAmount),
-    discounts: nullableNumber(order.discounts ?? order.discountAmount),
+    tax: nullableNumber(order.tax ?? order.taxAmount ?? order.pricingSummary?.tax),
+    currentTax: nullableNumber(order.currentTax ?? order.tax ?? order.taxAmount ?? order.pricingSummary?.tax),
+    discounts: nullableNumber(order.discounts ?? order.discountAmount ?? order.pricingSummary?.priceDiscount),
     shippingCharged: nullableNumber(order.shippingCharged ?? order.deliveryCost ?? order.pricingSummary?.deliveryCost),
     actualShippingCost: nullableNumber(order.actualShippingCost ?? order.postageCost),
     paymentFees: nullableNumber(order.paymentFees ?? order.paymentProcessingFees),
@@ -241,6 +266,29 @@ function mapEbayOrder(order) {
       gross: nullableNumber(line.gross ?? line.total ?? line.lineItemCost),
       net: nullableNumber(line.net ?? line.total ?? line.lineItemCost)
     }))
+  };
+}
+
+function mapEbayOAuthListing(item, offer, adByListingId) {
+  const listingId = String(offer?.listing?.listingId || '');
+  const price = nullableNumber(offer?.pricingSummary?.price ?? offer?.price) ?? 0;
+  const inventoryQuantity = nullableNumber(item?.availability?.shipToLocationAvailability?.quantity);
+  const offerQuantity = nullableNumber(offer?.availableQuantity);
+  const ad = listingId ? adByListingId.get(listingId) : null;
+  return {
+    id: String(offer?.offerId || listingId || item?.sku || ''),
+    title: String(item?.product?.title || item?.product?.subtitle || item?.sku || ''),
+    sku: String(item?.sku || offer?.sku || ''),
+    price,
+    currency: String(offer?.pricingSummary?.price?.currency || 'GBP'),
+    quantity: offerQuantity ?? inventoryQuantity,
+    status: String(offer?.status || (listingId ? 'PUBLISHED' : 'UNPUBLISHED')),
+    adRate: nullableNumber(ad?.bidPercentage),
+    buyerShippingCharge: null,
+    listingUrl: listingId ? `https://www.ebay.co.uk/itm/${encodeURIComponent(listingId)}` : null,
+    image: item?.product?.imageUrls?.[0] || null,
+    listingId,
+    offerId: String(offer?.offerId || '')
   };
 }
 
@@ -263,14 +311,25 @@ export class IntegrationService {
     this.repoRoot = repoRoot;
     this.shopifyTokenCache = new Map();
     this.shopifyTokenRequests = new Map();
+    this.ebayTokenCache = new Map();
+    this.ebayTokenRequests = new Map();
   }
 
   shopifyConnection(state) {
     return (state?.connections || []).find(connection => connection.provider === 'shopify' && connection.encryptedCredentials) || null;
   }
 
-  ebayConnection(state) {
+  ebayOAuthConnection(state) {
+    return (state?.connections || []).find(connection => connection.provider === 'ebay_oauth' && connection.encryptedCredentials) || null;
+  }
+
+  ebayManagerConnection(state) {
     return (state?.connections || []).find(connection => connection.provider === 'ebay' && connection.encryptedCredentials) || null;
+  }
+
+  ebayConnection(state) {
+    const oauth = this.ebayOAuthConnection(state);
+    return (oauth && this.ebayOAuthReady(state) ? oauth : null) || this.ebayManagerConnection(state) || oauth;
   }
 
   shopifyConfigured(state) {
@@ -490,8 +549,140 @@ export class IntegrationService {
     return state.integrationStatus.shopify;
   }
 
+  ebayOAuthReady(state) {
+    const workspaceId = String(state?.workspace?.id || '');
+    const environmentWorkspace = String(this.env.EBAY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    return workspaceId === environmentWorkspace &&
+      ['1', 'true', 'yes', 'on'].includes(String(this.env.EBAY_OAUTH_ENABLED || '').toLowerCase()) &&
+      String(this.env.EBAY_CLIENT_ID || '').length >= 8 &&
+      String(this.env.EBAY_CLIENT_SECRET || '').length >= 16 &&
+      String(this.env.EBAY_REDIRECT_URI_NAME || '').length >= 8 &&
+      String(this.env.CREDENTIALS_KEY || '').length >= 32;
+  }
+
+  ebayOAuthStatus(state) {
+    const connection = this.ebayOAuthConnection(state);
+    return {
+      ready: this.ebayOAuthReady(state),
+      connected: Boolean(connection),
+      readOnly: true,
+      marketplaceId: String(connection?.metadata?.marketplaceId || this.env.EBAY_MARKETPLACE_ID || 'EBAY_GB')
+    };
+  }
+
+  ebayAuthorizationUrl(oauthState, state) {
+    if (!this.ebayOAuthReady(state)) throw integrationError('eBay read-only OAuth is not configured', 503, 'EBAY_OAUTH_NOT_CONFIGURED');
+    const stateValue = String(oauthState || '');
+    if (stateValue.length < 32 || stateValue.length > 4096 || /[\r\n]/.test(stateValue)) {
+      throw integrationError('Invalid eBay authorization state', 400, 'EBAY_OAUTH_STATE_INVALID');
+    }
+    const url = new URL(EBAY_PRODUCTION.authorize);
+    url.search = new URLSearchParams({
+      client_id: String(this.env.EBAY_CLIENT_ID),
+      redirect_uri: String(this.env.EBAY_REDIRECT_URI_NAME),
+      response_type: 'code',
+      scope: EBAY_READONLY_SCOPES.join(' '),
+      state: stateValue,
+      locale: 'en-GB'
+    }).toString();
+    return url.toString();
+  }
+
+  ebayOAuthHeaders() {
+    const clientId = String(this.env.EBAY_CLIENT_ID || '');
+    const clientSecret = String(this.env.EBAY_CLIENT_SECRET || '');
+    if (clientId.length < 8 || clientSecret.length < 16) throw integrationError('eBay OAuth credentials are incomplete', 503, 'EBAY_OAUTH_NOT_CONFIGURED');
+    return {
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+      'User-Agent': 'Packsmart-Ops/4.3'
+    };
+  }
+
+  async ebayTokenRequest(form, code) {
+    const response = await this.fetch(EBAY_PRODUCTION.token, {
+      method: 'POST',
+      headers: this.ebayOAuthHeaders(),
+      body: new URLSearchParams(form).toString(),
+      redirect: 'error',
+      signal: AbortSignal.timeout(20000)
+    });
+    let payload;
+    try { payload = await response.json(); } catch { payload = {}; }
+    if (!response.ok) throw integrationError('eBay OAuth token request failed', 502, code);
+    const accessToken = String(payload.access_token || '');
+    const expiresIn = Number(payload.expires_in || 0);
+    if (!accessToken || !Number.isFinite(expiresIn) || expiresIn < 60) {
+      throw integrationError('eBay returned an invalid access token', 502, 'EBAY_ACCESS_TOKEN_INVALID');
+    }
+    return { ...payload, accessToken, expiresIn };
+  }
+
+  async exchangeEbayAuthorizationCode(authorizationCode) {
+    const code = String(authorizationCode || '');
+    if (!code || code.length > 4096 || /[\r\n]/.test(code)) throw integrationError('eBay authorization code is invalid', 400, 'EBAY_AUTHORIZATION_CODE_INVALID');
+    const payload = await this.ebayTokenRequest({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: String(this.env.EBAY_REDIRECT_URI_NAME || '')
+    }, 'EBAY_AUTHORIZATION_EXCHANGE_FAILED');
+    const refreshToken = String(payload.refresh_token || '');
+    if (!refreshToken || refreshToken.length > 8192) throw integrationError('eBay did not return a refresh token', 502, 'EBAY_REFRESH_TOKEN_INVALID');
+    return {
+      accessToken: payload.accessToken,
+      expiresIn: payload.expiresIn,
+      refreshToken,
+      refreshTokenExpiresIn: Number(payload.refresh_token_expires_in || 0),
+      scopes: EBAY_READONLY_SCOPES.slice()
+    };
+  }
+
+  async ebayAccessToken(config) {
+    const cached = this.ebayTokenCache.get(config.cacheKey);
+    if (cached?.token && Date.now() + 60000 < cached.expiresAt) return cached.token;
+    if (!this.ebayTokenRequests.has(config.cacheKey)) {
+      const request = (async () => {
+        const payload = await this.ebayTokenRequest({
+          grant_type: 'refresh_token',
+          refresh_token: config.refreshToken,
+          scope: EBAY_READONLY_SCOPES.join(' ')
+        }, 'EBAY_REFRESH_FAILED');
+        this.ebayTokenCache.set(config.cacheKey, { token: payload.accessToken, expiresAt: Date.now() + payload.expiresIn * 1000 });
+        return payload.accessToken;
+      })();
+      this.ebayTokenRequests.set(config.cacheKey, request);
+    }
+    const request = this.ebayTokenRequests.get(config.cacheKey);
+    try { return await request; }
+    finally {
+      if (this.ebayTokenRequests.get(config.cacheKey) === request) this.ebayTokenRequests.delete(config.cacheKey);
+    }
+  }
+
+  async ebayApiGet(url, accessToken, { marketplaceId } = {}) {
+    const headers = {
+      Accept: 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+      'User-Agent': 'Packsmart-Ops/4.3'
+    };
+    if (marketplaceId) headers['X-EBAY-C-MARKETPLACE-ID'] = marketplaceId;
+    const response = await this.fetch(url, {
+      method: 'GET',
+      headers,
+      redirect: 'error',
+      signal: AbortSignal.timeout(20000)
+    });
+    return responseJson(response, 'eBay read API');
+  }
+
+  async ebayIdentity(accessToken) {
+    return this.ebayApiGet(EBAY_PRODUCTION.identity, accessToken);
+  }
+
   ebayConfigured(state) {
-    if (this.ebayConnection(state)) return true;
+    if (this.ebayOAuthConnection(state) && this.ebayOAuthReady(state)) return true;
+    if (this.ebayManagerConnection(state)) return true;
     const workspaceId = String(state?.workspace?.id || '');
     const environmentWorkspace = String(this.env.EBAY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
     return workspaceId === environmentWorkspace && Boolean(this.env.EBAY_MANAGER_BASE_URL);
@@ -499,7 +690,30 @@ export class IntegrationService {
 
   ebayConfig(state) {
     const workspaceId = String(state?.workspace?.id || '');
-    const connection = this.ebayConnection(state);
+    const oauthConnection = this.ebayOAuthConnection(state);
+    if (oauthConnection && this.ebayOAuthReady(state)) {
+      let credentials;
+      try {
+        credentials = decryptCredentials(oauthConnection.encryptedCredentials, this.env.CREDENTIALS_KEY);
+      } catch {
+        throw integrationError('Stored eBay OAuth credentials are invalid', 503, 'EBAY_CREDENTIALS_INVALID');
+      }
+      const refreshToken = String(credentials.refreshToken || '');
+      if (credentials.mode !== 'direct_oauth' || !refreshToken || refreshToken.length > 8192) {
+        throw integrationError('Stored eBay OAuth credentials are incomplete', 503, 'EBAY_CREDENTIALS_INVALID');
+      }
+      return {
+        mode: 'direct_oauth',
+        workspaceId,
+        refreshToken,
+        expectedAccount: String(credentials.expectedAccount || 'packsmartsolutions20'),
+        marketplaceId: String(credentials.marketplaceId || this.env.EBAY_MARKETPLACE_ID || 'EBAY_GB'),
+        cacheKey: `connection:${workspaceId}:${oauthConnection.id}:${oauthConnection.updatedAt || oauthConnection.createdAt || ''}`,
+        connection: oauthConnection
+      };
+    }
+
+    const connection = this.ebayManagerConnection(state);
     if (connection) {
       let credentials;
       try {
@@ -508,6 +722,7 @@ export class IntegrationService {
         throw integrationError('Stored eBay Manager credentials are invalid', 503, 'EBAY_CREDENTIALS_INVALID');
       }
       return {
+        mode: 'manager',
         workspaceId,
         base: validateRemoteBase(credentials.baseUrl, { allowLocal: this.env.NODE_ENV !== 'production' }),
         apiToken: String(credentials.apiToken || ''),
@@ -518,9 +733,10 @@ export class IntegrationService {
 
     const environmentWorkspace = String(this.env.EBAY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
     if (workspaceId !== environmentWorkspace || !this.env.EBAY_MANAGER_BASE_URL) {
-      throw integrationError('eBay Manager is not configured for this workspace', 503, 'EBAY_NOT_CONFIGURED');
+      throw integrationError('eBay is not configured for this workspace', 503, 'EBAY_NOT_CONFIGURED');
     }
     return {
+      mode: 'manager',
       workspaceId,
       base: validateRemoteBase(this.env.EBAY_MANAGER_BASE_URL, { allowLocal: this.env.NODE_ENV !== 'production' }),
       apiToken: String(this.env.EBAY_MANAGER_API_TOKEN || ''),
@@ -530,7 +746,7 @@ export class IntegrationService {
   }
 
   ebayHeaders(config) {
-    const headers = { Accept: 'application/json', 'User-Agent': 'Packsmart-Ops/4.2' };
+    const headers = { Accept: 'application/json', 'User-Agent': 'Packsmart-Ops/4.3' };
     if (config.apiToken) headers.Authorization = `Bearer ${config.apiToken}`;
     return headers;
   }
@@ -551,6 +767,142 @@ export class IntegrationService {
     throw integrationError(`eBay Manager read route was not found (${lastStatus || 'network error'})`, 502, 'EBAY_ROUTE_NOT_FOUND');
   }
 
+  async fetchEbayOrders(accessToken) {
+    const orders = [];
+    for (let page = 0; page < 3; page += 1) {
+      const offset = page * 200;
+      const url = `${EBAY_PRODUCTION.fulfillment}/order?limit=200&offset=${offset}`;
+      const payload = await this.ebayApiGet(url, accessToken);
+      const batch = payloadItems(payload, ['orders']);
+      orders.push(...batch);
+      const total = Number(payload?.total);
+      if (batch.length < 200 || (Number.isFinite(total) && total > 0 && orders.length >= total)) break;
+    }
+    return orders.slice(0, 500);
+  }
+
+  async fetchEbayInventoryItems(accessToken) {
+    const items = [];
+    for (let page = 0; page < 3; page += 1) {
+      const offset = page * 200;
+      const url = `${EBAY_PRODUCTION.inventory}/inventory_item?limit=200&offset=${offset}`;
+      const payload = await this.ebayApiGet(url, accessToken);
+      const batch = payloadItems(payload, ['inventoryItems']);
+      items.push(...batch);
+      const total = Number(payload?.total);
+      if (batch.length < 200 || (Number.isFinite(total) && total > 0 && items.length >= total)) break;
+    }
+    return items.slice(0, 500);
+  }
+
+  async fetchEbayOffers(accessToken, inventoryItems, marketplaceId) {
+    const offers = [];
+    for (let index = 0; index < inventoryItems.length; index += 10) {
+      const batch = inventoryItems.slice(index, index + 10);
+      const results = await Promise.all(batch.map(async item => {
+        const params = new URLSearchParams({ sku: String(item.sku || ''), limit: '25', marketplace_id: marketplaceId });
+        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.inventory}/offer?${params}`, accessToken, { marketplaceId });
+        return payloadItems(payload, ['offers']).map(offer => ({ item, offer }));
+      }));
+      offers.push(...results.flat());
+    }
+    return offers.slice(0, 1000);
+  }
+
+  async fetchEbayMarketing(accessToken, marketplaceId) {
+    const campaignPayload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}/ad_campaign?limit=100&offset=0`, accessToken, { marketplaceId });
+    const campaigns = payloadItems(campaignPayload, ['campaigns']).slice(0, 100);
+    const ads = [];
+    for (let index = 0; index < campaigns.length; index += 5) {
+      const batch = campaigns.slice(index, index + 5);
+      const results = await Promise.all(batch.map(async campaign => {
+        const campaignId = String(campaign.campaignId || '');
+        if (!campaignId) return [];
+        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}/ad_campaign/${encodeURIComponent(campaignId)}/ad?limit=500&offset=0`, accessToken, { marketplaceId });
+        return payloadItems(payload, ['ads']).map(ad => ({ ...ad, campaignId }));
+      }));
+      ads.push(...results.flat());
+    }
+    return { campaigns, ads: ads.slice(0, 5000) };
+  }
+
+  async syncEbayOAuth(state, config) {
+    const now = new Date().toISOString();
+    const accessToken = await this.ebayAccessToken(config);
+    const identity = await this.ebayIdentity(accessToken);
+    const account = String(identity.username || identity.userId || '');
+    if (!account) throw integrationError('eBay did not confirm the connected seller account', 502, 'EBAY_ACCOUNT_UNCONFIRMED');
+    if (account.toLowerCase() !== config.expectedAccount.toLowerCase()) {
+      throw integrationError('eBay reported the wrong seller account', 502, 'EBAY_ACCOUNT_MISMATCH');
+    }
+
+    const [rawOrders, inventoryItems, marketing] = await Promise.all([
+      this.fetchEbayOrders(accessToken),
+      this.fetchEbayInventoryItems(accessToken),
+      this.fetchEbayMarketing(accessToken, config.marketplaceId).catch(() => ({ campaigns: [], ads: [], unavailable: true }))
+    ]);
+    const offerPairs = await this.fetchEbayOffers(accessToken, inventoryItems, config.marketplaceId);
+    const adByListingId = new Map(marketing.ads.map(ad => [String(ad.listingId || ''), ad]));
+    const listings = offerPairs.map(({ item, offer }) => mapEbayOAuthListing(item, offer, adByListingId)).filter(item => item.id);
+    const drafts = listings.filter(item => !item.listingId || item.status.toUpperCase() !== 'PUBLISHED');
+    const published = listings.filter(item => item.listingId && item.status.toUpperCase() === 'PUBLISHED');
+    const orders = rawOrders.map(mapEbayOrder).filter(order => order.id);
+    const fees = rawOrders.map(order => ({
+      orderId: String(order.orderId || ''),
+      amount: nullableNumber(order.totalMarketplaceFee),
+      currency: String(order.totalMarketplaceFee?.currency || order.pricingSummary?.total?.currency || 'GBP')
+    })).filter(record => record.orderId && record.amount !== null);
+    state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
+
+    const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
+    const listingSkus = new Set(published.map(item => item.sku).filter(Boolean));
+    const missingOnEbay = [...shopifySkus].filter(sku => !listingSkus.has(sku));
+    const staleOnEbay = [...listingSkus].filter(sku => !shopifySkus.has(sku));
+    state.ebay = {
+      account,
+      marketplaceId: config.marketplaceId,
+      source: 'ebay-oauth-readonly',
+      listings: published.slice(0, 500),
+      drafts: drafts.slice(0, 500).map(item => ({ id: item.offerId || item.id, title: item.title, sku: item.sku, updatedAt: null })),
+      fees: fees.slice(0, 1000),
+      promotions: marketing.campaigns.slice(0, 500),
+      health: { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
+      coverage: {
+        inventoryApiItems: inventoryItems.length,
+        marketingAvailable: !marketing.unavailable,
+        standardManagerPreserved: true
+      },
+      syncedAt: now
+    };
+    config.connection.status = 'connected';
+    config.connection.lastSyncAt = now;
+    config.connection.lastError = null;
+    config.connection.metadata = {
+      ...(config.connection.metadata || {}),
+      account,
+      marketplaceId: config.marketplaceId,
+      listingCount: published.length,
+      draftCount: drafts.length,
+      channel: 'direct_oauth'
+    };
+    const status = {
+      status: 'connected',
+      detail: `${published.length} Inventory API listings, ${drafts.length} drafts and ${orders.length} recent orders synced directly from eBay read-only. The existing Manager remains unchanged.`,
+      source: 'ebay-oauth-readonly',
+      account,
+      listingCount: published.length,
+      draftCount: drafts.length,
+      orderCount: orders.length,
+      feeRecordCount: fees.length,
+      promotionCount: marketing.campaigns.length,
+      mismatchCount: missingOnEbay.length + staleOnEbay.length,
+      lastSyncAt: now,
+      lastError: null
+    };
+    state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
+    return status;
+  }
+
   async syncEbay(state) {
     const now = new Date().toISOString();
     if (!this.ebayConfigured(state)) {
@@ -564,6 +916,7 @@ export class IntegrationService {
       return status;
     }
     const config = this.ebayConfig(state);
+    if (config.mode === 'direct_oauth') return this.syncEbayOAuth(state, config);
     const statusPayload = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
     const account = String(statusPayload.account || statusPayload.username || statusPayload.ebayUser || '');
     const connected = statusPayload.connected === true || statusPayload.authenticated === true || statusPayload.ebayConnected === true;

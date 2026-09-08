@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   clearSessionCookie,
+  createEbayOAuthStateToken,
   createSessionToken,
   decryptCredentials,
   encryptCredentials,
@@ -10,6 +11,7 @@ import {
   requiresApproval,
   sessionCookie,
   validatePassword,
+  verifyEbayOAuthStateToken,
   verifyPassword,
   verifySessionToken
 } from '../lib/security.mjs';
@@ -51,6 +53,21 @@ test('session tokens are signed, expiring and workspace scoped', () => {
   assert.match(sessionCookie(token), /HttpOnly/);
   assert.match(sessionCookie(token), /SameSite=Strict/);
   assert.match(clearSessionCookie(), /Max-Age=0/);
+});
+
+test('eBay OAuth state is purpose-bound, expiring and tamper resistant', () => {
+  const token = createEbayOAuthStateToken({
+    workspaceId: 'packsmart-solutions',
+    userId: 'packsmart-admin',
+    nonce: 'long-random-oauth-nonce-value-for-test'
+  }, SESSION_SECRET, 300);
+  const payload = verifyEbayOAuthStateToken(token, SESSION_SECRET);
+  assert.equal(payload.workspaceId, 'packsmart-solutions');
+  assert.equal(payload.userId, 'packsmart-admin');
+  assert.equal(payload.purpose, 'ebay-readonly-oauth');
+  assert.equal(verifyEbayOAuthStateToken(token + 'tampered', SESSION_SECRET), null);
+  assert.equal(verifyEbayOAuthStateToken(token, SESSION_SECRET, payload.exp + 1), null);
+  assert.equal(verifySessionToken(token, SESSION_SECRET), null);
 });
 
 test('passwords use a salted scrypt hash and enforce production strength', () => {
