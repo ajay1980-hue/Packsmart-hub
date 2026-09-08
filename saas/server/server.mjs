@@ -36,7 +36,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.3.1';
+const VERSION = '4.3.2';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -427,14 +427,33 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return false;
   }
 
+  function briefSourceSignature(state) {
+    const source = {
+      products: state.products || [],
+      orders: state.orders || [],
+      economics: state.economics || {},
+      advertisingCosts: state.advertisingCosts || [],
+      approvals: state.approvals || [],
+      integrationStatus: state.integrationStatus || {},
+      automations: state.automations || {},
+      suppliers: state.suppliers || []
+    };
+    return crypto.createHash('sha256').update(JSON.stringify(source)).digest('hex').slice(0, 32);
+  }
+
   function currentBrief(state) {
     const today = new Date().toISOString().slice(0, 10);
-    const existing = (state.dailyBriefs || []).find(brief => String(brief.generatedAt || '').startsWith(today) && brief.logic === 'deterministic-v2');
+    const sourceSignature = briefSourceSignature(state);
+    const existing = (state.dailyBriefs || []).find(brief =>
+      String(brief.generatedAt || '').startsWith(today) &&
+      brief.logic === 'deterministic-v2' &&
+      brief.sourceSignature === sourceSignature
+    );
     if (existing) return existing;
-    const brief = buildDailyBrief(state, {
+    const brief = { ...buildDailyBrief(state, {
       lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
       marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
-    });
+    }), sourceSignature };
     state.dailyBriefs = [brief, ...(state.dailyBriefs || []).filter(item => !String(item.generatedAt || '').startsWith(today))].slice(0, 30);
     addAudit(state, { type: 'daily_operations_brief_generated', actor: 'system', detail: { briefId: brief.id, logic: brief.logic } });
     return brief;

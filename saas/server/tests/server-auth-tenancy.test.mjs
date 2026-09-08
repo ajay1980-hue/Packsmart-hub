@@ -72,7 +72,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=4\.3\.0/);
+  assert.match(String(home.payload), /app\.js\?v=4\.3\.2/);
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
@@ -132,6 +132,11 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   });
   assert.equal(economics.response.status, 200);
   assert.equal(economics.payload.economics.landed, 2.1);
+
+  const refreshedBrief = await request('/api/bootstrap', { cookie });
+  assert.equal(refreshedBrief.response.status, 200);
+  assert.notEqual(refreshedBrief.payload.brief.id, bootstrap.payload.brief.id, 'the daily brief must refresh when its source data changes');
+  assert.match(refreshedBrief.payload.brief.sourceSignature, /^[a-f0-9]{32}$/);
 
   const supplier = await request('/api/suppliers', {
     method: 'POST', cookie, csrf,
