@@ -836,12 +836,28 @@ export class IntegrationService {
       throw integrationError('eBay reported the wrong seller account', 502, 'EBAY_ACCOUNT_MISMATCH');
     }
 
+    // A verified seller connection must remain useful even when one optional
+    // eBay surface is unavailable for the account. For example, the Inventory
+    // API only returns records managed through that API, while Fulfilment and
+    // Marketing access can vary independently. Identity and token failures
+    // remain fatal; downstream read surfaces degrade independently.
+    const readErrors = {};
+    const optionalRead = async (surface, operation, fallback) => {
+      try {
+        return await operation();
+      } catch {
+        readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
+        return fallback;
+      }
+    };
     const [rawOrders, inventoryItems, marketing] = await Promise.all([
-      this.fetchEbayOrders(accessToken),
-      this.fetchEbayInventoryItems(accessToken),
-      this.fetchEbayMarketing(accessToken, config.marketplaceId).catch(() => ({ campaigns: [], ads: [], unavailable: true }))
+      optionalRead('orders', () => this.fetchEbayOrders(accessToken), []),
+      optionalRead('inventory', () => this.fetchEbayInventoryItems(accessToken), []),
+      optionalRead('marketing', () => this.fetchEbayMarketing(accessToken, config.marketplaceId), { campaigns: [], ads: [] })
     ]);
-    const offerPairs = await this.fetchEbayOffers(accessToken, inventoryItems, config.marketplaceId);
+    const offerPairs = readErrors.inventory
+      ? []
+      : await optionalRead('offers', () => this.fetchEbayOffers(accessToken, inventoryItems, config.marketplaceId), []);
     const adByListingId = new Map(marketing.ads.map(ad => [String(ad.listingId || ''), ad]));
     const listings = offerPairs.map(({ item, offer }) => mapEbayOAuthListing(item, offer, adByListingId)).filter(item => item.id);
     const drafts = listings.filter(item => !item.listingId || item.status.toUpperCase() !== 'PUBLISHED');
@@ -869,14 +885,22 @@ export class IntegrationService {
       health: { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
       coverage: {
         inventoryApiItems: inventoryItems.length,
-        marketingAvailable: !marketing.unavailable,
+        ordersAvailable: !readErrors.orders,
+        inventoryAvailable: !readErrors.inventory,
+        offersAvailable: !readErrors.inventory && !readErrors.offers,
+        marketingAvailable: !readErrors.marketing,
+        unavailableSurfaces: Object.keys(readErrors),
         standardManagerPreserved: true
       },
       syncedAt: now
     };
+    const unavailable = Object.keys(readErrors);
+    const readWarning = unavailable.length
+      ? `Some eBay read data is currently unavailable: ${unavailable.join(', ')}.`
+      : null;
     config.connection.status = 'connected';
     config.connection.lastSyncAt = now;
-    config.connection.lastError = null;
+    config.connection.lastError = readWarning;
     config.connection.metadata = {
       ...(config.connection.metadata || {}),
       account,
@@ -887,7 +911,7 @@ export class IntegrationService {
     };
     const status = {
       status: 'connected',
-      detail: `${published.length} Inventory API listings, ${drafts.length} drafts and ${orders.length} recent orders synced directly from eBay read-only. The existing Manager remains unchanged.`,
+      detail: `${published.length} Inventory API listings, ${drafts.length} drafts and ${orders.length} recent orders synced directly from eBay read-only.${readWarning ? ` ${readWarning}` : ''} The existing Manager remains unchanged.`,
       source: 'ebay-oauth-readonly',
       account,
       listingCount: published.length,
@@ -897,7 +921,7 @@ export class IntegrationService {
       promotionCount: marketing.campaigns.length,
       mismatchCount: missingOnEbay.length + staleOnEbay.length,
       lastSyncAt: now,
-      lastError: null
+      lastError: readWarning
     };
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;

@@ -36,7 +36,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.3.0';
+const VERSION = '4.3.1';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
