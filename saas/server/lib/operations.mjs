@@ -173,9 +173,10 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   const lowMargin = covered.filter(item => item.margin < item.marginFloor);
   const negativeMargin = covered.filter(item => item.contribution < 0);
   const stockRisks = productRows.filter(item =>
-    String(item.productStatus).toLowerCase() === 'active' && item.inventory !== null && item.inventory <= lowStockThreshold
+    String(item.productStatus).toLowerCase() === 'active' &&
+    ((item.inventory !== null && item.inventory <= lowStockThreshold) || item.available === false)
   );
-  const outOfStock = stockRisks.filter(item => item.inventory <= 0);
+  const outOfStock = stockRisks.filter(item => item.available === false || (item.inventory !== null && item.inventory <= 0));
 
   const orders = state.orders || [];
   const today = summarizeOrders(orders, economics, order => sameUtcDay(order.createdAt, now));

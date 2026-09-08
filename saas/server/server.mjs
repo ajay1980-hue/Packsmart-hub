@@ -36,7 +36,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.3.2';
+const VERSION = '4.3.3';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -408,8 +408,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   async function refreshOperationalState(state, { force = false } = {}) {
     const lastShopify = Date.parse(state.integrationStatus?.shopify?.lastSyncAt || 0);
     const stale = !Number.isFinite(lastShopify) || Date.now() - lastShopify > clamp(env.SYNC_INTERVAL_MS, 60000, 86400000, 15 * 60 * 1000);
-    const shopifyLiveConfigured = integrations.shopifyConfigured(state);
-    if (force || !state.products?.length || (shopifyLiveConfigured && stale)) {
+    const shopifyRefreshAvailable = integrations.shopifyRefreshAvailable(state);
+    const needsLiveCatalogueUpgrade = state.integrationStatus?.shopify?.source === 'repository-snapshot' &&
+      (integrations.shopifyConfigured(state) || Boolean(integrations.shopifyPublicCatalogueUrl(state)));
+    if (shopifyRefreshAvailable && (force || !state.products?.length || stale || needsLiveCatalogueUpgrade)) {
       try { await integrations.syncShopify(state); }
       catch (error) {
         state.integrationStatus = {

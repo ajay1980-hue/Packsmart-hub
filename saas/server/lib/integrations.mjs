@@ -126,7 +126,7 @@ function mapAdminProduct(product) {
     inventory: Number.isFinite(Number(product.totalInventory)) ? Number(product.totalInventory) : null,
     updatedAt: product.updatedAt || null,
     variants: (product.variants?.nodes || []).map(variant => ({
-      id: String(variant.id),
+      id: String(variant.sku || variant.id),
       externalId: String(variant.id),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
@@ -149,10 +149,10 @@ function mapSnapshotProduct(product) {
     productType: String(product.product_type || product.productType || ''),
     description: String(product.description || product.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
     image: product.image?.src || product.image || product.images?.[0]?.src || null,
-    inventory: null,
+    inventory: Number.isFinite(Number(product.inventory ?? product.totalInventory)) ? Number(product.inventory ?? product.totalInventory) : null,
     updatedAt: product.updated_at || null,
     variants: (product.variants || []).map(variant => ({
-      id: String(variant.id || variant.sku || `${product.id}-${variant.title}`),
+      id: String(variant.sku || variant.id || `${product.id}-${variant.title}`),
       externalId: String(variant.id || variant.sku || ''),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
@@ -160,6 +160,39 @@ function mapSnapshotProduct(product) {
       inventory: Number.isFinite(Number(variant.inventory_quantity)) ? Number(variant.inventory_quantity) : null,
       available: variant.available !== false,
       image: variant.featured_image?.src || product.image?.src || product.image || product.images?.[0]?.src || null
+    }))
+  };
+}
+
+function shopifyGid(resource, value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  return raw.startsWith('gid://shopify/') ? raw : `gid://shopify/${resource}/${raw}`;
+}
+
+function mapPublicProduct(product) {
+  const productImage = product.image?.src || product.featured_image?.src || product.featured_image || product.images?.[0]?.src || null;
+  return {
+    id: shopifyGid('Product', product.id),
+    externalId: shopifyGid('Product', product.id),
+    provider: 'shopify',
+    title: String(product.title || ''),
+    handle: String(product.handle || ''),
+    status: 'active',
+    productType: String(product.product_type || ''),
+    description: String(product.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+    image: productImage,
+    inventory: null,
+    updatedAt: product.updated_at || null,
+    variants: (product.variants || []).slice(0, 100).map(variant => ({
+      id: String(variant.sku || shopifyGid('ProductVariant', variant.id)),
+      externalId: variant.id ? shopifyGid('ProductVariant', variant.id) : String(variant.sku || ''),
+      title: String(variant.title || 'Default'),
+      sku: String(variant.sku || ''),
+      price: Number(variant.price || 0),
+      inventory: null,
+      available: variant.available !== false,
+      image: variant.featured_image?.src || productImage
     }))
   };
 }
@@ -344,6 +377,21 @@ export class IntegrationService {
     );
   }
 
+  shopifyPublicCatalogueUrl(state) {
+    const workspaceId = String(state?.workspace?.id || '');
+    const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    const disabled = ['0', 'false', 'no', 'off'].includes(String(this.env.SHOPIFY_PUBLIC_SYNC_ENABLED || '').toLowerCase());
+    if (workspaceId !== environmentWorkspace || disabled) return null;
+    const origin = validateRemoteBase(this.env.SHOPIFY_PUBLIC_STOREFRONT_URL || 'https://packsmartsolutions.com');
+    return new URL('/products.json?limit=250', `${origin}/`).toString();
+  }
+
+  shopifyRefreshAvailable(state) {
+    const workspaceId = String(state?.workspace?.id || '');
+    const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    return this.shopifyConfigured(state) || workspaceId === environmentWorkspace;
+  }
+
   shopifyConfig(state) {
     const workspaceId = String(state?.workspace?.id || '');
     const connection = this.shopifyConnection(state);
@@ -491,6 +539,24 @@ export class IntegrationService {
     return orders;
   }
 
+  async fetchPublicShopifyProducts(state) {
+    const url = this.shopifyPublicCatalogueUrl(state);
+    if (!url) throw integrationError('Shopify public catalogue is not configured for this workspace', 503, 'SHOPIFY_NOT_CONFIGURED');
+    const response = await this.fetch(url, {
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Packsmart-Ops/4.3'
+      },
+      redirect: 'error',
+      signal: AbortSignal.timeout(20000)
+    });
+    const payload = await responseJson(response, 'Shopify public catalogue');
+    const products = Array.isArray(payload?.products) ? payload.products.slice(0, 250).map(mapPublicProduct) : [];
+    if (!products.length) throw integrationError('Shopify public catalogue returned no products', 502, 'SHOPIFY_PUBLIC_CATALOGUE_EMPTY');
+    return products;
+  }
+
   async loadShopifySnapshot() {
     if (!this.repoRoot) throw integrationError('Shopify snapshot is unavailable', 503, 'SHOPIFY_SNAPSHOT_UNAVAILABLE');
     const url = new URL('ebay-manager/shopify-products.json', `file://${this.repoRoot}/`);
@@ -527,6 +593,62 @@ export class IntegrationService {
           detail: `${products.length} products and ${orders.length} recent orders synced read-only.`,
           source: 'admin-graphql',
           lastSyncAt: now,
+          lastError: null
+        }
+      };
+      return state.integrationStatus.shopify;
+    }
+
+    const publicCatalogueUrl = this.shopifyPublicCatalogueUrl(state);
+    if (publicCatalogueUrl) {
+      try {
+        const products = await this.fetchPublicShopifyProducts(state);
+        state.products = products;
+        state.integrationStatus = {
+          ...(state.integrationStatus || {}),
+          shopify: {
+            status: 'degraded',
+            detail: `${products.length} live products synced read-only from Packsmart's Shopify storefront. Prices, images and availability are current; exact inventory and recent orders need the private store connection.`,
+            source: 'public-storefront',
+            lastSyncAt: now,
+            lastError: null,
+            readOnly: true,
+            exactInventory: false,
+            ordersAvailable: false
+          }
+        };
+        return state.integrationStatus.shopify;
+      } catch (error) {
+        const snapshot = await this.loadShopifySnapshot();
+        state.products = snapshot.products;
+        state.integrationStatus = {
+          ...(state.integrationStatus || {}),
+          shopify: {
+            status: 'degraded',
+            detail: `${snapshot.products.length} products loaded from the safe repository snapshot after the live storefront feed was unavailable.`,
+            source: 'repository-snapshot',
+            snapshotSyncedAt: snapshot.syncedAt,
+            lastSyncAt: now,
+            lastError: error.code || 'SHOPIFY_PUBLIC_SYNC_FAILED',
+            readOnly: true,
+            exactInventory: false,
+            ordersAvailable: false
+          }
+        };
+        return state.integrationStatus.shopify;
+      }
+    }
+
+    const workspaceId = String(state?.workspace?.id || '');
+    const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
+    if (workspaceId !== environmentWorkspace) {
+      state.integrationStatus = {
+        ...(state.integrationStatus || {}),
+        shopify: {
+          status: 'not_configured',
+          detail: 'Connect this workspace to Shopify to import its own catalogue and orders.',
+          source: 'unconfigured',
+          lastSyncAt: null,
           lastError: null
         }
       };

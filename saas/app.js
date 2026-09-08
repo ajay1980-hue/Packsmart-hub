@@ -248,8 +248,8 @@
     if (filter === 'profitable') return item.status === 'profitable';
     if (filter === 'below-floor') return item.status === 'below-floor';
     if (filter === 'loss-making') return item.status === 'loss-making';
-    if (filter === 'low-stock') return item.inventory !== null && item.inventory <= Number(state.data.settings && state.data.settings.lowStockThreshold || 20);
-    if (filter === 'out-of-stock') return item.inventory !== null && item.inventory <= 0;
+    if (filter === 'low-stock') return (item.inventory !== null && item.inventory <= Number(state.data.settings && state.data.settings.lowStockThreshold || 20)) || item.available === false;
+    if (filter === 'out-of-stock') return (item.inventory !== null && item.inventory <= 0) || item.available === false;
     return true;
   }
 
@@ -346,8 +346,9 @@
     const canConfigure = ['owner', 'admin'].includes(String(state.data.user?.role || ''));
     $('#shopify-connection-card').classList.toggle('hidden', !canConfigure);
     const connectionState = $('#shopify-connection-state');
-    connectionState.textContent = shopifyStatus?.status === 'connected' ? 'Connected · read-only' : shopifyConnection ? 'Saved · verification needed' : 'Not configured';
-    connectionState.className = 'tag ' + (shopifyStatus?.status === 'connected' ? 'good' : shopifyConnection ? 'warn' : 'neutral');
+    const publicCatalogueLive = shopifyStatus?.source === 'public-storefront';
+    connectionState.textContent = shopifyStatus?.status === 'connected' ? 'Connected · read-only' : publicCatalogueLive ? 'Live catalogue · read-only' : shopifyConnection ? 'Saved · verification needed' : 'Not configured';
+    connectionState.className = 'tag ' + (shopifyStatus?.status === 'connected' ? 'good' : publicCatalogueLive || shopifyConnection ? 'warn' : 'neutral');
     const savedDomain = shopifyConnection?.metadata?.shopDomain;
     if (savedDomain) $('#shopify-connection-form').storeDomain.value = savedDomain;
     const ebayOauth = state.data.ebayOAuth || {};
@@ -389,7 +390,11 @@
     const d = state.data.dashboard || {};
     $('#seo-issue-list').innerHTML = issueRows(d.seoIssueItems || [], item => '<button class="issue-row" data-view-link="profit" data-target-filter="all"><span><b>' + escapeHtml(item.product) + '</b><small>' + escapeHtml(item.issue) + '</small></span><span class="tag warn">Review</span></button>');
     $('#customer-issue-list').innerHTML = issueRows(d.customerServiceItems || [], item => '<button class="issue-row" data-view-link="orders" data-target-filter="open"><span><b>' + escapeHtml(item.name || item.id) + '</b><small>' + escapeHtml(statusLabel(item.financialStatus)) + ' · ' + escapeHtml(statusLabel(item.fulfillmentStatus)) + ' · ' + date(item.createdAt) + '</small></span><span class="tag warn">Review</span></button>');
-    $('#stock-issue-list').innerHTML = issueRows(d.stockRiskItems || [], item => '<button class="issue-row" data-view-link="profit" data-target-filter="low-stock"><span><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.sku) + ' · stock ' + escapeHtml(item.inventory) + '</small></span><span class="tag ' + (item.inventory <= 0 ? 'bad' : 'warn') + '">' + (item.inventory <= 0 ? 'Out' : 'Low') + '</span></button>');
+    $('#stock-issue-list').innerHTML = issueRows(d.stockRiskItems || [], item => {
+      const out = item.available === false || (item.inventory !== null && item.inventory <= 0);
+      const stock = item.inventory === null ? (out ? 'unavailable' : 'quantity unknown') : item.inventory;
+      return '<button class="issue-row" data-view-link="profit" data-target-filter="low-stock"><span><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.sku) + ' · stock ' + escapeHtml(stock) + '</small></span><span class="tag ' + (out ? 'bad' : 'warn') + '">' + (out ? 'Out' : 'Low') + '</span></button>';
+    });
     $('#cost-issue-list').innerHTML = issueRows(d.missingCostItems || [], item => '<button class="issue-row" data-view-link="profit" data-target-filter="missing-costs"><span><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.sku) + ' · ' + escapeHtml((item.missingFields || []).join(', ')) + '</small></span><span class="tag warn">Incomplete</span></button>');
   }
 

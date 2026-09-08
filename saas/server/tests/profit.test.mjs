@@ -103,3 +103,15 @@ test('business dashboard separates windows, channels, stock value and profit cov
   assert.equal(result.stockValue, 8);
   assert.equal(result.costCoverage, 100);
 });
+
+test('storefront availability flags an out-of-stock risk without inventing an exact quantity', () => {
+  const state = seedWorkspaceState({});
+  state.products = [{
+    id: 'product-availability', title: 'Protective Mailer', handle: 'mailer', status: 'active',
+    variants: [{ id: 'variant-availability', sku: 'PS-AVAIL', title: 'Pack 50', price: 5, inventory: null, available: false }]
+  }];
+  const result = deriveOperations(state, { now: new Date('2026-09-08T12:00:00Z') });
+  assert.equal(result.stockRisks, 1);
+  assert.equal(result.outOfStock, 1);
+  assert.equal(result.stockRiskItems[0].inventory, null);
+});

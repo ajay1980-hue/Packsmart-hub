@@ -47,6 +47,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
     PACKSMART_ADMIN_PASSWORD: BOOTSTRAP_PASSWORD,
     SESSION_SECRET,
     CREDENTIALS_KEY: 'server-integration-credential-key-more-than-thirty-two-characters',
+    SHOPIFY_PUBLIC_SYNC_ENABLED: 'false',
     BETA_SIGNUPS_ENABLED: 'false',
     BILLING_CHECKOUT_ENABLED: 'false'
   });
@@ -72,7 +73,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=4\.3\.2/);
+  assert.match(String(home.payload), /app\.js\?v=4\.3\.3/);
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
@@ -345,6 +346,7 @@ test('eBay read-only OAuth uses a one-time callback while preserving the existin
     PACKSMART_ADMIN_PASSWORD: BOOTSTRAP_PASSWORD,
     SESSION_SECRET,
     CREDENTIALS_KEY: credentialsKey,
+    SHOPIFY_PUBLIC_SYNC_ENABLED: 'false',
     BETA_SIGNUPS_ENABLED: 'false',
     BILLING_CHECKOUT_ENABLED: 'false',
     EBAY_OAUTH_ENABLED: 'true',
@@ -430,6 +432,7 @@ test('one-time owner activation sets a private password without exposing the boo
     OWNER_ACTIVATION_TOKEN: ACTIVATION_TOKEN,
     SESSION_SECRET,
     CREDENTIALS_KEY: 'server-integration-credential-key-more-than-thirty-two-characters',
+    SHOPIFY_PUBLIC_SYNC_ENABLED: 'false',
     BETA_SIGNUPS_ENABLED: 'false',
     BILLING_CHECKOUT_ENABLED: 'false'
   });

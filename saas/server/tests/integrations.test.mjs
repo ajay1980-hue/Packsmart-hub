@@ -12,13 +12,67 @@ import { encryptCredentials } from '../lib/security.mjs';
 const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
 
 test('Shopify snapshot remains a safe server-side fallback', async () => {
-  const service = new IntegrationService({}, { repoRoot });
+  const service = new IntegrationService({ SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, { repoRoot });
   const state = { workspace: { id: 'packsmart-solutions' }, products: [], orders: [], integrationStatus: {} };
   const status = await service.syncShopify(state);
   assert.equal(status.status, 'degraded');
   assert.equal(status.source, 'repository-snapshot');
   assert.ok(state.products.length > 0);
   assert.ok(state.products.every(product => Array.isArray(product.variants)));
+});
+
+test('Packsmart customer-zero syncs the live public Shopify catalogue without credentials or writes', async () => {
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    requests.push({ url, options });
+    return Response.json({ products: [{
+      id: 15952658465102,
+      title: 'Grey Mailing Bags | 230 × 300mm (9 × 12in)',
+      handle: 'grey-mailing-bags-230-x-300mm-9-x-12',
+      product_type: 'Mailing Bags',
+      body_html: '<p>Strong grey mailing bags for ecommerce orders.</p>',
+      updated_at: '2026-09-08T07:00:30Z',
+      image: { src: 'https://cdn.shopify.com/product.jpg' },
+      variants: [{
+        id: 60415428755790,
+        title: 'Pack of 50',
+        sku: 'GM-230x300-50',
+        price: '2.50',
+        available: false
+      }]
+    }] });
+  };
+  const service = new IntegrationService({}, { fetchImpl, repoRoot });
+  const state = { workspace: { id: 'packsmart-solutions' }, products: [], orders: [], integrationStatus: {} };
+  const status = await service.syncShopify(state);
+  assert.equal(status.status, 'degraded');
+  assert.equal(status.source, 'public-storefront');
+  assert.equal(status.readOnly, true);
+  assert.equal(status.exactInventory, false);
+  assert.equal(state.products[0].id, 'gid://shopify/Product/15952658465102');
+  assert.equal(state.products[0].variants[0].id, 'GM-230x300-50');
+  assert.equal(state.products[0].variants[0].externalId, 'gid://shopify/ProductVariant/60415428755790');
+  assert.equal(state.products[0].variants[0].inventory, null);
+  assert.equal(state.products[0].variants[0].available, false);
+  assert.equal(state.products[0].description, 'Strong grey mailing bags for ecommerce orders.');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://packsmartsolutions.com/products.json?limit=250');
+  assert.equal(requests[0].options.method, 'GET');
+  assert.equal(requests[0].options.redirect, 'error');
+  assert.equal('Authorization' in requests[0].options.headers, false);
+});
+
+test('the safe repository snapshot remains available if the live public catalogue fails', async () => {
+  const service = new IntegrationService({}, {
+    repoRoot,
+    fetchImpl: async () => Response.json({ error: 'temporarily unavailable' }, { status: 503 })
+  });
+  const state = { workspace: { id: 'packsmart-solutions' }, products: [], orders: [], integrationStatus: {} };
+  const status = await service.syncShopify(state);
+  assert.equal(status.status, 'degraded');
+  assert.equal(status.source, 'repository-snapshot');
+  assert.ok(state.products.length > 0);
+  assert.ok(status.lastError);
 });
 
 test('Shopify Admin sync imports products, variants, inventory, images and orders read-only', async () => {
@@ -86,6 +140,8 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
   const status = await service.syncShopify(state);
   assert.equal(status.status, 'connected');
   assert.equal(status.source, 'admin-graphql');
+  assert.equal(state.products[0].variants[0].id, 'TAPE-BROWN');
+  assert.equal(state.products[0].variants[0].externalId, 'gid://shopify/ProductVariant/2');
   assert.equal(state.products[0].variants[0].sku, 'TAPE-BROWN');
   assert.equal(state.products[0].variants[0].inventory, 42);
   assert.equal(state.products[0].variants[0].image, 'https://cdn.shopify.com/product.jpg');
@@ -189,7 +245,9 @@ test('a future tenant never inherits Packsmart Shopify environment credentials',
   const state = { workspace: { id: 'beta-workspace' }, products: [], orders: [], integrationStatus: {}, connections: [] };
   assert.equal(service.shopifyConfigured(state), false);
   const status = await service.syncShopify(state);
-  assert.equal(status.source, 'repository-snapshot');
+  assert.equal(status.source, 'unconfigured');
+  assert.equal(status.status, 'not_configured');
+  assert.equal(state.products.length, 0);
   assert.equal(remoteRequests, 0);
 });
 
