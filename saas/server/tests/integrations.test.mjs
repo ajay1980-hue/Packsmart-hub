@@ -73,6 +73,7 @@ test('the safe repository snapshot remains available if the live public catalogu
   assert.equal(status.source, 'repository-snapshot');
   assert.ok(state.products.length > 0);
   assert.ok(status.lastError);
+  assert.ok(status.publicAttemptedAt);
 });
 
 test('Shopify Admin sync imports products, variants, inventory, images and orders read-only', async () => {

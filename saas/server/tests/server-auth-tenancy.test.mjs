@@ -73,7 +73,10 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=4\.3\.3/);
+  assert.match(String(home.payload), /app\.js\?v=4\.3\.4/);
+  const head = await request('/', { method: 'HEAD' });
+  assert.equal(head.response.status, 200);
+  assert.deepEqual(head.payload, {});
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);

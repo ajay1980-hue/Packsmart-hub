@@ -36,7 +36,7 @@ import {
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.3.3';
+const VERSION = '4.3.4';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -330,7 +330,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     catch { throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'JSON_INVALID' }); }
   }
 
-  async function serveStatic(pathname, res) {
+  async function serveStatic(pathname, res, { head = false } = {}) {
     const item = STATIC_FILES.get(pathname);
     if (!item) return false;
     const [relative, contentType] = item;
@@ -342,7 +342,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
       });
-      res.end(body);
+      res.end(head ? undefined : body);
     } catch {
       send(res, 404, { error: 'Static file not found', code: 'NOT_FOUND' });
     }
@@ -410,7 +410,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     const stale = !Number.isFinite(lastShopify) || Date.now() - lastShopify > clamp(env.SYNC_INTERVAL_MS, 60000, 86400000, 15 * 60 * 1000);
     const shopifyRefreshAvailable = integrations.shopifyRefreshAvailable(state);
     const needsLiveCatalogueUpgrade = state.integrationStatus?.shopify?.source === 'repository-snapshot' &&
-      (integrations.shopifyConfigured(state) || Boolean(integrations.shopifyPublicCatalogueUrl(state)));
+      Boolean(integrations.shopifyPublicCatalogueUrl(state)) &&
+      !state.integrationStatus?.shopify?.publicAttemptedAt;
     if (shopifyRefreshAvailable && (force || !state.products?.length || stale || needsLiveCatalogueUpgrade)) {
       try { await integrations.syncShopify(state); }
       catch (error) {
@@ -1294,7 +1295,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
 
-      if (req.method === 'GET' && await serveStatic(pathname, res)) return;
+      if (['GET', 'HEAD'].includes(req.method) && await serveStatic(pathname, res, { head: req.method === 'HEAD' })) return;
       send(res, 404, { error: 'Not found', code: 'NOT_FOUND' });
     } catch (error) {
       const safe = sanitizeError(error);
