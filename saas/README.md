@@ -13,6 +13,9 @@ Packsmart Ops is the private customer-zero operations cockpit for Packsmart Solu
 - True per-SKU economics for landed, packing, delivery and channel costs, plus margin visibility and profit guard recommendations.
 - Human approval records for supplier orders, advertising spend, refunds, major price changes, paid services, risky marketplace actions and social-commerce publishing.
 - Deterministic daily operations brief covering sales, orders, stock, margins, pricing, SEO, customer-service proxies, approvals and recommended actions.
+- Runvara Commander with natural-language routing to specialist Stock, Pricing, Product Scout, Supplier, eBay, Shopify, SEO, Marketing, Customer Service, Sales, Finance and Health Watch workers.
+- Concurrent, server-side specialist analysis with confidence, safe failure reporting, persistent activity history and configurable autonomy levels.
+- Mobile-first AI Team command screen; every specialist reports `NOT CONNECTED` when a required live source is unavailable instead of inventing results.
 - Prepared social-commerce channel registry for Facebook and Instagram Shops, TikTok Shop, Pinterest Shopping, Google and YouTube Shopping, and WhatsApp Business.
 - Prepared Stripe Starter, Growth and Pro architecture. Packsmart customer-zero is always internal/free, and checkout is disabled by default.
 - Feature-flagged beta account/workspace onboarding. It stays closed until customer-zero is stable.
@@ -23,6 +26,7 @@ Packsmart Ops is the private customer-zero operations cockpit for Packsmart Solu
 - Shopify and eBay synchronization are read-only.
 - Marketplace OAuth refresh tokens, Supabase service-role credentials, Stripe keys and AI provider keys never enter browser code or browser storage.
 - Social publishing, advertising changes, promotions, refunds, supplier orders and financially sensitive writes remain approval-gated.
+- AI Team v1 performs analysis and preparation only. Agent commands never execute external actions.
 - The Android app and existing eBay OAuth/backend are outside this deployment and must remain unchanged.
 
 ## Local verification

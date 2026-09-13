@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=4.3.0">
+  <link rel="stylesheet" href="/styles.css?v=5.0.0">
 </head>
 <body>
   <section id="login-screen" class="auth-screen">
@@ -46,6 +46,7 @@
       <div class="brand-lockup"><span class="brand-mark">PS</span><div><strong>Packsmart Ops</strong><small>Runvara customer zero</small></div></div>
       <nav id="main-nav" aria-label="Primary">
         <button class="nav-item active" data-view="overview"><span>◆</span> Overview</button>
+        <button class="nav-item" data-view="ai-team"><span>✦</span> AI Team</button>
         <button class="nav-item" data-view="profit"><span>£</span> Products &amp; Profit</button>
         <button class="nav-item" data-view="orders"><span>▤</span> Orders</button>
         <button class="nav-item" data-view="suppliers"><span>▣</span> Suppliers &amp; Costs</button>
@@ -106,6 +107,16 @@
           <article class="card"><div class="section-head"><div><p class="eyebrow">PRODUCT ECONOMICS</p><h2>Most profitable</h2></div><button class="text-button" data-view-link="profit" data-target-filter="profitable">View products</button></div><div id="best-products" class="ranking-list"></div></article>
           <article class="card"><div class="section-head"><div><p class="eyebrow">MARGIN RISK</p><h2>Needs attention</h2></div><button class="text-button" data-view-link="profit" data-target-filter="below-floor">Review</button></div><div id="risk-products" class="ranking-list"></div></article>
         </div>
+      </section>
+
+      <section id="view-ai-team" class="view">
+        <article class="card command-card">
+          <div><p class="eyebrow">RUNVARA COMMANDER</p><h2>What should the team handle?</h2><p class="muted">The Commander routes each request to the relevant specialists. Read-only analysis can run immediately; money, refunds, live publishing and risky changes remain approval-gated.</p></div>
+          <form id="commander-form" class="command-form"><label for="commander-input">Quick command</label><div><input id="commander-input" name="command" maxlength="1000" placeholder="Sort Packsmart out today." required><button class="primary" type="submit">Send to team</button></div><p id="commander-error" class="form-error" role="alert"></p></form>
+          <div id="commander-result" class="commander-result hidden"></div>
+        </article>
+        <article class="card"><div class="section-head"><div><p class="eyebrow">AI TEAM</p><h2>Specialist workers</h2></div><span class="tag good">Approval protected</span></div><div id="agent-grid" class="agent-grid"></div></article>
+        <article class="card"><div class="section-head"><div><p class="eyebrow">ACTIVITY FEED</p><h2>Latest agent work</h2></div></div><div id="agent-activity" class="activity-feed"></div></article>
       </section>
 
       <section id="view-profit" class="view">
@@ -209,6 +220,6 @@
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
-  <script src="/app.js?v=4.3.6"></script>
+  <script src="/app.js?v=5.0.0"></script>
 </body>
 </html>

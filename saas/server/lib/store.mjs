@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultAutomations } from './operations.mjs';
+import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 
 export function seedWorkspaceState(env = process.env, options = {}) {
@@ -11,7 +12,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     workspace: {
       id: workspaceId,
       name: options.name || (workspaceId === 'packsmart-solutions' ? 'Packsmart Solutions Ltd' : 'New business'),
@@ -57,6 +58,9 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     },
     marketplaceSettings: {},
     automations: defaultAutomations(),
+    agentSettings: defaultAgentSettings(),
+    agentRuns: [],
+    agentActivity: [],
     approvals: [],
     audit: [{
       id: id('audit'),
@@ -109,7 +113,7 @@ export function upgradeState(state, env = process.env) {
   const upgraded = {
     ...seeded,
     ...(state || {}),
-    schemaVersion: 4,
+    schemaVersion: 5,
     workspace: { ...seeded.workspace, ...(state?.workspace || {}), updatedAt: state?.workspace?.updatedAt || new Date().toISOString() },
     users: Array.isArray(state?.users) && state.users.length ? state.users.map(user => {
       const upgradedUser = { active: true, sessionVersion: 1, passwordHash: null, ...user };
@@ -128,6 +132,9 @@ export function upgradeState(state, env = process.env) {
     settings: { ...seeded.settings, ...(state?.settings || {}) },
     marketplaceSettings: state?.marketplaceSettings && typeof state.marketplaceSettings === 'object' ? state.marketplaceSettings : {},
     automations: { ...defaultAutomations(), ...(state?.automations || {}) },
+    agentSettings: { ...defaultAgentSettings(), ...(state?.agentSettings || {}) },
+    agentRuns: Array.isArray(state?.agentRuns) ? state.agentRuns : [],
+    agentActivity: Array.isArray(state?.agentActivity) ? state.agentActivity : [],
     approvals: Array.isArray(state?.approvals) ? state.approvals : [],
     audit: Array.isArray(state?.audit) ? state.audit : seeded.audit,
     dailyBriefs: Array.isArray(state?.dailyBriefs) ? state.dailyBriefs : [],

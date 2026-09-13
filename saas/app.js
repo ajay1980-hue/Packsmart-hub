@@ -148,7 +148,7 @@
     state.view = view;
     $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Sales Channels', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Operations Issues', audit: 'Audit & Account' };
+    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Sales Channels', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Operations Issues', audit: 'Audit & Account' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -166,7 +166,7 @@
   function statusClass(status) {
     if (['connected', 'ready', 'configured', 'deterministic', 'internal', 'profitable', 'confirmed-costs'].includes(status)) return 'good';
     if (['error', 'failed', 'loss-making'].includes(status)) return 'bad';
-    if (['degraded', 'not_configured', 'dormant', 'configured_disabled', 'below-floor', 'missing-costs', 'incomplete', 'estimated-costs'].includes(status)) return 'warn';
+    if (['warning', 'needs approval', 'degraded', 'not_configured', 'dormant', 'configured_disabled', 'below-floor', 'missing-costs', 'incomplete', 'estimated-costs'].includes(status)) return 'warn';
     return 'neutral';
   }
 
@@ -407,11 +407,18 @@
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
   }
 
+  function renderAiTeam() {
+    const team = state.data.aiTeam || [];
+    $('#agent-grid').innerHTML = team.map(agent => '<article class="agent-card" data-agent-id="' + escapeHtml(agent.id) + '"><div class="agent-head"><span class="agent-mark">' + escapeHtml(agent.name.slice(0, 2).toUpperCase()) + '</span><div><b>' + escapeHtml(agent.name) + '</b><small>Level ' + escapeHtml(agent.autonomy) + ' · ' + escapeHtml((state.data.autonomyLevels || {})[agent.autonomy] || 'Unknown') + '</small></div><span class="tag ' + statusClass(String(agent.status).toLowerCase()) + '">' + escapeHtml(agent.status) + '</span></div><p>' + escapeHtml(agent.lastFinding || 'Not run yet.') + '</p><dl><div><dt>Last run</dt><dd>' + escapeHtml(agent.lastRun ? date(agent.lastRun) : 'Never') + '</dd></div><div><dt>Issues</dt><dd>' + escapeHtml(agent.issuesDetected || 0) + '</dd></div><div><dt>Confidence</dt><dd>' + escapeHtml(agent.confidence === null ? '—' : agent.confidence + '%') + '</dd></div></dl></article>').join('');
+    const activity = state.data.agentActivity || [];
+    $('#agent-activity').innerHTML = activity.length ? activity.map(item => '<div class="activity-row"><span class="activity-dot ' + statusClass(String(item.status).toLowerCase()) + '"></span><div><b>' + escapeHtml(statusLabel(item.agentId)) + '</b><p>' + escapeHtml(item.message) + '</p><small>' + escapeHtml(date(item.createdAt)) + (item.confidence === undefined ? '' : ' · confidence ' + Math.round(item.confidence * 100) + '%') + '</small></div></div>').join('') : '<div class="empty-state">No agent runs yet. Send the Commander a quick command.</div>';
+  }
+
   function renderAll() {
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
-    renderOverview(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    renderOverview(); renderAiTeam(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
   }
 
   async function loadAudit() {
@@ -479,6 +486,17 @@
   $('#product-sort').addEventListener('change', event => { state.productSort = event.target.value; renderProducts(); });
   $('#order-filter').addEventListener('change', event => { state.orderFilter = event.target.value; renderOrders(); });
   $('#approval-filter').addEventListener('change', event => { state.approvalFilter = event.target.value; renderApprovals(); });
+
+  $('#commander-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#commander-error'); error.textContent = ''; setBusy(button, true, 'Team working…');
+    try {
+      const payload = await request('/api/agents/command', { method: 'POST', body: JSON.stringify({ command: form.command.value }) });
+      const run = payload.run; $('#commander-result').classList.remove('hidden');
+      $('#commander-result').innerHTML = '<p class="eyebrow">COMMANDER BRIEF</p><h3>' + escapeHtml(run.summary) + '</h3><p class="muted">Delegated to: ' + escapeHtml((run.routedAgents || []).map(statusLabel).join(', ')) + '</p>' + ((run.priorities || []).length ? '<ol>' + run.priorities.map(item => '<li><b>' + escapeHtml(statusLabel(item.agentId)) + '</b> — ' + escapeHtml(item.action) + '</li>').join('') + '</ol>' : '');
+      form.reset(); await loadBootstrap({ migrate: false }); setView('ai-team'); showMessage('AI Team completed the command. No external action was executed.');
+    } catch (commandError) { error.textContent = commandError.message; }
+    finally { setBusy(button, false); }
+  });
 
   $('#economics-body').addEventListener('click', event => {
     const detail = event.target.closest('.cost-details');

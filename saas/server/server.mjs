@@ -34,9 +34,10 @@ import {
   onboardingState
 } from './lib/operations.mjs';
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
+import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, runCommander } from './lib/agents.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '4.3.6';
+const VERSION = '5.0.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -500,6 +501,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }),
       brief,
       onboarding: onboardingState(state, env),
+      aiTeam: agentTeamSnapshot(state),
+      agentDefinitions: AGENT_DEFINITIONS,
+      autonomyLevels: AUTONOMY_LEVELS,
+      agentActivity: (state.agentActivity || []).slice(0, 100),
+      agentRuns: (state.agentRuns || []).slice(0, 20),
       storage: store.provider
     };
   }
@@ -1107,6 +1113,46 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const brief = currentBrief(auth.state);
           if (!briefIdsBefore.has(brief.id)) await store.save(auth.session.workspaceId, auth.state);
           send(res, 200, { brief });
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/agents/command') {
+          const body = await jsonBody(req, 32768);
+          const command = text(body.command, 1000);
+          const run = await mutate(auth, async state => {
+            const next = await runCommander(state, command, {
+              lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
+              marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
+            });
+            recordAgentRun(state, next, auth.user.id);
+            addAudit(state, { type: 'commander_run_completed', actor: auth.user.id, detail: { runId: next.id, routedAgents: next.routedAgents, status: next.status } });
+            return next;
+          });
+          send(res, 200, { run, executedExternally: false });
+          return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/agents') {
+          send(res, 200, { team: agentTeamSnapshot(auth.state), activity: (auth.state.agentActivity || []).slice(0, 250), runs: (auth.state.agentRuns || []).slice(0, 50), autonomyLevels: AUTONOMY_LEVELS });
+          return;
+        }
+
+        const agentSettingMatch = pathname.match(/^\/api\/agents\/([^/]+)\/settings$/);
+        if (req.method === 'PUT' && agentSettingMatch) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const agentId = text(agentSettingMatch[1], 80);
+          if (!AGENT_DEFINITIONS.some(item => item.id === agentId)) throw Object.assign(new Error('Unknown agent'), { status: 404, code: 'AGENT_NOT_FOUND' });
+          const autonomy = Number(body.autonomy);
+          if (![0, 1, 2, 3].includes(autonomy)) throw Object.assign(new Error('Autonomy must be level 0, 1, 2 or 3'), { status: 400, code: 'VALIDATION_FAILED' });
+          const setting = await mutate(auth, async state => {
+            const previous = state.agentSettings?.[agentId] || {};
+            const next = { ...previous, autonomy, enabled: body.enabled === undefined ? previous.enabled !== false : Boolean(body.enabled) };
+            state.agentSettings = { ...(state.agentSettings || {}), [agentId]: next };
+            addAudit(state, { type: 'agent_autonomy_updated', actor: auth.user.id, detail: { agentId, autonomy, enabled: next.enabled } });
+            return next;
+          });
+          send(res, 200, { agentId, setting });
           return;
         }
 
