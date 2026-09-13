@@ -476,12 +476,20 @@ class SupabaseStore {
     const upgraded = upgradeState(state);
     upgraded.storageReady = true;
     upgraded.workspace.updatedAt = new Date().toISOString();
-    await this.mirrorNormalized(workspaceId, upgraded);
+    // The tenant state is authoritative. Persist it before refreshing the
+    // reporting mirrors so an optional/legacy mirror constraint cannot discard
+    // a successful commerce sync.
     await this.upsert('saas_workspace_state', [{
       workspace_id: workspaceId,
       state: upgraded,
       updated_at: new Date().toISOString()
     }], 'workspace_id');
+    try {
+      await this.mirrorNormalized(workspaceId, upgraded);
+    } catch (error) {
+      if (error.code !== 'SUPABASE_PERSISTENCE_FAILED') throw error;
+      console.warn(JSON.stringify({ event: 'supabase_mirror_refresh_failed', workspaceId, code: error.code }));
+    }
     return upgraded;
   }
 
