@@ -510,18 +510,18 @@
   $('#shopify-connection-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#shopify-connection-error'); error.textContent = '';
-    const credentials = { storeDomain: form.storeDomain.value, clientId: form.clientId.value, clientSecret: form.clientSecret.value };
+    const credentials = { storeDomain: form.storeDomain.value, accessToken: form.accessToken.value, clientId: form.clientId.value, clientSecret: form.clientSecret.value };
     setBusy(button, true, 'Encrypting & verifying…');
     try {
       await request('/api/connections', { method: 'POST', body: JSON.stringify({ provider: 'shopify', credentials }) });
-      form.clientId.value = ''; form.clientSecret.value = '';
+      form.accessToken.value = ''; form.clientId.value = ''; form.clientSecret.value = '';
       await request('/api/integrations/shopify/sync', { method: 'POST', body: '{}' });
       await loadBootstrap({ migrate: false });
       showMessage('Shopify connected. Live products, inventory and recent orders synced read-only.');
     } catch (connectionError) { error.textContent = connectionError.message; }
     finally {
-      credentials.clientId = ''; credentials.clientSecret = '';
-      form.clientSecret.value = '';
+      credentials.accessToken = ''; credentials.clientId = ''; credentials.clientSecret = '';
+      form.accessToken.value = ''; form.clientSecret.value = '';
       setBusy(button, false);
     }
   });

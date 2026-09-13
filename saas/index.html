@@ -156,8 +156,10 @@
           <div class="section-head stack-mobile"><div><p class="eyebrow">SECURE SHOPIFY CONNECTION</p><h2>Connect the installed Packsmart Ops app</h2><p class="muted">Owner-only setup. Client credentials are sent directly to this server over HTTPS, encrypted before cloud storage, and never returned to the browser.</p></div><span id="shopify-connection-state" class="tag neutral">Not configured</span></div>
           <form id="shopify-connection-form" class="connection-form" autocomplete="off">
             <label>Permanent store domain<input name="storeDomain" type="text" value="wavtzm-vy.myshopify.com" maxlength="253" autocapitalize="none" spellcheck="false" inputmode="url" required></label>
-            <label>Client ID<input name="clientId" type="text" maxlength="200" autocapitalize="none" autocomplete="off" spellcheck="false" required></label>
-            <label>Client secret<input name="clientSecret" type="password" maxlength="512" autocapitalize="none" autocomplete="off" spellcheck="false" required></label>
+            <label>Admin API access token (existing custom app)<input name="accessToken" type="password" maxlength="512" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
+            <p class="connection-safety">Use either the access token above, or both client credential fields below. Never enter both methods.</p>
+            <label>Client ID (Dev Dashboard app)<input name="clientId" type="text" maxlength="200" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
+            <label>Client secret (Dev Dashboard app)<input name="clientSecret" type="password" maxlength="512" autocapitalize="none" autocomplete="off" spellcheck="false"></label>
             <button class="primary" type="submit">Save &amp; verify read-only</button>
             <p class="connection-safety">Read access only: products, variants, images, pricing, inventory and recent orders. Packsmart Ops has no Shopify write operation for products, prices, inventory or orders.</p>
             <p id="shopify-connection-error" class="form-error" role="alert"></p>

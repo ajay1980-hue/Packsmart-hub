@@ -114,12 +114,21 @@ function cleanShopifyCredentials(value) {
   const storeDomain = text(value?.storeDomain, 253).toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
   const clientId = text(value?.clientId, 200);
   const clientSecret = String(value?.clientSecret || '').trim();
+  const accessToken = String(value?.accessToken || '').trim();
   if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(storeDomain)) {
     throw Object.assign(new Error('Enter the permanent .myshopify.com store domain'), { status: 400, code: 'SHOPIFY_DOMAIN_INVALID' });
   }
-  if (!/^[A-Za-z0-9_-]{8,200}$/.test(clientId) || clientSecret.length < 16 || clientSecret.length > 512 || /\s/.test(clientSecret)) {
-    throw Object.assign(new Error('Enter the Shopify Client ID and Client secret from the installed app'), { status: 400, code: 'SHOPIFY_CREDENTIALS_INVALID' });
+  if (accessToken) {
+    if (clientId || clientSecret) throw Object.assign(new Error('Use either an Admin API access token or client credentials, not both'), { status: 400, code: 'SHOPIFY_AUTH_METHOD_AMBIGUOUS' });
+    if (accessToken.length < 16 || accessToken.length > 512 || /\s/.test(accessToken)) {
+      throw Object.assign(new Error('The Shopify Admin API access token is incomplete or contains spaces'), { status: 400, code: 'SHOPIFY_ACCESS_TOKEN_INVALID' });
+    }
+    return { storeDomain, accessToken };
   }
+  if (!clientId) throw Object.assign(new Error('Enter the Shopify Client ID, or use an Admin API access token'), { status: 400, code: 'SHOPIFY_CLIENT_ID_REQUIRED' });
+  if (!/^[A-Za-z0-9_-]{8,200}$/.test(clientId)) throw Object.assign(new Error('The Shopify Client ID is incomplete or contains invalid characters'), { status: 400, code: 'SHOPIFY_CLIENT_ID_INVALID' });
+  if (!clientSecret) throw Object.assign(new Error('Enter the Shopify Client secret'), { status: 400, code: 'SHOPIFY_CLIENT_SECRET_REQUIRED' });
+  if (clientSecret.length < 16 || clientSecret.length > 512 || /\s/.test(clientSecret)) throw Object.assign(new Error('The Shopify Client secret is incomplete or contains spaces'), { status: 400, code: 'SHOPIFY_CLIENT_SECRET_INVALID' });
   return { storeDomain, clientId, clientSecret };
 }
 

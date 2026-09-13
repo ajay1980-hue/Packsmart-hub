@@ -190,6 +190,20 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(decision.payload.executedExternally, false);
 
   const shopifySecret = 'shopify-client-secret-value-test-only';
+  const missingShopifySecret = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: { provider: 'shopify', credentials: { storeDomain: 'wavtzm-vy.myshopify.com', clientId: 'valid-client-id' } }
+  });
+  assert.equal(missingShopifySecret.response.status, 400);
+  assert.equal(missingShopifySecret.payload.code, 'SHOPIFY_CLIENT_SECRET_REQUIRED');
+
+  const ambiguousShopifyAuth = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: { provider: 'shopify', credentials: { storeDomain: 'wavtzm-vy.myshopify.com', accessToken: 'shpat_valid-test-token', clientId: 'valid-client-id', clientSecret: shopifySecret } }
+  });
+  assert.equal(ambiguousShopifyAuth.response.status, 400);
+  assert.equal(ambiguousShopifyAuth.payload.code, 'SHOPIFY_AUTH_METHOD_AMBIGUOUS');
+
   const shopifyConnection = await request('/api/connections', {
     method: 'POST', cookie, csrf,
     body: {
@@ -243,6 +257,19 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
     storeDomain: 'wavtzm-vy.myshopify.com',
     clientId: 'shopify-client-id-test',
     clientSecret: shopifySecret
+  });
+
+  const accessToken = 'shpat_test-access-token-value-never-returned';
+  const tokenConnection = await request('/api/connections', {
+    method: 'POST', cookie, csrf,
+    body: { provider: 'shopify', credentials: { storeDomain: 'https://wavtzm-vy.myshopify.com/', accessToken } }
+  });
+  assert.equal(tokenConnection.response.status, 200);
+  assert.equal(JSON.stringify(tokenConnection.payload).includes(accessToken), false);
+  const persistedWithToken = await server.packsmart.store.get('packsmart-solutions');
+  const persistedTokenConnection = persistedWithToken.connections.find(item => item.provider === 'shopify');
+  assert.deepEqual(decryptCredentials(persistedTokenConnection.encryptedCredentials, 'server-integration-credential-key-more-than-thirty-two-characters'), {
+    storeDomain: 'wavtzm-vy.myshopify.com', accessToken
   });
   const persistedEbay = persistedWithConnection.connections.find(item => item.provider === 'ebay');
   assert.equal(persistedEbay.encryptedCredentials.includes(ebaySecret), false);
