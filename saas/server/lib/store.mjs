@@ -224,6 +224,15 @@ class SupabaseStore {
     if (!response.ok) {
       const error = new Error(`Supabase persistence request failed (${response.status})`);
       error.code = 'SUPABASE_PERSISTENCE_FAILED';
+      error.httpStatus = response.status;
+      error.table = pathname.split('?')[0];
+      // Never log PostgREST messages/details: they can contain row data.
+      try {
+        const payload = await response.json();
+        if (typeof payload?.code === 'string' && /^(?:[0-9A-Z]{5}|PGRST\d{3})$/.test(payload.code)) {
+          error.databaseCode = payload.code;
+        }
+      } catch { /* Non-JSON error responses retain HTTP/table diagnostics. */ }
       throw error;
     }
     if (response.status === 204 || options.method === 'HEAD') return null;
@@ -495,7 +504,8 @@ class SupabaseStore {
       await this.mirrorNormalized(workspaceId, upgraded);
     } catch (error) {
       if (error.code !== 'SUPABASE_PERSISTENCE_FAILED') throw error;
-      console.warn(JSON.stringify({ event: 'supabase_mirror_refresh_failed', workspaceId, code: error.code }));
+      console.warn(JSON.stringify({ event: 'supabase_mirror_refresh_failed', workspaceId, code: error.code,
+        table: error.table, httpStatus: error.httpStatus, databaseCode: error.databaseCode }));
     }
     return upgraded;
   }

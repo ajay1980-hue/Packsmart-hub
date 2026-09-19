@@ -2,6 +2,26 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 
+test('mirror failure preserves authoritative state and emits only safe diagnostics', async () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  let saved = false;
+  const store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'secret' }, {
+    fetchImpl: async (url) => {
+      if (url.includes('/saas_workspace_state?')) saved = true;
+      if (url.includes('/workspaces?')) return Response.json({ code: '23505', message: 'private row value', details: 'secret' }, { status: 409 });
+      return new Response(null, { status: 204 });
+    }
+  });
+  console.warn = message => warnings.push(JSON.parse(message));
+  try {
+    await store.save('packsmart-solutions', seedWorkspaceState());
+  } finally { console.warn = originalWarn; }
+  assert.equal(saved, true);
+  assert.deepEqual(warnings, [{ event: 'supabase_mirror_refresh_failed', workspaceId: 'packsmart-solutions',
+    code: 'SUPABASE_PERSISTENCE_FAILED', table: 'workspaces', httpStatus: 409, databaseCode: '23505' }]);
+});
+
 test('Supabase persistence mirrors every production table and restores lossless workspace state', async () => {
   const calls = [];
   let savedState = null;
