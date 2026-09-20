@@ -346,6 +346,10 @@ export function integrationMatrix(state, env = process.env) {
   }));
 }
 
+export function ebayComparisonAvailable(ebay) {
+  return Boolean(ebay?.health && ebay.source !== 'ebay-oauth-readonly' && ebay.coverage?.fullCatalogueAvailable !== false && ebay.coverage?.offersAvailable !== false && ebay.coverage?.inventoryAvailable !== false);
+}
+
 export function onboardingState(state, env = process.env) {
   const integrations = integrationMatrix(state, env);
   return {

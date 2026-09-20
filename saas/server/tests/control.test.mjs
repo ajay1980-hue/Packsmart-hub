@@ -32,6 +32,18 @@ test('exceptions deduplicate, retain dismissal evidence and reopen only after re
   assert.throws(() => setExceptionStatus(state, stock.id, { status: 'resolved' }, 'owner'), /note/);
 });
 
+test('Inventory API scope cannot produce full-marketplace missing-listing alerts', async () => {
+  const state = business();
+  state.ebay = { source: 'ebay-oauth-readonly', listings: [], health: { missingOnEbay: ['SKU-1'] }, coverage: { inventoryAvailable: true, offersAvailable: true } };
+  state.integrationStatus.ebay = { status: 'connected' };
+  detectExceptions(state);
+  assert.ok(!state.exceptions.some(item => item.kind === 'inventory_mismatch' && item.present));
+  assert.ok(state.exceptions.some(item => item.kind === 'source_coverage' && item.present));
+  const run = await runCommander(state, 'Check eBay');
+  assert.match(run.summary, /Inventory API/);
+  assert.equal(run.results[0].data.health, null);
+});
+
 test('opportunity estimates require costs, respect decision memory and deduplicate approvals', () => {
   const state = business(); detectOpportunities(state);
   const pricing = state.opportunities.find(item => item.kind === 'pricing');

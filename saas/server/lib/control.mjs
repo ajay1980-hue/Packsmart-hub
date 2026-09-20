@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { AUTOMATION_DEFINITIONS, deriveOperations, integrationMatrix, normalizeApprovalRequest } from './operations.mjs';
+import { AUTOMATION_DEFINITIONS, deriveOperations, ebayComparisonAvailable, integrationMatrix, normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
 
 const nowIso = () => new Date().toISOString();
@@ -131,7 +131,8 @@ export function detectExceptions(state, actor = 'system', options = {}) {
     owner: 'customer_service', evidence: [{ type: 'order', id: item.id, detail: item.provider }] });
   if (d.missingCostItems.length) candidates.push({ kind: 'cost_coverage', reference: 'catalogue', severity: 'medium', title: 'Product costs need confirmation', businessImpact: 'Profit is withheld for incompletely costed products.', rootCause: `${d.missingCostItems.length} variants have missing cost inputs.`, recommendedAction: 'Record verified supplier, shipping and selling costs.', owner: 'finance', evidence: d.missingCostItems.slice(0, 20).map(item => ({ type: 'economics', id: item.sku, detail: item.missingFields.join(', ') })) });
   const mismatches = state.ebay?.health;
-  if (mismatches && state.ebay?.coverage?.offersAvailable !== false && state.ebay?.coverage?.inventoryAvailable !== false) {
+  if (state.ebay?.source === 'ebay-oauth-readonly') candidates.push({ kind: 'source_coverage', reference: 'ebay_catalogue', severity: 'medium', title: 'Full eBay catalogue is not connected', businessImpact: 'A complete marketplace comparison cannot be verified.', rootCause: 'The current feed covers Inventory API items; listings managed outside that API are not included.', recommendedAction: 'Connect the existing Manager full catalogue read feed before comparing marketplaces.', owner: 'ebay', evidence: [{ type: 'source_coverage', id: 'ebay', detail: 'Inventory API scope only; orders and marketing can still be read.' }] });
+  if (ebayComparisonAvailable(state.ebay)) {
     const count = ['missingOnEbay', 'staleOnEbay', 'priceMismatches', 'stockMismatches'].reduce((sum, key) => sum + (mismatches[key]?.length || 0), 0);
     if (count) candidates.push({ kind: 'inventory_mismatch', reference: 'ebay', severity: 'medium', title: 'Marketplace catalogue mismatch', businessImpact: 'Recorded channel listings differ.', rootCause: `${count} comparisons need review.`, recommendedAction: 'Verify marketplace coverage before proposing listing changes.', owner: 'ebay', evidence: [{ type: 'channel_comparison', id: 'ebay', detail: `${count} differences` }] });
   }

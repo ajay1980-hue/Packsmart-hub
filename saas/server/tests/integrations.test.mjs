@@ -367,7 +367,10 @@ test('direct eBay OAuth sync uses only read scopes and read API methods while pr
   assert.equal(state.ebay.listings[0].sku, 'TAPE-BROWN');
   assert.equal(state.ebay.listings[0].adRate, 4.5);
   assert.equal(state.ebay.listings[0].quantity, 38);
-  assert.deepEqual(state.ebay.health.missingOnEbay, ['MAILER-2']);
+  assert.equal(state.ebay.health, null);
+  assert.equal(state.ebay.coverage.fullCatalogueAvailable, false);
+  assert.equal(status.mismatchCount, null);
+  assert.deepEqual(state.ebay.inventoryApiComparison.missingInInventoryApi, ['MAILER-2']);
   assert.equal(state.orders[0].total, 12.99);
   assert.equal(state.orders[0].channelFees, 1.5);
   assert.equal(state.ebay.fees[0].amount, 1.5);

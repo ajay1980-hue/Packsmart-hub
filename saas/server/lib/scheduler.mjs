@@ -1,6 +1,6 @@
 import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensureControl, finishAutomation } from './control.mjs';
 import { addAudit } from './events.mjs';
-import { deriveOperations } from './operations.mjs';
+import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
@@ -71,7 +71,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
             const findings = detectOpportunities(state, 'autopilot');
             evidence = [{ type: 'opportunity_scan', id: run.id, detail: `${findings.detected} evidence-backed opportunities; ${findings.created} new records.` }];
           } else if (run.ruleId === 'channelMismatchAlerts') {
-            if (!state.ebay?.health || state.ebay?.coverage?.offersAvailable === false || state.ebay?.coverage?.inventoryAvailable === false) throw Object.assign(new Error('Marketplace coverage unavailable'), { code: 'COVERAGE_UNAVAILABLE' });
+            if (!ebayComparisonAvailable(state.ebay)) throw Object.assign(new Error('Full marketplace coverage unavailable'), { code: 'COVERAGE_UNAVAILABLE' });
             evidence = [{ type: 'channel_comparison', id: 'ebay', detail: JSON.stringify(Object.fromEntries(Object.entries(state.ebay.health).map(([key, value]) => [key, Array.isArray(value) ? value.length : value]))) }];
           } else {
             const d = deriveOperations(state);

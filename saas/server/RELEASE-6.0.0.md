@@ -1,4 +1,4 @@
-# Runvara 6.0.2 — existing production completion
+# Runvara 6.0.3 — existing production completion
 
 This release extends `ajay1980-hue/Packsmart-hub` and the existing Render
 `packsmart-ops` service. It preserves the Supabase database, signed-cookie
@@ -40,6 +40,10 @@ are unchanged.
 - eBay GET requests specify a valid UK response language instead of Node's
   wildcard default. Inventory pagination uses page offsets, as specified by
   eBay, rather than the record offsets used by its Fulfilment API.
+- Direct eBay OAuth covers Inventory API listings, not the seller's entire
+  marketplace catalogue. Comparison, exceptions and Commander explicitly retain
+  that distinction; full-marketplace checks stay blocked pending the existing
+  Manager catalogue feed instead of inventing missing listings.
 
 ## Database rollout
 
