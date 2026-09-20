@@ -40,7 +40,9 @@ export const APPROVAL_TYPES = Object.freeze({
   live_external_action: 'Live external action',
   risky_marketplace_action: 'Risky marketplace action',
   social_commerce_publish: 'Social-commerce publish',
-  social_advertising_change: 'Social advertising change'
+  social_advertising_change: 'Social advertising change',
+  customer_facing_publish: 'Customer-facing publication', sensitive_communication: 'Sensitive outbound communication',
+  delete_data: 'Important data deletion', integration_change: 'Important integration change', irreversible_action: 'Irreversible action'
 });
 
 export const AUTOMATION_DEFINITIONS = Object.freeze([
@@ -52,7 +54,7 @@ export const AUTOMATION_DEFINITIONS = Object.freeze([
   { id: 'dailyOpsBrief', name: 'Daily operations brief', detail: 'Builds a deterministic daily priority briefing.' },
   { id: 'seoChecks', name: 'SEO checks', detail: 'Finds missing images, weak titles and unpublished products.' },
   { id: 'priceRecommendations', name: 'Price recommendations', detail: 'Prepares recommendations; major changes require approval.' },
-  { id: 'customerReplyDrafts', name: 'Customer-service issue detection', detail: 'Identifies order follow-up and prepares drafts without sending messages.' },
+  { id: 'customerReplyDrafts', name: 'Customer-service issue detection', detail: 'Identifies order follow-up from recorded payment and fulfilment states. Inbox messages are not connected.' },
   { id: 'channelMismatchAlerts', name: 'Channel mismatch alerts', detail: 'Compares marketplace and social-channel catalogue health.' },
   { id: 'lossMakingAlerts', name: 'Loss-making SKU alerts', detail: 'Surfaces fully costed products and orders with negative contribution.' }
 ]);
@@ -159,7 +161,7 @@ function channelEconomics(state, now) {
   });
 }
 
-export function deriveOperations(state, { now = new Date(), lowStockThreshold = 20, marginFloor = 20 } = {}) {
+export function deriveOperations(state, { now = new Date(), lowStockThreshold = state.settings?.lowStockThreshold ?? 20, marginFloor = state.settings?.marginFloor ?? 20 } = {}) {
   const products = state.products || [];
   const variants = flattenProducts(products);
   const economics = state.economics || {};
@@ -211,8 +213,8 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
 
   const pendingApprovals = (state.approvals || []).filter(item => item.status === 'pending');
   const commerceStatuses = state.integrationStatus || {};
-  const expectedChannels = ['shopify', 'ebay', ...SOCIAL_COMMERCE_CHANNELS.map(item => item.id), ...MARKETPLACE_CHANNELS.map(item => item.id)];
-  const integrationIssues = expectedChannels.filter(id => ['error', 'degraded', 'not_configured'].includes(commerceStatuses[id]?.status || 'not_configured'));
+  const expectedChannels = [...new Set(['shopify', 'ebay', ...Object.keys(commerceStatuses), ...(state.connections || []).map(item => item.provider)])];
+  const integrationIssues = expectedChannels.filter(id => ['error', 'failed', 'auth_expired', 'degraded'].includes(commerceStatuses[id]?.status) || commerceStatuses[id]?.lastError);
   const activeAutomations = Object.values(state.automations || {}).filter(Boolean).length;
   const automationCount = Object.keys(state.automations || {}).length;
   const channels = channelEconomics(state, now);
@@ -296,6 +298,8 @@ export function normalizeApprovalRequest(body, requestedBy) {
     expectedBenefit: cleanText(body?.expectedBenefit, 1000, true), risk: cleanText(body?.risk, 1000, true),
     requestedBy, source: cleanText(body?.source || 'packsmart-ops', 120, true),
     payload: body?.payload && typeof body.payload === 'object' && !Array.isArray(body.payload) ? body.payload : {},
+    evidence: Array.isArray(body?.evidence) ? body.evidence.slice(0, 20).map(item => ({ type: cleanText(item?.type || 'reference', 40), id: cleanText(item?.id, 180), detail: cleanText(item?.detail, 1000) })) : [],
+    revision: 1, history: [], agentId: cleanText(body?.agentId || requestedBy, 80), workStatus: 'REQUIRES APPROVAL',
     status: 'pending', createdAt: new Date().toISOString(), decidedAt: null, decidedBy: null, decisionNote: null,
     executedExternally: false, executionStatus: 'not_connected'
   };
@@ -321,11 +325,20 @@ export function integrationMatrix(state, env = process.env) {
     { id: 'shopify', name: 'Shopify', kind: 'commerce', capabilities: ['catalogue', 'inventory', 'orders', 'refunds', 'tax', 'payments'], status: statuses.shopify?.status || 'not_configured', detail: statuses.shopify?.detail || 'Secure Admin API connection required for live orders, fees and inventory.', lastSyncAt: statuses.shopify?.lastSyncAt || null, lastError: statuses.shopify?.lastError || null, metrics30d: metricMap.get('shopify') || null },
     { id: 'ebay', name: 'eBay', kind: 'marketplace', capabilities: ['listings', 'drafts', 'orders', 'fees', 'promotions', 'profit-guard'], status: statuses.ebay?.status || 'not_configured', detail: statuses.ebay?.detail || 'Secure read-only access can use the existing eBay app without changing the current Manager.', lastSyncAt: statuses.ebay?.lastSyncAt || null, lastError: statuses.ebay?.lastError || null, metrics30d: metricMap.get('ebay') || null }
   ];
-  return [
+  const channels = [
     ...core, ...SOCIAL_COMMERCE_CHANNELS.map(makeChannel), ...MARKETPLACE_CHANNELS.map(makeChannel),
     { id: 'stripe', name: 'Stripe Billing', kind: 'billing', capabilities: ['subscriptions', 'webhooks'], status: env.STRIPE_SECRET_KEY ? 'configured_disabled' : 'dormant', detail: env.BILLING_CHECKOUT_ENABLED === 'true' ? 'Checkout is enabled for eligible external workspaces.' : 'Architecture prepared; charging is disabled.', lastSyncAt: null, lastError: null },
     { id: 'ai', name: 'AI Briefing', kind: 'intelligence', capabilities: ['summaries'], status: env.AI_BRIEF_ENABLED === 'true' && env.OPENAI_API_KEY ? 'configured' : 'deterministic', detail: 'The daily brief uses deterministic business logic; no browser AI key is required.', lastSyncAt: null, lastError: null }
   ];
+  for (const id of ['supabase', 'reporting', 'render', 'email', 'google']) {
+    if (statuses[id]) channels.push({ id, name: ({ supabase: 'Supabase', reporting: 'Reporting', render: 'Render', email: 'Email', google: 'Google' })[id], kind: 'system', capabilities: ['health'], ...statuses[id] });
+  }
+  return channels.map(channel => ({ ...channel, source: statuses[channel.id]?.source || null,
+    status: /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(channel.lastError || '')) ? 'auth_expired' : channel.status,
+    lastFailureAt: statuses[channel.id]?.lastFailureAt || null,
+    degradedSurfaces: statuses[channel.id]?.degradedSurfaces || [],
+    recommendedRepair: channel.lastError ? (/AUTH|CREDENTIAL|TOKEN_EXPIRED/.test(String(channel.lastError)) ? 'Owner: verify the existing credential and reconnect through Sales Channels.' : 'Review the recorded error; temporary read failures will be retried within Autopilot limits.') : null
+  }));
 }
 
 export function onboardingState(state, env = process.env) {

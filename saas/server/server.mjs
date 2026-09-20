@@ -35,15 +35,19 @@ import {
 } from './lib/operations.mjs';
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, runCommander } from './lib/agents.mjs';
+import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
+import { recordWork } from './lib/events.mjs';
+import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '5.0.0';
+const VERSION = '6.0.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
   ['/', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
+  ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
 ]);
@@ -171,7 +175,8 @@ function publicUser(user) {
 }
 
 function csvCell(value) {
-  const string = value === null || value === undefined ? '' : String(value);
+  let string = value === null || value === undefined ? '' : String(value);
+  if (typeof value === 'string' && /^[\s]*[=+@\-]/.test(string)) string = `'${string}`;
   return /[",\r\n]/.test(string) ? `"${string.replaceAll('"', '""')}"` : string;
 }
 
@@ -287,6 +292,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     blockMs: clamp(env.ACTIVATION_BLOCK_MS, 60000, 86400000, 30 * 60 * 1000)
   });
   const locks = new Map();
+  const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
+  const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const startedAt = new Date().toISOString();
 
   function headers(contentType = 'application/json; charset=utf-8', cache = 'no-store') {
     return {
@@ -336,7 +344,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
     const raw = await rawBody(req, maxBytes);
     if (!raw.length) return {};
-    try { return JSON.parse(raw.toString('utf8')); }
+    try {
+      const parsed = JSON.parse(raw.toString('utf8'), (key, value) => {
+        if (['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error('Reserved key');
+        return value;
+      });
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Object required');
+      return parsed;
+    }
     catch { throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'JSON_INVALID' }); }
   }
 
@@ -347,7 +362,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const cacheControl = ['/','/index.html','/app.js','/control-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(200, {
         ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
@@ -391,6 +406,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   }
 
+  function requireApprover(auth) {
+    if (auth.user.role !== 'owner') throw Object.assign(new Error('Workspace owner approval required'), { status: 403, code: 'OWNER_APPROVAL_REQUIRED' });
+  }
+
   async function withWorkspaceLock(workspaceId, callback) {
     const previous = locks.get(workspaceId) || Promise.resolve();
     let release;
@@ -409,6 +428,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
       const state = await store.get(auth.session.workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status: 404, code: 'WORKSPACE_NOT_FOUND' });
+      const currentUser = state.users.find(item => item.id === auth.user.id);
+      if (!currentUser || currentUser.active === false || currentUser.role !== auth.user.role || Number(currentUser.sessionVersion || 1) !== Number(auth.session.sessionVersion || 1)) throw Object.assign(new Error('Session changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
       const result = await callback(state);
       await store.save(auth.session.workspaceId, state);
       return result;
@@ -423,12 +444,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       Boolean(integrations.shopifyPublicCatalogueUrl(state)) &&
       !state.integrationStatus?.shopify?.publicAttemptedAt;
     if (shopifyRefreshAvailable && (force || !state.products?.length || stale || needsLiveCatalogueUpgrade)) {
-      try { await integrations.syncShopify(state); }
+      const previous = state.integrationStatus?.shopify || {};
+      if (!force && (/AUTH|CREDENTIAL|TOKEN_EXPIRED/.test(previous.lastError || '') || Date.now() - Date.parse(previous.lastFailureAt || 0) < 15 * 60000)) return false;
+      try { await monitoredSync(state, integrations, 'shopify', { automatic: !force }); }
       catch (error) {
         state.integrationStatus = {
           ...(state.integrationStatus || {}),
           shopify: {
-            status: state.products?.length ? 'degraded' : 'error',
+            ...state.integrationStatus?.shopify,
+            status: /AUTH|CREDENTIAL|TOKEN_EXPIRED/.test(error.code || '') ? 'auth_expired' : state.products?.length ? 'degraded' : 'error',
             detail: state.products?.length ? 'Last known catalogue retained after a live sync error.' : 'Shopify data is unavailable.',
             lastSyncAt: state.integrationStatus?.shopify?.lastSyncAt || null,
             lastError: error.code || 'SHOPIFY_SYNC_FAILED'
@@ -447,9 +471,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       economics: state.economics || {},
       advertisingCosts: state.advertisingCosts || [],
       approvals: state.approvals || [],
-      integrationStatus: state.integrationStatus || {},
+      integrationStatus: Object.fromEntries(Object.entries(state.integrationStatus || {}).map(([key, value]) => [key, { status: value.status, source: value.source, lastError: value.lastError, lastSyncAt: ['supabase', 'reporting', 'render'].includes(key) ? null : value.lastSyncAt }])),
       automations: state.automations || {},
-      suppliers: state.suppliers || []
+      suppliers: state.suppliers || [],
+      decisions: (state.decisions || []).filter(item => item.status === 'active').map(item => item.id),
+      exceptions: (state.exceptions || []).map(item => [item.id, item.status]),
+      automationFailures: (state.automationRuns || []).filter(item => ['FAILED', 'BLOCKED'].includes(item.status)).map(item => item.id)
     };
     return crypto.createHash('sha256').update(JSON.stringify(source)).digest('hex').slice(0, 32);
   }
@@ -464,10 +491,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     );
     if (existing) return existing;
     const brief = { ...buildDailyBrief(state, {
-      lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
-      marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
+      lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
+      marginFloor: state.settings?.marginFloor ?? clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
     }), sourceSignature };
-    state.dailyBriefs = [brief, ...(state.dailyBriefs || []).filter(item => !String(item.generatedAt || '').startsWith(today))].slice(0, 30);
+    brief.attention = { exceptions: (state.exceptions || []).filter(item => ['open', 'acknowledged'].includes(item.status)).length,
+      approvals: (state.approvals || []).filter(item => item.status === 'pending').length,
+      failedAutomations: (state.automationRuns || []).filter(item => ['FAILED', 'BLOCKED'].includes(item.status) && item.startedAt.startsWith(today)).length,
+      opportunities: (state.opportunities || []).filter(item => item.present && item.status === 'open').length };
+    brief.summary += ` ${brief.attention.exceptions} open exceptions; ${brief.attention.failedAutomations} failed or blocked automations today; ${brief.attention.opportunities} opportunities to review.`;
+    state.dailyBriefs = [brief, ...(state.dailyBriefs || [])];
     addAudit(state, { type: 'daily_operations_brief_generated', actor: 'system', detail: { briefId: brief.id, logic: brief.logic } });
     return brief;
   }
@@ -506,7 +538,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       autonomyLevels: AUTONOMY_LEVELS,
       agentActivity: (state.agentActivity || []).slice(0, 100),
       agentRuns: (state.agentRuns || []).slice(0, 20),
-      storage: store.provider
+      storage: store.provider,
+      ...controlSnapshot(state)
     };
   }
 
@@ -570,13 +603,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   async function login(req, res) {
-    if (!env.PACKSMART_ADMIN_PASSWORD || !env.SESSION_SECRET || String(env.SESSION_SECRET).length < 32) {
+    if (!env.SESSION_SECRET || String(env.SESSION_SECRET).length < 32) {
       send(res, 503, { error: 'Server authentication is not configured', code: 'AUTH_NOT_CONFIGURED' });
       return;
     }
     const body = await jsonBody(req, 32768);
     const email = normalizeEmail(body.email);
-    const key = `${requestIp(req)}:${email}`;
+    const key = crypto.createHash('sha256').update(email).digest('hex');
     const rate = loginLimiter.check(key);
     if (!rate.allowed) {
       send(res, 429, { error: 'Too many sign-in attempts. Try again later.', code: 'LOGIN_RATE_LIMITED' }, {
@@ -602,7 +635,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     const valid = Boolean(user?.active !== false && (
       user?.passwordHash
         ? verifyPassword(suppliedPassword, user.passwordHash)
-        : found?.workspaceId === CUSTOMER_ZERO_WORKSPACE && email === adminEmail && safeEqual(suppliedPassword, env.PACKSMART_ADMIN_PASSWORD)
+        : Boolean(env.PACKSMART_ADMIN_PASSWORD) && found?.workspaceId === CUSTOMER_ZERO_WORKSPACE && email === adminEmail && safeEqual(suppliedPassword, env.PACKSMART_ADMIN_PASSWORD)
     ));
     if (!valid) {
       loginLimiter.fail(key);
@@ -611,8 +644,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       return;
     }
     loginLimiter.reset(key);
-    addAudit(state, { type: 'user_login', actor: user.id, detail: { method: user.passwordHash ? 'workspace-password' : 'customer-zero-bootstrap' } });
-    await store.save(found.workspaceId, state);
+    await withWorkspaceLock(found.workspaceId, async () => {
+      const fresh = await store.get(found.workspaceId);
+      const current = fresh?.users.find(item => item.id === user.id);
+      if (!current || current.active === false || current.passwordHash !== user.passwordHash || current.sessionVersion !== user.sessionVersion) throw Object.assign(new Error('Account changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
+      addAudit(fresh, { type: 'user_login', actor: user.id, detail: { method: user.passwordHash ? 'workspace-password' : 'customer-zero-bootstrap' } });
+      await store.save(found.workspaceId, fresh);
+    });
     const token = createSessionToken({
       userId: user.id,
       workspaceId: found.workspaceId,
@@ -756,33 +794,41 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       send(res, 200, { received: true, ignored: true });
       return;
     }
-    const state = await store.get(workspaceId);
-    if (!state || workspaceId === CUSTOMER_ZERO_WORKSPACE) {
-      send(res, 200, { received: true, ignored: true });
-      return;
-    }
-    if (event.type === 'checkout.session.completed') {
-      state.subscription = {
-        ...state.subscription,
-        plan: object.metadata?.plan || state.subscription?.plan || 'unknown',
-        status: 'checkout_completed',
-        stripeCustomerId: object.customer || null,
-        stripeSubscriptionId: object.subscription || null,
-        updatedAt: new Date().toISOString()
-      };
-    } else if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
-      state.subscription = {
-        ...state.subscription,
-        plan: object.metadata?.plan || state.subscription?.plan || 'unknown',
-        status: object.status || (event.type.endsWith('deleted') ? 'cancelled' : 'unknown'),
-        stripeCustomerId: object.customer || state.subscription?.stripeCustomerId || null,
-        stripeSubscriptionId: object.id || state.subscription?.stripeSubscriptionId || null,
-        updatedAt: new Date().toISOString()
-      };
-    }
-    addAudit(state, { type: 'stripe_webhook', actor: 'stripe', detail: { eventType: event.type } });
-    await store.save(workspaceId, state);
-    send(res, 200, { received: true });
+    await withWorkspaceLock(workspaceId, async () => {
+      const state = await store.get(workspaceId);
+      if (!state || workspaceId === CUSTOMER_ZERO_WORKSPACE) {
+        send(res, 200, { received: true, ignored: true });
+        return;
+      }
+      if (!event.id || !Number.isFinite(event.created)) throw Object.assign(new Error('Invalid Stripe event identity'), { status: 400, code: 'STRIPE_EVENT_INVALID' });
+      state.billingEvents ||= [];
+      if (state.billingEvents.some(item => item.id === event.id)) { send(res, 200, { received: true, duplicate: true }); return; }
+      const outdated = event.created < (state.subscription?.lastEventCreated || 0);
+      if (!outdated && event.type === 'checkout.session.completed') {
+        state.subscription = {
+          ...state.subscription,
+          plan: object.metadata?.plan || state.subscription?.plan || 'unknown',
+          status: 'checkout_completed',
+          stripeCustomerId: object.customer || null,
+          stripeSubscriptionId: object.subscription || null,
+          updatedAt: new Date().toISOString()
+        };
+      } else if (!outdated && (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted')) {
+        state.subscription = {
+          ...state.subscription,
+          plan: object.metadata?.plan || state.subscription?.plan || 'unknown',
+          status: object.status || (event.type.endsWith('deleted') ? 'cancelled' : 'unknown'),
+          stripeCustomerId: object.customer || state.subscription?.stripeCustomerId || null,
+          stripeSubscriptionId: object.id || state.subscription?.stripeSubscriptionId || null,
+          updatedAt: new Date().toISOString()
+        };
+      }
+      state.billingEvents.push({ id: event.id, created: event.created, type: event.type, ignored: outdated });
+      if (!outdated) state.subscription.lastEventCreated = event.created;
+      addAudit(state, { type: 'stripe_webhook', actor: 'stripe', detail: { eventId: event.id, eventType: event.type, outdated } });
+      await store.save(workspaceId, state);
+      send(res, 200, { received: true });
+    });
   }
 
   const server = http.createServer(async (req, res) => {
@@ -792,16 +838,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
 
-      if (req.method === 'GET' && pathname === '/api/health') {
+      if (['GET', 'HEAD'].includes(req.method) && pathname === '/api/health') {
         let persistence = false;
         try { persistence = await store.ping(); } catch {}
-        const authConfigured = Boolean(env.PACKSMART_ADMIN_PASSWORD && env.SESSION_SECRET && String(env.SESSION_SECRET).length >= 32);
+        const authConfigured = Boolean(env.SESSION_SECRET && String(env.SESSION_SECRET).length >= 32);
         const encryptionConfigured = Boolean(env.CREDENTIALS_KEY && String(env.CREDENTIALS_KEY).length >= 32);
-        send(res, persistence ? 200 : 503, {
-          ok: persistence,
+        const ready = persistence && (!isProduction || (store.provider === 'supabase' && authConfigured && encryptionConfigured));
+        send(res, ready ? 200 : 503, req.method === 'HEAD' ? '' : {
+          ok: ready,
           version: VERSION,
+          commit: env.RENDER_GIT_COMMIT || null,
+          startedAt,
           storage: store.provider,
-          productionReady: store.provider === 'supabase' && authConfigured && encryptionConfigured,
+          productionReady: persistence && store.provider === 'supabase' && authConfigured && encryptionConfigured,
           checks: {
             persistence,
             authentication: authConfigured,
@@ -811,6 +860,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         });
         return;
       }
+
+      if (isProduction && pathname.startsWith('/api/') && store.provider !== 'supabase') throw Object.assign(new Error('Durable persistence must be configured before using production'), { status: 503, code: 'PERSISTENCE_REQUIRED' });
 
       if (req.method === 'POST' && pathname === '/api/webhooks/stripe') {
         await stripeWebhook(req, res);
@@ -837,6 +888,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const auth = await authenticate(req, res);
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
+        const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+        if (auth.user.passwordChangeRequired && !['/api/auth/session', '/api/auth/logout', '/api/auth/change-password'].includes(pathname)) throw Object.assign(new Error('Replace the temporary password before accessing business data'), { status: 403, code: 'PASSWORD_CHANGE_REQUIRED' });
+        if (mutating && auth.user.role === 'viewer' && !['/api/auth/logout', '/api/auth/change-password'].includes(pathname)) throw Object.assign(new Error('Read-only workspace access'), { status: 403, code: 'ROLE_DENIED' });
+        const rateKey = `${auth.session.workspaceId}:${auth.user.id}`;
+        const rate = apiLimiter.check(rateKey);
+        if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
+        apiLimiter.fail(rateKey);
 
         if (req.method === 'GET' && pathname === '/api/auth/session') {
           send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString() });
@@ -844,14 +902,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'POST' && pathname === '/api/auth/logout') {
-          addAudit(auth.state, { type: 'user_logout', actor: auth.user.id });
-          await store.save(auth.session.workspaceId, auth.state);
+          await mutate(auth, async state => {
+            const user = state.users.find(item => item.id === auth.user.id);
+            user.sessionVersion = Number(user.sessionVersion || 1) + 1;
+            addAudit(state, { type: 'user_logout', actor: auth.user.id, detail: { sessionsRevoked: true } });
+          });
           send(res, 200, { ok: true }, { 'Set-Cookie': clearSessionCookie({ secure: secureCookies }) });
           return;
         }
 
         if (req.method === 'POST' && pathname === '/api/auth/change-password') {
-          requireOwner(auth);
           const body = await jsonBody(req, 32768);
           validatePassword(body.newPassword);
           if (!auth.user.passwordChangeRequired && !verifyPassword(body.currentPassword, auth.user.passwordHash)) {
@@ -881,16 +941,26 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/bootstrap') {
-          const briefIdsBefore = new Set((auth.state.dailyBriefs || []).map(item => item.id));
-          const operationalStateChanged = await refreshOperationalState(auth.state);
-          const payload = bootstrapPayload(auth.state, auth.user, auth.session.csrf);
-          const briefCreated = !briefIdsBefore.has(payload.brief.id);
-          if (operationalStateChanged || briefCreated) await store.save(auth.session.workspaceId, auth.state);
+          const payload = await withWorkspaceLock(auth.session.workspaceId, async () => {
+            const state = await store.get(auth.session.workspaceId);
+            const briefIdsBefore = new Set((state.dailyBriefs || []).map(item => item.id));
+            const operationalStateChanged = await refreshOperationalState(state);
+            ensureControl(state);
+            const signature = briefSourceSignature(state);
+            const controlChanged = state.controlSignature !== signature;
+            if (controlChanged) { detectExceptions(state); detectOpportunities(state); }
+            const payload = bootstrapPayload(state, auth.user, auth.session.csrf);
+            state.controlSignature = briefSourceSignature(state);
+            if (operationalStateChanged || controlChanged || !briefIdsBefore.has(payload.brief.id)) await store.save(auth.session.workspaceId, state);
+            return payload;
+          });
           send(res, 200, payload);
           return;
         }
 
         if (req.method === 'POST' && pathname === '/api/migrate-pilot') {
+          requireOwner(auth);
+          if (auth.session.workspaceId !== CUSTOMER_ZERO_WORKSPACE) throw Object.assign(new Error('Pilot migration belongs to customer-zero'), { status: 403, code: 'MIGRATION_SCOPE_DENIED' });
           const body = await jsonBody(req, 512 * 1024);
           const migrationId = text(body.migrationId || 'browser-pilot-v1', 120);
           const result = await mutate(auth, async state => {
@@ -911,7 +981,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             }
             let automationsImported = 0;
             for (const [id, enabled] of Object.entries(body.automations || {})) {
-              if (!(id in state.automations)) continue;
+              if (!Object.hasOwn(state.automations, id)) continue;
               state.automations[id] = Boolean(enabled);
               automationsImported += 1;
             }
@@ -929,10 +999,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 requestedBy: auth.user.id,
                 source: 'pilot-migration',
                 payload: {},
-                status: ['approved', 'rejected'].includes(item.status) ? item.status : 'pending',
+                status: 'pending',
                 createdAt: item.createdAt || new Date().toISOString(),
-                decidedAt: item.decidedAt || null,
-                decidedBy: item.decidedBy || null,
+                decidedAt: null,
+                decidedBy: null,
                 executedExternally: false,
                 executionStatus: 'not_connected'
               });
@@ -966,7 +1036,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 before: Object.fromEntries(changedFields.map(field => [field, before[field] ?? null])),
                 after: Object.fromEntries(changedFields.map(field => [field, next[field] ?? null])),
                 createdAt: next.updatedAt
-              }, ...(state.costHistory || [])].slice(0, 5000);
+              }, ...(state.costHistory || [])];
               addAudit(state, { type: 'economics_updated', actor: auth.user.id, detail: { sku, changedFields } });
             }
             return next;
@@ -1020,9 +1090,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const body = await jsonBody(req, 32768);
           const costs = cleanOrderCosts(body);
           const result = await mutate(auth, async state => {
-            const order = (state.orders || []).find(item => item.id === orderEconomicsMatch[1]);
+            const order = (state.orders || []).find(item => item.id === decodeURIComponent(orderEconomicsMatch[1]));
             if (!order) throw Object.assign(new Error('Order not found'), { status: 404, code: 'ORDER_NOT_FOUND' });
             Object.assign(order, costs, { costUpdatedAt: new Date().toISOString() });
+            order.costOverrides = { ...order.costOverrides, ...costs };
             addAudit(state, { type: 'order_costs_updated', actor: auth.user.id, detail: { orderId: order.id, changedFields: Object.keys(costs) } });
             return { order, profitability: calculateOrderProfit(order, state.economics || {}) };
           });
@@ -1051,10 +1122,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'PUT' && pathname === '/api/automations') {
+          requireOwner(auth);
           const body = await jsonBody(req, 32768);
           const ruleId = text(body.id, 80);
           const result = await mutate(auth, async state => {
-            if (!(ruleId in (state.automations || {}))) throw Object.assign(new Error('Unknown automation rule'), { status: 400, code: 'VALIDATION_FAILED' });
+            if (!Object.hasOwn(state.automations || {}, ruleId) || typeof body.enabled !== 'boolean') throw Object.assign(new Error('Known rule and boolean enabled value are required'), { status: 400, code: 'VALIDATION_FAILED' });
             state.automations[ruleId] = Boolean(body.enabled);
             addAudit(state, { type: 'automation_rule_updated', actor: auth.user.id, detail: { id: ruleId, enabled: state.automations[ruleId] } });
             return state.automations[ruleId];
@@ -1067,7 +1139,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const body = await jsonBody(req, 128 * 1024);
           const approval = normalizeApprovalRequest(body, auth.user.id);
           await mutate(auth, async state => {
-            state.approvals = [approval, ...(state.approvals || [])].slice(0, 1000);
+            state.approvals = [approval, ...(state.approvals || [])];
             addAudit(state, { type: 'approval_requested', actor: auth.user.id, detail: { approvalId: approval.id, actionType: approval.type, financialImpact: approval.financialImpact } });
           });
           send(res, 202, { approvalRequired: true, approval, executedExternally: false });
@@ -1076,7 +1148,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
         const approvalMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/);
         if (req.method === 'POST' && approvalMatch) {
-          requireOwner(auth);
+          requireApprover(auth);
           const body = await jsonBody(req, 32768);
           const decision = body.decision === 'approved' ? 'approved' : body.decision === 'rejected' ? 'rejected' : null;
           if (!decision) throw Object.assign(new Error('Decision must be approved or rejected'), { status: 400, code: 'VALIDATION_FAILED' });
@@ -1084,12 +1156,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             const approval = (state.approvals || []).find(item => item.id === approvalMatch[1]);
             if (!approval) throw Object.assign(new Error('Approval request not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
             if (approval.status !== 'pending') throw Object.assign(new Error('Approval already decided'), { status: 409, code: 'APPROVAL_ALREADY_DECIDED' });
+            if ((body.revision ?? 1) !== (approval.revision || 1)) throw Object.assign(new Error('Approval changed; review its current revision'), { status: 409, code: 'APPROVAL_CONFLICT' });
             approval.status = decision;
             approval.decidedAt = new Date().toISOString();
             approval.decidedBy = auth.user.id;
             approval.decisionNote = text(body.note, 500) || null;
             approval.executedExternally = false;
             approval.executionStatus = 'not_connected';
+            approval.workStatus = decision === 'approved' ? 'BLOCKED' : 'COMPLETED';
+            approval.history = [...(approval.history || []), { revision: approval.revision || 1, status: decision, actor: auth.user.id, at: approval.decidedAt, note: approval.decisionNote }];
+            recordWork(state, { id: approval.id, title: approval.action, source: 'approval-centre', status: decision === 'approved' ? 'BLOCKED' : 'COMPLETED',
+              evidence: [{ type: 'approval_decision', id: approval.id, detail: `${decision}; external execution unavailable` }], executedExternally: false });
             addAudit(state, { type: 'approval_decided', actor: auth.user.id, detail: { approvalId: approval.id, decision, executedExternally: false } });
             return approval;
           });
@@ -1109,32 +1186,93 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/brief') {
-          const briefIdsBefore = new Set((auth.state.dailyBriefs || []).map(item => item.id));
-          const brief = currentBrief(auth.state);
-          if (!briefIdsBefore.has(brief.id)) await store.save(auth.session.workspaceId, auth.state);
+          const brief = await withWorkspaceLock(auth.session.workspaceId, async () => {
+            const state = await store.get(auth.session.workspaceId);
+            const previous = state.dailyBriefs?.[0]?.id;
+            const value = currentBrief(state);
+            if (previous !== value.id) await store.save(auth.session.workspaceId, state);
+            return value;
+          });
           send(res, 200, { brief });
           return;
         }
 
         if (req.method === 'POST' && pathname === '/api/agents/command') {
+          const rate = commandLimiter.check(rateKey);
+          if (!rate.allowed) throw Object.assign(new Error('Commander frequency limit reached'), { status: 429, code: 'COMMAND_RATE_LIMITED' });
+          commandLimiter.fail(rateKey);
           const body = await jsonBody(req, 32768);
           const command = text(body.command, 1000);
+          if (!command) throw Object.assign(new Error('Command required'), { status: 400, code: 'COMMAND_REQUIRED' });
+          const runId = `agent_run_${crypto.randomUUID()}`;
+          await mutate(auth, async state => { recordWork(state, { id: runId, title: command, source: 'commander', status: 'IN PROGRESS', evidence: [] }); });
+          try {
           const run = await mutate(auth, async state => {
             const next = await runCommander(state, command, {
-              lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
-              marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
+              actor: auth.user.id, runId, lowStockThreshold: state.settings?.lowStockThreshold ?? 20,
+              marginFloor: state.settings?.marginFloor ?? 20
             });
             recordAgentRun(state, next, auth.user.id);
             addAudit(state, { type: 'commander_run_completed', actor: auth.user.id, detail: { runId: next.id, routedAgents: next.routedAgents, status: next.status } });
             return next;
           });
           send(res, 200, { run, executedExternally: false });
+          } catch (error) {
+            try { await mutate(auth, async state => recordWork(state, { id: runId, title: command, source: 'commander', status: error.code === 'COMMANDER_DISABLED' ? 'BLOCKED' : 'FAILED', errorCode: error.code || 'COMMAND_FAILED', evidence: [{ type: 'command_failure', id: runId, detail: error.code || 'COMMAND_FAILED' }] })); }
+            catch { /* A failed persistence write cannot be claimed as completed. */ }
+            throw error;
+          }
           return;
         }
 
         if (req.method === 'GET' && pathname === '/api/agents') {
           send(res, 200, { team: agentTeamSnapshot(auth.state), activity: (auth.state.agentActivity || []).slice(0, 250), runs: (auth.state.agentRuns || []).slice(0, 50), autonomyLevels: AUTONOMY_LEVELS });
           return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/control') {
+          send(res, 200, { ...controlSnapshot(auth.state), scheduler: scheduler.status }); return;
+        }
+        if (req.method === 'PUT' && pathname === '/api/autopilot') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const autopilot = await mutate(auth, async state => configureAutopilot(state, body, auth.user.id));
+          send(res, 200, { autopilot }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/autopilot/run') {
+          requireOwner(auth);
+          send(res, 200, await scheduler.runWorkspace(auth.session.workspaceId, { manual: true })); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/decision-memory') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 16384);
+          const decision = await mutate(auth, async state => putDecision(state, body, auth.user.id));
+          send(res, 201, { decision }); return;
+        }
+        const decisionMemoryMatch = pathname.match(/^\/api\/decision-memory\/([^/]+)$/);
+        if (req.method === 'PUT' && decisionMemoryMatch) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 16384);
+          const decision = await mutate(auth, async state => putDecision(state, body, auth.user.id, decisionMemoryMatch[1]));
+          send(res, 200, { decision }); return;
+        }
+        const exceptionMatch = pathname.match(/^\/api\/exceptions\/([^/]+)$/);
+        if (req.method === 'PATCH' && exceptionMatch) {
+          const body = await jsonBody(req, 16384);
+          const exception = await mutate(auth, async state => setExceptionStatus(state, exceptionMatch[1], body, auth.user.id));
+          send(res, 200, { exception }); return;
+        }
+        const opportunityMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/approval$/);
+        if (req.method === 'POST' && opportunityMatch) {
+          const approval = await mutate(auth, async state => requestOpportunityApproval(state, opportunityMatch[1], auth.user.id));
+          send(res, 202, { approval, executedExternally: false }); return;
+        }
+        const modifyMatch = pathname.match(/^\/api\/approvals\/([^/]+)$/);
+        if (req.method === 'PATCH' && modifyMatch) {
+          requireApprover(auth);
+          const body = await jsonBody(req, 32768);
+          const approval = await mutate(auth, async state => modifyApproval(state, modifyMatch[1], body, auth.user.id));
+          send(res, 200, { approval, executedExternally: false }); return;
         }
 
         const agentSettingMatch = pathname.match(/^\/api\/agents\/([^/]+)\/settings$/);
@@ -1147,7 +1285,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (![0, 1, 2, 3].includes(autonomy)) throw Object.assign(new Error('Autonomy must be level 0, 1, 2 or 3'), { status: 400, code: 'VALIDATION_FAILED' });
           const setting = await mutate(auth, async state => {
             const previous = state.agentSettings?.[agentId] || {};
-            const next = { ...previous, autonomy, enabled: body.enabled === undefined ? previous.enabled !== false : Boolean(body.enabled) };
+            if (body.enabled !== undefined && typeof body.enabled !== 'boolean') throw Object.assign(new Error('Enabled must be a boolean'), { status: 400, code: 'VALIDATION_FAILED' });
+            const next = { ...previous, autonomy, enabled: body.enabled === undefined ? previous.enabled !== false : body.enabled };
             state.agentSettings = { ...(state.agentSettings || {}), [agentId]: next };
             addAudit(state, { type: 'agent_autonomy_updated', actor: auth.user.id, detail: { agentId, autonomy, enabled: next.enabled } });
             return next;
@@ -1199,18 +1338,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'POST' && pathname === '/api/integrations/sync') {
+          requireOwner(auth);
           const results = await mutate(auth, async state => {
             const output = {};
-            try { output.shopify = await integrations.syncShopify(state); }
+            try { output.shopify = await monitoredSync(state, integrations, 'shopify'); }
             catch (error) {
-              output.shopify = { status: state.products?.length ? 'degraded' : 'error', detail: 'Shopify read sync failed; last known data was retained.', lastError: error.code || 'SHOPIFY_SYNC_FAILED' };
+              output.shopify = state.integrationStatus.shopify;
               const connection = (state.connections || []).find(item => item.provider === 'shopify');
               if (connection) { connection.status = 'error'; connection.lastError = output.shopify.lastError; }
             }
             if (integrations.ebayConfigured(state)) {
-              try { output.ebay = await integrations.syncEbay(state); }
+              try { output.ebay = await monitoredSync(state, integrations, 'ebay'); }
               catch (error) {
-                output.ebay = { status: 'error', detail: 'eBay read sync failed; the existing Manager was not changed.', lastError: error.code || 'EBAY_SYNC_FAILED' };
+                output.ebay = state.integrationStatus.ebay;
                 const connection = integrations.ebayConnection(state);
                 if (connection) { connection.status = 'error'; connection.lastError = output.ebay.lastError; }
               }
@@ -1224,9 +1364,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'POST' && pathname === '/api/integrations/shopify/sync') {
+          requireOwner(auth);
           const outcome = await mutate(auth, async state => {
             try {
-              const result = await integrations.syncShopify(state);
+              const result = await monitoredSync(state, integrations, 'shopify');
               addAudit(state, { type: 'shopify_read_sync', actor: auth.user.id, detail: { status: result.status, source: result.source } });
               return { status: result, error: null };
             } catch (error) {
@@ -1235,6 +1376,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 detail: 'The live Shopify read connection could not be verified; last known catalogue data was retained.',
                 lastSyncAt: state.integrationStatus?.shopify?.lastSyncAt || null,
                 lastError: error.code || 'SHOPIFY_SYNC_FAILED'
+                , lastFailureAt: new Date().toISOString()
               };
               state.integrationStatus = { ...(state.integrationStatus || {}), shopify: failedStatus };
               const connection = (state.connections || []).find(item => item.provider === 'shopify');
@@ -1251,16 +1393,18 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'POST' && pathname === '/api/integrations/ebay/sync') {
+          requireOwner(auth);
           const outcome = await mutate(auth, async state => {
             try {
-              const result = await integrations.syncEbay(state);
+              const result = await monitoredSync(state, integrations, 'ebay');
               addAudit(state, { type: 'ebay_read_sync', actor: auth.user.id, detail: { status: result.status, account: result.account || null } });
               return { status: result, error: null };
             } catch (error) {
               const failedStatus = {
                 status: 'error',
                 detail: 'The eBay read connection could not be verified; the existing Manager was not changed.',
-                lastSyncAt: null,
+                lastSyncAt: state.integrationStatus?.ebay?.lastSyncAt || null,
+                lastFailureAt: new Date().toISOString(),
                 lastError: error.code || 'EBAY_SYNC_FAILED'
               };
               state.integrationStatus = {
@@ -1335,8 +1479,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const plan = text(body.plan, 30).toLowerCase();
           if (!PLANS[plan]) throw Object.assign(new Error('Unknown subscription plan'), { status: 400, code: 'VALIDATION_FAILED' });
           const checkout = await createStripeCheckout(env, auth.session, plan);
-          addAudit(auth.state, { type: 'billing_checkout_created', actor: auth.user.id, detail: { plan, checkoutSessionId: checkout.id } });
-          await store.save(auth.session.workspaceId, auth.state);
+          await mutate(auth, async state => addAudit(state, { type: 'billing_checkout_created', actor: auth.user.id, detail: { plan, checkoutSessionId: checkout.id } }));
           send(res, 200, checkout);
           return;
         }
@@ -1360,7 +1503,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   });
 
-  server.packsmart = { store, integrations, env };
+  const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief,
+    enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
+  server.once('listening', () => scheduler.start());
+  server.once('close', () => scheduler.stop());
+  server.headersTimeout = 15000;
+  server.requestTimeout = 120000;
+  server.packsmart = { store, integrations, env, scheduler };
   return server;
 }
 

@@ -34,6 +34,7 @@ export const SHOPIFY_PRODUCTS_QUERY = `
         totalInventory
         featuredMedia { preview { image { url } } }
         variants(first: 100) {
+          pageInfo { hasNextPage }
           nodes {
             id
             title
@@ -66,6 +67,7 @@ export const SHOPIFY_ORDERS_QUERY = `
         currentShippingPriceSet { shopMoney { amount currencyCode } }
         paymentGatewayNames
         lineItems(first: 100) {
+          pageInfo { hasNextPage }
           nodes {
             id
             name
@@ -123,16 +125,16 @@ function mapAdminProduct(product) {
     productType: String(product.productType || ''),
     description: String(product.description || ''),
     image: productImage,
-    inventory: Number.isFinite(Number(product.totalInventory)) ? Number(product.totalInventory) : null,
+    inventory: nullableNumber(product.totalInventory),
     updatedAt: product.updatedAt || null,
     variants: (product.variants?.nodes || []).map(variant => ({
-      id: String(variant.sku || variant.id),
+      id: String(variant.id),
       externalId: String(variant.id),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
       price: Number(variant.price || 0),
-      inventory: Number.isFinite(Number(variant.inventoryQuantity)) ? Number(variant.inventoryQuantity) : null,
-      available: Number(variant.inventoryQuantity || 0) > 0,
+      inventory: nullableNumber(variant.inventoryQuantity),
+      available: nullableNumber(variant.inventoryQuantity) === null || Number(variant.inventoryQuantity) > 0,
       image: variant.media?.nodes?.[0]?.preview?.image?.url || productImage
     }))
   };
@@ -152,12 +154,12 @@ function mapSnapshotProduct(product) {
     inventory: Number.isFinite(Number(product.inventory ?? product.totalInventory)) ? Number(product.inventory ?? product.totalInventory) : null,
     updatedAt: product.updated_at || null,
     variants: (product.variants || []).map(variant => ({
-      id: String(variant.sku || variant.id || `${product.id}-${variant.title}`),
+      id: String(variant.id || `${product.id}-${variant.sku || variant.title}`),
       externalId: String(variant.id || variant.sku || ''),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
       price: Number(variant.price || 0),
-      inventory: Number.isFinite(Number(variant.inventory_quantity)) ? Number(variant.inventory_quantity) : null,
+      inventory: nullableNumber(variant.inventory_quantity),
       available: variant.available !== false,
       image: variant.featured_image?.src || product.image?.src || product.image || product.images?.[0]?.src || null
     }))
@@ -185,7 +187,7 @@ function mapPublicProduct(product) {
     inventory: null,
     updatedAt: product.updated_at || null,
     variants: (product.variants || []).slice(0, 100).map(variant => ({
-      id: String(variant.sku || shopifyGid('ProductVariant', variant.id)),
+      id: String(shopifyGid('ProductVariant', variant.id) || `${product.id}-${variant.sku}`),
       externalId: variant.id ? shopifyGid('ProductVariant', variant.id) : String(variant.sku || ''),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
@@ -237,8 +239,23 @@ function mapOrder(order) {
   };
 }
 
-function mergeProviderRecords(existing = [], provider, incoming = []) {
-  return [...incoming, ...existing.filter(item => String(item.provider || '') !== provider)];
+export function mergeProviderRecords(existing = [], provider, incoming = []) {
+  const previous = new Map(existing.filter(item => item.provider === provider).map(item => [item.id, item]));
+  const seen = new Set();
+  const imported = incoming.map(item => {
+    seen.add(item.id);
+    const old = previous.get(item.id);
+    const merged = { ...old, ...item };
+    // An API window is not a deletion feed. Preserve older orders and explicitly
+    // entered business costs; source order totals/status still refresh normally.
+    for (const field of ['actualShippingCost', 'paymentFees', 'channelFees', 'advertisingCost', 'otherVariableCosts']) {
+      if (old && (Object.hasOwn(old.costOverrides || {}, field) || (old.costUpdatedAt && old[field] !== undefined))) {
+        merged[field] = Object.hasOwn(old.costOverrides || {}, field) ? old.costOverrides[field] : old[field];
+      }
+    }
+    return merged;
+  });
+  return [...imported, ...existing.filter(item => item.provider !== provider || !seen.has(item.id))];
 }
 
 function payloadItems(payload, keys = []) {
@@ -276,7 +293,7 @@ function mapEbayOrder(order) {
     createdAt: order.createdAt || order.creationDate || order.orderDate || new Date().toISOString(),
     updatedAt: order.updatedAt || order.lastModifiedDate || order.createdAt || new Date().toISOString(),
     cancelledAt: order.cancelledAt || null,
-    financialStatus: String(order.financialStatus || order.paymentStatus || (refunds && total && refunds >= total ? 'REFUNDED' : 'PAID')).toUpperCase(),
+    financialStatus: String(order.financialStatus || order.paymentStatus || order.orderPaymentStatus || (refunds && total && refunds >= total ? 'REFUNDED' : 'UNKNOWN')).toUpperCase(),
     fulfillmentStatus: String(order.fulfillmentStatus || order.orderFulfillmentStatus || 'UNFULFILLED').toUpperCase(),
     total,
     currentTotal,
@@ -332,7 +349,7 @@ async function responseJson(response, label) {
     const message = response.status === 401 || response.status === 403
       ? `${label} authentication failed`
       : `${label} request failed (${response.status})`;
-    throw integrationError(message, 502, 'UPSTREAM_REQUEST_FAILED');
+    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status });
   }
   return data;
 }
@@ -518,8 +535,10 @@ export class IntegrationService {
     for (let page = 0; page < 10; page += 1) {
       const data = await this.shopifyGraphql(SHOPIFY_PRODUCTS_QUERY, { first: 50, after }, config);
       const connection = data?.products;
+      if ((connection?.nodes || []).some(product => product.variants?.pageInfo?.hasNextPage)) throw integrationError('Variant coverage is incomplete; existing catalogue retained', 502, 'SHOPIFY_VARIANT_COVERAGE_LIMIT');
       products.push(...(connection?.nodes || []).map(mapAdminProduct));
       if (!connection?.pageInfo?.hasNextPage) break;
+      if (page === 9) throw integrationError('Catalogue coverage limit reached; existing data retained', 502, 'SHOPIFY_PRODUCT_COVERAGE_LIMIT');
       after = connection.pageInfo.endCursor;
     }
     return products;
@@ -532,8 +551,10 @@ export class IntegrationService {
     for (let page = 0; page < 10; page += 1) {
       const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query: `created_at:>=${cutoff}` }, config);
       const connection = data?.orders;
+      if ((connection?.nodes || []).some(order => order.lineItems?.pageInfo?.hasNextPage)) throw integrationError('Order line coverage is incomplete; existing orders retained', 502, 'SHOPIFY_ORDER_LINE_COVERAGE_LIMIT');
       orders.push(...(connection?.nodes || []).map(mapOrder));
       if (!connection?.pageInfo?.hasNextPage) break;
+      if (page === 9) throw integrationError('Order coverage limit reached; existing orders retained', 502, 'SHOPIFY_ORDER_COVERAGE_LIMIT');
       after = connection.pageInfo.endCursor;
     }
     return orders;
@@ -621,15 +642,17 @@ export class IntegrationService {
         return state.integrationStatus.shopify;
       } catch (error) {
         const snapshot = await this.loadShopifySnapshot();
-        state.products = snapshot.products;
+        const retained = Boolean(state.products?.length);
+        if (!retained) state.products = snapshot.products;
         state.integrationStatus = {
           ...(state.integrationStatus || {}),
           shopify: {
             status: 'degraded',
-            detail: `${snapshot.products.length} products loaded from the safe repository snapshot after the live storefront feed was unavailable.`,
-            source: 'repository-snapshot',
+            detail: retained ? 'Last known catalogue retained after the public storefront read failed.' : `${snapshot.products.length} products loaded from the safe repository snapshot after the live storefront feed was unavailable.`,
+            source: retained ? (state.integrationStatus?.shopify?.source || 'last-known') : 'repository-snapshot',
             snapshotSyncedAt: snapshot.syncedAt,
-            lastSyncAt: now,
+            lastSyncAt: retained ? (state.integrationStatus?.shopify?.lastSyncAt || null) : null,
+            lastFailureAt: now,
             publicAttemptedAt: now,
             lastError: error.code || 'SHOPIFY_PUBLIC_SYNC_FAILED',
             readOnly: true,
@@ -734,7 +757,7 @@ export class IntegrationService {
     });
     let payload;
     try { payload = await response.json(); } catch { payload = {}; }
-    if (!response.ok) throw integrationError('eBay OAuth token request failed', 502, code);
+    if (!response.ok) throw Object.assign(integrationError('eBay OAuth token request failed', 502, response.status === 400 || response.status === 401 || response.status === 403 ? 'EBAY_AUTH_EXPIRED' : code), { upstreamStatus: response.status });
     const accessToken = String(payload.access_token || '');
     const expiresIn = Number(payload.expires_in || 0);
     if (!accessToken || !Number.isFinite(expiresIn) || expiresIn < 60) {
@@ -901,8 +924,9 @@ export class IntegrationService {
       orders.push(...batch);
       const total = Number(payload?.total);
       if (batch.length < 200 || (Number.isFinite(total) && total > 0 && orders.length >= total)) break;
+      if (page === 2) throw integrationError('eBay order coverage limit reached', 502, 'EBAY_ORDER_COVERAGE_LIMIT');
     }
-    return orders.slice(0, 500);
+    return orders;
   }
 
   async fetchEbayInventoryItems(accessToken) {
@@ -915,8 +939,9 @@ export class IntegrationService {
       items.push(...batch);
       const total = Number(payload?.total);
       if (batch.length < 200 || (Number.isFinite(total) && total > 0 && items.length >= total)) break;
+      if (page === 2) throw integrationError('eBay inventory coverage limit reached', 502, 'EBAY_INVENTORY_COVERAGE_LIMIT');
     }
-    return items.slice(0, 500);
+    return items;
   }
 
   async fetchEbayOffers(accessToken, inventoryItems, marketplaceId) {
@@ -992,7 +1017,7 @@ export class IntegrationService {
       amount: nullableNumber(order.totalMarketplaceFee),
       currency: String(order.totalMarketplaceFee?.currency || order.pricingSummary?.total?.currency || 'GBP')
     })).filter(record => record.orderId && record.amount !== null);
-    state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
+    if (!readErrors.orders) state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
 
     const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
     const listingSkus = new Set(published.map(item => item.sku).filter(Boolean));
@@ -1002,11 +1027,11 @@ export class IntegrationService {
       account,
       marketplaceId: config.marketplaceId,
       source: 'ebay-oauth-readonly',
-      listings: published.slice(0, 500),
-      drafts: drafts.slice(0, 500).map(item => ({ id: item.offerId || item.id, title: item.title, sku: item.sku, updatedAt: null })),
-      fees: fees.slice(0, 1000),
-      promotions: marketing.campaigns.slice(0, 500),
-      health: { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
+      listings: readErrors.inventory || readErrors.offers ? (state.ebay?.listings || []) : published.slice(0, 500),
+      drafts: readErrors.inventory || readErrors.offers ? (state.ebay?.drafts || []) : drafts.slice(0, 500).map(item => ({ id: item.offerId || item.id, title: item.title, sku: item.sku, updatedAt: null })),
+      fees: readErrors.orders ? (state.ebay?.fees || []) : fees.slice(0, 1000),
+      promotions: readErrors.marketing ? (state.ebay?.promotions || []) : marketing.campaigns.slice(0, 500),
+      health: readErrors.inventory || readErrors.offers ? (state.ebay?.health || null) : { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
       coverage: {
         inventoryApiItems: inventoryItems.length,
         ordersAvailable: !readErrors.orders,
@@ -1045,7 +1070,9 @@ export class IntegrationService {
       promotionCount: marketing.campaigns.length,
       mismatchCount: missingOnEbay.length + staleOnEbay.length,
       lastSyncAt: now,
-      lastError: readWarning
+      lastError: readWarning,
+      lastFailureAt: readWarning ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
+      degradedSurfaces: unavailable
     };
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;
@@ -1072,12 +1099,17 @@ export class IntegrationService {
     if (!connected || !account) throw integrationError('eBay Manager did not confirm its connected account', 502, 'EBAY_ACCOUNT_UNCONFIRMED');
     if (account.toLowerCase() !== expected) throw integrationError('eBay Manager reported the wrong seller account', 502, 'EBAY_ACCOUNT_MISMATCH');
 
+    const readErrors = [];
+    const optional = async (surface, paths, fallback) => {
+      try { return await this.ebayGet(config, paths); }
+      catch { readErrors.push(surface); return fallback; }
+    };
     const [listingPayload, draftPayload, orderPayload, feePayload, promotionPayload] = await Promise.all([
-      this.ebayGet(config, ['/api/ebay/listings', '/api/listings']).catch(() => ({ listings: [] })),
-      this.ebayGet(config, ['/api/ebay/drafts', '/api/drafts']).catch(() => ({ drafts: [] })),
-      this.ebayGet(config, ['/api/ebay/orders', '/api/orders']).catch(() => ({ orders: [] })),
-      this.ebayGet(config, ['/api/ebay/fees', '/api/fees']).catch(() => ({ fees: [] })),
-      this.ebayGet(config, ['/api/ebay/promotions', '/api/promotions']).catch(() => ({ promotions: [] }))
+      optional('listings', ['/api/ebay/listings', '/api/listings'], { listings: state.ebay?.listings || [] }),
+      optional('drafts', ['/api/ebay/drafts', '/api/drafts'], { drafts: state.ebay?.drafts || [] }),
+      optional('orders', ['/api/ebay/orders', '/api/orders'], { orders: [] }),
+      optional('fees', ['/api/ebay/fees', '/api/fees'], { fees: state.ebay?.fees || [] }),
+      optional('promotions', ['/api/ebay/promotions', '/api/promotions'], { promotions: state.ebay?.promotions || [] })
     ]);
     const listings = payloadItems(listingPayload, ['listings', 'items']);
     const drafts = payloadItems(draftPayload, ['drafts', 'items']);
@@ -1106,7 +1138,8 @@ export class IntegrationService {
       drafts: drafts.slice(0, 500).map(item => ({ id: String(item.id || ''), title: String(item.title || ''), sku: String(item.sku || ''), updatedAt: item.updatedAt || null })),
       fees: fees.slice(0, 1000),
       promotions: promotions.slice(0, 500),
-      health: { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
+      health: readErrors.includes('listings') ? (state.ebay?.health || null) : { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
+      coverage: { unavailableSurfaces: readErrors, ordersAvailable: !readErrors.includes('orders'), offersAvailable: !readErrors.includes('listings') },
       syncedAt: now
     };
     if (config.connection) {
@@ -1132,7 +1165,9 @@ export class IntegrationService {
       promotionCount: promotions.length,
       mismatchCount: missingOnEbay.length + staleOnEbay.length,
       lastSyncAt: now,
-      lastError: null
+      lastError: readErrors.length ? 'EBAY_PARTIAL_READ' : null,
+      lastFailureAt: readErrors.length ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
+      degradedSurfaces: readErrors
     };
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;

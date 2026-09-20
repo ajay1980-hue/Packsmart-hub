@@ -920,3 +920,31 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
   .order-state { grid-column: 1 / -1; }
   .order-metrics, .order-cost-grid { grid-template-columns: 1fr; }
 }
+
+/* Durable operational controls */
+.attention-queue { border-color: #776039; }
+.attention-links, .control-list { display: grid; gap: .8rem; }
+.attention-item { display: flex; align-items: center; flex-wrap: wrap; gap: .8rem; width: 100%; text-align: left; background: var(--panel); padding: .85rem; border: 1px solid var(--line); border-radius: 10px; }
+.attention-item > span:nth-child(2) { flex: 1; min-width: 140px; }
+.control-record { padding: 1rem; border: 1px solid var(--line); border-radius: 12px; min-width: 0; overflow-wrap: anywhere; }
+.control-record h3 { margin: 0; }
+.record-facts { display: grid; gap: .65rem; }
+.record-facts > div { display: grid; grid-template-columns: 140px minmax(0,1fr); gap: .6rem; }
+.record-facts dt { color: var(--muted); }
+.record-facts dd { margin: 0; }
+.record-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .8rem; margin: 1rem 0; }
+.record-form label, .agent-controls label { display: grid; gap: .4rem; min-width: 0; }
+.record-form input, .record-form select, .record-form textarea, .agent-controls select { width: 100%; min-width: 0; }
+.record-form .wide { grid-column: 1 / -1; }
+.agent-controls { display: flex; flex-wrap: wrap; gap: .5rem; align-items: end; }
+.agent-controls label { flex: 1; }
+.evidence { margin: .7rem 0; overflow-wrap: anywhere; }
+.evidence summary { cursor: pointer; color: var(--muted); padding: .4rem 0; }
+.evidence p { font-size: .85rem; }
+#value-metrics .kpi > strong { font-size: 1.35rem; }
+@media (max-width: 700px) {
+  .record-form, .record-facts > div { grid-template-columns: minmax(0,1fr); }
+  .record-form .wide { grid-column: auto; }
+  .control-record .section-head, #attention-queue .section-head { flex-wrap: wrap; }
+  .agent-controls button { min-height: 42px; }
+}

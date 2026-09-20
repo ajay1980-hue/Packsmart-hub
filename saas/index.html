@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=5.0.0">
+  <link rel="stylesheet" href="/styles.css?v=6.0.0">
 </head>
 <body>
   <section id="login-screen" class="auth-screen">
@@ -46,6 +46,7 @@
       <div class="brand-lockup"><span class="brand-mark">PS</span><div><strong>Packsmart Ops</strong><small>Runvara customer zero</small></div></div>
       <nav id="main-nav" aria-label="Primary">
         <button class="nav-item active" data-view="overview"><span>◆</span> Overview</button>
+        <button class="nav-item" data-view="issues"><span>!</span> Exceptions</button>
         <button class="nav-item" data-view="ai-team"><span>✦</span> AI Team</button>
         <button class="nav-item" data-view="profit"><span>£</span> Products &amp; Profit</button>
         <button class="nav-item" data-view="orders"><span>▤</span> Orders</button>
@@ -53,7 +54,9 @@
         <button class="nav-item" data-view="channels"><span>◎</span> Sales Channels</button>
         <button class="nav-item" data-view="approvals"><span>✓</span> Approval Centre <b id="nav-approval-count" class="nav-count hidden">0</b></button>
         <button class="nav-item" data-view="automations"><span>⚙</span> Automations</button>
-        <button class="nav-item" data-view="issues"><span>!</span> Issues</button>
+        <button class="nav-item" data-view="opportunities"><span>↗</span> Opportunities</button>
+        <button class="nav-item" data-view="memory"><span>▣</span> Decision Memory</button>
+        <button class="nav-item" data-view="value"><span>◇</span> Value &amp; Work</button>
         <button class="nav-item" data-view="audit"><span>↻</span> Audit &amp; Account</button>
       </nav>
       <div class="customer-zero"><span class="status-dot"></span><div><b>Packsmart Solutions Ltd</b><small>Internal · no SaaS charge</small></div></div>
@@ -68,8 +71,9 @@
       <div id="global-success" class="global-message success hidden" role="status"></div>
 
       <section id="view-overview" class="view active">
+        <article id="attention-queue" class="card attention-queue" aria-live="polite"></article>
         <article class="hero card">
-          <div><p class="eyebrow">TODAY'S OPERATIONS BRIEF</p><h2>What needs your attention now</h2><p id="brief-summary" class="hero-copy">Loading secure Packsmart data…</p><small id="brief-generated" class="muted"></small></div>
+          <div><p class="eyebrow">MORNING COMMAND BRIEF</p><h2>What needs your attention now</h2><p id="brief-summary" class="hero-copy">Loading secure Packsmart data…</p><small id="brief-generated" class="muted"></small></div>
           <div class="hero-score"><strong id="readiness-score">—</strong><span>readiness</span></div>
         </article>
 
@@ -199,18 +203,24 @@
       </section>
 
       <section id="view-approvals" class="view">
+        <article id="approval-edit-panel" class="card hidden"><p class="eyebrow">MODIFY PROPOSAL</p><h2>Revise before approval</h2><form id="approval-edit-form" class="approval-form"><label>Proposed action<input name="action" maxlength="180" required></label><label>Reason<textarea name="reason" maxlength="1000" required></textarea></label><label>Financial impact (£) — leave blank if unknown<input name="financialImpact" type="number" step="0.01"></label><label>Expected benefit<textarea name="expectedBenefit" maxlength="1000" required></textarea></label><label>Risk<textarea name="risk" maxlength="1000" required></textarea></label><div class="button-row"><button class="primary" type="submit">Save revision</button><button id="approval-edit-cancel" class="secondary" type="button">Cancel</button></div></form></article>
         <div class="grid-approval">
-          <article class="card"><p class="eyebrow">HUMAN IN THE LOOP</p><h2>Request approval</h2><p class="muted">Approval records a decision only. No supplier order, refund, spend, price change, marketplace or social action executes until its executor is separately connected and tested.</p><form id="approval-form" class="approval-form"><label>Action class<select name="type" required><option value="supplier_order">Supplier order</option><option value="advertising_spend">Advertising spend</option><option value="refund">Customer refund</option><option value="major_price_change">Major price change</option><option value="paid_service_purchase">Paid-service purchase</option><option value="risky_marketplace_action">Risky marketplace action</option><option value="social_commerce_publish">Social-commerce publish</option><option value="social_advertising_change">Social advertising change</option></select></label><label>Proposed action<input name="action" maxlength="180" required></label><label>Reason<textarea name="reason" maxlength="1000" required></textarea></label><label>Financial impact (£)<input name="financialImpact" type="number" step="0.01"></label><label>Expected benefit<textarea name="expectedBenefit" maxlength="1000" required></textarea></label><label>Risk<textarea name="risk" maxlength="1000" required></textarea></label><button class="primary" type="submit">Create approval request</button><p id="approval-form-error" class="form-error" role="alert"></p></form></article>
+          <article class="card"><p class="eyebrow">HUMAN IN THE LOOP</p><h2>Request approval</h2><p class="muted">Approval records a decision only. No supplier order, refund, spend, price change, marketplace or social action executes until its executor is separately connected and tested.</p><form id="approval-form" class="approval-form"><label>Action class<select name="type" required><option value="supplier_order">Supplier order</option><option value="advertising_spend">Advertising spend</option><option value="refund">Customer refund</option><option value="major_price_change">Major price change</option><option value="paid_service_purchase">Paid-service purchase</option><option value="risky_marketplace_action">Risky marketplace action</option><option value="social_commerce_publish">Social-commerce publish</option><option value="social_advertising_change">Social advertising change</option><option value="customer_facing_publish">Customer-facing publication</option><option value="sensitive_communication">Sensitive communication</option><option value="delete_data">Important data deletion</option><option value="integration_change">Important integration change</option><option value="irreversible_action">Irreversible action</option></select></label><label>Proposed action<input name="action" maxlength="180" required></label><label>Reason<textarea name="reason" maxlength="1000" required></textarea></label><label>Financial impact (£)<input name="financialImpact" type="number" step="0.01"></label><label>Expected benefit<textarea name="expectedBenefit" maxlength="1000" required></textarea></label><label>Risk<textarea name="risk" maxlength="1000" required></textarea></label><button class="primary" type="submit">Create approval request</button><p id="approval-form-error" class="form-error" role="alert"></p></form></article>
           <article class="card"><div class="section-head"><div><p class="eyebrow">DECISION QUEUE</p><h2>Approval requests</h2></div><select id="approval-filter"><option value="pending">Pending</option><option value="all">All records</option></select></div><div id="approval-list" class="approval-list"></div></article>
         </div>
       </section>
 
-      <section id="view-automations" class="view"><article class="card"><p class="eyebrow">SAFE AUTOMATION</p><h2>Automation rules</h2><p class="muted">Monitoring, calculations and drafting can run automatically. Financial and externally risky actions always enter the Approval Centre.</p><div id="automation-list" class="rule-list"></div></article></section>
+      <section id="view-automations" class="view"><article class="card"><div class="section-head"><div><p class="eyebrow">AUTOPILOT</p><h2>Recurring monitoring</h2></div><div class="button-row"><button id="autopilot-toggle" class="primary" type="button">Loading…</button><button id="autopilot-run" class="secondary" type="button">Run due checks</button></div></div><p id="autopilot-status" class="muted"></p><details><summary>Permissions and frequency limits</summary><div id="autopilot-policies" class="control-list"></div></details></article><article class="card"><p class="eyebrow">SAFE AUTOMATION</p><h2>Automation rules</h2><p class="muted">Monitoring, calculations and drafting can run automatically. Financial and externally risky actions always enter the Approval Centre.</p><div id="automation-list" class="rule-list"></div></article></section>
 
       <section id="view-issues" class="view">
+        <article class="card"><div class="section-head"><div><p class="eyebrow">EXCEPTION CENTRE</p><h2>What needs a decision</h2></div><label>Show<select id="exception-filter"><option value="active">Needs attention</option><option value="all">All history</option></select></label></div><div id="exception-list" class="control-list"></div></article>
         <div class="grid-2"><article class="card"><p class="eyebrow">CATALOGUE QUALITY</p><h2>SEO issues</h2><div id="seo-issue-list" class="issue-list"></div></article><article class="card"><p class="eyebrow">CUSTOMER SERVICE</p><h2>Order issues</h2><div id="customer-issue-list" class="issue-list"></div></article></div>
         <div class="grid-2"><article class="card"><p class="eyebrow">STOCK</p><h2>Stock risks</h2><div id="stock-issue-list" class="issue-list"></div></article><article class="card"><p class="eyebrow">PROFIT COVERAGE</p><h2>Missing cost inputs</h2><div id="cost-issue-list" class="issue-list"></div></article></div>
       </section>
+
+      <section id="view-opportunities" class="view"><article class="card"><p class="eyebrow">OPPORTUNITY ENGINE</p><h2>Commercial opportunities</h2><p class="muted">Suggestions grounded in recorded stock, cost and catalogue data. Estimates remain separate from realised value.</p><div id="opportunity-list" class="control-list"></div></article></section>
+      <section id="view-memory" class="view"><article class="card"><p class="eyebrow">DECISION MEMORY</p><h2>Business decisions and preferences</h2><p class="muted">Active decisions inform the Commander. Margin targets and exclusions also guide monitoring. Editing retains the superseded decision.</p><form id="decision-form" class="record-form"><label>Decision key<input name="key" pattern="[a-z0-9][a-z0-9_-]{1,99}" maxlength="100" placeholder="supplier-policy" required></label><label>Category<select id="decision-category" name="category"></select></label><label class="wide">Title<input name="title" maxlength="160" required></label><label class="wide">Decision<textarea name="content" maxlength="2000" required></textarea></label><label class="wide">Source / context<input name="source" maxlength="500" required></label><label>Target SKU or opportunity ID<input name="target" maxlength="160"></label><label>Numeric value, if relevant<input name="value" type="number" step="any"></label><div class="button-row wide"><button class="primary" type="submit">Save decision</button><button id="decision-reset" class="secondary" type="button">New decision</button></div></form><div id="decision-list" class="control-list"></div></article></section>
+      <section id="view-value" class="view"><article class="card"><p class="eyebrow">ACTUAL VALUE</p><h2>Measured results</h2><p id="value-explanation" class="muted"></p></article><div id="value-metrics" class="kpis kpis-four"></div><article class="card"><p class="eyebrow">ESTIMATED VALUE</p><h2>Potential improvements</h2><div id="value-estimates"></div></article><article class="card"><p class="eyebrow">PROOF OF WORK</p><h2>Actions, outcomes and evidence</h2><p class="muted">Completed analysis and monitoring are labelled by source. Approved external actions remain blocked until a supported executor is connected.</p><div id="work-list" class="control-list"></div></article></section>
 
       <section id="view-audit" class="view">
         <div class="grid-2"><article class="card"><p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Packsmart Solutions Ltd</h2><div id="account-details" class="status-list"></div><div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div><form id="account-password-form" class="auth-form compact-form hidden"><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label><button class="primary" type="submit">Update password</button><p class="form-error" role="alert"></p></form></article><article class="card"><p class="eyebrow">FUTURE BILLING</p><h2>Subscription architecture</h2><div id="billing-status" class="status-list"></div><div id="plan-grid" class="plan-grid"></div><p class="muted tiny">Indicative tiers only. Packsmart customer-zero remains internal/free and charging is disabled.</p></article></div>
@@ -220,6 +230,7 @@
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
-  <script src="/app.js?v=5.0.0"></script>
+  <script src="/control-ui.js?v=6.0.0"></script>
+  <script src="/app.js?v=6.0.0"></script>
 </body>
 </html>

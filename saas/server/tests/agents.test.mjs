@@ -44,7 +44,7 @@ test('all agents default safely and financial workers do not execute actions', (
   assert.equal(settings.finance.autonomy, 1);
   assert.ok(Object.values(settings).every(item => item.autonomy <= 2));
   const team = agentTeamSnapshot(seedWorkspaceState({}));
-  assert.equal(team.length, 13);
+  assert.equal(team.length, 15);
   assert.equal(team.find(item => item.id === 'commander').lastFinding, 'Ready for a business command.');
 });
 

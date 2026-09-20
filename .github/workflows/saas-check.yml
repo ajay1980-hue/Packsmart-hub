@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install pinned test dependencies
+        run: npm --prefix saas/server ci --ignore-scripts
       - name: Browser syntax check
         run: node --check saas/app.js
       - name: Server syntax check
@@ -35,6 +37,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name packsmart-ops-test -p 8787:8787 \
+            -e NODE_ENV=test \
             -e PACKSMART_ADMIN_EMAIL=sales@packsmartsolutions.com \
             -e PACKSMART_ADMIN_PASSWORD='Packsmart-Test-Only!2026' \
             -e SESSION_SECRET='test-session-secret-with-more-than-thirty-two-characters' \

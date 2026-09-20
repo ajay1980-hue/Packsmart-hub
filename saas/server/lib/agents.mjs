@@ -1,5 +1,8 @@
 import crypto from 'node:crypto';
 import { deriveOperations, integrationMatrix } from './operations.mjs';
+import { normalizeApprovalRequest } from './operations.mjs';
+import { ensureControl } from './control.mjs';
+import { recordWork } from './events.mjs';
 
 export const AUTONOMY_LEVELS = Object.freeze({ 0: 'Observe', 1: 'Recommend', 2: 'Prepare', 3: 'Auto within limits' });
 
@@ -8,12 +11,12 @@ export const AGENT_DEFINITIONS = Object.freeze([
   ['product_scout', 'Product Scout', 1], ['supplier', 'Supplier', 2], ['ebay', 'eBay', 2],
   ['shopify', 'Shopify', 2], ['seo', 'SEO', 1], ['marketing', 'Marketing', 2],
   ['customer_service', 'Customer Service', 2], ['sales', 'Sales', 1], ['finance', 'Finance', 1],
-  ['health_watch', 'Health Watch', 2]
+  ['health_watch', 'Health Watch', 2], ['operations', 'Operations', 2], ['compliance', 'Compliance & Risk', 1]
 ].map(([id, name, defaultAutonomy]) => ({ id, name, defaultAutonomy })));
 
 const safeText = (value, max = 500) => String(value ?? '').trim().slice(0, max);
 const nowIso = now => (now instanceof Date ? now : new Date(now || Date.now())).toISOString();
-const money = value => Number.isFinite(Number(value)) ? `£${Number(value).toFixed(2)}` : 'not confirmed';
+const money = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? `£${Number(value).toFixed(2)}` : 'not confirmed';
 
 export function defaultAgentSettings() {
   return Object.fromEntries(AGENT_DEFINITIONS.map(agent => [agent.id, { autonomy: agent.defaultAutonomy, enabled: true }]));
@@ -35,6 +38,8 @@ export function routeCommand(command) {
   matches(/customer|message|complaint|refund|delivery|damaged/, ['customer_service']);
   matches(/sales|conversion|upsell|bundle|b2b|channel/, ['sales']);
   matches(/supplier|purchase|order stock|lead time|moq/, ['supplier']);
+  matches(/operation|shipping|fulfil|fulfill|dispatch|automation|autopilot/, ['operations']);
+  matches(/risk|approval|compliance|security|spend|refund|publish|delete/, ['compliance']);
   matches(/new product|product scout|worth selling|product gate/, ['product_scout', 'supplier', 'pricing', 'seo', 'ebay', 'finance']);
   if (/sort packsmart|today.?s priorit|daily brief|check everything|full audit|business health/.test(input)) {
     ['health_watch', 'finance', 'stock', 'pricing', 'shopify', 'ebay', 'sales'].forEach(id => selected.add(id));
@@ -52,7 +57,7 @@ function result(id, status, finding, data = {}, confidence = 0.8, issues = []) {
 }
 
 export function runSpecialist(agentId, state, options = {}) {
-  const metrics = deriveOperations(state, options);
+  const metrics = options.metrics || deriveOperations(state, options);
   const shopify = connection(state, 'shopify');
   const ebay = connection(state, 'ebay');
   switch (agentId) {
@@ -85,22 +90,59 @@ export function runSpecialist(agentId, state, options = {}) {
       return result(agentId, metrics.customerServiceIssues ? 'Warning' : 'Idle', metrics.customerServiceIssues ? `${metrics.customerServiceIssues} order${metrics.customerServiceIssues === 1 ? '' : 's'} may need customer follow-up.` : 'No customer-service order exceptions detected.', { cases: metrics.customerServiceItems }, metrics.orders30d ? 0.82 : 0.5);
     case 'product_scout':
       return result(agentId, 'Warning', 'Live product discovery sources are NOT CONNECTED. Existing catalogue data can be scored, but no external opportunity is being claimed.', { sources: { trends: 'NOT CONNECTED', competitors: 'NOT CONNECTED', suppliers: metrics.supplierCount ? 'PARTIAL' : 'NOT CONNECTED' } }, 0.25, [{ code: 'SCOUT_SOURCES_NOT_CONNECTED', severity: 'WARNING' }]);
+    case 'operations':
+      return result(agentId, metrics.openOrders ? 'Warning' : 'Idle', `${metrics.openOrders} open orders need operational review.`, { orders: metrics.customerServiceItems, exceptions: (state.exceptions || []).filter(item => ['open', 'acknowledged'].includes(item.status)).map(({ id, title, severity }) => ({ id, title, severity })) }, 0.8);
+    case 'compliance':
+      return result(agentId, metrics.pendingApprovals ? 'Warning' : 'Idle', `${metrics.pendingApprovals} approvals are pending. Spending and risky external actions require the workspace owner's decision.`, { approvalIds: (state.approvals || []).filter(item => item.status === 'pending').map(item => item.id), externalWritesEnabled: false }, 1);
     default:
       return result(agentId, 'Failed', 'This specialist is not implemented.', {}, 0, [{ code: 'AGENT_NOT_IMPLEMENTED', severity: 'HIGH' }]);
   }
 }
 
 export async function runCommander(state, command, options = {}) {
+  ensureControl(state);
   const startedAt = nowIso(options.now);
   const agentIds = routeCommand(command);
-  const specialistResults = await Promise.all(agentIds.map(async agentId => runSpecialist(agentId, state, options)));
+  const settings = { ...defaultAgentSettings(), ...state.agentSettings };
+  if (settings.commander?.enabled === false) throw Object.assign(new Error('Commander is disabled'), { status: 409, code: 'COMMANDER_DISABLED' });
+  const metrics = deriveOperations(state, options);
+  const specialistResults = await Promise.all(agentIds.map(async agentId => {
+    if (settings[agentId]?.enabled === false) return { ...result(agentId, 'Warning', 'This specialist is disabled by workspace policy.', {}, 0), workStatus: 'BLOCKED' };
+    try {
+      const output = await (options.specialist || runSpecialist)(agentId, state, { ...options, metrics });
+      return { ...output, autonomy: settings[agentId]?.autonomy ?? 1, workStatus: output.status === 'Failed' ? 'FAILED' : 'COMPLETED', evidence: [{ type: 'workspace_analysis', id: state.workspace.id, detail: `Analysis of recorded ${agentId} data; no external action executed.` }] };
+    } catch (error) {
+      return { ...result(agentId, 'Failed', 'Specialist analysis failed; review the recorded error code.', {}, 0, [{ code: 'SPECIALIST_FAILED', severity: 'HIGH' }]), workStatus: 'FAILED' };
+    }
+  }));
   const issues = specialistResults.flatMap(item => item.issues || []);
-  const priorities = specialistResults.filter(item => item.status !== 'Idle').sort((a, b) => (b.confidence || 0) - (a.confidence || 0)).slice(0, 5).map(item => ({ agentId: item.agentId, action: item.finding }));
+  const priorities = specialistResults.filter(item => item.status !== 'Idle' && item.autonomy > 0 && settings.commander.autonomy > 0).sort((a, b) => (b.confidence || 0) - (a.confidence || 0)).slice(0, 5).map(item => ({ agentId: item.agentId, action: item.finding }));
+  const decisions = state.decisions.filter(item => item.status === 'active');
+  const conflicts = metrics.stockRiskItems.filter(item => metrics.lowMarginItems.some(row => row.sku === item.sku)).map(item => ({ sku: item.sku, agents: ['stock', 'pricing'], reason: 'Replenishment is suggested while recorded margins are below target.', resolution: 'Resolve margin and demand assumptions before approving a supplier order.' }));
+  let proposedType = null;
+  if (/\b(place|buy|purchase|order)\b.*\b(stock|supplier|carton|pack|inventory)\b/i.test(command)) proposedType = 'supplier_order';
+  if (/\b(issue|send|make|process)\b.*\brefund\b/i.test(command)) proposedType = 'refund';
+  if (/\b(spend|pay|buy|purchase)\b/i.test(command)) proposedType ||= 'spend_money';
+  if (/\b(change|raise|reduce|set|increase|decrease)\b.*\bprice/i.test(command)) proposedType = 'major_price_change';
+  if (/\bpublish\b/i.test(command)) proposedType = 'customer_facing_publish';
+  if (/\b(send|email|message)\b.*\b(customer|supplier|complaint)\b/i.test(command)) proposedType = 'sensitive_communication';
+  if (/\bdelete\b/i.test(command)) proposedType = 'delete_data';
+  if (proposedType && settings.commander.autonomy >= 2) {
+    const approval = normalizeApprovalRequest({ type: proposedType, action: safeText(command, 180), reason: 'Commander prepared this request; confirm the exact scope and supporting evidence before approval.',
+      financialImpact: null, expectedBenefit: 'Business impact requires owner review.', risk: 'External or financial action. Execution is disabled until a supported executor is connected and tested.',
+      source: 'commander', agentId: 'commander', evidence: specialistResults.flatMap(item => item.evidence || []).slice(0, 20), payload: {} }, options.actor || 'commander');
+    state.approvals.unshift(approval);
+    options.approvalId = approval.id;
+  }
+  const workStatus = proposedType || conflicts.length ? 'REQUIRES APPROVAL' : specialistResults.some(item => item.workStatus === 'FAILED') ? 'FAILED' : specialistResults.every(item => item.workStatus === 'BLOCKED') ? 'BLOCKED' : 'COMPLETED';
   const run = {
-    id: `agent_run_${crypto.randomUUID()}`, command: safeText(command, 1000), routedAgents: agentIds,
+    id: options.runId || `agent_run_${crypto.randomUUID()}`, command: safeText(command, 1000), routedAgents: agentIds,
     startedAt, completedAt: nowIso(), status: specialistResults.some(item => item.status === 'Failed') ? 'Warning' : 'Completed',
     summary: specialistResults.map(item => item.finding).filter(Boolean).join(' '), priorities,
-    urgentRisks: issues.filter(item => ['HIGH', 'CRITICAL'].includes(item.severity)), results: specialistResults
+    urgentRisks: issues.filter(item => ['HIGH', 'CRITICAL'].includes(item.severity)), results: specialistResults,
+    workStatus, conflicts, decisionContext: decisions.map(({ id, title, content, revision }) => ({ id, title, content, revision })), approvalId: options.approvalId || null,
+    executedExternally: false, resultKind: 'analysis', modelCalls: 0,
+    evidence: specialistResults.flatMap(item => item.evidence || [])
   };
   return run;
 }
@@ -121,11 +163,12 @@ export function agentTeamSnapshot(state) {
 }
 
 export function recordAgentRun(state, run, actor = 'system') {
-  state.agentRuns = [run, ...(state.agentRuns || [])].slice(0, 100);
+  state.agentRuns = [run, ...(state.agentRuns || [])];
+  recordWork(state, { id: run.id, title: run.command, source: 'commander', status: run.workStatus || 'COMPLETED', evidence: run.evidence || [{ type: 'agent_run', id: run.id }], approvalId: run.approvalId || null, executedExternally: false });
   const activities = [
-    { id: `activity_${crypto.randomUUID()}`, agentId: 'commander', type: 'command_completed', message: `Commander completed: ${run.command}`, status: run.status, createdAt: run.completedAt },
+    { id: `activity_${crypto.randomUUID()}`, agentId: 'commander', type: 'command_analysis', message: `Commander analysis: ${run.command}`, status: run.workStatus || run.status, createdAt: run.completedAt },
     ...run.results.map(item => ({ id: `activity_${crypto.randomUUID()}`, agentId: item.agentId, type: 'agent_finding', message: item.finding, status: item.status, confidence: item.confidence, createdAt: item.completedAt }))
   ];
-  state.agentActivity = [...activities, ...(state.agentActivity || [])].slice(0, 1000);
+  state.agentActivity = [...activities, ...(state.agentActivity || [])];
   return { run, actor };
 }

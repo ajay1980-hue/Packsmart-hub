@@ -5,14 +5,24 @@ import { fileURLToPath } from 'node:url';
 import { defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
+import { ensureControl } from './control.mjs';
+export { addAudit } from './events.mjs';
+
+const PERSISTED = Symbol('persisted');
+function markPersisted(state) { Object.defineProperty(state, PERSISTED, { value: true, configurable: true }); return state; }
+function conflict() { return Object.assign(new Error('Workspace changed; refresh and try again'), { status: 409, code: 'STATE_CONFLICT' }); }
+function assertWorkspace(workspaceId, state) {
+  if (!workspaceId || state?.workspace?.id !== workspaceId) throw Object.assign(new Error('Workspace identity mismatch'), { status: 403, code: 'WORKSPACE_MISMATCH' });
+}
+const fileQueues = new Map();
 
 export function seedWorkspaceState(env = process.env, options = {}) {
   const now = new Date().toISOString();
   const workspaceId = options.workspaceId || 'packsmart-solutions';
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
-  return {
-    schemaVersion: 5,
+  return ensureControl({
+    schemaVersion: 6,
     workspace: {
       id: workspaceId,
       name: options.name || (workspaceId === 'packsmart-solutions' ? 'Packsmart Solutions Ltd' : 'New business'),
@@ -83,23 +93,11 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     integrationStatus: {},
     migrations: {},
     storageReady: false
-  };
+  });
 }
 
 function id(prefix) {
   return `${prefix}_${crypto.randomUUID()}`;
-}
-
-export function addAudit(state, event) {
-  const entry = {
-    id: id('audit'),
-    type: String(event.type || 'event').slice(0, 100),
-    actor: String(event.actor || 'system').slice(0, 160),
-    detail: event.detail && typeof event.detail === 'object' ? event.detail : {},
-    createdAt: new Date().toISOString()
-  };
-  state.audit = [entry, ...(state.audit || [])].slice(0, 2000);
-  return entry;
 }
 
 export function upgradeState(state, env = process.env) {
@@ -113,7 +111,7 @@ export function upgradeState(state, env = process.env) {
   const upgraded = {
     ...seeded,
     ...(state || {}),
-    schemaVersion: 5,
+    schemaVersion: 6,
     workspace: { ...seeded.workspace, ...(state?.workspace || {}), updatedAt: state?.workspace?.updatedAt || new Date().toISOString() },
     users: Array.isArray(state?.users) && state.users.length ? state.users.map(user => {
       const upgradedUser = { active: true, sessionVersion: 1, passwordHash: null, ...user };
@@ -144,7 +142,7 @@ export function upgradeState(state, env = process.env) {
     integrationStatus: state?.integrationStatus && typeof state.integrationStatus === 'object' ? state.integrationStatus : {},
     migrations: state?.migrations && typeof state.migrations === 'object' ? state.migrations : {}
   };
-  return upgraded;
+  return ensureControl(upgraded);
 }
 
 class FileStore {
@@ -166,20 +164,35 @@ class FileStore {
 
   async get(workspaceId) {
     const all = await this.readAll();
-    return all[workspaceId] ? upgradeState(all[workspaceId]) : null;
+    return all[workspaceId] ? markPersisted(upgradeState(all[workspaceId])) : null;
   }
 
   async save(workspaceId, state) {
-    const all = await this.readAll();
-    const upgraded = upgradeState(state);
-    upgraded.storageReady = false;
-    all[workspaceId] = upgraded;
-    await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-    const temp = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(all, null, 2), { mode: 0o600 });
-    await fs.rename(temp, this.filePath);
-    return upgraded;
+    assertWorkspace(workspaceId, state);
+    const previous = fileQueues.get(this.filePath) || Promise.resolve();
+    const write = previous.catch(() => {}).then(async () => {
+      const all = await this.readAll();
+      const existing = all[workspaceId];
+      if (existing && (!(state[PERSISTED] || state._revision) || (existing._revision || null) !== (state._revision || null))) throw conflict();
+      for (const other of Object.values(all)) if (other.workspace.id !== workspaceId && (other.users || []).some(user => (state.users || []).some(next => normalizeEmail(next.email) === normalizeEmail(user.email)))) {
+        throw Object.assign(new Error('An account already exists for this email'), { status: 409, code: 'ACCOUNT_EXISTS' });
+      }
+      const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: false };
+      all[workspaceId] = upgraded;
+      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
+      const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
+      const handle = await fs.open(temp, 'wx', 0o600);
+      try { await handle.writeFile(JSON.stringify(all)); await handle.sync(); } finally { await handle.close(); }
+      await fs.rename(temp, this.filePath);
+      state._revision = upgraded._revision;
+      markPersisted(state);
+      return markPersisted(upgraded);
+    });
+    fileQueues.set(this.filePath, write);
+    try { return await write; } finally { if (fileQueues.get(this.filePath) === write) fileQueues.delete(this.filePath); }
   }
+
+  async listWorkspaceIds() { return Object.keys(await this.readAll()); }
 
   async findUserByEmail(email) {
     const normalized = normalizeEmail(email);
@@ -245,28 +258,34 @@ class SupabaseStore {
     if (!rows?.[0]?.state) return null;
     const state = upgradeState(rows[0].state);
     state.storageReady = true;
-    return state;
+    assertWorkspace(workspaceId, state);
+    return markPersisted(state);
   }
 
-  async upsert(table, rows, conflict) {
+  async upsert(table, rows, conflict, options = {}) {
     if (!rows.length) return;
     await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, {
       method: 'POST',
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify(rows)
+      body: JSON.stringify(rows),
+      ...options
     });
   }
 
-  async upsertOptional(table, rows, conflict) {
-    try { await this.upsert(table, rows, conflict); }
-    catch (error) {
-      if (error.code !== 'SUPABASE_PERSISTENCE_FAILED') throw error;
-    }
-  }
-
   async mirrorNormalized(workspaceId, state) {
+    const errors = [];
+    const deadline = Date.now() + 12000;
+    const mirror = async (table, rows, conflict) => {
+      if (!rows.length) return;
+      try {
+        if (Date.now() >= deadline) throw Object.assign(new Error('Mirror deferred'), { code: 'MIRROR_DEFERRED' });
+        await this.upsert(table, rows, conflict, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+      } catch (error) {
+        errors.push({ table, code: error.code === 'SUPABASE_PERSISTENCE_FAILED' ? error.code : 'MIRROR_DEFERRED', httpStatus: error.httpStatus || null, databaseCode: error.databaseCode || null });
+      }
+    };
     const workspace = state.workspace;
-    await this.upsert('workspaces', [{
+    await mirror('workspaces', [{
       id: workspaceId,
       name: workspace.name,
       slug: workspace.slug,
@@ -275,7 +294,7 @@ class SupabaseStore {
       updated_at: workspace.updatedAt || new Date().toISOString()
     }], 'id');
 
-    await this.upsert('users', (state.users || []).map(user => ({
+    await mirror('users', (state.users || []).map(user => ({
       id: user.id,
       workspace_id: workspaceId,
       email: normalizeEmail(user.email),
@@ -288,7 +307,7 @@ class SupabaseStore {
       updated_at: user.updatedAt || user.createdAt
     })), 'id');
 
-    await this.upsert('connections', (state.connections || []).map(connection => ({
+    await mirror('connections', (state.connections || []).map(connection => ({
       id: connection.id,
       workspace_id: workspaceId,
       provider: connection.provider,
@@ -304,7 +323,7 @@ class SupabaseStore {
     })), 'id');
 
     const products = state.products || [];
-    await this.upsert('products', products.map(product => ({
+    await mirror('products', products.map(product => ({
       id: product.id,
       workspace_id: workspaceId,
       provider: product.provider || 'shopify',
@@ -321,8 +340,21 @@ class SupabaseStore {
       updated_at: new Date().toISOString()
     })), 'workspace_id,id');
 
+    // Preserve old reporting IDs while matching on source identity, never SKU.
+    const existingVariants = new Map();
+    let variantsAvailable = true;
+    if (products.length) try {
+      for (let offset = 0; ; offset += 500) {
+        const rows = await this.request(`variants?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,product_id,external_id&order=id&limit=500&offset=${offset}`, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+        for (const row of rows || []) existingVariants.set(`${row.product_id}:${row.external_id}`, row.id);
+        if ((rows || []).length < 500) break;
+      }
+    } catch (error) {
+      variantsAvailable = false;
+      errors.push({ table: 'variants', code: 'VARIANT_IDENTITY_READ_FAILED', httpStatus: error.httpStatus || null, databaseCode: error.databaseCode || null });
+    }
     const variants = products.flatMap(product => (product.variants || []).map(variant => ({
-      id: variant.id || variant.externalId || variant.sku,
+      id: existingVariants.get(`${product.id}:${variant.externalId || variant.id || ''}`) || variant.externalId || `${product.id}:${variant.id || variant.sku}`,
       workspace_id: workspaceId,
       product_id: product.id,
       external_id: variant.externalId || variant.id || '',
@@ -335,10 +367,11 @@ class SupabaseStore {
       raw: {},
       updated_at: new Date().toISOString()
     })));
-    await this.upsert('variants', variants, 'workspace_id,id');
+    if (variantsAvailable) await mirror('variants', variants, 'workspace_id,id');
 
-    const variantBySku = new Map(variants.map(variant => [variant.sku, variant.id]));
-    await this.upsert('economics', Object.entries(state.economics || {}).map(([sku, economics]) => ({
+    const variantBySku = new Map();
+    if (variantsAvailable) for (const variant of variants) variantBySku.set(variant.sku, variantBySku.has(variant.sku) ? null : variant.id);
+    await mirror('economics', Object.entries(state.economics || {}).map(([sku, economics]) => ({
       workspace_id: workspaceId,
       sku,
       variant_id: variantBySku.get(sku) || null,
@@ -350,14 +383,14 @@ class SupabaseStore {
       updated_at: new Date().toISOString()
     })), 'workspace_id,sku');
 
-    await this.upsertOptional('product_cost_profiles', Object.entries(state.economics || {}).map(([sku, economics]) => ({
+    await mirror('product_cost_profiles', Object.entries(state.economics || {}).map(([sku, economics]) => ({
       workspace_id: workspaceId,
       sku,
       cost_data: economics,
       updated_at: economics.updatedAt || new Date().toISOString()
     })), 'workspace_id,sku');
 
-    await this.upsertOptional('suppliers', (state.suppliers || []).map(supplier => ({
+    await mirror('suppliers', (state.suppliers || []).map(supplier => ({
       id: supplier.id,
       workspace_id: workspaceId,
       name: supplier.name,
@@ -368,7 +401,7 @@ class SupabaseStore {
       updated_at: supplier.updatedAt || supplier.createdAt
     })), 'id');
 
-    await this.upsertOptional('cost_history', (state.costHistory || []).slice(0, 5000).map(event => ({
+    await mirror('cost_history', (state.costHistory || []).slice(0, 5000).map(event => ({
       id: event.id,
       workspace_id: workspaceId,
       sku: event.sku,
@@ -379,15 +412,15 @@ class SupabaseStore {
       created_at: event.createdAt
     })), 'id');
 
-    await this.upsert('automation_rules', Object.entries(state.automations || {}).map(([ruleId, enabled]) => ({
+    await mirror('automation_rules', Object.entries(state.automations || {}).map(([ruleId, enabled]) => ({
       workspace_id: workspaceId,
       rule_id: ruleId,
       enabled: Boolean(enabled),
-      config: {},
+      config: state.autopilot?.rules?.[ruleId] || {},
       updated_at: new Date().toISOString()
     })), 'workspace_id,rule_id');
 
-    await this.upsert('approval_requests', (state.approvals || []).map(approval => ({
+    await mirror('approval_requests', (state.approvals || []).map(approval => ({
       id: approval.id,
       workspace_id: workspaceId,
       type: approval.type,
@@ -408,7 +441,7 @@ class SupabaseStore {
       execution_status: approval.executionStatus || 'not_connected'
     })), 'id');
 
-    await this.upsert('audit_events', (state.audit || []).map(event => ({
+    await mirror('audit_events', (state.audit || []).map(event => ({
       id: event.id,
       workspace_id: workspaceId,
       type: event.type,
@@ -417,7 +450,7 @@ class SupabaseStore {
       created_at: event.createdAt
     })), 'id');
 
-    await this.upsert('subscriptions', [{
+    await mirror('subscriptions', [{
       workspace_id: workspaceId,
       plan: state.subscription?.plan || 'starter',
       status: state.subscription?.status || 'pending',
@@ -427,7 +460,7 @@ class SupabaseStore {
       updated_at: state.subscription?.updatedAt || new Date().toISOString()
     }], 'workspace_id');
 
-    await this.upsert('orders', (state.orders || []).map(order => ({
+    await mirror('orders', (state.orders || []).map(order => ({
       id: order.id,
       workspace_id: workspaceId,
       provider: order.provider || 'shopify',
@@ -443,7 +476,7 @@ class SupabaseStore {
       updated_at: new Date().toISOString()
     })), 'workspace_id,id');
 
-    await this.upsertOptional('order_financials', (state.orders || []).map(order => ({
+    await mirror('order_financials', (state.orders || []).map(order => ({
       workspace_id: workspaceId,
       order_id: order.id,
       provider: order.provider || 'shopify',
@@ -465,7 +498,7 @@ class SupabaseStore {
       updated_at: order.updatedAt || new Date().toISOString()
     })), 'workspace_id,order_id');
 
-    await this.upsertOptional('advertising_costs', (state.advertisingCosts || []).map(record => ({
+    await mirror('advertising_costs', (state.advertisingCosts || []).map(record => ({
       id: record.id,
       workspace_id: workspaceId,
       channel: record.channel,
@@ -478,7 +511,7 @@ class SupabaseStore {
       updated_at: record.updatedAt || record.createdAt
     })), 'id');
 
-    await this.upsert('operations_briefs', (state.dailyBriefs || []).slice(0, 30).map(brief => ({
+    await mirror('operations_briefs', (state.dailyBriefs || []).slice(0, 30).map(brief => ({
       id: brief.id,
       workspace_id: workspaceId,
       summary: brief.summary,
@@ -486,47 +519,73 @@ class SupabaseStore {
       logic: brief.logic || 'deterministic-v1',
       created_at: brief.generatedAt
     })), 'id');
+    return errors;
+  }
+
+  async commit(workspaceId, state, expectedRevision, existing) {
+    const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
+    if (existing) {
+      const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
+      const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`, {
+        method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record)
+      });
+      if (!rows?.length) throw conflict();
+    } else {
+      // Atomically create the FK parent, unique login identity and primary state.
+      try { await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) }); }
+      catch (error) { if (error.databaseCode === '23505') throw conflict(); throw error; }
+    }
   }
 
   async save(workspaceId, state) {
-    const upgraded = upgradeState(state);
-    upgraded.storageReady = true;
+    assertWorkspace(workspaceId, state);
+    const existing = Boolean(state[PERSISTED] || state._revision);
+    const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
     upgraded.workspace.updatedAt = new Date().toISOString();
-    // The tenant state is authoritative. Persist it before refreshing the
-    // reporting mirrors so an optional/legacy mirror constraint cannot discard
-    // a successful commerce sync.
-    await this.upsert('saas_workspace_state', [{
-      workspace_id: workspaceId,
-      state: upgraded,
-      updated_at: new Date().toISOString()
-    }], 'workspace_id');
+    const now = new Date().toISOString();
+    upgraded.integrationStatus.supabase = { status: 'connected', detail: 'Authoritative workspace state committed.', lastSyncAt: now, lastError: null };
+    upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
+    await this.commit(workspaceId, upgraded, state._revision, existing);
+    state._revision = upgraded._revision;
+    markPersisted(state);
+    const failures = await this.mirrorNormalized(workspaceId, upgraded);
+    const report = { status: failures.length ? 'degraded' : 'connected', detail: failures.length ? `${failures.length} reporting tables need repair; primary workspace data remains durable.` : 'Reporting refresh completed.',
+      lastSyncAt: failures.length ? (state.integrationStatus?.reporting?.lastSyncAt || null) : now,
+      lastFailureAt: failures.length ? now : (state.integrationStatus?.reporting?.lastFailureAt || null), lastError: failures[0]?.databaseCode || failures[0]?.code || null, failures };
+    for (const failure of failures) console.warn(JSON.stringify({ event: 'supabase_mirror_refresh_failed', workspaceId, ...failure }));
+    upgraded.integrationStatus.reporting = report;
+    const expected = upgraded._revision;
+    upgraded._revision = crypto.randomUUID();
     try {
-      await this.mirrorNormalized(workspaceId, upgraded);
+      await this.commit(workspaceId, upgraded, expected, true);
+      state._revision = upgraded._revision;
+      state.integrationStatus = upgraded.integrationStatus;
     } catch (error) {
-      if (error.code !== 'SUPABASE_PERSISTENCE_FAILED') throw error;
-      console.warn(JSON.stringify({ event: 'supabase_mirror_refresh_failed', workspaceId, code: error.code,
-        table: error.table, httpStatus: error.httpStatus, databaseCode: error.databaseCode }));
+      // Primary commit already succeeded. Never replay its business action, and
+      // never overwrite a newer concurrent state merely to update diagnostics.
+      upgraded._revision = expected;
+      upgraded.integrationStatus.reporting = { status: 'degraded', detail: 'Reporting status update deferred; primary workspace data is durable.', lastError: 'REPORTING_STATUS_DEFERRED' };
+      console.warn(JSON.stringify({ event: 'reporting_status_deferred', workspaceId, code: error.code || 'PERSISTENCE_UNAVAILABLE' }));
     }
-    return upgraded;
+    return markPersisted(upgraded);
   }
 
   async findUserByEmail(email) {
     const normalized = normalizeEmail(email);
-    const rows = await this.request(`users?email=eq.${encodeURIComponent(normalized)}&select=id,workspace_id,email,role,password_hash,password_change_required,active,session_version,created_at,updated_at&limit=1`);
-    if (!rows?.[0]) return null;
-    const user = rows[0];
-    return {
-      id: user.id,
-      workspaceId: user.workspace_id,
-      email: user.email,
-      role: user.role,
-      passwordHash: user.password_hash,
-      passwordChangeRequired: user.password_change_required,
-      active: user.active,
-      sessionVersion: user.session_version,
-      createdAt: user.created_at,
-      updatedAt: user.updated_at
-    };
+    const filter = encodeURIComponent(JSON.stringify([{ email: normalized }]));
+    const rows = await this.request(`saas_workspace_state?state->users=cs.${filter}&select=workspace_id,state->users&limit=2`);
+    if (rows?.length > 1) throw Object.assign(new Error('Ambiguous account'), { code: 'ACCOUNT_CONFLICT' });
+    const user = rows?.[0]?.users?.find(item => normalizeEmail(item.email) === normalized);
+    return user ? { ...user, workspaceId: rows[0].workspace_id } : null;
+  }
+
+  async listWorkspaceIds() {
+    const ids = [];
+    for (let offset = 0; ; offset += 200) {
+      const rows = await this.request(`saas_workspace_state?select=workspace_id&order=workspace_id&limit=200&offset=${offset}`);
+      ids.push(...(rows || []).map(row => row.workspace_id));
+      if ((rows || []).length < 200) return ids;
+    }
   }
 
   async ping() {
@@ -551,5 +610,6 @@ export async function getOrSeed(store, workspaceId, env = process.env, options =
   if (existing) return existing;
   const seeded = seedWorkspaceState(env, { workspaceId, ...options });
   seeded.storageReady = store.provider === 'supabase';
-  return store.save(workspaceId, seeded);
+  try { return await store.save(workspaceId, seeded); }
+  catch (error) { if (error.code === 'STATE_CONFLICT') { const concurrent = await store.get(workspaceId); if (concurrent) return concurrent; } throw error; }
 }

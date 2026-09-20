@@ -73,7 +73,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=5\.0\.0/);
+  assert.match(String(home.payload), /app\.js\?v=6\.0\.0/);
   const head = await request('/', { method: 'HEAD' });
   assert.equal(head.response.status, 200);
   assert.deepEqual(head.payload, {});
@@ -109,6 +109,19 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
     body: { sku: 'BP1-50', economics: { landed: 1 } }
   });
   assert.equal(csrfFailure.response.status, 403);
+
+  const protectedBootstrap = await request('/api/bootstrap', { cookie });
+  assert.equal(protectedBootstrap.response.status, 403);
+  assert.equal(protectedBootstrap.payload.code, 'PASSWORD_CHANGE_REQUIRED');
+  const changed = await request('/api/auth/change-password', {
+    method: 'POST',
+    cookie,
+    csrf,
+    body: { newPassword: OWNER_PASSWORD }
+  });
+  assert.equal(changed.response.status, 200);
+  cookie = cookieValue(changed.setCookie);
+  csrf = changed.payload.csrf;
 
   const bootstrap = await request('/api/bootstrap', { cookie });
   assert.equal(bootstrap.response.status, 200);
@@ -279,15 +292,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
     apiToken: ebaySecret
   });
 
-  const changed = await request('/api/auth/change-password', {
-    method: 'POST',
-    cookie,
-    csrf,
-    body: { newPassword: OWNER_PASSWORD }
-  });
-  assert.equal(changed.response.status, 200);
-  cookie = cookieValue(changed.setCookie);
-  csrf = changed.payload.csrf;
+
 
   const staleSession = await request('/api/auth/session', { cookie: cookieValue(login.setCookie) });
   assert.equal(staleSession.response.status, 401);
@@ -398,8 +403,10 @@ test('eBay read-only OAuth uses a one-time callback while preserving the existin
     body: { email: 'sales@packsmartsolutions.com', password: BOOTSTRAP_PASSWORD }
   });
   assert.equal(login.response.status, 200);
-  const cookie = cookieValue(login.setCookie);
-  const csrf = login.payload.csrf;
+  const setup = await request('/api/auth/change-password', { method: 'POST', cookie: cookieValue(login.setCookie), csrf: login.payload.csrf, body: { newPassword: OWNER_PASSWORD } });
+  assert.equal(setup.response.status, 200);
+  const cookie = cookieValue(setup.setCookie);
+  const csrf = setup.payload.csrf;
 
   const manager = await request('/api/connections', {
     method: 'POST', cookie, csrf,

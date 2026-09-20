@@ -117,12 +117,14 @@
   }
 
   async function migratePilotData() {
-    if (localStorage.getItem(LOCAL.migrated)) return;
+    if (state.session?.workspace?.id !== 'packsmart-solutions' || state.session?.user?.role !== 'owner') return;
+    const marker = LOCAL.migrated + ':' + state.session.workspace.id;
+    if (localStorage.getItem(marker)) return;
     const result = await request('/api/migrate-pilot', {
       method: 'POST',
       body: JSON.stringify({ migrationId: 'browser-pilot-v1', economics: readLocal(LOCAL.economics, {}), automations: readLocal(LOCAL.automations, {}), approvals: [] })
     });
-    localStorage.setItem(LOCAL.migrated, JSON.stringify({ migratedAt: new Date().toISOString(), result }));
+    localStorage.setItem(marker, JSON.stringify({ migratedAt: new Date().toISOString(), result }));
   }
 
   async function loadBootstrap(options) {
@@ -133,8 +135,8 @@
     }
     const data = await request('/api/bootstrap');
     state.data = data; state.csrf = data.csrf || state.csrf;
-    localStorage.setItem(LOCAL.economics, JSON.stringify(data.economics || {}));
-    localStorage.setItem(LOCAL.automations, JSON.stringify(data.automations || {}));
+    localStorage.removeItem(LOCAL.economics);
+    localStorage.removeItem(LOCAL.automations);
     renderAll(); showApp();
   }
 
@@ -148,7 +150,7 @@
     state.view = view;
     $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Sales Channels', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Operations Issues', audit: 'Audit & Account' };
+    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Sales Channels', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -165,7 +167,7 @@
 
   function statusClass(status) {
     if (['connected', 'ready', 'configured', 'deterministic', 'internal', 'profitable', 'confirmed-costs'].includes(status)) return 'good';
-    if (['error', 'failed', 'loss-making'].includes(status)) return 'bad';
+    if (['error', 'failed', 'auth_expired', 'loss-making'].includes(status)) return 'bad';
     if (['warning', 'needs approval', 'degraded', 'not_configured', 'dormant', 'configured_disabled', 'below-floor', 'missing-costs', 'incomplete', 'estimated-costs'].includes(status)) return 'warn';
     return 'neutral';
   }
@@ -186,7 +188,7 @@
     const metrics = channel.metrics30d;
     const metricHtml = metrics ? '<div class="channel-metrics"><span><b>' + escapeHtml(metrics.orders || 0) + '</b> orders</span><span><b>' + escapeHtml(money(metrics.revenue)) + '</b> revenue</span><span><b>' + escapeHtml(money(metrics.operatingProfit)) + '</b> contribution</span><span><b>' + escapeHtml(money(metrics.advertisingSpend)) + '</b> ads</span></div>' : '';
     const sync = channel.lastSyncAt ? 'Last sync ' + date(channel.lastSyncAt) : 'No successful live sync';
-    return '<article class="channel-card"><div class="channel-icon">' + escapeHtml(channel.name.slice(0, 2).toUpperCase()) + '</div><div><b>' + escapeHtml(channel.name) + '</b><small>' + escapeHtml(channel.detail) + '</small><div class="capabilities">' + (channel.capabilities || []).map(item => '<span>' + escapeHtml(item) + '</span>').join('') + '</div>' + metricHtml + '<p class="channel-sync">' + escapeHtml(sync) + (channel.lastError ? ' · ' + escapeHtml(statusLabel(channel.lastError)) : '') + '</p></div><span class="tag ' + statusClass(channel.status) + '">' + escapeHtml(statusLabel(channel.status)) + '</span></article>';
+    return '<article class="channel-card"><div class="channel-icon">' + escapeHtml(channel.name.slice(0, 2).toUpperCase()) + '</div><div><b>' + escapeHtml(channel.name) + '</b><small>' + escapeHtml(channel.detail) + '</small><div class="capabilities">' + (channel.capabilities || []).map(item => '<span>' + escapeHtml(item) + '</span>').join('') + '</div>' + metricHtml + '<p class="channel-sync">' + escapeHtml(sync) + (channel.lastError ? ' · ' + escapeHtml(statusLabel(channel.lastError)) : '') + (channel.lastFailureAt ? '<br>Last failure ' + escapeHtml(date(channel.lastFailureAt)) : '') + (channel.recommendedRepair ? '<br>' + escapeHtml(channel.recommendedRepair) : '') + '</p></div><span class="tag ' + statusClass(channel.status) + '">' + escapeHtml(statusLabel(channel.status)) + '</span></article>';
   }
 
   function ranking(items, risk) {
@@ -321,8 +323,8 @@
 
   function approvalCard(item) {
     const pending = item.status === 'pending';
-    const actions = pending ? '<div class="approval-actions"><button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">Decision recorded ' + date(item.decidedAt) + ' · External execution: disabled</p>';
-    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Packsmart Ops') + ' · ' + date(item.createdAt) + '</dd></div></dl>' + actions + '</article>';
+    const actions = pending && state.data.user?.role === 'owner' ? '<div class="approval-actions"><button class="secondary" data-modify-approval="' + escapeHtml(item.id) + '">Modify</button><button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">' + (pending ? 'Awaiting owner decision' : 'Decision recorded ' + date(item.decidedAt)) + ' · External execution: disabled</p>';
+    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Packsmart Ops') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + actions + '</article>';
   }
 
   function renderApprovals() {
@@ -419,6 +421,7 @@
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
     renderOverview(); renderAiTeam(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    window.RunvaraControl.render(state.data);
   }
 
   async function loadAudit() {
@@ -493,7 +496,7 @@
       const payload = await request('/api/agents/command', { method: 'POST', body: JSON.stringify({ command: form.command.value }) });
       const run = payload.run; $('#commander-result').classList.remove('hidden');
       $('#commander-result').innerHTML = '<p class="eyebrow">COMMANDER BRIEF</p><h3>' + escapeHtml(run.summary) + '</h3><p class="muted">Delegated to: ' + escapeHtml((run.routedAgents || []).map(statusLabel).join(', ')) + '</p>' + ((run.priorities || []).length ? '<ol>' + run.priorities.map(item => '<li><b>' + escapeHtml(statusLabel(item.agentId)) + '</b> — ' + escapeHtml(item.action) + '</li>').join('') + '</ol>' : '');
-      form.reset(); await loadBootstrap({ migrate: false }); setView('ai-team'); showMessage('AI Team completed the command. No external action was executed.');
+      form.reset(); await loadBootstrap({ migrate: false }); setView('ai-team'); showMessage('Commander analysis: ' + run.workStatus + '. Evidence is recorded in Value & Work.');
     } catch (commandError) { error.textContent = commandError.message; }
     finally { setBusy(button, false); }
   });
@@ -507,7 +510,7 @@
 
   $('#automation-list').addEventListener('click', async event => {
     const button = event.target.closest('[data-automation]'); if (!button) return; const id = button.dataset.automation; const enabled = !Boolean(state.data.automations[id]); button.disabled = true;
-    try { await request('/api/automations', { method: 'PUT', body: JSON.stringify({ id, enabled }) }); state.data.automations[id] = enabled; localStorage.setItem(LOCAL.automations, JSON.stringify(state.data.automations)); renderAutomations(); }
+    try { await request('/api/automations', { method: 'PUT', body: JSON.stringify({ id, enabled }) }); state.data.automations[id] = enabled; await loadBootstrap({ migrate: false }); }
     catch (error) { button.disabled = false; showMessage(error.message, 'error'); }
   });
 
@@ -586,7 +589,7 @@
 
   $('#approval-list').addEventListener('click', async event => {
     const button = event.target.closest('[data-approval]'); if (!button) return; setBusy(button, true, button.dataset.decision === 'approved' ? 'Approving…' : 'Rejecting…');
-    try { const payload = await request('/api/approvals/' + encodeURIComponent(button.dataset.approval) + '/decision', { method: 'POST', body: JSON.stringify({ decision: button.dataset.decision }) }); const index = state.data.approvals.findIndex(item => item.id === payload.approval.id); if (index >= 0) state.data.approvals[index] = payload.approval; renderApprovals(); showMessage(statusLabel(payload.approval.status) + ' recorded. External execution remains disabled.'); }
+    try { const payload = await request('/api/approvals/' + encodeURIComponent(button.dataset.approval) + '/decision', { method: 'POST', body: JSON.stringify({ decision: button.dataset.decision, revision: state.data.approvals.find(item => item.id === button.dataset.approval)?.revision || 1 }) }); const index = state.data.approvals.findIndex(item => item.id === payload.approval.id); if (index >= 0) state.data.approvals[index] = payload.approval; renderApprovals(); showMessage(statusLabel(payload.approval.status) + ' recorded. External execution remains disabled.'); }
     catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
   });
 
@@ -603,6 +606,8 @@
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });
+
+  window.RunvaraControl.init({ request, reload: loadBootstrap, notify: showMessage, setView, money, date, escapeHtml });
 
   (async () => {
     try {

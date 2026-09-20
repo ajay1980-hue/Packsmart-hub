@@ -50,7 +50,7 @@ test('Packsmart customer-zero syncs the live public Shopify catalogue without cr
   assert.equal(status.readOnly, true);
   assert.equal(status.exactInventory, false);
   assert.equal(state.products[0].id, 'gid://shopify/Product/15952658465102');
-  assert.equal(state.products[0].variants[0].id, 'GM-230x300-50');
+  assert.equal(state.products[0].variants[0].id, 'gid://shopify/ProductVariant/60415428755790');
   assert.equal(state.products[0].variants[0].externalId, 'gid://shopify/ProductVariant/60415428755790');
   assert.equal(state.products[0].variants[0].inventory, null);
   assert.equal(state.products[0].variants[0].available, false);
@@ -141,7 +141,7 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
   const status = await service.syncShopify(state);
   assert.equal(status.status, 'connected');
   assert.equal(status.source, 'admin-graphql');
-  assert.equal(state.products[0].variants[0].id, 'TAPE-BROWN');
+  assert.equal(state.products[0].variants[0].id, 'gid://shopify/ProductVariant/2');
   assert.equal(state.products[0].variants[0].externalId, 'gid://shopify/ProductVariant/2');
   assert.equal(state.products[0].variants[0].sku, 'TAPE-BROWN');
   assert.equal(state.products[0].variants[0].inventory, 42);

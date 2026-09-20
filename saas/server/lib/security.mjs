@@ -13,7 +13,8 @@ export const RISKY_ACTION_TYPES = new Set([
   'live_external_action',
   'risky_marketplace_action',
   'social_commerce_publish',
-  'social_advertising_change'
+  'social_advertising_change',
+  'customer_facing_publish', 'sensitive_communication', 'delete_data', 'integration_change', 'irreversible_action'
 ]);
 
 const PASSWORD_MIN_LENGTH = 14;
@@ -251,6 +252,10 @@ export class SlidingWindowLimiter {
   }
 
   check(key, now = Date.now()) {
+    if (this.entries.size > 10000) {
+      for (const [id, entry] of this.entries) if (entry.blockedUntil <= now && !entry.attempts.some(at => at > now - this.windowMs)) this.entries.delete(id);
+      if (this.entries.size > 10000) return { allowed: false, retryAfterMs: this.windowMs };
+    }
     const normalized = String(key || 'unknown').slice(0, 300);
     const current = this.entries.get(normalized) || { attempts: [], blockedUntil: 0 };
     if (current.blockedUntil > now) return { allowed: false, retryAfterMs: current.blockedUntil - now };

@@ -1,64 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { fakeSupabase } from './fake-supabase.mjs';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 
 test('mirror failure preserves authoritative state and emits only safe diagnostics', async () => {
   const warnings = [];
   const originalWarn = console.warn;
-  let saved = false;
-  const store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'secret' }, {
-    fetchImpl: async (url) => {
-      if (url.includes('/saas_workspace_state?')) saved = true;
-      if (url.includes('/workspaces?')) return Response.json({ code: '23505', message: 'private row value', details: 'secret' }, { status: 409 });
-      return new Response(null, { status: 204 });
-    }
-  });
+  const fake = fakeSupabase({ fault: ({ table, method }) => table === 'workspaces' && method === 'POST' ? { code: '23505', message: 'private row value', details: 'secret' } : null });
+  const store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'secret' }, { fetchImpl: fake.fetchImpl });
   console.warn = message => warnings.push(JSON.parse(message));
   try {
     await store.save('packsmart-solutions', seedWorkspaceState());
   } finally { console.warn = originalWarn; }
-  assert.equal(saved, true);
+  assert.equal(fake.states.has('packsmart-solutions'), true);
+  assert.equal(fake.states.get('packsmart-solutions').integrationStatus.reporting.status, 'degraded');
+  assert.ok(fake.tables.has('users'), 'other reporting tables still refresh');
   assert.deepEqual(warnings, [{ event: 'supabase_mirror_refresh_failed', workspaceId: 'packsmart-solutions',
     code: 'SUPABASE_PERSISTENCE_FAILED', table: 'workspaces', httpStatus: 409, databaseCode: '23505' }]);
 });
 
 test('Supabase persistence mirrors every production table and restores lossless workspace state', async () => {
-  const calls = [];
-  let savedState = null;
   const serviceKey = 'test-service-role-value-that-never-enters-a-response';
-  const fetchImpl = async (input, options = {}) => {
-    const url = new URL(input);
-    const method = options.method || 'GET';
-    calls.push({ url, method, headers: options.headers, body: options.body || '' });
-    assert.equal(options.headers.apikey, serviceKey);
-    assert.equal(options.headers.Authorization, `Bearer ${serviceKey}`);
-
-    if (method === 'POST') {
-      if (url.pathname.endsWith('/saas_workspace_state')) {
-        savedState = JSON.parse(options.body)[0].state;
-      }
-      return new Response(null, { status: 204 });
-    }
-    if (url.pathname.endsWith('/users')) {
-      const user = savedState.users[0];
-      return Response.json([{
-        id: user.id,
-        workspace_id: savedState.workspace.id,
-        email: user.email,
-        role: user.role,
-        password_hash: user.passwordHash,
-        password_change_required: user.passwordChangeRequired,
-        active: user.active,
-        session_version: user.sessionVersion,
-        created_at: user.createdAt,
-        updated_at: user.updatedAt
-      }]);
-    }
-    if (url.searchParams.get('select') === 'state') {
-      return Response.json(savedState ? [{ state: savedState }] : []);
-    }
-    return Response.json(savedState ? [{ workspace_id: savedState.workspace.id }] : []);
-  };
+  const { fetchImpl, calls } = fakeSupabase();
 
   const store = createStore({
     NODE_ENV: 'production',
@@ -151,7 +114,7 @@ test('Supabase persistence mirrors every production table and restores lossless 
   for (const table of [
     'workspaces', 'users', 'connections', 'products', 'variants', 'economics',
     'automation_rules', 'approval_requests', 'audit_events', 'subscriptions',
-    'orders', 'operations_briefs', 'saas_workspace_state', 'suppliers',
+    'orders', 'operations_briefs', 'runvara_create_workspace', 'suppliers',
     'product_cost_profiles', 'cost_history', 'order_financials', 'advertising_costs'
   ]) {
     assert.ok(writtenTables.has(table), `${table} must be mirrored`);
