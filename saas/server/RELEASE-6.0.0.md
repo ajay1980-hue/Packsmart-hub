@@ -1,4 +1,4 @@
-# Runvara 6.0.1 — existing production completion
+# Runvara 6.0.2 — existing production completion
 
 This release extends `ajay1980-hue/Packsmart-hub` and the existing Render
 `packsmart-ops` service. It preserves the Supabase database, signed-cookie
@@ -37,6 +37,9 @@ are unchanged.
   the existing cockpit. Optional eBay read failures retain safe HTTP/error IDs;
   automatic cycles stop retrying an individual surface after HTTP 401/403 while
   other authorised reads continue.
+- eBay GET requests specify a valid UK response language instead of Node's
+  wildcard default. Inventory pagination uses page offsets, as specified by
+  eBay, rather than the record offsets used by its Fulfilment API.
 
 ## Database rollout
 

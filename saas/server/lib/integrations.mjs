@@ -811,6 +811,8 @@ export class IntegrationService {
   async ebayApiGet(url, accessToken, { marketplaceId } = {}) {
     const headers = {
       Accept: 'application/json',
+      // Node fetch otherwise sends '*', which Inventory rejects as a locale.
+      'Accept-Language': 'en-GB',
       Authorization: `Bearer ${accessToken}`,
       'User-Agent': 'Packsmart-Ops/4.3'
     };
@@ -933,7 +935,8 @@ export class IntegrationService {
   async fetchEbayInventoryItems(accessToken) {
     const items = [];
     for (let page = 0; page < 3; page += 1) {
-      const offset = page * 200;
+      // Inventory uses a page number; Fulfilment uses a record offset.
+      const offset = page;
       const url = `${EBAY_PRODUCTION.inventory}/inventory_item?limit=200&offset=${offset}`;
       const payload = await this.ebayApiGet(url, accessToken);
       const batch = payloadItems(payload, ['inventoryItems']);

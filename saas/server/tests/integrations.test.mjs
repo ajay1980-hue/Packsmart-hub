@@ -453,6 +453,20 @@ test('eBay read-only sync stays connected when optional seller APIs are unavaila
   assert.equal(state.ebay.coverage.readDiagnostics.marketing.automaticRetryBlocked, true);
 });
 
+test('eBay inventory reads use a valid locale and consecutive page offsets without losing records', async () => {
+  const offsets = [];
+  const service = new IntegrationService({}, { fetchImpl: async (url, options) => {
+    assert.equal(options.headers['Accept-Language'], 'en-GB');
+    assert.equal(options.method, 'GET');
+    const offset = new URL(url).searchParams.get('offset'); offsets.push(offset);
+    const inventoryItems = offset === '0' ? Array.from({ length: 200 }, (_, i) => ({ sku: `SKU-${i}` })) : [{ sku: 'SKU-200' }];
+    return Response.json({ total: 201, inventoryItems });
+  } });
+  const items = await service.fetchEbayInventoryItems('test-only-token');
+  assert.deepEqual(offsets, ['0', '1']);
+  assert.equal(items.length, 201); assert.equal(items[200].sku, 'SKU-200');
+});
+
 test('eBay sync rejects an unexpected seller account', async () => {
   const service = new IntegrationService({
     NODE_ENV: 'production',
