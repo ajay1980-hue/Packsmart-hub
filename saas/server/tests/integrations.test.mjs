@@ -399,6 +399,7 @@ test('eBay authorization URL is purpose-scoped to read-only consent', () => {
 
 test('eBay read-only sync stays connected when optional seller APIs are unavailable', async () => {
   const credentialKey = 'partial-ebay-sync-key-more-than-thirty-two-characters';
+  let marketingRequests = 0;
   const fetchImpl = async (url) => {
     if (String(url).includes('/identity/v1/oauth2/token')) {
       return Response.json({ access_token: 'temporary-access-token', expires_in: 7200 });
@@ -413,6 +414,7 @@ test('eBay read-only sync stays connected when optional seller APIs are unavaila
       return Response.json({ errors: [{ errorId: 30500 }] }, { status: 500 });
     }
     if (String(url).includes('/sell/marketing/v1/ad_campaign?')) {
+      marketingRequests++;
       return Response.json({ errors: [{ errorId: 35001 }] }, { status: 403 });
     }
     return new Response(null, { status: 404 });
@@ -444,6 +446,11 @@ test('eBay read-only sync stays connected when optional seller APIs are unavaila
   assert.equal(state.ebay.coverage.marketingAvailable, false);
   assert.match(status.detail, /Some eBay read data is currently unavailable: orders, marketing\./);
   assert.equal(connection.status, 'connected');
+  assert.deepEqual(state.ebay.coverage.readDiagnostics.marketing.errorIds, ['35001']);
+  assert.equal(state.ebay.coverage.readDiagnostics.marketing.httpStatus, 403);
+  await service.syncEbay(state, { automatic: true });
+  assert.equal(marketingRequests, 1, 'automatic runs do not retry an authorization failure');
+  assert.equal(state.ebay.coverage.readDiagnostics.marketing.automaticRetryBlocked, true);
 });
 
 test('eBay sync rejects an unexpected seller account', async () => {

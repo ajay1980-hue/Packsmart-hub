@@ -37,6 +37,8 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
   assert.equal(document.querySelector('[onerror]'), null, 'source text is escaped');
+  assert.ok(document.querySelector('#attention-queue .attention-item'));
+  assert.ok(!document.getElementById('attention-queue').textContent.includes('No recorded exceptions or approvals need attention.'), 'active exceptions never show an all-clear message');
   for (const button of document.querySelectorAll('#main-nav [data-view]')) { button.click(); assert.ok(document.getElementById(`view-${button.dataset.view}`).classList.contains('active')); }
   const decision = document.getElementById('decision-form');
   for (const [key, value] of Object.entries({ key: 'ui-goal', category: 'goal', title: 'A verified UI goal', content: 'Check operations daily.', source: 'DOM integration test' })) decision.elements[key].value = value;

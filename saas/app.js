@@ -362,16 +362,16 @@
     const ebayOauthButton = $('#connect-ebay-oauth');
     ebayOauthButton.classList.toggle('hidden', !canConfigure || !ebayOauth.ready || ebayOauth.connected);
     const ebayConnectionState = $('#ebay-connection-state');
-    ebayConnectionState.textContent = ebayStatus?.status === 'connected' ? 'Connected · read-only' : ebayConnection ? 'Saved · verification needed' : 'Not configured';
+    ebayConnectionState.textContent = ebayStatus?.status === 'connected' ? 'Connected · read-only' : ebayStatus?.status === 'degraded' ? 'Connected · partial read coverage' : ebayConnection ? 'Saved · verification needed' : 'Not configured';
     ebayConnectionState.className = 'tag ' + (ebayStatus?.status === 'connected' ? 'good' : ebayConnection ? 'warn' : 'neutral');
     const savedAccount = ebayConnection?.metadata?.account;
     if (savedAccount) $('#ebay-connection-form').expectedAccount.value = savedAccount;
     const ebay = state.data.ebay;
     if (!ebay) { $('#ebay-health').innerHTML = '<div class="empty-state">eBay is ready for a secure read-only connection. The existing Manager remains available and unchanged.</div>'; return; }
     const coverage = ebay.coverage || {};
-    const comparisonAvailable = coverage.offersAvailable !== false && coverage.inventoryAvailable !== false;
+    const comparisonAvailable = coverage.offersAvailable !== false && coverage.inventoryAvailable !== false && !/unavailable:.*(?:inventory|offers)/i.test(ebayStatus?.lastError || '');
     $('#ebay-health').innerHTML = [
-      ['Connected account', ebay.account || '—'], ['Listings', coverage.inventoryAvailable === false || coverage.offersAvailable === false ? 'Source unavailable' : ebay.listings && ebay.listings.length || 0], ['Drafts', ebay.drafts && ebay.drafts.length || 0],
+      ['Connected account', ebay.account || '—'], ['Listings', !comparisonAvailable ? 'Source unavailable' : ebay.listings && ebay.listings.length || 0], ['Drafts', !comparisonAvailable ? 'Source unavailable' : ebay.drafts && ebay.drafts.length || 0],
       ['Orders', (state.data.orders || []).filter(order => order.provider === 'ebay').length], ['Fee records', ebay.fees && ebay.fees.length || 0], ['Promotions', ebay.promotions && ebay.promotions.length || 0],
       ['Missing on eBay', !comparisonAvailable ? 'Cannot compare' : ebay.health && ebay.health.missingOnEbay && ebay.health.missingOnEbay.length || 0], ['Stale on eBay', !comparisonAvailable ? 'Cannot compare' : ebay.health && ebay.health.staleOnEbay && ebay.health.staleOnEbay.length || 0], ['Last read sync', date(ebay.syncedAt)]
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');

@@ -13,7 +13,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   while (true) {
     attempts++;
     try {
-      const result = await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state);
+      const result = await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic });
       const status = { ...result, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
       state.integrationStatus = { ...state.integrationStatus, [provider]: status };
       return status;

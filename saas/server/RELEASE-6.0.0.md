@@ -1,4 +1,4 @@
-# Runvara 6.0.0 — existing production completion
+# Runvara 6.0.1 — existing production completion
 
 This release extends `ajay1980-hue/Packsmart-hub` and the existing Render
 `packsmart-ops` service. It preserves the Supabase database, signed-cookie
@@ -32,6 +32,11 @@ are unchanged.
 - Cockpit prioritises exceptions and approvals before the brief and operations;
   all new controls use the existing authenticated API. Browser economics are no
   longer saved under shared tenant-independent keys.
+- Production UI follow-up removes a contradictory all-clear message and shows
+  unavailable eBay inventory as unknown. Release-versioned asset URLs refresh
+  the existing cockpit. Optional eBay read failures retain safe HTTP/error IDs;
+  automatic cycles stop retrying an individual surface after HTTP 401/403 while
+  other authorised reads continue.
 
 ## Database rollout
 

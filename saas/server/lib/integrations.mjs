@@ -349,7 +349,8 @@ async function responseJson(response, label) {
     const message = response.status === 401 || response.status === 403
       ? `${label} authentication failed`
       : `${label} request failed (${response.status})`;
-    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status });
+    const upstreamErrorIds = (Array.isArray(data?.errors) ? data.errors : []).map(item => String(item.errorId || '')).filter(id => /^\d{1,12}$/.test(id)).slice(0, 10);
+    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status, upstreamErrorIds });
   }
   return data;
 }
@@ -975,7 +976,7 @@ export class IntegrationService {
     return { campaigns, ads: ads.slice(0, 5000) };
   }
 
-  async syncEbayOAuth(state, config) {
+  async syncEbayOAuth(state, config, { automatic = false } = {}) {
     const now = new Date().toISOString();
     const accessToken = await this.ebayAccessToken(config);
     const identity = await this.ebayIdentity(accessToken);
@@ -990,12 +991,19 @@ export class IntegrationService {
     // API only returns records managed through that API, while Fulfilment and
     // Marketing access can vary independently. Identity and token failures
     // remain fatal; downstream read surfaces degrade independently.
-    const readErrors = {};
+    const readErrors = {}, readDiagnostics = {};
     const optionalRead = async (surface, operation, fallback) => {
+      const previous = state.ebay?.coverage?.readDiagnostics?.[surface];
+      if (automatic && [401, 403].includes(previous?.httpStatus)) {
+        readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
+        readDiagnostics[surface] = { ...previous, automaticRetryBlocked: true };
+        return fallback;
+      }
       try {
         return await operation();
-      } catch {
+      } catch (error) {
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
+        readDiagnostics[surface] = { code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401, 403].includes(error.upstreamStatus) };
         return fallback;
       }
     };
@@ -1039,6 +1047,7 @@ export class IntegrationService {
         offersAvailable: !readErrors.inventory && !readErrors.offers,
         marketingAvailable: !readErrors.marketing,
         unavailableSurfaces: Object.keys(readErrors),
+        readDiagnostics,
         standardManagerPreserved: true
       },
       syncedAt: now
@@ -1054,21 +1063,21 @@ export class IntegrationService {
       ...(config.connection.metadata || {}),
       account,
       marketplaceId: config.marketplaceId,
-      listingCount: published.length,
-      draftCount: drafts.length,
+      listingCount: readErrors.inventory || readErrors.offers ? null : published.length,
+      draftCount: readErrors.inventory || readErrors.offers ? null : drafts.length,
       channel: 'direct_oauth'
     };
     const status = {
       status: 'connected',
-      detail: `${published.length} Inventory API listings, ${drafts.length} drafts and ${orders.length} recent orders synced directly from eBay read-only.${readWarning ? ` ${readWarning}` : ''} The existing Manager remains unchanged.`,
+      detail: `${readErrors.inventory || readErrors.offers ? 'Inventory API listings and drafts unavailable' : `${published.length} Inventory API listings and ${drafts.length} drafts`}; ${readErrors.orders ? 'order read unavailable' : `${orders.length} recent orders synced`} directly from eBay read-only.${readWarning ? ` ${readWarning}` : ''} The existing Manager remains unchanged.`,
       source: 'ebay-oauth-readonly',
       account,
-      listingCount: published.length,
-      draftCount: drafts.length,
-      orderCount: orders.length,
+      listingCount: readErrors.inventory || readErrors.offers ? null : published.length,
+      draftCount: readErrors.inventory || readErrors.offers ? null : drafts.length,
+      orderCount: readErrors.orders ? null : orders.length,
       feeRecordCount: fees.length,
       promotionCount: marketing.campaigns.length,
-      mismatchCount: missingOnEbay.length + staleOnEbay.length,
+      mismatchCount: readErrors.inventory || readErrors.offers ? null : missingOnEbay.length + staleOnEbay.length,
       lastSyncAt: now,
       lastError: readWarning,
       lastFailureAt: readWarning ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
@@ -1078,7 +1087,7 @@ export class IntegrationService {
     return status;
   }
 
-  async syncEbay(state) {
+  async syncEbay(state, { automatic = false } = {}) {
     const now = new Date().toISOString();
     if (!this.ebayConfigured(state)) {
       const status = {
@@ -1091,7 +1100,7 @@ export class IntegrationService {
       return status;
     }
     const config = this.ebayConfig(state);
-    if (config.mode === 'direct_oauth') return this.syncEbayOAuth(state, config);
+    if (config.mode === 'direct_oauth') return this.syncEbayOAuth(state, config, { automatic });
     const statusPayload = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
     const account = String(statusPayload.account || statusPayload.username || statusPayload.ebayUser || '');
     const connected = statusPayload.connected === true || statusPayload.authenticated === true || statusPayload.ebayConnected === true;

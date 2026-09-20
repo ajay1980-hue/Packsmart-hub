@@ -73,7 +73,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.match(String(appAsset.payload), /HttpOnly|packsmart/i);
   const home = await request('/');
   assert.equal(home.response.status, 200);
-  assert.match(String(home.payload), /app\.js\?v=6\.0\.0/);
+  assert.ok(String(home.payload).includes(`/app.js?v=${health.payload.version}`), 'browser assets use the deployed release version');
   const head = await request('/', { method: 'HEAD' });
   assert.equal(head.response.status, 200);
   assert.deepEqual(head.payload, {});
