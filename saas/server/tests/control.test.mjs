@@ -112,6 +112,17 @@ test('sync retains known data and manual costs, never loops on expired authentic
   assert.equal(reads, 2);
 });
 
+test('an interrupted morning brief can retry with a cooldown and bounded daily attempts', () => {
+  const state = business(), now = new Date('2026-09-20T06:00:00Z');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const clock = new Date(now.getTime() + attempt * 15 * 60000);
+    const run = claimAutomation(state, 'dailyOpsBrief', clock); assert.ok(run);
+    finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true });
+    assert.ok(!dueRules(state, new Date(clock.getTime() + 60000)).some(rule => rule.id === 'dailyOpsBrief'));
+  }
+  assert.ok(!dueRules(state, new Date(now.getTime() + 3600000)).some(rule => rule.id === 'dailyOpsBrief'));
+});
+
 test('file persistence survives restart and rejects stale writes without losing another workspace', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-durable-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));

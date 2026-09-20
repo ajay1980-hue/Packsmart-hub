@@ -42,7 +42,8 @@ export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
       return new Response(null, { status: 204 });
     }
     const id = url.searchParams.get('workspace_id')?.slice(3);
-    return Response.json((tables.get(table) || []).filter(row => !id || row.workspace_id === id));
+    const recordId = url.searchParams.get('id')?.slice(3);
+    return Response.json((tables.get(table) || []).filter(row => (!id || row.workspace_id === id) && (!recordId || row.id === recordId)));
   };
   return { fetchImpl, states, tables, calls };
 }

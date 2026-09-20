@@ -62,6 +62,8 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
             evidence = outcomes.map((result, index) => ({ type: 'integration_read', id: providers[index], detail: result.status === 'fulfilled' ? result.value.status : safeCode(result.reason), at: new Date().toISOString() }));
             const failed = outcomes.find(result => result.status === 'rejected');
             if (failed) { finishAutomation(state, run, { evidence, errorCode: safeCode(failed.reason), blocked: authFailure(failed.reason) }); continue; }
+            const partial = outcomes.find(result => result.status === 'fulfilled' && (result.value.lastError || ['degraded', 'error', 'auth_expired'].includes(result.value.status)));
+            if (partial) { finishAutomation(state, run, { evidence, errorCode: 'SOURCE_COVERAGE_INCOMPLETE', blocked: true }); continue; }
           } else if (run.ruleId === 'dailyOpsBrief') {
             const brief = currentBrief(state);
             evidence = [{ type: 'daily_brief', id: brief.id, detail: brief.summary }];
@@ -102,7 +104,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
         catch (error) {
           if (error.code !== 'STATE_CONFLICT') {
             status.lastError = safeCode(error);
-            console.error(JSON.stringify({ event: 'autopilot_workspace_failed', workspaceId: id, code: safeCode(error) }));
+            console.error(JSON.stringify({ event: 'autopilot_workspace_failed', workspaceId: id, code: safeCode(error), table: error.table || null, httpStatus: error.httpStatus || null, databaseCode: error.databaseCode || null, payloadBytes: error.payloadBytes || null }));
           }
         }
       }

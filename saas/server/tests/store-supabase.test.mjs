@@ -151,3 +151,31 @@ test('legacy customer-zero owners without a password hash are forced through sec
   const restored = await store.get('packsmart-solutions');
   assert.equal(restored.users[0].passwordChangeRequired, true);
 });
+
+test('large historical briefs are archived losslessly before compact primary writes and remain tenant scoped', async () => {
+  const state = seedWorkspaceState();
+  state._revision = 'legacy';
+  const brief = { id: 'large-historical-brief', summary: 'Original executive summary', generatedAt: new Date().toISOString(), logic: 'deterministic-v2', orders30d: 61, productRows: [{ description: 'x'.repeat(900000), sku: 'SKU-1' }] };
+  state.dailyBriefs = [brief];
+  const fake = fakeSupabase({ initialStates: [state] });
+  const store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test' }, { fetchImpl: fake.fetchImpl });
+  const loaded = await store.get(state.workspace.id); await store.save(state.workspace.id, loaded);
+  const restored = await store.get(state.workspace.id);
+  assert.ok(restored.dailyBriefs[0].archive); assert.equal(restored.dailyBriefs[0].orders30d, 61);
+  assert.ok(JSON.stringify(restored).length < 15000);
+  assert.deepEqual(await store.getBrief(state.workspace.id, brief.id), brief);
+  assert.equal(await store.getBrief('other-workspace', brief.id), null);
+  await store.save(state.workspace.id, restored);
+  assert.deepEqual(await store.getBrief(state.workspace.id, brief.id), brief, 'summary mirroring must not overwrite archived detail');
+  assert.ok(fake.calls.findIndex(call => call.url.pathname.endsWith('/operations_briefs') && call.method === 'POST') < fake.calls.findIndex(call => call.method === 'PATCH'));
+});
+
+test('archive failure leaves full primary history intact and primary outage cannot claim success', async () => {
+  const state = seedWorkspaceState(); state._revision = 'original';
+  state.dailyBriefs = [{ id: 'brief', summary: 'History', generatedAt: new Date().toISOString(), productRows: [{ description: 'x'.repeat(70000) }] }];
+  const fake = fakeSupabase({ initialStates: [state], fault: ({ table, method }) => table === 'operations_briefs' && method === 'POST' ? { status: 503, code: 'PGRST000' } : null });
+  const store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test' }, { fetchImpl: fake.fetchImpl });
+  await assert.rejects(() => store.save(state.workspace.id, state), error => error.httpStatus === 503);
+  assert.deepEqual((await store.get(state.workspace.id)).dailyBriefs, state.dailyBriefs);
+  assert.equal(fake.calls.filter(call => call.method === 'PATCH').length, 0);
+});

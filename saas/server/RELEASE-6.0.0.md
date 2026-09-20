@@ -57,8 +57,14 @@ Customer inboxes, competitor feeds and paid discovery sources are not connected;
 it does not claim to read enquiries, send replies or realise financial savings.
 Financial and time savings remain unknown until independently verified.
 
-Primary state retains history. The cockpit pages recent evidence while the
-authoritative record is kept. At higher SaaS volumes, move long histories to a
+Primary state retains history. Large legacy brief snapshots are copied in full
+to the existing `operations_briefs` table before primary state stores their
+summaries and archive pointers. Archive failure prevents compaction; later
+reporting refresh cannot replace archived details with a summary. Authenticated
+`GET /api/briefs/:id` retrieves the complete snapshot within its workspace.
+New morning briefs store concise aggregates, not repeated full catalogues.
+The cockpit pages recent evidence while the authoritative record is kept.
+At higher SaaS volumes, move other long histories to a
 transactional archive with verified retention before introducing any pruning.
 Reporting tables remain secondary; their refresh can be degraded independently
 and must not be used to override authoritative login or business state.

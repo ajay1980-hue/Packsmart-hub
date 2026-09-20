@@ -14,12 +14,14 @@ export function ensureControl(state) {
   for (const key of ['exceptions', 'opportunities', 'decisions', 'workRecords', 'automationRuns']) if (!Array.isArray(state[key])) state[key] = [];
   const defaults = Object.fromEntries(AUTOMATION_DEFINITIONS.map(rule => [rule.id, {
     permitted: true, risk: 'low', intervalMinutes: rule.id === 'dailyOpsBrief' ? 1440 : rule.id === 'channelSync' ? 30 : 15,
-    maxRunsPerDay: rule.id === 'dailyOpsBrief' ? 1 : rule.id === 'channelSync' ? 48 : 96, spendLimit: 0
+    maxRunsPerDay: rule.id === 'dailyOpsBrief' ? 3 : rule.id === 'channelSync' ? 48 : 96, spendLimit: 0
   }]));
   const previous = state.autopilot || {};
   state.autopilot = { enabled: state.workspace?.id === 'packsmart-solutions', spendLimit: 0, morningHour: 7, timeZone: 'Europe/London', ...previous,
     rules: Object.fromEntries(Object.entries(defaults).map(([id, value]) => [id, { ...value, ...(previous.rules?.[id] || {}), risk: 'low', spendLimit: 0 }])) };
   state.autopilot.spendLimit = 0;
+  if (!previous.policyVersion && !previous.updatedAt) state.autopilot.rules.dailyOpsBrief.maxRunsPerDay = 3;
+  state.autopilot.policyVersion = 2;
   if (state.workspace?.id === 'packsmart-solutions' && !state.decisions.some(item => item.key === 'owner-approval-policy')) {
     state.decisions.push({ id: 'decision_owner_approval_policy', key: 'owner-approval-policy', category: 'approval', title: "Aj's approval policy",
       content: 'Aj must approve spending, supplier orders, refunds, major prices, publishing, sensitive communications, data deletion, integration changes and other materially risky actions.',
@@ -208,7 +210,8 @@ export function dueRules(state, now = new Date()) {
     if (rule.id === 'dailyOpsBrief') {
       const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: state.autopilot.timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23' }).formatToParts(now).map(item => [item.type, item.value]));
       const localDay = `${parts.year}-${parts.month}-${parts.day}`;
-      return Number(parts.hour) >= state.autopilot.morningHour && !runs.some(run => new Intl.DateTimeFormat('en-CA', { timeZone: state.autopilot.timeZone }).format(new Date(run.startedAt)) === localDay);
+      const todayRuns = runs.filter(run => new Intl.DateTimeFormat('en-CA', { timeZone: state.autopilot.timeZone }).format(new Date(run.startedAt)) === localDay);
+      return Number(parts.hour) >= state.autopilot.morningHour && !todayRuns.some(run => run.status === 'COMPLETED') && todayRuns.length < policy.maxRunsPerDay && (!todayRuns[0] || now.getTime() - Date.parse(todayRuns[0].startedAt) >= 15 * 60000);
     }
     if (runs.filter(item => item.startedAt.slice(0, 10) === now.toISOString().slice(0, 10)).length >= policy.maxRunsPerDay) return false;
     const last = runs[0];

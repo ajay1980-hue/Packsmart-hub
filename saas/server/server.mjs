@@ -1233,6 +1233,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'GET' && pathname === '/api/control') {
           send(res, 200, { ...controlSnapshot(auth.state), scheduler: scheduler.status }); return;
         }
+        if (req.method === 'GET' && pathname === '/api/briefs') {
+          send(res, 200, { briefs: auth.state.dailyBriefs || [] }); return;
+        }
+        const historicalBrief = pathname.match(/^\/api\/briefs\/([^/]+)$/);
+        if (req.method === 'GET' && historicalBrief) {
+          const brief = await store.getBrief(auth.session.workspaceId, historicalBrief[1]);
+          if (!brief) throw Object.assign(new Error('Brief not found'), { status: 404, code: 'BRIEF_NOT_FOUND' });
+          send(res, 200, { brief }); return;
+        }
         if (req.method === 'PUT' && pathname === '/api/autopilot') {
           requireOwner(auth);
           const body = await jsonBody(req, 32768);

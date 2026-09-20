@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultAutomations } from './operations.mjs';
+import { compactDailyBrief, defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { ensureControl } from './control.mjs';
@@ -194,6 +194,8 @@ class FileStore {
 
   async listWorkspaceIds() { return Object.keys(await this.readAll()); }
 
+  async getBrief(workspaceId, briefId) { return (await this.get(workspaceId))?.dailyBriefs?.find(item => item.id === briefId) || null; }
+
   async findUserByEmail(email) {
     const normalized = normalizeEmail(email);
     const all = await this.readAll();
@@ -239,6 +241,7 @@ class SupabaseStore {
       error.code = 'SUPABASE_PERSISTENCE_FAILED';
       error.httpStatus = response.status;
       error.table = pathname.split('?')[0];
+      error.payloadBytes = Buffer.byteLength(options.body || '');
       // Never log PostgREST messages/details: they can contain row data.
       try {
         const payload = await response.json();
@@ -511,7 +514,8 @@ class SupabaseStore {
       updated_at: record.updatedAt || record.createdAt
     })), 'id');
 
-    await mirror('operations_briefs', (state.dailyBriefs || []).slice(0, 30).map(brief => ({
+    // Archived full snapshots are immutable: never replace them with summaries.
+    await mirror('operations_briefs', (state.dailyBriefs || []).filter(brief => !brief.archive).map(brief => ({
       id: brief.id,
       workspace_id: workspaceId,
       summary: brief.summary,
@@ -542,11 +546,24 @@ class SupabaseStore {
     const existing = Boolean(state[PERSISTED] || state._revision);
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
     upgraded.workspace.updatedAt = new Date().toISOString();
+    if (existing) {
+      const briefs = [];
+      for (const brief of upgraded.dailyBriefs) {
+        if (brief.archive || Buffer.byteLength(JSON.stringify(brief)) <= 65536) { briefs.push(brief); continue; }
+        // Commit the full historical snapshot before replacing it with a pointer.
+        // One snapshot per request also avoids the gateway's bulk payload limit.
+        await this.upsert('operations_briefs', [{ id: brief.id, workspace_id: workspaceId, summary: brief.summary,
+          metrics: brief, logic: brief.logic || 'deterministic-v1', created_at: brief.generatedAt }], 'id');
+        briefs.push({ ...compactDailyBrief(brief), archive: { table: 'operations_briefs', id: brief.id, sha256: crypto.createHash('sha256').update(JSON.stringify(brief)).digest('hex') } });
+      }
+      upgraded.dailyBriefs = briefs;
+    }
     const now = new Date().toISOString();
     upgraded.integrationStatus.supabase = { status: 'connected', detail: 'Authoritative workspace state committed.', lastSyncAt: now, lastError: null };
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
     await this.commit(workspaceId, upgraded, state._revision, existing);
     state._revision = upgraded._revision;
+    state.dailyBriefs = upgraded.dailyBriefs;
     markPersisted(state);
     const failures = await this.mirrorNormalized(workspaceId, upgraded);
     const report = { status: failures.length ? 'degraded' : 'connected', detail: failures.length ? `${failures.length} reporting tables need repair; primary workspace data remains durable.` : 'Reporting refresh completed.',
@@ -577,6 +594,15 @@ class SupabaseStore {
     if (rows?.length > 1) throw Object.assign(new Error('Ambiguous account'), { code: 'ACCOUNT_CONFLICT' });
     const user = rows?.[0]?.users?.find(item => normalizeEmail(item.email) === normalized);
     return user ? { ...user, workspaceId: rows[0].workspace_id } : null;
+  }
+
+  async getBrief(workspaceId, briefId) {
+    const state = await this.get(workspaceId);
+    const brief = state?.dailyBriefs?.find(item => item.id === briefId);
+    if (!brief?.archive) return brief || null;
+    const rows = await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=metrics&limit=1`);
+    if (!rows?.[0]?.metrics) throw Object.assign(new Error('Historical brief is temporarily unavailable'), { status: 503, code: 'BRIEF_ARCHIVE_UNAVAILABLE' });
+    return rows[0].metrics;
   }
 
   async listWorkspaceIds() {

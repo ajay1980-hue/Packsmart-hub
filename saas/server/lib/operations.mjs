@@ -261,6 +261,11 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   };
 }
 
+export function compactDailyBrief(brief) {
+  const summaries = new Set(['today', 'last7d', 'last30d', 'advertising', 'channels', 'recommendations', 'topActions', 'attention', 'archive']);
+  return Object.fromEntries(Object.entries(brief).filter(([key, value]) => value === null || typeof value !== 'object' || summaries.has(key)));
+}
+
 export function buildDailyBrief(state, options = {}) {
   const metrics = deriveOperations(state, options);
   const lines = [];
@@ -275,7 +280,7 @@ export function buildDailyBrief(state, options = {}) {
   if (metrics.lowMargin) lines.push(`${metrics.lowMargin} fully costed variants are below their contribution-margin floor.`);
   if (metrics.pendingApprovals) lines.push(`${metrics.pendingApprovals} risk-sensitive actions are waiting for a decision.`);
   if (metrics.integrationIssues) lines.push(`${metrics.integrationIssues} channel connections need attention.`);
-  return { id: `brief_${crypto.randomUUID()}`, ...metrics, summary: lines.join(' '), logic: 'deterministic-v2', topActions: metrics.recommendations.slice(0, 5) };
+  return compactDailyBrief({ id: `brief_${crypto.randomUUID()}`, ...metrics, summary: lines.join(' '), logic: 'deterministic-v2', topActions: metrics.recommendations.slice(0, 5) });
 }
 
 function cleanText(value, max, required = false) {
@@ -334,7 +339,7 @@ export function integrationMatrix(state, env = process.env) {
     if (statuses[id]) channels.push({ id, name: ({ supabase: 'Supabase', reporting: 'Reporting', render: 'Render', email: 'Email', google: 'Google' })[id], kind: 'system', capabilities: ['health'], ...statuses[id] });
   }
   return channels.map(channel => ({ ...channel, source: statuses[channel.id]?.source || null,
-    status: /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(channel.lastError || '')) ? 'auth_expired' : channel.status,
+    status: /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(channel.lastError || '')) ? 'auth_expired' : channel.lastError && channel.status === 'connected' ? 'degraded' : channel.status,
     lastFailureAt: statuses[channel.id]?.lastFailureAt || null,
     degradedSurfaces: statuses[channel.id]?.degradedSurfaces || [],
     recommendedRepair: channel.lastError ? (/AUTH|CREDENTIAL|TOKEN_EXPIRED/.test(String(channel.lastError)) ? 'Owner: verify the existing credential and reconnect through Sales Channels.' : 'Review the recorded error; temporary read failures will be retried within Autopilot limits.') : null
