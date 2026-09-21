@@ -150,7 +150,7 @@
     state.view = view;
     $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Sales Channels', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
+    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -323,7 +323,8 @@
 
   function approvalCard(item) {
     const pending = item.status === 'pending';
-    const actions = pending && state.data.user?.role === 'owner' ? '<div class="approval-actions"><button class="secondary" data-modify-approval="' + escapeHtml(item.id) + '">Modify</button><button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">' + (pending ? 'Awaiting owner decision' : 'Decision recorded ' + date(item.decidedAt)) + ' · External execution: disabled</p>';
+    const executionNote = item.executionStatus === 'ready' ? 'Ready to apply in the Connection Centre.' : item.executionStatus === 'completed' ? 'Shopify confirmed the change.' : item.executionStatus === 'cancelled' ? 'No channel change made.' : 'External execution: disabled';
+    const actions = pending && state.data.user?.role === 'owner' ? '<div class="approval-actions">' + (item.payload?.connectionWriteId ? '<button class="secondary" data-view-link="channels">Review exact change</button>' : '<button class="secondary" data-modify-approval="' + escapeHtml(item.id) + '">Modify</button>') + '<button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">' + (pending ? 'Awaiting owner decision' : 'Decision recorded ' + date(item.decidedAt)) + ' · ' + escapeHtml(executionNote) + '</p>' + (item.executionStatus === 'ready' ? '<button class="secondary" data-view-link="channels">Open Connection Centre</button>' : '');
     return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Packsmart Ops') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + actions + '</article>';
   }
 
@@ -342,7 +343,8 @@
   }
 
   function renderChannels() {
-    $('#channel-grid').innerHTML = (state.data.integrations || []).map(channelCard).join('');
+    window.RunvaraConnections?.render(state.data);
+    $('#channel-grid').innerHTML = (state.data.integrations || []).filter(item => ['system', 'billing', 'intelligence'].includes(item.kind)).map(channelCard).join('');
     const shopifyConnection = (state.data.connections || []).find(item => item.provider === 'shopify');
     const shopifyStatus = (state.data.integrations || []).find(item => item.id === 'shopify');
     const canConfigure = ['owner', 'admin'].includes(String(state.data.user?.role || ''));
@@ -352,20 +354,20 @@
     connectionState.textContent = shopifyStatus?.status === 'connected' ? 'Connected · read-only' : publicCatalogueLive ? 'Live catalogue · read-only' : shopifyConnection ? 'Saved · verification needed' : 'Not configured';
     connectionState.className = 'tag ' + (shopifyStatus?.status === 'connected' ? 'good' : publicCatalogueLive || shopifyConnection ? 'warn' : 'neutral');
     const savedDomain = shopifyConnection?.metadata?.shopDomain;
-    if (savedDomain) $('#shopify-connection-form').storeDomain.value = savedDomain;
+    if (savedDomain) $('#shopify-connection-form').elements.storeDomain.value = savedDomain;
     const ebayOauth = state.data.ebayOAuth || {};
     const ebayOauthConnection = (state.data.connections || []).find(item => item.provider === 'ebay_oauth');
     const ebayManagerConnection = (state.data.connections || []).find(item => item.provider === 'ebay');
     const ebayConnection = ebayOauthConnection || ebayManagerConnection;
     const ebayStatus = (state.data.integrations || []).find(item => item.id === 'ebay');
-    $('#ebay-connection-form').classList.toggle('hidden', !canConfigure || ebayOauth.ready);
+    $('#ebay-connection-form').classList.toggle('hidden', !canConfigure);
     const ebayOauthButton = $('#connect-ebay-oauth');
     ebayOauthButton.classList.toggle('hidden', !canConfigure || !ebayOauth.ready || ebayOauth.connected);
     const ebayConnectionState = $('#ebay-connection-state');
     ebayConnectionState.textContent = ebayStatus?.status === 'connected' ? 'Connected · read-only' : ebayStatus?.status === 'degraded' ? 'Connected · partial read coverage' : ebayConnection ? 'Saved · verification needed' : 'Not configured';
     ebayConnectionState.className = 'tag ' + (ebayStatus?.status === 'connected' ? 'good' : ebayConnection ? 'warn' : 'neutral');
     const savedAccount = ebayConnection?.metadata?.account;
-    if (savedAccount) $('#ebay-connection-form').expectedAccount.value = savedAccount;
+    if (savedAccount) $('#ebay-connection-form').elements.expectedAccount.value = savedAccount;
     const ebay = state.data.ebay;
     if (!ebay) { $('#ebay-health').innerHTML = '<div class="empty-state">eBay is ready for a secure read-only connection. The existing Manager remains available and unchanged.</div>'; return; }
     const coverage = ebay.coverage || {};
@@ -535,18 +537,18 @@
   $('#shopify-connection-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#shopify-connection-error'); error.textContent = '';
-    const credentials = { storeDomain: form.storeDomain.value, accessToken: form.accessToken.value, clientId: form.clientId.value, clientSecret: form.clientSecret.value };
+    const credentials = { storeDomain: form.elements.storeDomain.value, accessToken: form.elements.accessToken.value, clientId: form.elements.clientId.value, clientSecret: form.elements.clientSecret.value };
     setBusy(button, true, 'Encrypting & verifying…');
     try {
       await request('/api/connections', { method: 'POST', body: JSON.stringify({ provider: 'shopify', credentials }) });
-      form.accessToken.value = ''; form.clientId.value = ''; form.clientSecret.value = '';
+      form.elements.accessToken.value = ''; form.elements.clientId.value = ''; form.elements.clientSecret.value = '';
       await request('/api/integrations/shopify/sync', { method: 'POST', body: '{}' });
       await loadBootstrap({ migrate: false });
       showMessage('Shopify connected. Live products, inventory and recent orders synced read-only.');
     } catch (connectionError) { error.textContent = connectionError.message; }
     finally {
       credentials.accessToken = ''; credentials.clientId = ''; credentials.clientSecret = '';
-      form.accessToken.value = ''; form.clientSecret.value = '';
+      form.elements.accessToken.value = ''; form.elements.clientSecret.value = '';
       setBusy(button, false);
     }
   });
@@ -554,18 +556,18 @@
   $('#ebay-connection-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#ebay-connection-error'); error.textContent = '';
-    const credentials = { baseUrl: form.baseUrl.value, expectedAccount: form.expectedAccount.value, apiToken: form.apiToken.value };
+    const credentials = { baseUrl: form.elements.baseUrl.value, expectedAccount: form.elements.expectedAccount.value, apiToken: form.elements.apiToken.value };
     setBusy(button, true, 'Encrypting & verifying…');
     try {
       await request('/api/connections', { method: 'POST', body: JSON.stringify({ provider: 'ebay', credentials }) });
-      form.apiToken.value = '';
+      form.elements.apiToken.value = '';
       await request('/api/integrations/ebay/sync', { method: 'POST', body: '{}' });
       await loadBootstrap({ migrate: false });
       showMessage('Existing eBay Manager verified read-only. Its OAuth and live listing controls were not changed.');
     } catch (connectionError) { error.textContent = connectionError.message; }
     finally {
       credentials.apiToken = '';
-      form.apiToken.value = '';
+      form.elements.apiToken.value = '';
       setBusy(button, false);
     }
   });
@@ -593,7 +595,7 @@
 
   $('#approval-list').addEventListener('click', async event => {
     const button = event.target.closest('[data-approval]'); if (!button) return; setBusy(button, true, button.dataset.decision === 'approved' ? 'Approving…' : 'Rejecting…');
-    try { const payload = await request('/api/approvals/' + encodeURIComponent(button.dataset.approval) + '/decision', { method: 'POST', body: JSON.stringify({ decision: button.dataset.decision, revision: state.data.approvals.find(item => item.id === button.dataset.approval)?.revision || 1 }) }); const index = state.data.approvals.findIndex(item => item.id === payload.approval.id); if (index >= 0) state.data.approvals[index] = payload.approval; renderApprovals(); showMessage(statusLabel(payload.approval.status) + ' recorded. External execution remains disabled.'); }
+    try { const payload = await request('/api/approvals/' + encodeURIComponent(button.dataset.approval) + '/decision', { method: 'POST', body: JSON.stringify({ decision: button.dataset.decision, revision: state.data.approvals.find(item => item.id === button.dataset.approval)?.revision || 1 }) }); const index = state.data.approvals.findIndex(item => item.id === payload.approval.id); if (index >= 0) state.data.approvals[index] = payload.approval; const write = state.data.connectionWrites?.find(item => item.approvalId === payload.approval.id); if (write && payload.approval.executionStatus === 'ready') write.status = 'ready'; if (write && payload.approval.status === 'rejected') write.status = 'rejected'; renderApprovals(); showMessage(payload.approval.executionStatus === 'ready' ? 'Approved. Review and apply the exact change in the Connection Centre.' : statusLabel(payload.approval.status) + ' recorded. No external action was executed.'); }
     catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
   });
 
@@ -612,6 +614,7 @@
   });
 
   window.RunvaraControl.init({ request, reload: loadBootstrap, notify: showMessage, setView, money, date, escapeHtml });
+  window.RunvaraConnections?.init({ request, reload: loadBootstrap, notify: showMessage, setView, date, escapeHtml });
 
   (async () => {
     try {
@@ -620,6 +623,16 @@
       if (ownerActivationToken) { showPasswordSetup(); return; }
       if (await loadSession()) {
         await loadBootstrap();
+        const connectionReturn = new URL(window.location.href);
+        if (connectionReturn.searchParams.has('connection')) {
+          const channel = connectionReturn.searchParams.get('channel');
+          const outcome = connectionReturn.searchParams.get('connection');
+          setView('channels');
+          if (state.data.connectionCentre?.some(item => item.id === channel)) window.RunvaraConnections?.open(channel);
+          showMessage(outcome === 'connected' ? 'Connected successfully. Choose what to sync. Write permissions remain read-only.' : outcome === 'cancelled' ? 'Connection cancelled. Your existing connection was preserved.' : outcome === 'account-mismatch' ? 'A different account was selected. Your existing connection was preserved.' : 'Sign-in could not be completed. Open the channel and try reconnecting.', outcome === 'connected' ? undefined : 'error');
+          connectionReturn.searchParams.delete('connection'); connectionReturn.searchParams.delete('channel'); window.history.replaceState(null, '', connectionReturn.pathname + connectionReturn.search);
+        }
+        if (ebayReturnResult) setView('channels');
         if (ebayReturnResult === 'connected') showMessage('eBay connected read-only. Live writes remain disabled and the existing Manager was not changed.');
         else if (ebayReturnResult === 'declined') showMessage('eBay connection was cancelled. Nothing was changed.', 'error');
         else if (ebayReturnResult === 'account-mismatch') showMessage('The eBay account did not match Packsmart, so no credential was saved.', 'error');

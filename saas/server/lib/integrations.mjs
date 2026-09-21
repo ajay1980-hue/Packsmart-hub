@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { decryptCredentials } from './security.mjs';
+import { connectorMethods } from './connector-oauth.mjs';
+import { connectionSettings, connectionError } from './connection-centre.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -384,6 +386,7 @@ export class IntegrationService {
   }
 
   shopifyConfigured(state) {
+    if (state?.connectionSettings?.shopify?.disconnected) return false;
     if (this.shopifyConnection(state)) return true;
     const workspaceId = String(state?.workspace?.id || '');
     const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
@@ -396,6 +399,7 @@ export class IntegrationService {
   }
 
   shopifyPublicCatalogueUrl(state) {
+    if (state?.connectionSettings?.shopify?.disconnected) return null;
     const workspaceId = String(state?.workspace?.id || '');
     const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
     const disabled = ['0', 'false', 'no', 'off'].includes(String(this.env.SHOPIFY_PUBLIC_SYNC_ENABLED || '').toLowerCase());
@@ -405,12 +409,14 @@ export class IntegrationService {
   }
 
   shopifyRefreshAvailable(state) {
+    if (state?.connectionSettings?.shopify?.disconnected) return false;
     const workspaceId = String(state?.workspace?.id || '');
     const environmentWorkspace = String(this.env.SHOPIFY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
     return this.shopifyConfigured(state) || workspaceId === environmentWorkspace;
   }
 
   shopifyConfig(state) {
+    if (state?.connectionSettings?.shopify?.disconnected) throw connectionError('Reconnect Shopify before continuing.', 'CONNECTION_DISCONNECTED', 409);
     const workspaceId = String(state?.workspace?.id || '');
     const connection = this.shopifyConnection(state);
     if (connection) {
@@ -428,6 +434,7 @@ export class IntegrationService {
         throw integrationError('Stored Shopify credentials are incomplete', 503, 'SHOPIFY_CREDENTIALS_INVALID');
       }
       return {
+        mode: credentials.mode,
         workspaceId,
         domain,
         apiVersion: String(this.env.SHOPIFY_ADMIN_API_VERSION || '2026-07'),
@@ -525,7 +532,8 @@ export class IntegrationService {
     });
     const payload = await responseJson(response, 'Shopify');
     if (Array.isArray(payload.errors) && payload.errors.length) {
-      throw integrationError('Shopify returned a GraphQL error', 502, 'SHOPIFY_GRAPHQL_ERROR');
+      const denied = payload.errors.some(error => error.extensions?.code === 'ACCESS_DENIED' || /access denied|permission/i.test(error.message || ''));
+      throw integrationError('Shopify could not complete the requested read', 502, denied ? 'SHOPIFY_PERMISSION_REQUIRED' : 'SHOPIFY_GRAPHQL_ERROR');
     }
     return payload.data;
   }
@@ -591,13 +599,21 @@ export class IntegrationService {
     };
   }
 
-  async syncShopify(state) {
+  async syncShopify(state, { areas = connectionSettings(state, 'shopify').areas } = {}) {
+    if (state?.connectionSettings?.shopify?.disconnected) throw connectionError('Reconnect Shopify before syncing.', 'CONNECTION_DISCONNECTED', 409);
     const now = new Date().toISOString();
     if (this.shopifyConfigured(state)) {
       const config = this.shopifyConfig(state);
-      const [products, orders] = await Promise.all([this.fetchShopifyProducts(config), this.fetchShopifyOrders(config)]);
-      state.products = products;
-      state.orders = mergeProviderRecords(state.orders, 'shopify', orders);
+      if (config.mode === 'oauth') config.accessToken = (await this.connectorCredentials(state, 'shopify')).accessToken;
+      const catalogue = areas.some(area => ['products', 'variants', 'inventory', 'prices'].includes(area));
+      const [products, orders, customers] = await Promise.all([
+        catalogue ? this.fetchShopifyProducts(config) : null,
+        areas.includes('orders') ? this.fetchShopifyOrders(config) : null,
+        areas.includes('customers') ? this.fetchShopifyCustomers(config) : null
+      ]);
+      if (products) state.products = mergeSelectedShopify(state.products || [], products, areas);
+      if (orders) state.orders = mergeProviderRecords(state.orders, 'shopify', orders);
+      if (customers) state.channelData = { ...state.channelData, shopify: { ...state.channelData?.shopify, customers } };
       if (config.connection) {
         config.connection.status = 'connected';
         config.connection.lastSyncAt = now;
@@ -605,14 +621,15 @@ export class IntegrationService {
         config.connection.metadata = {
           ...(config.connection.metadata || {}),
           shopDomain: config.domain,
-          itemCount: products.length
+          itemCount: state.products.length
         };
       }
       state.integrationStatus = {
         ...(state.integrationStatus || {}),
         shopify: {
+          ...state.integrationStatus?.shopify,
           status: 'connected',
-          detail: `${products.length} products and ${orders.length} recent orders synced read-only.`,
+          detail: `${areas.join(', ')} synced successfully.`,
           source: 'admin-graphql',
           lastSyncAt: now,
           lastError: null
@@ -698,9 +715,7 @@ export class IntegrationService {
   }
 
   ebayOAuthReady(state) {
-    const workspaceId = String(state?.workspace?.id || '');
-    const environmentWorkspace = String(this.env.EBAY_ENV_WORKSPACE_ID || CUSTOMER_ZERO_WORKSPACE);
-    return workspaceId === environmentWorkspace &&
+    return Boolean(state?.workspace?.id) &&
       ['1', 'true', 'yes', 'on'].includes(String(this.env.EBAY_OAUTH_ENABLED || '').toLowerCase()) &&
       String(this.env.EBAY_CLIENT_ID || '').length >= 8 &&
       String(this.env.EBAY_CLIENT_SECRET || '').length >= 16 &&
@@ -831,6 +846,7 @@ export class IntegrationService {
   }
 
   ebayConfigured(state) {
+    if (state?.connectionSettings?.ebay?.disconnected) return false;
     if (this.ebayOAuthConnection(state) && this.ebayOAuthReady(state)) return true;
     if (this.ebayManagerConnection(state)) return true;
     const workspaceId = String(state?.workspace?.id || '');
@@ -839,6 +855,7 @@ export class IntegrationService {
   }
 
   ebayConfig(state) {
+    if (state?.connectionSettings?.ebay?.disconnected) throw connectionError('Reconnect eBay before continuing.', 'CONNECTION_DISCONNECTED', 409);
     const workspaceId = String(state?.workspace?.id || '');
     const oauthConnection = this.ebayOAuthConnection(state);
     if (oauthConnection && this.ebayOAuthReady(state)) {
@@ -979,7 +996,7 @@ export class IntegrationService {
     return { campaigns, ads: ads.slice(0, 5000) };
   }
 
-  async syncEbayOAuth(state, config, { automatic = false } = {}) {
+  async syncEbayOAuth(state, config, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
     const now = new Date().toISOString();
     const accessToken = await this.ebayAccessToken(config);
     const identity = await this.ebayIdentity(accessToken);
@@ -995,7 +1012,9 @@ export class IntegrationService {
     // Marketing access can vary independently. Identity and token failures
     // remain fatal; downstream read surfaces degrade independently.
     const readErrors = {}, readDiagnostics = {};
+    const selected = surface => surface === 'orders' ? areas.includes('orders') : surface === 'marketing' ? areas.includes('promotions') : areas.some(area => ['products', 'inventory', 'prices'].includes(area));
     const optionalRead = async (surface, operation, fallback) => {
+      if (!selected(surface)) return fallback;
       const previous = state.ebay?.coverage?.readDiagnostics?.[surface];
       if (automatic && [401, 403].includes(previous?.httpStatus)) {
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
@@ -1028,7 +1047,7 @@ export class IntegrationService {
       amount: nullableNumber(order.totalMarketplaceFee),
       currency: String(order.totalMarketplaceFee?.currency || order.pricingSummary?.total?.currency || 'GBP')
     })).filter(record => record.orderId && record.amount !== null);
-    if (!readErrors.orders) state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
+    if (selected('orders') && !readErrors.orders) state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
 
     const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
     const listingSkus = new Set(published.map(item => item.sku).filter(Boolean));
@@ -1038,22 +1057,22 @@ export class IntegrationService {
       account,
       marketplaceId: config.marketplaceId,
       source: 'ebay-oauth-readonly',
-      listings: readErrors.inventory || readErrors.offers ? (state.ebay?.listings || []) : published.slice(0, 500),
-      drafts: readErrors.inventory || readErrors.offers ? (state.ebay?.drafts || []) : drafts.slice(0, 500).map(item => ({ id: item.offerId || item.id, title: item.title, sku: item.sku, updatedAt: null })),
-      fees: readErrors.orders ? (state.ebay?.fees || []) : fees.slice(0, 1000),
-      promotions: readErrors.marketing ? (state.ebay?.promotions || []) : marketing.campaigns.slice(0, 500),
+      listings: !selected('inventory') || readErrors.inventory || readErrors.offers ? (state.ebay?.listings || []) : mergeSelectedEbay(state.ebay?.listings || [], published.slice(0, 500), areas),
+      drafts: !selected('inventory') || readErrors.inventory || readErrors.offers ? (state.ebay?.drafts || []) : drafts.slice(0, 500).map(item => ({ id: item.offerId || item.id, title: item.title, sku: item.sku, updatedAt: null })),
+      fees: !selected('orders') || readErrors.orders ? (state.ebay?.fees || []) : fees.slice(0, 1000),
+      promotions: !selected('marketing') || readErrors.marketing ? (state.ebay?.promotions || []) : marketing.campaigns.slice(0, 500),
       health: null,
-      inventoryApiComparison: readErrors.inventory || readErrors.offers ? (state.ebay?.inventoryApiComparison || null) : { missingInInventoryApi: missingOnEbay.slice(0, 100), unmatchedInventoryApiSkus: staleOnEbay.slice(0, 100) },
+      inventoryApiComparison: !selected('inventory') || readErrors.inventory || readErrors.offers ? (state.ebay?.inventoryApiComparison || null) : { missingInInventoryApi: missingOnEbay.slice(0, 100), unmatchedInventoryApiSkus: staleOnEbay.slice(0, 100) },
       coverage: {
         catalogueScope: 'inventory_api_only',
         fullCatalogueAvailable: false,
-        inventoryApiItems: inventoryItems.length,
-        ordersAvailable: !readErrors.orders,
-        inventoryAvailable: !readErrors.inventory,
-        offersAvailable: !readErrors.inventory && !readErrors.offers,
-        marketingAvailable: !readErrors.marketing,
-        unavailableSurfaces: Object.keys(readErrors),
-        readDiagnostics,
+        inventoryApiItems: selected('inventory') ? inventoryItems.length : state.ebay?.coverage?.inventoryApiItems ?? null,
+        ordersAvailable: selected('orders') ? !readErrors.orders : state.ebay?.coverage?.ordersAvailable ?? false,
+        inventoryAvailable: selected('inventory') ? !readErrors.inventory : state.ebay?.coverage?.inventoryAvailable ?? false,
+        offersAvailable: selected('inventory') ? !readErrors.inventory && !readErrors.offers : state.ebay?.coverage?.offersAvailable ?? false,
+        marketingAvailable: selected('marketing') ? !readErrors.marketing : state.ebay?.coverage?.marketingAvailable ?? false,
+        unavailableSurfaces: [...new Set([...(state.ebay?.coverage?.unavailableSurfaces || []).filter(surface => !selected(surface)), ...Object.keys(readErrors)])],
+        readDiagnostics: { ...Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).filter(([surface]) => !selected(surface))), ...readDiagnostics },
         standardManagerPreserved: true
       },
       syncedAt: now
@@ -1069,8 +1088,8 @@ export class IntegrationService {
       ...(config.connection.metadata || {}),
       account,
       marketplaceId: config.marketplaceId,
-      listingCount: readErrors.inventory || readErrors.offers ? null : published.length,
-      draftCount: readErrors.inventory || readErrors.offers ? null : drafts.length,
+      listingCount: !selected('inventory') ? config.connection.metadata?.listingCount ?? null : readErrors.inventory || readErrors.offers ? null : published.length,
+      draftCount: !selected('inventory') ? config.connection.metadata?.draftCount ?? null : readErrors.inventory || readErrors.offers ? null : drafts.length,
       channel: 'direct_oauth'
     };
     const status = {
@@ -1093,7 +1112,8 @@ export class IntegrationService {
     return status;
   }
 
-  async syncEbay(state, { automatic = false } = {}) {
+  async syncEbay(state, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
+    if (state?.connectionSettings?.ebay?.disconnected) throw connectionError('Reconnect eBay before syncing.', 'CONNECTION_DISCONNECTED', 409);
     const now = new Date().toISOString();
     if (!this.ebayConfigured(state)) {
       const status = {
@@ -1106,7 +1126,7 @@ export class IntegrationService {
       return status;
     }
     const config = this.ebayConfig(state);
-    if (config.mode === 'direct_oauth') return this.syncEbayOAuth(state, config, { automatic });
+    if (config.mode === 'direct_oauth') return this.syncEbayOAuth(state, config, { automatic, areas });
     const statusPayload = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
     const account = String(statusPayload.account || statusPayload.username || statusPayload.ebayUser || '');
     const connected = statusPayload.connected === true || statusPayload.authenticated === true || statusPayload.ebayConnected === true;
@@ -1116,6 +1136,7 @@ export class IntegrationService {
 
     const readErrors = [];
     const optional = async (surface, paths, fallback) => {
+      if (surface === 'orders' || surface === 'fees' ? !areas.includes('orders') : surface === 'promotions' ? !areas.includes('promotions') : !areas.some(area => ['products', 'inventory', 'prices'].includes(area))) return fallback;
       try { return await this.ebayGet(config, paths); }
       catch { readErrors.push(surface); return fallback; }
     };
@@ -1139,7 +1160,7 @@ export class IntegrationService {
     state.ebay = {
       account,
       marketplaceId: statusPayload.marketplaceId || 'EBAY_GB',
-      listings: listings.slice(0, 500).map(item => ({
+      listings: mergeSelectedEbay(state.ebay?.listings || [], listings.slice(0, 500).map(item => ({
         id: String(item.id || item.itemId || ''),
         title: String(item.title || ''),
         sku: String(item.sku || ''),
@@ -1149,7 +1170,7 @@ export class IntegrationService {
         adRate: Number.isFinite(Number(item.adRate ?? item.promotionRate)) ? Number(item.adRate ?? item.promotionRate) : null,
         buyerShippingCharge: nullableNumber(item.buyerShippingCharge ?? item.shippingCost),
         listingUrl: item.listingUrl || item.url || null
-      })),
+      })), areas),
       drafts: drafts.slice(0, 500).map(item => ({ id: String(item.id || ''), title: String(item.title || ''), sku: String(item.sku || ''), updatedAt: item.updatedAt || null })),
       fees: fees.slice(0, 1000),
       promotions: promotions.slice(0, 500),
@@ -1187,4 +1208,46 @@ export class IntegrationService {
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;
   }
+}
+
+Object.assign(IntegrationService.prototype, connectorMethods);
+
+IntegrationService.prototype.fetchShopifyCustomers = async function(config) {
+  const customers = []; let after = null;
+  for (let page = 0; page < 20; page++) {
+    const data = await this.shopifyGraphql('query ConnectionCustomers($after: String) { customers(first: 100, after: $after) { nodes { id createdAt numberOfOrders } pageInfo { hasNextPage endCursor } } }', { after }, config);
+    if (!data?.customers) throw connectionError('Customer access needs approval in Shopify. Reconnect with customer access, or deselect customers.', 'CUSTOMER_PERMISSION_REQUIRED', 422);
+    customers.push(...data.customers.nodes.map(item => ({ id: item.id, createdAt: item.createdAt, numberOfOrders: item.numberOfOrders })));
+    if (!data.customers.pageInfo.hasNextPage) return customers;
+    after = data.customers.pageInfo.endCursor;
+  }
+  throw connectionError('Customer sync exceeded the supported size. Previous customer data is retained.', 'CUSTOMER_COVERAGE_LIMIT', 422);
+};
+
+export function mergeSelectedShopify(previous, incoming, areas) {
+  const old = new Map(previous.map(item => [item.id, item]));
+  const result = incoming.filter(item => areas.includes('products') || old.has(item.id)).map(item => {
+    const existing = old.get(item.id) || {}, next = areas.includes('products') ? { ...item } : { ...existing };
+    next.inventory = areas.includes('inventory') ? item.inventory : existing.inventory ?? null;
+    const oldVariants = new Map((existing.variants || []).map(variant => [variant.id, variant]));
+    next.variants = item.variants.filter(variant => areas.includes('variants') || oldVariants.has(variant.id)).map(variant => {
+      const prior = oldVariants.get(variant.id) || {}, value = areas.includes('variants') ? { ...variant } : { ...prior };
+      value.price = areas.includes('prices') ? variant.price : prior.price ?? null;
+      value.inventory = areas.includes('inventory') ? variant.inventory : prior.inventory ?? null;
+      value.available = areas.includes('inventory') ? variant.available : prior.available ?? null;
+      return value;
+    });
+    if (!areas.includes('variants')) for (const variant of existing.variants || []) if (!next.variants.some(value => value.id === variant.id)) next.variants.push(variant);
+    return next;
+  });
+  // Partial field reads must not delete unselected records or variants.
+  if (!areas.includes('products')) for (const item of previous) if (!result.some(next => next.id === item.id)) result.push(item);
+  return result;
+}
+export function mergeSelectedEbay(previous, incoming, areas) {
+  const old = new Map(previous.map(item => [item.id, item]));
+  return incoming.map(item => {
+    const prior = old.get(item.id) || {};
+    return { ...(areas.includes('products') ? item : { ...prior, id: item.id, sku: item.sku }), price: areas.includes('prices') ? item.price : prior.price ?? null, quantity: areas.includes('inventory') ? item.quantity : prior.quantity ?? null };
+  });
 }

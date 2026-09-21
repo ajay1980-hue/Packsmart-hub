@@ -72,6 +72,21 @@ export function verifyEbayOAuthStateToken(token, secret, nowSeconds = Math.floor
   }
 }
 
+export function createConnectorOAuthState(payload, secret) {
+  const encoded = b64url(JSON.stringify({ ...payload, purpose: 'runvara-connection', exp: Math.floor(Date.now() / 1000) + 600 }));
+  return `${encoded}.${sign(`connection.${encoded}`, secret)}`;
+}
+
+export function verifyConnectorOAuthState(token, secret) {
+  const [encoded, signature, extra] = String(token || '').split('.');
+  if (!encoded || !signature || extra || !safeEqual(signature, sign(`connection.${encoded}`, secret))) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString());
+    if (payload.purpose !== 'runvara-connection' || payload.exp <= Date.now() / 1000 || !payload.workspaceId || !payload.userId || !payload.provider || !payload.nonce) return null;
+    return payload;
+  } catch { return null; }
+}
+
 export function createSessionToken({ userId, workspaceId, email, role = 'member', csrf, sessionVersion = 1 }, secret, ttlSeconds = 60 * 60 * 12) {
   if (!secret || String(secret).length < 32) throw new Error('SESSION_SECRET must contain at least 32 characters');
   const now = Math.floor(Date.now() / 1000);

@@ -433,7 +433,7 @@ test('eBay read-only OAuth uses a one-time callback while preserving the existin
   const forged = await request(`/api/integrations/ebay/oauth/callback?state=${encodeURIComponent(`${oauthState}x`)}&code=forged`, { redirect: 'manual' });
   assert.equal(forged.response.status, 400);
 
-  const callback = await request(`/api/integrations/ebay/oauth/callback?state=${encodeURIComponent(oauthState)}&code=authorized-code`, { redirect: 'manual' });
+  const callback = await request(`/api/integrations/ebay/oauth/callback?state=${encodeURIComponent(oauthState)}&code=authorized-code`, { cookie: cookieValue(started.setCookie), redirect: 'manual' });
   assert.equal(callback.response.status, 303);
   assert.equal(callback.response.headers.get('location'), 'http://localhost:8787/?ebay=connected');
   assert.equal(String(callback.payload).includes(refreshSecret), false);

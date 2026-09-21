@@ -1,21 +1,26 @@
 import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensureControl, finishAutomation } from './control.mjs';
 import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
+import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS } from './connection-centre.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
 
-export async function monitoredSync(state, integrations, provider, { automatic = false, retry = true } = {}) {
+export async function monitoredSync(state, integrations, provider, { automatic = false, retry = true, areas, run } = {}) {
   const previous = state.integrationStatus?.[provider] || {};
   const now = new Date().toISOString();
   if (automatic && authFailure(previous.lastError)) throw Object.assign(new Error('Owner must repair authentication'), { code: 'AUTH_REPAIR_REQUIRED' });
+  if (automatic && !connectionSettings(state, provider).autoSync) return previous;
+  run ||= beginConnectionSync(state, provider, { automatic, areas });
+  areas = run.areas;
   let attempts = 0;
   while (true) {
     attempts++;
     try {
-      const result = await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic });
-      const status = { ...result, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
+      const result = integrations.syncProvider ? await integrations.syncProvider(state, provider, { automatic, areas }) : await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic, areas });
+      const status = { ...previous, ...result, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
       state.integrationStatus = { ...state.integrationStatus, [provider]: status };
+      finishConnectionSync(state, run, status);
       return status;
     } catch (error) {
       const transient = error.upstreamStatus === 429 || error.upstreamStatus >= 500 || ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name);
@@ -25,6 +30,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
         detail: 'Read sync failed; last known data was retained.', lastSyncAt: previous.lastSyncAt || null, lastFailureAt: now, lastAttemptAt: now, lastError: code, attempts } };
       const connection = provider === 'shopify' ? integrations.shopifyConnection?.(state) : integrations.ebayConnection?.(state);
       if (connection) { connection.status = state.integrationStatus[provider].status; connection.lastError = code; }
+      finishConnectionSync(state, run, null, { code });
       throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus });
     }
   }
@@ -47,6 +53,15 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
         return { skipped: true, reason: state.autopilot.enabled ? 'FREQUENCY_OR_PERMISSION_LIMIT' : 'AUTOPILOT_OFF' };
       }
       const runs = rules.map(rule => claimAutomation(state, rule.id, now));
+      const providers = [];
+      if (runs.some(run => run.ruleId === 'channelSync')) {
+        for (const provider of Object.keys(CONNECTORS)) {
+          const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(integrations.syncProvider && state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
+          const legacyFirstRun = !state.connectionSettings?.[provider] && !state.connectionSyncs?.some(item => item.provider === provider);
+          if (configured && (legacyFirstRun || connectionDue(state, provider, now))) providers.push(provider);
+        }
+      }
+      const syncRuns = new Map(providers.map(provider => [provider, beginConnectionSync(state, provider, { automatic: true, actor: 'autopilot' })]));
       // Commit the claim before any work. PostgREST compare-and-save allows only
       // one replica to acquire this workspace's due runs, including at redeploy.
       await store.save(workspaceId, state);
@@ -54,11 +69,8 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
         try {
           let evidence;
           if (run.ruleId === 'channelSync') {
-            const providers = [];
-            if (integrations.shopifyRefreshAvailable(state)) providers.push('shopify');
-            if (integrations.ebayConfigured(state)) providers.push('ebay');
-            if (!providers.length) throw Object.assign(new Error('No connected source'), { code: 'NO_CONNECTED_SOURCE' });
-            const outcomes = await Promise.allSettled(providers.map(provider => monitoredSync(state, integrations, provider, { automatic: !manual })));
+            if (!providers.length) { finishAutomation(state, run, { evidence: [{ type: 'sync_schedule', id: run.id, detail: 'No channel is due; individual sync settings were respected.' }] }); continue; }
+            const outcomes = await Promise.allSettled(providers.map(provider => monitoredSync(state, integrations, provider, { automatic: !manual, run: syncRuns.get(provider) })));
             evidence = outcomes.map((result, index) => ({ type: 'integration_read', id: providers[index], detail: result.status === 'fulfilled' ? result.value.status : safeCode(result.reason), at: new Date().toISOString() }));
             const failed = outcomes.find(result => result.status === 'rejected');
             if (failed) { finishAutomation(state, run, { evidence, errorCode: safeCode(failed.reason), blocked: authFailure(failed.reason) }); continue; }

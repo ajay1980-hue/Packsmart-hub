@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { connectionDue, CONNECTORS } from './connection-centre.mjs';
 import { AUTOMATION_DEFINITIONS, deriveOperations, ebayComparisonAvailable, integrationMatrix, normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
 
@@ -216,6 +217,9 @@ export function dueRules(state, now = new Date()) {
     }
     if (runs.filter(item => item.startedAt.slice(0, 10) === now.toISOString().slice(0, 10)).length >= policy.maxRunsPerDay) return false;
     const last = runs[0];
+    if (rule.id === 'channelSync' && state.connectionSettings && Object.keys(state.connectionSettings).length) {
+      return Object.keys(CONNECTORS).some(provider => connectionDue(state, provider, now) && (state.connections?.some(item => item.provider === provider || (provider === 'ebay' && item.provider === 'ebay_oauth')) || state.integrationStatus?.[provider]?.lastSyncAt));
+    }
     return !last || now.getTime() - Date.parse(last.startedAt) >= policy.intervalMinutes * 60000;
   });
 }
