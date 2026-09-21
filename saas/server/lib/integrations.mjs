@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { decryptCredentials } from './security.mjs';
 import { connectorMethods } from './connector-oauth.mjs';
+import { metaMethods } from './meta-commerce.mjs';
 import { connectionSettings, connectionError } from './connection-centre.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
@@ -1210,7 +1211,7 @@ export class IntegrationService {
   }
 }
 
-Object.assign(IntegrationService.prototype, connectorMethods);
+Object.assign(IntegrationService.prototype, connectorMethods, metaMethods);
 
 IntegrationService.prototype.fetchShopifyCustomers = async function(config) {
   const customers = []; let after = null;

@@ -1,12 +1,13 @@
 import crypto from 'node:crypto';
 import { addAudit } from './events.mjs';
+import { META_WRITES, META_ORDER_RESTRICTION } from './meta-capabilities.mjs';
 
 // One capability registry for the existing IntegrationService, UI and scheduler.
 // Areas describe implemented reads, not the provider's theoretical API features.
 export const CONNECTORS = Object.freeze({
   shopify: { name: 'Shopify', areas: ['products', 'variants', 'inventory', 'prices', 'orders', 'customers'], defaults: ['products', 'variants', 'inventory', 'prices', 'orders'], writes: ['product_content', 'internal_note'] },
   ebay: { name: 'eBay', areas: ['products', 'inventory', 'prices', 'orders', 'promotions'], defaults: ['products', 'inventory', 'prices', 'orders', 'promotions'], writes: [] },
-  meta: { name: 'Facebook & Instagram', areas: ['accounts'], defaults: ['accounts'], writes: [] },
+  meta: { name: 'Facebook & Instagram', areas: ['accounts', 'catalogs', 'products', 'inventory', 'prices', 'posts'], defaults: ['accounts'], writes: META_WRITES },
   tiktok_shop: { name: 'TikTok Shop', areas: ['shops', 'products', 'variants', 'inventory', 'prices', 'orders'], defaults: ['shops', 'products', 'variants', 'inventory', 'prices', 'orders'], writes: [] },
   google_youtube: { name: 'Google & YouTube', areas: ['channels'], defaults: ['channels'], writes: [] },
   pinterest: { name: 'Pinterest', areas: ['boards', 'pins'], defaults: ['boards', 'pins'], writes: [] },
@@ -52,6 +53,13 @@ export function saveConnectionSettings(state, provider, body, user) {
       addAudit(state, { type: 'connection_permissions_changed', actor: user.id, detail: { provider, from: previous.permissionMode, to: next.permissionMode, sensitiveActionsRequireApproval: true } });
     }
   }
+  if (provider === 'meta') for (const [key, group] of [['metaPageIds','pages'],['metaCatalogIds','catalogs']]) {
+    if (!Object.hasOwn(body,key)) continue;
+    const available = state.connections?.find(item => item.provider === 'meta')?.metadata?.assets?.[group] || [];
+    if (!Array.isArray(body[key]) || body[key].length > 20 || body[key].some(id => typeof id !== 'string' || !available.some(item => item.id === id))) throw connectionError('Choose only assets available to this workspace’s Meta connection.', 'META_ASSET_REQUIRED', 409);
+    next[key] = [...new Set(body[key])];
+    addAudit(state, { type: 'connection_assets_selected', actor: user.id, detail: { provider, kind: group, ids: next[key] } });
+  }
   next.revision++; next.updatedAt = new Date().toISOString();
   state.connectionSettings = { ...state.connectionSettings, [provider]: next };
   addAudit(state, { type: 'connection_sync_settings_changed', actor: user.id, detail: { provider, autoSync: next.autoSync, frequencyMinutes: next.frequencyMinutes, areas: next.areas } });
@@ -80,6 +88,8 @@ export function disconnectConnection(state, provider, body, actor, integrations)
 }
 export function recoveryFor(provider, status = {}, coverage = {}) {
   const name = connector(provider).name, code = String(status.lastError || '');
+  if (provider === 'meta' && code === 'META_ASSET_REQUIRED') return { message: 'Choose your Pages and catalogues in this panel, then try syncing again.', action: 'open', label: 'Review selected assets' };
+  if (provider === 'meta' && code === 'META_RATE_LIMITED') return { message: 'Meta is limiting requests. Wait a few minutes, then try syncing again.', action: 'sync', label: 'Retry sync' };
   if (/ACCOUNT_MISMATCH/.test(code)) return { message: `A different ${name} account was returned. Reconnect the account already used by this workspace.`, action: 'reconnect', label: `Reconnect ${name}` };
   if (/CUSTOMER_PERMISSION/.test(code)) return { message: 'Shopify has not granted customer access. Reconnect with customer records selected, or turn off customers in your sync areas.', action: 'reconnect', label: 'Review Shopify access' };
   if (/AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION/.test(code) || status.status === 'auth_expired') return { message: `Your ${name} connection needs reconnecting. Sign in again to renew access.`, action: 'reconnect', label: `Reconnect ${name}` };
@@ -137,9 +147,10 @@ export function connectionCentre(state, integrations) {
       areas: definition.areas, counts, recovery: configured ? recovery : null, history, progress: history.find(run => run.status === 'running') || null,
       lastSuccessfulSyncAt: health.lastSuccessfulSyncAt || history.find(run => run.status === 'completed')?.completedAt || (!history.length && !health.lastError ? health.lastSyncAt : null) || null, lastCheckedAt: record?.lastCheckedAt || null,
       oauthReady: Boolean(integrations.oauthReady?.(id, state)), refreshSupported: Boolean(configured && integrations.refreshSupported?.(state, id)),
-      writes: definition.writes, writeAccessGranted: id === 'shopify' && granted.includes('write_products'),
+      writes: definition.writes, writeAccessGranted: id === 'shopify' ? granted.includes('write_products') : id === 'meta' && granted.some(scope => ['catalog_management','pages_manage_posts','instagram_content_publish'].includes(scope)),
+      ...(id === 'meta' ? { meta: { assets: record?.metadata?.assets || {pages:[],catalogs:[]}, grantedScopes: granted, data: readData, orderRestriction: META_ORDER_RESTRICTION } } : {}),
       supportRequested: Boolean(settings.supportRequestedAt),
       availability: definition.areas.length ? 'available' : 'awaiting_provider_approval',
-      coverageNote: id === 'ebay' && state.ebay?.source === 'ebay-oauth-readonly' ? 'Product, inventory and price reads cover listings created through eBay’s Inventory service. Your existing Manager handles other listings.' : id === 'meta' ? 'Connect Facebook Pages and linked Instagram accounts. Shop orders and catalogue publishing are not available in this release.' : id === 'google_youtube' ? 'Connect YouTube channels. Google Merchant product feeds and advertising are not available in this release.' : id === 'pinterest' ? 'Connect boards and Pins. Advertising and catalogue publishing are not available in this release.' : id === 'tiktok_shop' ? 'Reads all shops you authorise, their product and stock records, and order summaries from the last 90 days.' : null };
+      coverageNote: id === 'ebay' && state.ebay?.source === 'ebay-oauth-readonly' ? 'Product, inventory and price reads cover listings created through eBay’s Inventory service. Your existing Manager handles other listings.' : id === 'meta' ? 'Sync selected catalogues, products, stock and Page posts. Product changes and Facebook/Instagram publishing require explicit owner permission and approval of each change. Native Meta checkout orders have been retired; website orders come through your checkout connection.' : id === 'google_youtube' ? 'Connect YouTube channels. Google Merchant product feeds and advertising are not available in this release.' : id === 'pinterest' ? 'Connect boards and Pins. Advertising and catalogue publishing are not available in this release.' : id === 'tiktok_shop' ? 'Reads all shops you authorise, their product and stock records, and order summaries from the last 90 days.' : null };
   });
 }

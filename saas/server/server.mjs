@@ -45,7 +45,7 @@ import { CONNECTORS, connector, connectionCentre, connectionSettings, connection
 import { proposeConnectionWrite, executeConnectionWrite } from './lib/connection-writes.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.1.0';
+const VERSION = '6.2.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -797,20 +797,23 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   async function startConnectorOAuth(provider, auth, body, res) {
     connector(provider);
     if (!integrations.oauthReady(provider, auth.state)) throw connectionError('Secure sign-in for this channel is not available yet. Open its setup guide for the next step.', 'OAUTH_NOT_CONFIGURED', 409);
-    if ((body.writeAccess || body.allowAccountChange) && auth.user.role !== 'owner') throw connectionError('Only the workspace owner can authorise write access or change the connected account.', 'OWNER_APPROVAL_REQUIRED', 403);
+    if (provider === 'meta' && body.catalogAccess && body.confirmCatalogAccess !== 'meta') throw connectionError('Confirm Meta catalogue access, which includes provider-side read and write permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
+    if (provider === 'meta' && body.businessInstagramAccess && (!body.writeAccess || body.confirmBusinessInstagramAccess !== 'meta')) throw connectionError('Confirm the additional Meta business permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
+    if ((body.writeAccess || body.allowAccountChange || body.catalogAccess || body.businessInstagramAccess) && auth.user.role !== 'owner') throw connectionError('Only the workspace owner can authorise write access or change the connected account.', 'OWNER_APPROVAL_REQUIRED', 403);
     if (body.writeAccess && body.confirmWriteAccess !== provider) throw connectionError('Confirm the request for channel write access.', 'PERMISSION_CONFIRMATION_REQUIRED');
     const nonce = crypto.randomBytes(32).toString('base64url'), browserNonce = crypto.randomBytes(32).toString('base64url');
     const challenge = { provider, nonce, userId: auth.user.id, sessionVersion: auth.user.sessionVersion || 1, expiresAt: new Date(Date.now() + 600000).toISOString(), cookieHash: crypto.createHash('sha256').update(browserNonce).digest('hex'),
       storeDomain: provider === 'shopify' ? String(body.storeDomain || '').trim().toLowerCase().replace(/^https:\/\//, '').replace(/\/$/, '') : null,
+      catalogAccess: provider === 'meta' && body.catalogAccess === true, businessInstagramAccess: provider === 'meta' && body.businessInstagramAccess === true,
       writeAccess: body.writeAccess === true, includeCustomers: body.includeCustomers === true, allowAccountChange: body.allowAccountChange === true,
       verifier: crypto.randomBytes(40).toString('base64url') };
     const stateToken = createConnectorOAuthState({ workspaceId: auth.session.workspaceId, userId: auth.user.id, provider, nonce }, env.SESSION_SECRET);
     const authorizationUrl = integrations.authorizationUrl(provider, stateToken, auth.state, challenge);
     await mutate(auth, async state => {
       state.oauthChallenges = [challenge, ...(state.oauthChallenges || []).filter(item => item.provider !== provider && Date.parse(item.expiresAt) > Date.now())].slice(0, 10);
-      addAudit(state, { type: 'connection_authorisation_started', actor: auth.user.id, detail: { provider, writeAccessRequested: challenge.writeAccess, allowAccountChange: challenge.allowAccountChange } });
+      addAudit(state, { type: 'connection_authorisation_started', actor: auth.user.id, detail: { provider, writeAccessRequested: challenge.writeAccess, catalogAccessRequested: challenge.catalogAccess, businessInstagramAccessRequested: challenge.businessInstagramAccess, allowAccountChange: challenge.allowAccountChange } });
     });
-    send(res, 200, { authorizationUrl, expiresAt: challenge.expiresAt, readOnly: !challenge.writeAccess, existingManagerPreserved: provider === 'ebay' }, { 'Set-Cookie': oauthCookie(provider, browserNonce) });
+    send(res, 200, { authorizationUrl, expiresAt: challenge.expiresAt, readOnly: true, providerWriteAccessRequested: Boolean(challenge.writeAccess || challenge.catalogAccess), existingManagerPreserved: provider === 'ebay' }, { 'Set-Cookie': oauthCookie(provider, browserNonce) });
   }
 
   async function connectorOAuthCallback(provider, url, req, res) {
@@ -822,6 +825,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const challenge = state?.oauthChallenges?.find(item => item.provider === provider && item.nonce === token.nonce && item.userId === token.userId);
       const user = state?.users?.find(item => item.id === token.userId && item.active !== false);
       if (!challenge || Date.parse(challenge.expiresAt) <= Date.now() || !user || !['owner', 'admin'].includes(user.role) || Number(user.sessionVersion || 1) !== Number(challenge.sessionVersion) || !browserNonce || !safeEqual(challenge.cookieHash, crypto.createHash('sha256').update(browserNonce).digest('hex'))) throw connectionError('This sign-in could not be verified. Return to Runvara and reconnect from the same browser.', 'OAUTH_STATE_INVALID');
+      if ((challenge.writeAccess || challenge.catalogAccess || challenge.businessInstagramAccess || challenge.allowAccountChange) && user.role !== 'owner') throw connectionError('The workspace owner must authorise this access.', 'OWNER_APPROVAL_REQUIRED', 403);
       state.oauthChallenges = state.oauthChallenges.filter(item => item.nonce !== token.nonce);
       // Persist single-use consumption before contacting a provider. CAS prevents
       // a second process from exchanging the same code or overwriting a new grant.
@@ -847,7 +851,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         activateConnection(state, provider, user.id);
         state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], status: 'connected', lastError: null, detail: 'Connected successfully. Choose what to sync.' } };
         integrations.clearConnectionCache(state, provider);
-        addAudit(state, { type: 'connection_authorised', actor: user.id, detail: { provider, account: identity.shopDomain || identity.account, readOnlyPolicy: true, writeAccessRequested: challenge.writeAccess } });
+        addAudit(state, { type: 'connection_authorised', actor: user.id, detail: { provider, account: identity.shopDomain || identity.account, readOnlyPolicy: true, writeAccessRequested: challenge.writeAccess, catalogAccessRequested: Boolean(challenge.catalogAccess), businessInstagramAccessRequested: Boolean(challenge.businessInstagramAccess) } });
         if (provider === 'ebay') {
           addAudit(state, { type: 'ebay_oauth_connected', actor: user.id, detail: { account: identity.account, existingManagerPreserved: true, readOnly: true } });
           const run = beginConnectionSync(state, provider, { actor: user.id });

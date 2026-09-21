@@ -30,6 +30,7 @@ async function fixture(t, extra = {}) {
   const fetchImpl = async (url, options = {}) => {
     const uri = new URL(String(url)), body = options.body ? JSON.parse(options.headers?.['Content-Type'] === 'application/json' ? options.body : '{}') : {};
     calls.push({url:String(url),query:body.query || '',headers:options.headers,body:options.body,method:options.method || 'GET'});
+    if (uri.hostname === 'graph.facebook.com' && flags.metaHandler) return flags.metaHandler(uri, options, body);
     if (uri.hostname.endsWith('.myshopify.com')) {
       if (uri.pathname.endsWith('/access_token')) return json({access_token:TOKEN,refresh_token:'new-refresh-token-test-only',expires_in:86400,scope:'read_products,read_inventory,read_orders,write_products'});
       if(flags.invalid) return json({errors:'secret error that must not be shown'},401);
@@ -58,6 +59,7 @@ async function fixture(t, extra = {}) {
     if(uri.pathname.endsWith('/user_account')) return json({username:'pinterest-user'});
     if(uri.hostname.includes('pinterest')) return json({items:[{id:'pin-1',title:'Pin',name:'Board'}],bookmark:null});
     if(uri.pathname.endsWith('/channels')) return json({items:[{id:'youtube-1',snippet:{title:'My channel'},statistics:{videoCount:'3'}}]});
+    if(uri.pathname.endsWith('/me/permissions')) return json({data:['pages_show_list','pages_read_engagement','instagram_basic'].map(permission=>({permission,status:'granted'}))});
     if(uri.pathname.endsWith('/me')) return json({id:'meta-user',name:'My pages'});
     if(uri.pathname.endsWith('/me/accounts')) return json({data:[{id:'page1',name:'My page',access_token:'MUST-NOT-STORE',instagram_business_account:{id:'ig1',username:'my-shop'}}]});
     if(uri.pathname.endsWith('/shops')) return json({code:0,data:{shops:[{id:'shop1',name:'My TikTok shop',region:'GB',cipher:'MUST-NOT-EXPOSE'}]}});
@@ -287,4 +289,147 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   document.querySelector('[data-connection-action="setup-request"]').click();
   await until(()=>document.getElementById('connection-detail').textContent.includes('Setup request recorded'));
   assert.deepEqual(errors,[]);
+});
+
+async function metaFixture(t) {
+  const f=await fixture(t), permissions=['pages_show_list','pages_read_engagement','instagram_basic','catalog_management','business_management','pages_manage_posts','instagram_content_publish'];
+  f.flags.metaPermissions=permissions;f.flags.mediaStatus='IN_PROGRESS';
+  f.flags.metaHandler=(url,options,body)=>{
+    const p=url.pathname.replace('/v26.0','');
+    if(p==='/oauth/access_token')return json({access_token:'meta-private-user-token',expires_in:5000000});
+    if(f.flags.metaInvalid)return json({error:{code:190,message:'private provider diagnostic'}},401);
+    if(p==='/me')return json({id:'100',name:'Meta owner'});
+    if(p==='/me/permissions')return json({data:f.flags.metaPermissions.map(permission=>({permission,status:'granted'}))});
+    if(p==='/me/accounts')return json({data:[{id:'200',name:'Alpha Page',tasks:['CREATE_CONTENT'],access_token:'meta-private-page-token',instagram_business_account:{id:'300',username:'alpha'}}]});
+    if(p==='/me/businesses')return json({data:[{id:'400',name:'Alpha Business'}]});
+    if(p==='/400/owned_product_catalogs')return json({data:[{id:'500',name:'Alpha Catalogue',vertical:'commerce'}]});
+    if(p==='/400/client_product_catalogs')return json({data:[]});
+    if((options.method||'GET')==='POST'){
+      if(f.flags.metaUnknown)throw new TypeError('connection lost');
+      if(p==='/600')return json({success:true});
+      if(p==='/500/products')return json({id:'601'});
+      if(p==='/200/feed')return json({id:'200_700'});
+      if(p==='/200_700')return json({success:true});
+      if(p==='/300/media')return json({id:'800'});
+      if(p==='/300/media_publish')return json({id:'900'});
+    }
+    if(p==='/500/products')return f.flags.metaReadFail ? json({error:{code:4}},429) : json({data:[{id:'600',retailer_id:'SKU',name:'Meta item',description:'Description',price:'12.99',currency:'GBP',inventory:5,availability:'in stock',retailer_product_group_id:'group'}]});
+    if(p==='/600')return json({id:'600',product_catalog:{id:f.flags.wrongCatalog?'999':'500'}});
+    if(p==='/200/published_posts')return json({data:[{id:'200_700',message:'Post'}]});
+    if(p==='/300/content_publishing_limit')return json({data:[{quota_usage:0,config:{quota_total:100}}]});
+    if(p==='/800')return json({status_code:f.flags.mediaStatus});
+    throw new Error(`Unexpected Meta path ${p}`);
+  };
+  f.metaConnect=async()=>{
+    const start=await f.request('/api/integrations/meta/oauth/start',{method:'POST',body:{catalogAccess:true,confirmCatalogAccess:'meta',writeAccess:true,confirmWriteAccess:'meta'}});
+    assert.equal(start.status,200);
+    const token=new URL(start.body.authorizationUrl).searchParams.get('state'),cookie=start.headers.get('set-cookie').split(';')[0];
+    const callback=await f.request(`/api/integrations/meta/oauth/callback?state=${encodeURIComponent(token)}&code=test-code`,{cookie});
+    assert.match(callback.headers.get('location'),/connected/);
+  };
+  await f.metaConnect();
+  const channel=await f.channel('meta');
+  assert.equal((await f.request('/api/connections/meta/settings',{method:'POST',body:{revision:channel.settings.revision,metaPageIds:['200'],metaCatalogIds:['500']}})).status,200);
+  f.metaPolicy=async(mode='approval_gated')=>f.request('/api/connections/meta/settings',{method:'POST',body:{revision:(await f.channel('meta')).settings.revision,permissionMode:mode,confirmPermission:`meta:${mode}`}});
+  f.metaPrepare=async(input)=>{
+    const result=await f.request('/api/connections/meta/writes',{method:'POST',body:{...input,requestId:crypto.randomUUID()}});assert.equal(result.status,200,JSON.stringify(result.body));return result.body.write;
+  };
+  f.metaApprove=async(write)=>{assert.equal((await f.request(`/api/approvals/${write.approvalId}/decision`,{method:'POST',body:{decision:'approved',revision:1}})).status,200);};
+  f.metaExecute=write=>f.request(`/api/connection-writes/${write.id}/execute`,{method:'POST',body:{}});
+  return f;
+}
+
+test('Meta OAuth uses explicit permissions and encrypted tokens; sync/disconnect/reconnect preserves tenant isolation',async t=>{
+  const f=await metaFixture(t), c=await f.channel('meta');
+  assert.equal(c.settings.permissionMode,'read_only');assert.equal(c.oauthReady,true);
+  assert.equal((await f.request('/api/integrations/meta/oauth/start',{method:'POST',body:{catalogAccess:true}})).status,400);
+  assert.equal((await f.request('/api/integrations/meta/oauth/start',{role:'admin',method:'POST',body:{catalogAccess:true,confirmCatalogAccess:'meta'}})).status,403);
+  const plain=await f.request('/api/integrations/meta/oauth/start',{method:'POST',body:{}});
+  assert.ok(!new URL(plain.body.authorizationUrl).searchParams.get('scope').includes('catalog_management'));
+  assert.equal((await f.request('/api/connections/meta/settings',{method:'POST',tenant:'beta',body:{revision:0,metaCatalogIds:['500']}})).status,409);
+  assert.equal((await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products','inventory','prices','posts']}})).status,200);
+  let state=await f.server.packsmart.store.get('alpha');assert.equal(state.channelData.meta.products[0].quantity,5);
+  assert.equal(state.channelData.meta.products[0].groupId,'group');
+  assert.equal(decryptCredentials(state.connections[0].encryptedCredentials,KEY).accessToken,'meta-private-user-token');
+  assert.ok(!JSON.stringify((await f.request('/api/connection-centre')).body).includes('meta-private'));
+  assert.ok(!JSON.stringify(state.channelData).includes('meta-private'));
+  assert.equal((await f.server.packsmart.store.get('beta')).channelData?.meta,undefined);
+  f.flags.metaReadFail=true;assert.equal((await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products']}})).status,422);
+  state=await f.server.packsmart.store.get('alpha');assert.equal(state.channelData.meta.products[0].name,'Meta item');assert.equal((await f.channel('meta')).status,'degraded');
+  f.flags.metaReadFail=false;
+  assert.equal((await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['orders']}})).status,400);
+  assert.equal((await f.request('/api/connections/meta/disconnect',{method:'POST',body:{revision:(await f.channel('meta')).settings.revision,confirm:'meta'}})).status,200);
+  assert.equal((await f.channel('meta')).status,'disconnected');
+  await f.metaConnect();assert.equal((await f.channel('meta')).settings.permissionMode,'read_only');
+});
+
+test('Meta stock writes require exact approval even in automatic mode, recheck asset ownership and never replay',async t=>{
+  const f=await metaFixture(t);await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products','inventory']}});await f.metaPolicy('automatic');
+  const write=await f.metaPrepare({operation:'catalog_inventory',catalogId:'500',productId:'600',quantity:8,availability:'in stock'});
+  assert.equal(write.requiresApproval,true);assert.equal((await f.metaExecute(write)).status,409);
+  assert.equal((await f.request(`/api/connection-writes/${write.id}/execute`,{method:'POST',tenant:'beta',body:{}})).status,404);
+  assert.equal((await f.request(`/api/connection-writes/${write.id}/execute`,{method:'POST',role:'admin',body:{}})).status,403);
+  await f.metaApprove(write);const result=await f.metaExecute(write);assert.equal(result.body.executedExternally,true);
+  await f.metaExecute(write);assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/600' && item.method==='POST').length,1);
+  assert.ok(f.calls.filter(item=>item.url.includes('graph.facebook.com') && !item.url.includes('oauth/access_token')).every(item=>!item.url.includes('meta-private') && item.url.includes('appsecret_proof=')));
+  const wrong=await f.metaPrepare({operation:'catalog_visibility',catalogId:'500',productId:'600',visibility:'published'});await f.metaApprove(wrong);f.flags.wrongCatalog=true;
+  assert.equal((await f.metaExecute(wrong)).body.executedExternally,false);assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/600' && item.method==='POST').length,1);
+});
+
+test('Meta revoked scopes and expired credentials block writes and show recoverable errors',async t=>{
+  const f=await metaFixture(t);await f.metaPolicy();const write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Approved post'});await f.metaApprove(write);
+  f.flags.metaPermissions=f.flags.metaPermissions.filter(scope=>scope!=='pages_manage_posts');
+  assert.equal((await f.metaExecute(write)).body.executedExternally,false);assert.ok(!f.calls.some(item=>item.method==='POST' && item.url.includes('/feed')));
+  f.flags.metaInvalid=true;assert.equal((await f.request('/api/connections/meta/test',{method:'POST',body:{}})).status,422);
+  assert.match((await f.channel('meta')).recovery.message,/reconnect|connect|sign in/i);
+  assert.ok(!JSON.stringify((await f.request('/api/connection-centre')).body).includes('private provider diagnostic'));
+});
+
+test('Meta creates hidden drafts, publishes Facebook posts and updates only this app’s workspace posts',async t=>{
+  const f=await metaFixture(t);await f.metaPolicy();
+  assert.equal((await f.request('/api/connections/meta/writes',{method:'POST',body:{operation:'facebook_update',pageId:'200',postId:'200_999',message:'No',requestId:crypto.randomUUID()}})).status,409);
+  const draft=await f.metaPrepare({operation:'catalog_product_create',catalogId:'500',retailerId:'A',name:'Box',description:'Box description',brand:'Runvara',category:'Packaging',url:'https://shop.example.test/box',imageUrl:'https://shop.example.test/box.jpg',priceMinor:599,currency:'GBP'});
+  assert.equal(draft.input.visibility,'staging');await f.metaApprove(draft);assert.equal((await f.metaExecute(draft)).body.executedExternally,true);
+  const post=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Approved content'});await f.metaApprove(post);assert.equal((await f.metaExecute(post)).body.write.result.externalId,'200_700');
+  const update=await f.metaPrepare({operation:'facebook_update',pageId:'200',postId:'200_700',message:'Updated content'});await f.metaApprove(update);assert.equal((await f.metaExecute(update)).body.executedExternally,true);
+});
+
+test('Instagram processing survives multiple checks with one container and one approved publication',async t=>{
+  const f=await metaFixture(t);await f.metaPolicy();const write=await f.metaPrepare({operation:'instagram_publish',pageId:'200',message:'Caption',imageUrl:'https://shop.example.test/photo.jpg'});await f.metaApprove(write);
+  assert.equal((await f.metaExecute(write)).body.write.status,'processing');assert.equal((await f.metaExecute(write)).body.write.status,'processing');
+  const state=await f.server.packsmart.store.get('alpha');state.connectionWrites[0].providerState.checkAfter=0;await f.server.packsmart.store.save('alpha',state);f.flags.mediaStatus='FINISHED';
+  assert.equal((await f.metaExecute(write)).body.executedExternally,true);await f.metaExecute(write);
+  assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/300/media' && item.method==='POST').length,1);
+  assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/300/media_publish' && item.method==='POST').length,1);
+});
+
+test('Meta uncertain writes cannot be replayed and request content cannot change after approval',async t=>{
+  const f=await metaFixture(t);await f.metaPolicy();let write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Reviewed'});await f.metaApprove(write);
+  const state=await f.server.packsmart.store.get('alpha');state.connectionWrites[0].input.message='Tampered';await f.server.packsmart.store.save('alpha',state);assert.equal((await f.metaExecute(write)).status,409);
+  write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Network test'});await f.metaApprove(write);f.flags.metaUnknown=true;
+  assert.equal((await f.metaExecute(write)).body.write.status,'uncertain');assert.equal((await f.metaExecute(write)).status,409);
+  assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/200/feed' && item.method==='POST').length,1);
+});
+
+test('Meta customer controls select assets, request scopes and prepare the exact stock change for approval',async t=>{
+  const f=await metaFixture(t);await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products','inventory']}});await f.metaPolicy();
+  const errors=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message));
+  const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',virtualConsole:vc,pretendToBeVisual:true});t.after(()=>dom.window.close());
+  const {window}=dom,doc=window.document;window.Headers=Headers;window.scrollTo=()=>{};window.HTMLElement.prototype.scrollIntoView=()=>{};
+  window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
+  window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
+  for(const file of ['connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
+  const until=async(fn)=>{for(let i=0;i<200;i++){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail(errors.join('; ')||'Meta interface did not reach the expected state');};
+  await until(()=>doc.querySelectorAll('.connection-card').length===8);doc.querySelector('[data-provider="meta"][data-connection-action="open"]').click();
+  assert.equal(doc.querySelector('#connection-meta-assets [name=metaCatalogIds]').checked,true);
+  assert.ok(doc.querySelector('#connection-onboarding [name=catalogAccess]'));assert.equal(doc.querySelector('#connection-onboarding [name=writeAccess]').checked,false);
+  assert.match(doc.querySelector('#connection-detail').textContent,/27 October 2026/);
+  const form=doc.querySelector('#connection-meta-write-form');form.elements.operation.value='catalog_inventory';form.elements.operation.dispatchEvent(new window.Event('change',{bubbles:true}));
+  assert.equal(form.querySelector('[name=message]'),null);form.elements.catalogId.value='500';form.elements.productId.value='600';form.elements.quantity.value='17';
+  form.dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+  await until(()=>doc.querySelector('.connection-write'));
+  const write=(await f.server.packsmart.store.get('alpha')).connectionWrites[0];assert.equal(write.input.quantity,17);assert.equal(write.status,'pending_approval');
+  assert.equal(doc.querySelector('[data-connection-action=execute]'),null);assert.match(doc.querySelector('.connection-write').textContent,/17/);
+  assert.ok(!f.calls.some(item=>item.method==='POST' && item.url.includes('/v26.0/600')));assert.deepEqual(errors,[]);
 });

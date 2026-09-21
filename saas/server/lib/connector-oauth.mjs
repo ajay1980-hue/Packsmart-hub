@@ -2,9 +2,11 @@ import crypto from 'node:crypto';
 import { decryptCredentials, encryptCredentials, safeEqual } from './security.mjs';
 import { connectionError, connectionSettings, validateAreas } from './connection-centre.mjs';
 
+import { META_VERSION, META_READ_SCOPES, META_CATALOG_SCOPES, META_PUBLISH_SCOPES } from './meta-capabilities.mjs';
+
 const APPS = {
   shopify: { prefix: 'SHOPIFY_OAUTH', scopes: ['read_products', 'read_inventory', 'read_orders'] },
-  meta: { prefix: 'META', scopes: ['pages_show_list', 'instagram_basic'], auth: 'https://www.facebook.com/v23.0/dialog/oauth', token: 'https://graph.facebook.com/v23.0/oauth/access_token' },
+  meta: { prefix: 'META', scopes: META_READ_SCOPES, auth: `https://www.facebook.com/${META_VERSION}/dialog/oauth`, token: `https://graph.facebook.com/${META_VERSION}/oauth/access_token` },
   google_youtube: { prefix: 'GOOGLE', scopes: ['https://www.googleapis.com/auth/youtube.readonly'], auth: 'https://accounts.google.com/o/oauth2/v2/auth', token: 'https://oauth2.googleapis.com/token' },
   pinterest: { prefix: 'PINTEREST', scopes: ['user_accounts:read', 'boards:read', 'pins:read'], auth: 'https://www.pinterest.com/oauth/', token: 'https://api.pinterest.com/v5/oauth/token' }
 };
@@ -52,9 +54,16 @@ export const connectorMethods = {
     }
     const config = app(this, provider), url = new URL(provider === 'shopify' ? `https://${domain(options.storeDomain)}/admin/oauth/authorize` : config.auth);
     const requested = config.scopes.slice();
+    if (provider === 'meta' && options.catalogAccess) requested.push(...META_CATALOG_SCOPES);
+    if (provider === 'meta' && options.writeAccess) requested.push(...META_PUBLISH_SCOPES);
+    if (provider === 'meta' && options.businessInstagramAccess) requested.push('ads_read', 'ads_management');
     if (provider === 'shopify' && options.includeCustomers) requested.push('read_customers');
     if (provider === 'shopify' && options.writeAccess) requested.push('write_products');
     url.search = new URLSearchParams({ client_id: config.clientId, redirect_uri: this.oauthRedirect(provider), response_type: 'code', scope: requested.join(provider === 'shopify' ? ',' : ' '), state: token }).toString();
+    if (provider === 'meta') {
+      url.searchParams.set('scope', requested.join(',')); url.searchParams.set('auth_type', 'rerequest');
+      if (this.env.META_LOGIN_CONFIG_ID) { url.searchParams.set('config_id', this.env.META_LOGIN_CONFIG_ID); url.searchParams.set('override_default_response_type', 'true'); }
+    }
     if (provider === 'google_youtube') {
       url.searchParams.set('access_type', 'offline'); url.searchParams.set('prompt', 'consent');
       url.searchParams.set('code_challenge', crypto.createHash('sha256').update(options.verifier).digest('base64url')); url.searchParams.set('code_challenge_method', 'S256');
@@ -94,7 +103,7 @@ export const connectorMethods = {
     return credentials;
   },
   async connectorGet(provider, path, credentials, query = {}) {
-    const base = { meta: 'https://graph.facebook.com/v23.0', google_youtube: 'https://www.googleapis.com/youtube/v3', pinterest: 'https://api.pinterest.com/v5' }[provider];
+    const base = { google_youtube: 'https://www.googleapis.com/youtube/v3', pinterest: 'https://api.pinterest.com/v5' }[provider];
     if (!base || !/^\/[a-z_]+$/.test(path)) throw connectionError('This read operation is unavailable.', 'READ_UNSUPPORTED');
     const url = new URL(base + path); url.search = new URLSearchParams(query).toString();
     return json(this, url.toString(), { headers: { Authorization: `Bearer ${credentials.accessToken}`, Accept: 'application/json' } });
@@ -112,7 +121,7 @@ export const connectorMethods = {
       if (!data?.shop?.id || data.shop.myshopifyDomain !== config.domain) throw connectionError('Shopify could not confirm the expected store.', 'ACCOUNT_MISMATCH', 422);
       return { account: data.shop.name, shopDomain: config.domain, accountId: data.shop.id, grantedScopes: data.currentAppInstallation?.accessScopes?.map(scope => scope.handle) || [] };
     }
-    if (provider === 'meta') { const value = await this.connectorGet(provider, '/me', credentials, { fields: 'id,name' }); return { account: value.name, accountId: value.id }; }
+    if (provider === 'meta') return this.metaIdentity(credentials);
     if (provider === 'google_youtube') { const value = await this.connectorGet(provider, '/channels', credentials, { part: 'id,snippet', mine: 'true', maxResults: '50' }); return { account: value.items?.map(item => item.snippet?.title).join(', ') || 'Google account (no YouTube channel)', accountId: value.items?.map(item => item.id).sort().join(',') || 'no-channel' }; }
     const value = await this.connectorGet(provider, '/user_account', credentials);
     return { account: value.username, accountId: value.username };
@@ -190,6 +199,7 @@ export const connectorMethods = {
   async syncProvider(state, provider, options = {}) {
     if (provider === 'shopify') return this.syncShopify(state, options);
     if (provider === 'ebay') return this.syncEbay(state, options);
+    if (provider === 'meta') return this.syncMeta(state, options);
     const selected = validateAreas(provider, options.areas || connectionSettings(state, provider).areas);
     const credentials = await this.connectorCredentials(state, provider);
     const data = { ...state.channelData?.[provider] };
@@ -238,15 +248,8 @@ export const connectorMethods = {
       }
       const items = []; let cursor = null;
       for (let page = 0; page < 20; page++) {
-        const path = provider === 'meta' ? '/accounts' : `/${area}`;
-        // Meta account reads use /me/accounts, fixed below; pagination never
-        // follows provider-supplied URLs containing access tokens.
-        let payload;
-        if (provider === 'meta') {
-          const url = new URL('https://graph.facebook.com/v23.0/me/accounts');
-          url.search = new URLSearchParams({ fields: 'id,name,instagram_business_account{id,username}', limit: '100', ...(cursor ? { after: cursor } : {}) }).toString();
-          payload = await json(this, url.toString(), { headers: { Authorization: `Bearer ${credentials.accessToken}` } });
-        } else payload = await this.connectorGet(provider, path, credentials, provider === 'google_youtube' ? { part: 'id,snippet,statistics', mine: 'true', maxResults: '50', ...(cursor ? { pageToken: cursor } : {}) } : { page_size: '100', ...(cursor ? { bookmark: cursor } : {}) });
+        const path = `/${area}`;
+        const payload = await this.connectorGet(provider, path, credentials, provider === 'google_youtube' ? { part: 'id,snippet,statistics', mine: 'true', maxResults: '50', ...(cursor ? { pageToken: cursor } : {}) } : { page_size: '100', ...(cursor ? { bookmark: cursor } : {}) });
         const rows = payload.items || payload.data || [];
         items.push(...rows.map(item => ({ id: String(item.id || ''), name: String(item.name || item.title || item.snippet?.title || ''), description: String(item.description || item.snippet?.description || '').slice(0, 2000), ...(item.instagram_business_account ? { instagram: { id: String(item.instagram_business_account.id), username: String(item.instagram_business_account.username || '') } } : {}), ...(item.statistics ? { statistics: item.statistics } : {}) })));
         cursor = payload.nextPageToken || payload.bookmark || (payload.paging?.next ? payload.paging?.cursors?.after : null);
