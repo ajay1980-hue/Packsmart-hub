@@ -433,3 +433,36 @@ test('Meta customer controls select assets, request scopes and prepare the exact
   assert.equal(doc.querySelector('[data-connection-action=execute]'),null);assert.match(doc.querySelector('.connection-write').textContent,/17/);
   assert.ok(!f.calls.some(item=>item.method==='POST' && item.url.includes('/v26.0/600')));assert.deepEqual(errors,[]);
 });
+
+test('Meta Connect always targets standard Facebook OAuth and returns connected Pages and Instagram to the same workspace',async t=>{
+  const f=await fixture(t,{META_LOGIN_CONFIG_ID:'business-config-test',META_AUTH_URL:'https://work.meta.com/',META_OAUTH_AUTHORIZE_URL:'https://work.meta.com/'});
+  const start=await f.request('/api/integrations/meta/oauth/start',{method:'POST',body:{authorizationUrl:'https://work.meta.com/'}});assert.equal(start.status,200);
+  const url=new URL(start.body.authorizationUrl);
+  assert.equal(url.origin,'https://www.facebook.com');assert.equal(url.pathname,'/v26.0/dialog/oauth');
+  assert.equal(url.searchParams.get('redirect_uri'),'https://runvara.example.test/api/integrations/meta/oauth/callback');
+  assert.equal(url.searchParams.get('response_type'),'code');assert.equal(url.searchParams.get('config_id'),'business-config-test');
+  assert.equal(url.searchParams.get('scope'),'pages_show_list,pages_read_engagement,instagram_basic');assert.ok(url.searchParams.get('state'));
+  const callback=`/api/integrations/meta/oauth/callback?code=provider-code&state=${encodeURIComponent(url.searchParams.get('state'))}`,cookie=start.headers.get('set-cookie').split(';')[0];
+  assert.equal((await f.request(callback,{cookie:'wrong=browser'})).status,400);
+  const returned=await f.request(callback,{cookie});assert.equal(returned.status,303);assert.match(returned.headers.get('location'),/^\/\?channel=meta&connection=connected/);
+  assert.equal((await f.request(callback,{cookie})).status,400);
+  assert.equal((await f.request('/api/connections/meta/test',{method:'POST',body:{}})).status,200);
+  assert.equal((await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['accounts']}})).status,200);
+  const channel=await f.channel('meta');assert.equal(channel.status,'connected');assert.equal(channel.meta.assets.pages[0].id,'page1');assert.equal(channel.meta.assets.pages[0].instagram.username,'my-shop');assert.equal(channel.meta.data.accounts[0].instagram.id,'ig1');
+  assert.equal((await f.server.packsmart.store.get('beta')).connections.length,0);assert.ok(!JSON.stringify(channel).includes('MUST-NOT-STORE'));
+});
+
+test('Meta Connect UI refuses Meta Work, developer portals and lookalike OAuth destinations',async t=>{
+  const f=await metaFixture(t),errors=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message));
+  const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',virtualConsole:vc});t.after(()=>dom.window.close());
+  const {window}=dom,doc=window.document;window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  let next='';
+  window.RunvaraConnections.init({request:async()=>({authorizationUrl:next}),escapeHtml:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),date:String,notify:()=>{},reload:async()=>{},setView:()=>{}});
+  window.RunvaraConnections.render({user:{role:'owner'},connectionCentre:[await f.channel('meta')],connectionWrites:[]});window.RunvaraConnections.open('meta',true);
+  for(const target of ['https://work.meta.com/','https://business.facebook.com/business/loginpage/','https://www.facebook.com/login/','https://www.facebook.com.evil.example/v26.0/dialog/oauth','https://www.facebook.com@work.meta.com/v26.0/dialog/oauth']) {
+    next=target;const form=doc.querySelector('#connection-onboarding');form.dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));await new Promise(resolve=>setImmediate(resolve));
+    assert.match(doc.querySelector('#connection-feedback').textContent,/No account was connected/);assert.equal(form.querySelector('button[type=submit]').disabled,false);assert.equal(window.location.href,'https://runvara.example.test/');
+  }
+  assert.match(doc.querySelector('#connection-onboarding').textContent,/No Meta Work account is needed/);assert.deepEqual(errors,[]);
+});
