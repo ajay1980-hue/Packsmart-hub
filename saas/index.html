@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#030a13">
+  <meta name="theme-color" content="#020814">
   <meta name="color-scheme" content="dark">
   <title>Runvara — Business Command Centre</title>
-  <link rel="icon" href="/favicon.svg?v=6.4.2" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=6.4.2">
+  <link rel="icon" href="/favicon.svg?v=6.5.0" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=6.5.0">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -15,7 +15,7 @@
   <section id="login-screen" class="auth-screen hidden">
     <div class="auth-glow"></div>
     <div class="auth-card">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.4.2" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small>Business intelligence. Under your control.</small></div></div>
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.5.0" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small>Business intelligence. Under your control.</small></div></div>
       <p class="eyebrow">YOUR BUSINESS · CONNECTED</p>
       <h1>Clarity for your business. Control for you.</h1>
       <p class="muted">Sales, orders, stock, true product economics, channel health, automations and human approval controls.</p>
@@ -43,7 +43,7 @@
 
   <section id="password-screen" class="auth-screen hidden">
     <div class="auth-card">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.4.2" width="40" height="40" alt=""></span><div><strong>Secure your owner account</strong><small>One-time production setup</small></div></div>
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.5.0" width="40" height="40" alt=""></span><div><strong>Secure your owner account</strong><small>One-time production setup</small></div></div>
       <h1>Choose your private workspace password.</h1>
       <p class="muted">Use at least 14 characters with upper-case, lower-case, a number and a symbol.</p>
       <form id="password-form" class="auth-form">
@@ -57,7 +57,7 @@
 
   <div id="app-shell" class="app-shell hidden">
     <aside class="sidebar">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.4.2" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small id="workspace-label">Business command centre</small></div></div>
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.5.0" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small id="workspace-label">Business command centre</small></div></div>
       <nav id="main-nav" aria-label="Primary">
         <button class="nav-item active" data-view="overview"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg></span> Overview</button>
         <button class="nav-item" data-view="issues"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m12 3 10 18H2z"/><path d="M12 9v5m0 3v.1"/></svg></span> Exceptions</button>
@@ -78,8 +78,12 @@
 
     <main id="main-content" tabindex="-1">
       <header class="topbar">
-        <button id="mobile-menu" class="secondary mobile-menu" aria-controls="main-nav" aria-expanded="false" type="button">Menu</button><div><p class="eyebrow" id="workspace-heading">YOUR WORKSPACE</p><h1 id="page-title">Command Centre</h1></div>
-        <div class="top-actions"><span id="storage-badge" class="tag neutral">Checking cloud</span><button id="refresh-all" class="secondary" type="button">Refresh all</button></div>
+        <div class="command-bar">
+          <button id="mobile-menu" class="secondary mobile-menu" aria-controls="main-nav" aria-expanded="false" type="button">Menu</button>
+          <button id="open-workspace-search" aria-label="Find a workspace page" class="workspace-search" type="button" aria-haspopup="dialog" aria-controls="workspace-search-dialog"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><span>Find a workspace page…</span><kbd aria-hidden="true">Ctrl / ⌘ K</kbd></button>
+          <div class="top-actions"><span id="storage-badge" class="tag neutral">Checking cloud</span><button id="refresh-all" class="secondary" type="button">Refresh all</button><button class="account-shortcut" type="button" data-view-link="audit" aria-label="Open account and billing"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 22v-3a8 8 0 0 1 16 0v3"/></svg></button></div>
+        </div>
+        <div class="page-heading"><div><p class="eyebrow" id="workspace-heading">YOUR WORKSPACE</p><h1 id="page-title">Command Centre</h1></div><span class="workspace-caption">OPERATIONS AT HIGHER VELOCITY</span></div>
       </header>
       <div id="global-error" class="global-message error hidden" role="alert"></div>
       <div id="global-success" class="global-message success hidden" role="status"></div>
@@ -88,7 +92,7 @@
         <div class="overview-intro">
         <article class="hero card">
           <div><p class="eyebrow">MORNING COMMAND BRIEF</p><h2>What needs your attention now</h2><p id="brief-summary" class="hero-copy">Loading your workspace data…</p><small id="brief-generated" class="muted"></small></div>
-          <div class="hero-score"><strong id="readiness-score">—</strong><span>readiness</span></div>
+          <div class="hero-score"><svg class="readiness-ring" viewBox="0 0 100 100" aria-hidden="true"><circle class="readiness-track" cx="50" cy="50" r="45"/><circle id="readiness-arc" cx="50" cy="50" r="45" pathLength="100" stroke-dasharray="0 100"/></svg><strong id="readiness-score">—</strong><span>readiness</span></div>
         </article>
         <article id="attention-queue" class="card attention-queue" aria-live="polite"></article>
         </div>
@@ -96,16 +100,16 @@
         <div class="period-block">
           <div class="period-heading"><p class="eyebrow">TODAY</p><small>Settled source data</small></div>
           <div class="kpis kpis-four">
-            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><span>Sales</span><strong id="today-revenue">—</strong><small>net collected revenue</small></button>
-            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><span>Orders</span><strong id="today-orders">—</strong><small id="today-open">— open</small></button>
-            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="profitable"><span>Operating contribution</span><strong id="today-profit">—</strong><small id="today-profit-coverage">coverage —</small></button>
-            <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="all"><span>Margin</span><strong id="today-margin">—</strong><small>on profit-covered orders</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v14H4zM8 7V5a4 4 0 0 1 8 0v2M9 12h6"/></svg><span>Sales</span><strong id="today-revenue">—</strong><small>net collected revenue</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6m-6 4h6m-6 4h3"/></svg><span>Orders</span><strong id="today-orders">—</strong><small id="today-open">— open</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="profitable"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M6 17v-6m6 6V7m6 10V3"/></svg><span>Operating contribution</span><strong id="today-profit">—</strong><small id="today-profit-coverage">coverage —</small></button>
+            <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="all"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 14-14"/><circle cx="6.5" cy="6.5" r="3"/><circle cx="17.5" cy="17.5" r="3"/></svg><span>Margin</span><strong id="today-margin">—</strong><small>on profit-covered orders</small></button>
           </div>
         </div>
 
-        <div class="grid-2">
-          <article class="card period-card"><p class="eyebrow">LAST 7 DAYS</p><div id="week-metrics" class="metric-grid"></div></article>
-          <article class="card period-card"><p class="eyebrow">LAST 30 DAYS</p><div id="month-metrics" class="metric-grid"></div></article>
+        <div class="analytics-grid">
+          <article class="card revenue-card"><div class="section-head"><div><p class="eyebrow">CHANNEL PERFORMANCE</p><h2>Revenue by channel</h2></div><span class="tag neutral">Last 30 days</span></div><p class="muted tiny">Net revenue from imported orders</p><div id="revenue-chart" class="revenue-chart"></div><button class="text-button" data-view-link="channels">View channel details <span aria-hidden="true">↗</span></button></article>
+          <article class="card period-card"><div class="section-head"><div><p class="eyebrow">BUSINESS PULSE</p><h2>Performance snapshot</h2></div></div><div class="segmented-control" role="group" aria-label="Performance period"><button type="button" data-period="week" aria-pressed="false" aria-controls="week-metrics">Last 7 days</button><button type="button" data-period="month" aria-pressed="true" aria-controls="month-metrics">Last 30 days</button></div><div id="week-metrics" class="metric-grid" hidden></div><div id="month-metrics" class="metric-grid"></div></article>
         </div>
 
         <div class="kpis kpis-six">
@@ -256,9 +260,10 @@
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
+  <dialog id="workspace-search-dialog" class="workspace-search-dialog" aria-labelledby="workspace-search-title"><div class="search-heading"><div><p class="eyebrow">WORKSPACE NAVIGATION</p><h2 id="workspace-search-title">Where would you like to go?</h2></div><button id="close-workspace-search" class="secondary" type="button">Close</button></div><label for="workspace-search-input" class="muted tiny">Find a page by name or task</label><input id="workspace-search-input" type="search" placeholder="Try approvals, products or billing" autocomplete="off" maxlength="100" autofocus><p id="workspace-search-count" class="muted tiny" role="status"></p><div id="workspace-search-results" class="search-results"></div><p class="search-help muted tiny">↑ ↓ to move · Enter to open · Esc to close</p></dialog>
   <dialog id="connection-dialog" aria-labelledby="connection-dialog-title"><div class="connection-dialog-shell"><button id="connection-close" class="secondary connection-close" type="button" aria-label="Close connection details">Close</button><div id="connection-detail"></div></div></dialog>
-  <script src="/connections-ui.js?v=6.4.2"></script>
-  <script src="/control-ui.js?v=6.4.2"></script>
-  <script src="/app.js?v=6.4.2"></script>
+  <script src="/connections-ui.js?v=6.5.0"></script>
+  <script src="/control-ui.js?v=6.5.0"></script>
+  <script src="/app.js?v=6.5.0"></script>
 </body>
 </html>

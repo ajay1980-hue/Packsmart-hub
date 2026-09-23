@@ -97,6 +97,7 @@
   }
 
   function showLogin() {
+    closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
     window.RunvaraConnections?.endSession();
     $('#login-screen').classList.remove('hidden');
@@ -111,6 +112,7 @@
   }
 
   function showPasswordSetup() {
+    closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
     $('#password-screen').classList.remove('hidden');
@@ -173,6 +175,7 @@
   }
 
   function setView(view) {
+    closeWorkspaceSearch();
     state.view = view;
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
@@ -185,6 +188,57 @@
       loadBilling().catch(error => showMessage(error.message, 'error'));
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  const navigationHints = {
+    overview: 'Dashboard, daily brief and business performance', issues: 'Exceptions, alerts and problems to review',
+    'ai-team': 'Commander and specialist agents', profit: 'Products, inventory, stock and margins',
+    orders: 'Sales, refunds and order profitability', suppliers: 'Supplier records and product costs',
+    channels: 'Connection Centre, onboarding, Shopify, eBay and Meta', approvals: 'Review proposed actions and approval history',
+    automations: 'Automation rules, policies and autopilot', opportunities: 'Recommendations and potential improvements',
+    memory: 'Business decisions, goals and context', value: 'Results, action history and proof of work',
+    audit: 'Account, billing, subscription, settings and audit history'
+  };
+
+  function closeWorkspaceSearch() {
+    const dialog = $('#workspace-search-dialog');
+    if (dialog.open) dialog.close();
+    $('#workspace-search-input').value = '';
+    $('#workspace-search-results').replaceChildren();
+    $('#workspace-search-count').textContent = '';
+  }
+
+  function renderWorkspaceSearch() {
+    const query = $('#workspace-search-input').value.trim().toLowerCase();
+    const results = Array.from($('#main-nav').querySelectorAll('[data-view]')).map(button => ({
+      view: button.dataset.view,
+      title: Array.from(button.childNodes).filter(node => node.nodeType === 3).map(node => node.textContent).join('').trim(),
+      hint: navigationHints[button.dataset.view] || '', icon: button.querySelector('svg')?.outerHTML || ''
+    })).filter(item => (item.title + ' ' + item.hint).toLowerCase().includes(query));
+    $('#workspace-search-count').textContent = results.length + (results.length === 1 ? ' page' : ' pages');
+    $('#workspace-search-results').innerHTML = results.length ? results.map(item => '<button type="button" class="search-result" data-view-link="' + escapeHtml(item.view) + '"><span class="search-result-icon" aria-hidden="true">' + item.icon + '</span><span><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.hint) + '</small></span><span aria-hidden="true">↗</span></button>').join('') : '<div class="empty-state">No matching pages. Try a page name such as Products or Approvals.</div>';
+  }
+
+  function openWorkspaceSearch() {
+    if (!state.session || !state.data || $('#app-shell').classList.contains('hidden') || $('dialog[open]')) return;
+    document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded', 'false');
+    renderWorkspaceSearch(); $('#workspace-search-dialog').showModal(); $('#workspace-search-input').focus();
+  }
+
+  function renderRevenueChart() {
+    const channels = (state.data.integrations || []).filter(item => ['commerce', 'marketplace', 'social-commerce'].includes(item.kind) && (item.metrics30d?.orders > 0 || Number(item.metrics30d?.revenue) || item.lastSyncAt || item.status === 'connected'));
+    const revenue = channel => {
+      const value = channel.metrics30d?.revenue;
+      return value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+    };
+    const values = channels.map(revenue).filter(value => value !== null);
+    if (!values.length) { $('#revenue-chart').innerHTML = '<div class="empty-state">No channel revenue is available yet. Connect a sales channel and import orders to see performance here.</div>'; return; }
+    const min = Math.min(0, ...values), max = Math.max(0, ...values), range = max - min || 1;
+    const zero = -min / range * 1000;
+    $('#revenue-chart').innerHTML = channels.map(channel => {
+      const value = revenue(channel), end = value === null ? zero : (value - min) / range * 1000;
+      return '<div class="revenue-row"><div><span>' + escapeHtml(channel.name) + '</span><strong' + (value < 0 ? ' class="bad"' : '') + '>' + escapeHtml(money(value)) + '</strong></div>' + (value === null ? '<small class="muted">No imported revenue data</small>' : '<svg viewBox="0 0 1000 14" preserveAspectRatio="none" aria-hidden="true"><rect class="revenue-track" width="1000" height="14" rx="7"/><rect class="revenue-bar' + (value < 0 ? ' negative' : '') + '" x="' + Math.min(zero, end).toFixed(2) + '" width="' + Math.abs(end - zero).toFixed(2) + '" height="14" rx="7"/><line class="revenue-zero" x1="' + zero.toFixed(2) + '" x2="' + zero.toFixed(2) + '" y1="0" y2="14"/></svg>') + '</div>';
+    }).join('');
   }
 
   function applyTarget(view, filter) {
@@ -230,6 +284,8 @@
     $('#brief-summary').textContent = brief.summary || 'No daily brief is available.';
     $('#brief-generated').textContent = brief.generatedAt ? 'Generated ' + date(brief.generatedAt) + ' · ' + (brief.logic || 'deterministic') : '';
     $('#readiness-score').textContent = String(dashboard.readiness || 0) + '%';
+    const readiness = Number(dashboard.readiness);
+    $('#readiness-arc').setAttribute('stroke-dasharray', (Number.isFinite(readiness) ? Math.max(0, Math.min(100, readiness)) : 0) + ' 100');
     $('#today-revenue').textContent = money(today.revenue);
     $('#today-orders').textContent = String(today.orders || 0);
     $('#today-open').textContent = String(today.openOrders || 0) + ' open';
@@ -238,6 +294,7 @@
     $('#today-margin').textContent = percent(today.margin);
     $('#week-metrics').innerHTML = metricRows(dashboard.last7d || {});
     $('#month-metrics').innerHTML = metricRows(dashboard.last30d || {});
+    renderRevenueChart();
     $('#kpi-products').textContent = String(dashboard.products || 0);
     $('#kpi-variants').textContent = String(dashboard.variants || 0) + ' variants';
     $('#kpi-stock').textContent = String(dashboard.stockRisks || 0);
@@ -652,6 +709,27 @@
 
 
   $('#mobile-menu').addEventListener('click', () => { const open = document.body.classList.toggle('nav-open'); $('#mobile-menu').setAttribute('aria-expanded', String(open)); });
+  $('#open-workspace-search').addEventListener('click', openWorkspaceSearch);
+  $('#close-workspace-search').addEventListener('click', closeWorkspaceSearch);
+  $('#workspace-search-dialog').addEventListener('close', closeWorkspaceSearch);
+  $('#workspace-search-input').addEventListener('input', renderWorkspaceSearch);
+  $('#workspace-search-dialog').addEventListener('keydown', event => {
+    const results = Array.from($('#workspace-search-results').querySelectorAll('button'));
+    if (!results.length) return;
+    const index = results.indexOf(document.activeElement);
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      results[event.key === 'ArrowDown' ? (index + 1) % results.length : (index < 0 ? results.length - 1 : (index - 1 + results.length) % results.length)].focus();
+    } else if (event.key === 'Enter' && event.target === $('#workspace-search-input')) { event.preventDefault(); results[0].click(); }
+  });
+  document.addEventListener('keydown', event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && state.session && state.data && !$('#app-shell').classList.contains('hidden') && !$('dialog[open]')) { event.preventDefault(); openWorkspaceSearch(); }
+  });
+  $$('[data-period]').forEach(button => button.addEventListener('click', () => {
+    $$('[data-period]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    $('#week-metrics').hidden = button.dataset.period !== 'week';
+    $('#month-metrics').hidden = button.dataset.period !== 'month';
+  }));
   document.addEventListener('keydown', event => { if (event.key === 'Escape') { document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded', 'false'); } });
   $('#startup-retry').addEventListener('click', () => window.location.reload());
   async function loadLaunch() {
