@@ -70,7 +70,7 @@ export function prepareMetaWrite(state, body) {
 
 export const metaMethods = {
   async metaRequest(path, token, { method = 'GET', query = {}, body } = {}) {
-    if (!/^\/(?:me|\d{1,32}(?:_\d{1,32})?)(?:\/[a-z_]+)?$/.test(path)) throw connectionError('This Meta operation is unavailable.', 'META_PATH_INVALID');
+    if (!/^\/(?:me|debug_token|\d{1,32}(?:_\d{1,32})?)(?:\/[a-z_]+)?$/.test(path)) throw connectionError('This Meta operation is unavailable.', 'META_PATH_INVALID');
     const url = new URL(`https://graph.facebook.com/${META_VERSION}${path}`);
     url.search = new URLSearchParams({ ...query, appsecret_proof: crypto.createHmac('sha256', this.env.META_CLIENT_SECRET || '').update(token).digest('hex') }).toString();
     const response = await this.fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) });
@@ -78,7 +78,7 @@ export const metaMethods = {
     if (!response.ok || value.error) {
       const code = Number(value.error?.code), auth = code === 190 || response.status === 401, permission = [10, 200].includes(code) || response.status === 403;
       const rate = [4, 17, 32, 613, 80004, 80014].includes(code) || response.status === 429;
-      throw Object.assign(connectionError(auth ? 'Your Meta connection has expired. Reconnect your account.' : permission ? 'Meta has not granted access to this data or action. Reconnect with the required access, or ask the business administrator to assign this asset.' : rate ? 'Meta is limiting requests. Wait before trying again.' : 'Meta declined this request. Check the selected asset and submitted fields.', auth ? 'META_AUTH_REQUIRED' : permission ? 'META_PERMISSION_REQUIRED' : rate ? 'META_RATE_LIMITED' : 'META_REQUEST_REJECTED', 422), { upstreamStatus: response.status, definitive: response.status < 500 && Boolean(value.error) });
+      throw Object.assign(connectionError(auth ? 'Your Meta connection has expired. Reconnect your account.' : permission ? 'Meta has not granted access to this data or action. Reconnect with the required access, or ask the business administrator to assign this asset.' : rate ? 'Meta is limiting requests. Wait before trying again.' : 'Meta declined this request. Check the selected asset and submitted fields.', auth ? 'META_AUTH_REQUIRED' : permission ? 'META_PERMISSION_REQUIRED' : rate ? 'META_RATE_LIMITED' : 'META_REQUEST_REJECTED', 422), { upstreamStatus: response.status, upstreamCode: Number.isSafeInteger(code) ? code : null, upstreamSubcode: Number.isSafeInteger(value.error?.error_subcode) ? value.error.error_subcode : null, definitive: response.status < 500 && Boolean(value.error) });
     }
     return value;
   },
@@ -99,6 +99,37 @@ export const metaMethods = {
   },
   async metaAssets(credentials, granted) {
     const rawPages = granted.includes('pages_show_list') ? await this.metaList('/me/accounts', credentials.accessToken, { fields: `id,name,tasks,access_token${granted.includes('instagram_basic') ? ',instagram_business_account{id,username}' : ''}` }) : [];
+    const discovery = { checkedAt: new Date().toISOString(), source: 'me/accounts', returnedPageCount: rawPages.length, pageChecks: [] };
+    // Granular grants can include Pages omitted by /me/accounts. Verify the
+    // token with the same app, then ask Graph for those exact granted targets.
+    // Neither an app token nor a Page token is persisted in public metadata.
+    try {
+      const debug = await this.metaRequest('/debug_token', `${this.env.META_CLIENT_ID}|${this.env.META_CLIENT_SECRET}`, { query: { input_token: credentials.accessToken } });
+      if (debug.data?.is_valid && String(debug.data.app_id) === String(this.env.META_CLIENT_ID)) {
+        const targets = [...new Set((debug.data.granular_scopes || []).filter(item => item.scope === 'pages_show_list').flatMap(item => item.target_ids || []).map(String).filter(numericId))];
+        discovery.grantedPageIds = targets;
+        for (const id of targets.filter(id => !rawPages.some(page => String(page.id) === id)).slice(0,20)) {
+          try {
+            const page = await this.metaRequest(`/${id}`, credentials.accessToken, { query: { fields: `id,name,access_token${granted.includes('instagram_basic') ? ',instagram_business_account{id,username}' : ''}` } });
+            if (String(page.id) !== id) throw connectionError('Meta returned a different Page.', 'META_ASSET_MISMATCH', 422);
+            rawPages.push(page);
+            discovery.pageChecks.push({ pageId:id, result:'granted_page_recovered' });
+          } catch (error) { discovery.pageChecks.push({ pageId:id, result:'lookup_failed', code:error.code || 'META_READ_FAILED', httpStatus:error.upstreamStatus || null, providerCode:error.upstreamCode || null, providerSubcode:error.upstreamSubcode || null }); }
+        }
+      } else discovery.tokenCheck = 'unconfirmed';
+    } catch { discovery.tokenCheck = 'unavailable'; }
+    // Use only Pages returned for this workspace token, never caller-supplied IDs.
+    if (granted.includes('instagram_basic')) for (const page of rawPages.slice(0,20)) {
+      if (page.instagram_business_account || !numericId(page.id) || !page.access_token) continue;
+      try {
+        const detail = await this.metaRequest(`/${page.id}`, page.access_token, { query: { fields: 'id,instagram_business_account{id,username}' } });
+        if (String(detail.id) !== String(page.id)) throw connectionError('Meta returned a different Page.', 'META_ASSET_MISMATCH', 422);
+        if (detail.instagram_business_account) page.instagram_business_account = detail.instagram_business_account;
+        discovery.pageChecks.push({ pageId: String(page.id), result: page.instagram_business_account ? 'linked' : 'no_link_returned' });
+      } catch (error) {
+        discovery.pageChecks.push({ pageId: String(page.id), result: 'lookup_failed', code: error.code || 'META_READ_FAILED', httpStatus: error.upstreamStatus || null, providerCode: error.upstreamCode || null, providerSubcode: error.upstreamSubcode || null });
+      }
+    }
     const pages = rawPages.map(item => ({ id: String(item.id), name: String(item.name || ''), tasks: item.tasks || [], ...(item.instagram_business_account ? { instagram: { id: String(item.instagram_business_account.id), username: String(item.instagram_business_account.username || '') } } : {}) }));
     const catalogs = [];
     if (META_CATALOG_SCOPES.every(scope => granted.includes(scope))) {
@@ -109,12 +140,12 @@ export const metaMethods = {
       }
     }
     // Page tokens exist only in this server-side return, never in public metadata.
-    return { pages, catalogs, pageTokens: Object.fromEntries(rawPages.map(item => [String(item.id), item.access_token])) };
+    return { pages, catalogs, discovery, pageTokens: Object.fromEntries(rawPages.map(item => [String(item.id), item.access_token])) };
   },
   async metaIdentity(credentials) {
     const user = await this.metaRequest('/me', credentials.accessToken, { query: { fields: 'id,name' } });
-    const grantedScopes = await this.metaPermissions(credentials), { pages, catalogs } = await this.metaAssets(credentials, grantedScopes);
-    return { account: String(user.name || ''), accountId: String(user.id || ''), grantedScopes, assets: { pages, catalogs } };
+    const grantedScopes = await this.metaPermissions(credentials), { pages, catalogs, discovery } = await this.metaAssets(credentials, grantedScopes);
+    return { account: String(user.name || ''), accountId: String(user.id || ''), grantedScopes, assets: { pages, catalogs }, discovery };
   },
   async syncMeta(state, options = {}) {
     const selected = validateAreas('meta', options.areas || connectionSettings(state, 'meta').areas), settings = connectionSettings(state, 'meta');
@@ -150,7 +181,7 @@ export const metaMethods = {
     }
     const now = new Date().toISOString(), record = state.connections.find(item => item.provider === 'meta');
     state.channelData = { ...state.channelData, meta: data };
-    Object.assign(record, { status: 'connected', lastSyncAt: now, lastError: null, metadata: { ...record.metadata, grantedScopes: granted, assets: { pages: assets.pages, catalogs: assets.catalogs } } });
+    Object.assign(record, { status: 'connected', lastSyncAt: now, lastError: null, metadata: { ...record.metadata, grantedScopes: granted, assets: { pages: assets.pages, catalogs: assets.catalogs }, discovery: assets.discovery } });
     return (state.integrationStatus.meta = { ...state.integrationStatus.meta, status: 'connected', lastSyncAt: now, lastError: null, detail: 'Selected Meta data synced successfully.' });
   },
   async executeMetaWrite(state, write, persistClaim) {

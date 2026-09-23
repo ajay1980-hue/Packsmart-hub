@@ -1,0 +1,39 @@
+import { CONNECTORS, connectionSettings, connectionError } from './connection-centre.mjs';
+import { addAudit } from './events.mjs';
+
+export function onboardingJourney(state) {
+  const saved = state.onboardingJourney || {};
+  const selected = saved.platforms || Object.keys(CONNECTORS).filter(provider => (state.connections || []).some(record => record.provider === provider && record.encryptedCredentials));
+  const platforms = selected.map(provider => {
+    const settings = connectionSettings(state, provider);
+    const record = (state.connections || []).find(item => item.provider === (provider === 'ebay' ? 'ebay_oauth' : provider));
+    const health = state.integrationStatus?.[provider] || {};
+    const connected = !settings.disconnected && Boolean(record?.encryptedCredentials || (provider === 'ebay' && health.account));
+    const tested = connected && Boolean(record?.lastCheckedAt) && !['auth_expired','error'].includes(record?.status);
+    const imported = connected && Boolean(health.lastSuccessfulSyncAt || (state.connectionSyncs || []).find(run => run.provider === provider && run.status === 'completed'));
+    const reviewed = saved.permissionReviews?.[provider] === settings.revision;
+    return { provider, connected, tested, imported, reviewed, permissionMode: settings.permissionMode, needsAttention: Boolean(health.lastError) };
+  });
+  const complete = Boolean(saved.platforms?.length) && platforms.every(item => item.tested && item.imported && item.reviewed && !item.needsAttention);
+  return { revision: saved.revision || 0, platforms, complete, completedAt: complete ? saved.completedAt || null : null };
+}
+export function saveOnboardingJourney(state, body, user) {
+  if (user.role !== 'owner') throw connectionError('Only the business owner can complete setup.', 'OWNER_APPROVAL_REQUIRED', 403);
+  const previous = state.onboardingJourney || {};
+  if (body.revision !== (previous.revision || 0)) throw connectionError('Setup changed. Refresh and try again.', 'CONNECTION_CONFLICT', 409);
+  const next = structuredClone(previous);
+  if (body.platforms !== undefined) {
+    if (!Array.isArray(body.platforms) || !body.platforms.length || body.platforms.length > Object.keys(CONNECTORS).length || body.platforms.some(key => !Object.hasOwn(CONNECTORS, key))) throw connectionError('Choose at least one supported platform.');
+    next.platforms = [...new Set(body.platforms)];
+  }
+  if (body.reviewPermissions) {
+    if (!next.platforms?.includes(body.reviewPermissions)) throw connectionError('Choose this platform first.');
+    next.permissionReviews = { ...next.permissionReviews, [body.reviewPermissions]: connectionSettings(state, body.reviewPermissions).revision };
+  }
+  next.revision = (previous.revision || 0) + 1;
+  state.onboardingJourney = next;
+  if (body.finish && !onboardingJourney(state).complete) { state.onboardingJourney = previous; throw connectionError('Complete the connection tests, imports and permission reviews before finishing setup.', 'ONBOARDING_INCOMPLETE', 409); }
+  if (body.finish) next.completedAt = new Date().toISOString();
+  addAudit(state, { type: body.finish ? 'onboarding_completed' : 'onboarding_updated', actor: user.id, detail: { platforms: next.platforms || [], permissionReview: body.reviewPermissions || null } });
+  return onboardingJourney(state);
+}

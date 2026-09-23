@@ -7,7 +7,7 @@
   <meta name="color-scheme" content="dark">
   <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=6.2.1">
+  <link rel="stylesheet" href="/styles.css?v=6.3.0">
 </head>
 <body>
   <section id="login-screen" class="auth-screen">
@@ -23,6 +23,17 @@
         <button class="primary full" type="submit">Sign in securely</button>
         <p id="login-error" class="form-error" role="alert"></p>
       </form>
+      <details id="signup-options" class="hidden"><summary>Create a Runvara business account</summary>
+        <p>Create your own workspace, then connect your platforms. Connections start read-only.</p>
+        <form id="signup-form" class="auth-form">
+          <label>Business name<input name="businessName" maxlength="120" minlength="2" required autocomplete="organization"></label>
+          <label>Your email<input name="email" type="email" required autocomplete="username"></label>
+          <label>Password<input name="password" type="password" minlength="14" required autocomplete="new-password"></label>
+          <p>Use at least 14 characters with upper-case, lower-case, a number and a symbol.</p>
+          <label>Confirm password<input name="confirmPassword" type="password" minlength="14" required autocomplete="new-password"></label>
+          <button class="primary" type="submit">Create business workspace</button><p id="signup-error" role="alert"></p>
+        </form>
+      </details>
       <div class="security-note"><span>●</span> Secure HTTP-only session · Packsmart Solutions Ltd</div>
     </div>
   </section>
@@ -166,6 +177,7 @@
       </section>
 
       <section id="view-channels" class="view">
+        <article id="connection-journey" class="card" aria-label="Business setup"></article>
         <article class="card"><div class="section-head stack-mobile"><div><p class="eyebrow">CONNECTION CENTRE</p><h2>Your channels, under control</h2><p class="muted">Connect your accounts, choose what to sync, and manage access in one place.</p></div><button id="connection-refresh" class="secondary" type="button">Refresh status</button></div><div id="connection-grid" class="connection-grid"></div></article>
         <details id="advanced-channel-connections" class="card"><summary>Advanced connections &amp; existing eBay Manager</summary>
         <article id="shopify-connection-card" class="card">
@@ -234,8 +246,8 @@
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
   <dialog id="connection-dialog" aria-labelledby="connection-dialog-title"><div class="connection-dialog-shell"><button id="connection-close" class="secondary connection-close" type="button" aria-label="Close connection details">Close</button><div id="connection-detail"></div></div></dialog>
-  <script src="/connections-ui.js?v=6.2.1"></script>
-  <script src="/control-ui.js?v=6.2.1"></script>
-  <script src="/app.js?v=6.2.1"></script>
+  <script src="/connections-ui.js?v=6.3.0"></script>
+  <script src="/control-ui.js?v=6.3.0"></script>
+  <script src="/app.js?v=6.3.0"></script>
 </body>
 </html>

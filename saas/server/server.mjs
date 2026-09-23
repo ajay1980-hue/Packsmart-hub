@@ -44,8 +44,10 @@ import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
 import { proposeConnectionWrite, executeConnectionWrite } from './lib/connection-writes.mjs';
 
+import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
+
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.2.1';
+const VERSION = '6.3.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -543,7 +545,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
       }),
       brief,
-      onboarding: onboardingState(state, env),
+      onboarding: { ...onboardingState(state, env), journey: onboardingJourney(state) },
       aiTeam: agentTeamSnapshot(state),
       agentDefinitions: AGENT_DEFINITIONS,
       autonomyLevels: AUTONOMY_LEVELS,
@@ -966,6 +968,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if (req.method === 'POST' && pathname === '/api/auth/login') {
         await login(req, res);
         return;
+      }
+      if (req.method === 'GET' && pathname === '/api/auth/signup-options') {
+        send(res, 200, { enabled: truthy(env.BETA_SIGNUPS_ENABLED) }); return;
       }
       if (req.method === 'POST' && pathname === '/api/auth/signup') {
         await signup(req, res);
@@ -1610,8 +1615,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        if (req.method === 'POST' && pathname === '/api/onboarding') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 8192);
+          const result = await mutate(auth, async state => saveOnboardingJourney(state, body, auth.user));
+          send(res, 200, result);
+          return;
+        }
+
         if (req.method === 'GET' && pathname === '/api/onboarding') {
-          send(res, 200, onboardingState(auth.state, env));
+          send(res, 200, { ...onboardingState(auth.state, env), journey: onboardingJourney(auth.state) });
           return;
         }
 

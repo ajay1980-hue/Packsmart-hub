@@ -82,7 +82,7 @@
     } finally { clearTimeout(timeout); }
     let payload = {};
     try { payload = await response.json(); } catch {}
-    if (response.status === 401 && !path.endsWith('/login') && !path.endsWith('/activate-owner')) {
+    if (response.status === 401 && !path.endsWith('/login') && !path.endsWith('/activate-owner') && !path.endsWith('/signup-options')) {
       state.session = null; state.data = null; state.csrf = ''; showLogin();
     }
     if (!response.ok) {
@@ -95,6 +95,7 @@
   function showLogin() {
     window.RunvaraConnections?.endSession();
     $('#login-screen').classList.remove('hidden');
+    request('/api/auth/signup-options').then(options=>$('#signup-options')?.classList.toggle('hidden',!options.enabled)).catch(()=>{});
     $('#password-screen').classList.add('hidden');
     $('#app-shell').classList.add('hidden');
   }
@@ -475,6 +476,15 @@
     catch (error) { showMessage(error.message, 'error'); }
     finally { setBusy(button, false); }
   }
+
+  $('#signup-form')?.addEventListener('submit', async event => {
+    event.preventDefault();const form=event.currentTarget, button=form.querySelector('button');$('#signup-error').textContent='';
+    if(form.password.value!==form.confirmPassword.value){$('#signup-error').textContent='The passwords do not match.';return;}
+    setBusy(button,true,'Creating your workspace…');
+    try {const payload=await request('/api/auth/signup',{method:'POST',body:JSON.stringify({businessName:form.businessName.value,email:form.email.value,password:form.password.value})});state.session=payload;state.csrf=payload.csrf;form.reset();await loadBootstrap();setView('channels');}
+    catch(error){$('#signup-error').textContent=error.message;}
+    finally{setBusy(button,false);}
+  });
 
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#login-error'); error.textContent = ''; setBusy(button, true, 'Signing in…');
