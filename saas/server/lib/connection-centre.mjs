@@ -5,7 +5,7 @@ import { META_WRITES, META_ORDER_RESTRICTION } from './meta-capabilities.mjs';
 // One capability registry for the existing IntegrationService, UI and scheduler.
 // Areas describe implemented reads, not the provider's theoretical API features.
 export const CONNECTORS = Object.freeze({
-  shopify: { name: 'Shopify', areas: ['products', 'variants', 'inventory', 'prices', 'orders', 'customers'], defaults: ['products', 'variants', 'inventory', 'prices', 'orders'], writes: ['product_content', 'internal_note'] },
+  shopify: { name: 'Shopify', areas: ['products', 'variants', 'inventory', 'prices', 'orders', 'customers'], defaults: ['products', 'variants', 'inventory', 'prices', 'orders'], writes: ['product_content', 'internal_note', 'product_tags_add', 'product_tags_remove'] },
   ebay: { name: 'eBay', areas: ['products', 'inventory', 'prices', 'orders', 'promotions'], defaults: ['products', 'inventory', 'prices', 'orders', 'promotions'], writes: [] },
   meta: { name: 'Facebook & Instagram', areas: ['accounts', 'catalogs', 'products', 'inventory', 'prices', 'posts'], defaults: ['accounts'], writes: META_WRITES },
   tiktok_shop: { name: 'TikTok Shop', areas: ['shops', 'products', 'variants', 'inventory', 'prices', 'orders'], defaults: ['shops', 'products', 'variants', 'inventory', 'prices', 'orders'], writes: [] },
@@ -145,6 +145,7 @@ export function connectionCentre(state, integrations) {
     const counts = { ...(id === 'shopify' || id === 'ebay' ? { products: products.length, orders: (state.orders || []).filter(order => order.provider === id).length } : {}), ...(id === 'shopify' ? { variants: products.reduce((sum, product) => sum + (product.variants?.length || 0), 0), customers: state.channelData?.shopify?.customers?.length || 0 } : {}), ...Object.fromEntries(Object.entries(readData).filter(([,value]) => Array.isArray(value)).map(([key,value]) => [key,value.length])) };
     const granted = record?.metadata?.grantedScopes || [];
     return { id, name: definition.name, status, configured, settings, identity: record?.metadata?.shopDomain || record?.metadata?.account || health.account || null,
+      readDiagnostics: id === 'ebay' ? Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).map(([surface, entry]) => [surface, { code: entry.code, httpStatus: entry.httpStatus, errorIds: (entry.errorIds || []).map(String).filter(id => /^\d{1,12}$/.test(id)), at: entry.at }])) : {},
       grantedScopes: granted, accessExpiresAt: integrations.connectionAccessExpiry?.(record) || null,
       lastFailedSyncAt: history.find(run => ['failed', 'partial'].includes(run.status))?.completedAt || history.find(run => ['failed', 'partial'].includes(run.status))?.startedAt || null,
       audit: (state.audit || []).filter(event => event.detail?.provider === id).slice(0, 30).map(({ id, type, createdAt }) => ({ id, type, createdAt })),
@@ -152,7 +153,7 @@ export function connectionCentre(state, integrations) {
       lastSuccessfulSyncAt: health.lastSuccessfulSyncAt || history.find(run => run.status === 'completed')?.completedAt || (!history.length && !health.lastError ? health.lastSyncAt : null) || null, lastCheckedAt: record?.lastCheckedAt || null,
       oauthReady: Boolean(integrations.oauthReady?.(id, state)), refreshSupported: Boolean(configured && integrations.refreshSupported?.(state, id)),
       writes: definition.writes, writeAccessGranted: id === 'shopify' ? granted.includes('write_products') : id === 'meta' && granted.some(scope => ['catalog_management','pages_manage_posts','instagram_content_publish'].includes(scope)),
-      ...(id === 'meta' ? { meta: { assets: record?.metadata?.assets || {pages:[],catalogs:[]}, grantedScopes: granted, data: readData, orderRestriction: META_ORDER_RESTRICTION } } : {}),
+      ...(id === 'meta' ? { meta: { assets: record?.metadata?.assets || {pages:[],catalogs:[]}, grantedScopes: granted, data: readData, orderRestriction: META_ORDER_RESTRICTION, discovery: record?.metadata?.discovery || null } } : {}),
       supportRequested: Boolean(settings.supportRequestedAt),
       availability: definition.areas.length ? 'available' : 'awaiting_provider_approval',
       coverageNote: id === 'ebay' && state.ebay?.source === 'ebay-oauth-readonly' ? 'Product, inventory and price reads cover listings created through eBay’s Inventory service. Your existing Manager handles other listings.' : id === 'meta' ? 'Sync selected catalogues, products, stock and Page posts. Product changes and Facebook/Instagram publishing require explicit owner permission and approval of each change. Native Meta checkout orders have been retired; website orders come through your checkout connection.' : id === 'google_youtube' ? 'Connect YouTube channels. Google Merchant product feeds and advertising are not available in this release.' : id === 'pinterest' ? 'Connect boards and Pins. Advertising and catalogue publishing are not available in this release.' : id === 'tiktok_shop' ? 'Reads all shops you authorise, their product and stock records, and order summaries from the last 90 days.' : null };

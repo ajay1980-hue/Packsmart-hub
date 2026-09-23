@@ -42,6 +42,7 @@ async function fixture(t, extra = {}) {
       }
       if (query.includes('Orders')) return json({data:{orders:{nodes:[],pageInfo:{hasNextPage:false}}}});
       if (query.includes('Customers')) return flags.customerDenied ? json({errors:[{message:'Access denied'}]}) : json({data:{customers:{nodes:[{id:'c1',createdAt:'2026-09-01',numberOfOrders:2}],pageInfo:{hasNextPage:false}}}});
+      if (query.includes('RunvaraProductTags')) return json({data:{[query.includes('tagsAdd(')?'tagsAdd':'tagsRemove']:{node:{id:body.variables.id},userErrors:[]}}});
       if (query.includes('mutation')) {
         if(flags.unknownWrite) throw new TypeError('Network interrupted');
         return json({data:query.includes('InternalNote') ? {metafieldsSet:{metafields:[{id:'note-1'}],userErrors:[]}} : {productUpdate:{product:{id:'gid://shopify/Product/1'},userErrors:[]}}});
@@ -376,7 +377,7 @@ test('Meta stock writes require exact approval even in automatic mode, recheck a
   assert.equal((await f.request(`/api/connection-writes/${write.id}/execute`,{method:'POST',role:'admin',body:{}})).status,403);
   await f.metaApprove(write);const result=await f.metaExecute(write);assert.equal(result.body.executedExternally,true);
   await f.metaExecute(write);assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/600' && item.method==='POST').length,1);
-  assert.ok(f.calls.filter(item=>item.url.includes('graph.facebook.com') && !item.url.includes('oauth/access_token')).every(item=>!item.url.includes('meta-private') && item.url.includes('appsecret_proof=')));
+  assert.ok(f.calls.filter(item=>item.url.includes('graph.facebook.com') && !item.url.includes('oauth/access_token') && !item.url.includes('/debug_token?')).every(item=>!item.url.includes('meta-private') && item.url.includes('appsecret_proof=')));
   const wrong=await f.metaPrepare({operation:'catalog_visibility',catalogId:'500',productId:'600',visibility:'published'});await f.metaApprove(wrong);f.flags.wrongCatalog=true;
   assert.equal((await f.metaExecute(wrong)).body.executedExternally,false);assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/600' && item.method==='POST').length,1);
 });
@@ -518,4 +519,57 @@ test('provider rate limits offer retry recovery without incorrectly asking for c
   state.connections=[{provider:'google_youtube',encryptedCredentials:encryptCredentials({accessToken:'test'},KEY)}];
   const channel=connectionCentre(state,service).find(item=>item.id==='google_youtube');
   assert.equal(channel.recovery.action,'sync');assert.match(channel.recovery.message,/limiting requests/);
+});
+
+test('onboarding persists per workspace and cannot bypass readiness or permission consent', async t => {
+  const f=await fixture(t);
+  let result=await f.request('/api/onboarding',{method:'POST',body:{revision:0,platforms:['shopify']}});
+  assert.equal(result.status,200);assert.equal(result.body.complete,false);
+  assert.equal((await f.request('/api/onboarding',{tenant:'beta'})).body.journey.platforms.length,0);
+  assert.equal((await f.request('/api/onboarding',{method:'POST',body:{revision:1,finish:true}})).status,409);
+  await f.connect();await f.request('/api/connections/shopify/test',{method:'POST',body:{}});
+  await f.request('/api/connections/shopify/sync',{method:'POST',body:{areas:['products']}});
+  result=await f.request('/api/onboarding',{method:'POST',body:{revision:1,reviewPermissions:'shopify'}});
+  assert.equal(result.status,200);assert.equal(result.body.complete,true);
+  assert.equal((await f.channel()).settings.permissionMode,'read_only');
+  result=await f.request('/api/onboarding',{method:'POST',body:{revision:2,finish:true}});
+  assert.equal(result.status,200);assert.ok(result.body.completedAt);
+  const state=await f.server.packsmart.store.get('alpha');
+  state.connectionSettings.shopify.revision++;await f.server.packsmart.store.save('alpha',state);
+  assert.equal((await f.request('/api/onboarding')).body.journey.complete,false);
+});
+
+test('Meta recovers only app-verified granular Page targets and never publishes tokens', async () => {
+  const service=new IntegrationService({META_CLIENT_ID:'app',META_CLIENT_SECRET:'secret'},{fetchImpl:async()=>{throw Error('unexpected');}});
+  const calls=[];
+  service.metaList=async path=>path==='/me/accounts'?[{id:'100',name:'First',access_token:'page-private'}]:[];
+  service.metaRequest=async(path,token)=>{
+    calls.push([path,token]);
+    if(path==='/debug_token')return {data:{is_valid:true,app_id:'app',granular_scopes:[{scope:'pages_show_list',target_ids:['100','200']},{scope:'other',target_ids:['999']} ]}};
+    if(path==='/200')return {id:'200',name:'Recovered',access_token:'other-private',instagram_business_account:{id:'300',username:'business'}};
+    if(path==='/100')return {id:'100'};
+    throw Error('Unexpected target');
+  };
+  const result=await service.metaAssets({accessToken:'user-private'},['pages_show_list','instagram_basic']);
+  assert.deepEqual(result.pages.map(p=>p.id),['100','200']);assert.equal(result.pages[1].instagram.id,'300');
+  assert.ok(!JSON.stringify({pages:result.pages,discovery:result.discovery}).includes('private'));
+  assert.ok(!calls.some(([path])=>path==='/999'));assert.ok(calls.some(([path,token])=>path==='/100'&&token==='page-private'));
+  service.metaRequest=async()=>({data:{is_valid:true,app_id:'different-app',granular_scopes:[{scope:'pages_show_list',target_ids:['999']}]}});
+  assert.deepEqual((await service.metaAssets({accessToken:'user-private'},['pages_show_list'])).pages.map(p=>p.id),['100']);
+});
+
+test('Shopify tag actions require approval even in automatic mode and remain tenant bound', async t=>{
+  const f=await fixture(t);await f.connect();await f.request('/api/connections/shopify/test',{method:'POST',body:{}});
+  const channel=await f.channel();await f.request('/api/connections/shopify/settings',{method:'POST',body:{revision:channel.settings.revision,permissionMode:'automatic',confirmPermission:'shopify:automatic'}});
+  for(const operation of ['product_tags_add','product_tags_remove']){
+    const result=await f.request('/api/connections/shopify/writes',{method:'POST',body:{operation,productId:'gid://shopify/Product/1',tags:'Reviewed, Internal',requestId:`test-${operation}-0001`}});
+    assert.equal(result.status,200);const write=result.body.write;assert.equal(write.requiresApproval,true);
+    const route=`/api/connection-writes/${write.id}/execute`;
+    assert.equal((await f.request(route,{method:'POST',body:{}})).status,409);
+    assert.equal((await f.request(route,{tenant:'beta',method:'POST',body:{}})).status,404);
+    await f.request(`/api/approvals/${write.approvalId}/decision`,{method:'POST',body:{decision:'approved',revision:1}});
+    assert.equal((await f.request(route,{method:'POST',body:{}})).body.write.status,'completed');
+    await f.request(route,{method:'POST',body:{}});
+  }
+  assert.equal(f.calls.filter(call=>call.query.includes('RunvaraProductTags')).length,2);
 });

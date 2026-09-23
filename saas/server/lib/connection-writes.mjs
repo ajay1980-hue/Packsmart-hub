@@ -8,7 +8,7 @@ const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)
 export function proposeConnectionWrite(state, provider, body, actor) {
   const settings = connectionSettings(state, provider);
   if (settings.disconnected || settings.permissionMode === 'read_only') throw connectionError('This connection is read-only. The owner must authorise write access first.', 'WRITE_NOT_AUTHORISED', 403);
-  if (!((provider === 'shopify' && ['product_content', 'internal_note'].includes(body.operation)) || (provider === 'meta' && META_WRITES.includes(body.operation)))) throw connectionError('Runvara does not support this write action. No change was made.', 'WRITE_UNSUPPORTED', 422);
+  if (!((provider === 'shopify' && ['product_content', 'internal_note', 'product_tags_add', 'product_tags_remove'].includes(body.operation)) || (provider === 'meta' && META_WRITES.includes(body.operation)))) throw connectionError('Runvara does not support this write action. No change was made.', 'WRITE_UNSUPPORTED', 422);
   if (!/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId || '')) throw connectionError('A unique request reference is required.', 'WRITE_REQUEST_ID_REQUIRED');
   state.connectionWrites ||= [];
   const existing = state.connectionWrites.find(item => item.requestId === body.requestId);
@@ -18,6 +18,10 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   if (provider === 'meta') { /* Exact supported input was validated above. */ } else if (body.operation === 'internal_note') {
     if (typeof body.note !== 'string' || !body.note.trim() || body.note.length > 500) throw connectionError('Enter an internal note of up to 500 characters.');
     input.note = body.note.trim();
+  } else if (body.operation.startsWith('product_tags_')) {
+    const tags = typeof body.tags === 'string' ? body.tags.split(',').map(value => value.trim()).filter(Boolean) : body.tags;
+    if (!Array.isArray(tags) || !tags.length || tags.length > 50 || tags.some(tag => typeof tag !== 'string' || !tag.trim() || tag.length > 255 || /[\r\n,]/.test(tag))) throw connectionError('Enter 1–50 tags, separated by commas, up to 255 characters each.');
+    input.tags = [...new Set(tags.map(tag => tag.trim()))];
   } else {
     if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 200 || typeof body.description !== 'string' || body.description.length > 10000) throw connectionError('Enter a product title and a description of up to 10,000 characters.');
     input.title = body.title.trim(); input.description = body.description;
@@ -34,9 +38,9 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   const write = { id: `write_${crypto.randomUUID()}`, requestId: body.requestId, provider, input, digest: digest(input), connectionId: connection.id, account: provider === 'meta' ? connection.metadata.accountId : connection.metadata.shopDomain, requestedBy: actor,
     requiresApproval, status: requiresApproval ? 'pending_approval' : 'ready', createdAt: new Date().toISOString() };
   if (requiresApproval) {
-    const approval = normalizeApprovalRequest({ type: provider === 'meta' ? 'risky_marketplace_action' : body.operation === 'product_content' ? 'customer_facing_publish' : 'integration_change',
-      action: provider === 'meta' ? `Meta: ${input.operation.replaceAll('_', ' ')}` : body.operation === 'product_content' ? `Update Shopify content: ${product.title}` : `Save internal Shopify note: ${product.title}`,
-      reason: provider === 'meta' ? JSON.stringify(input).slice(0,1000) : body.operation === 'product_content' ? `Proposed title: ${input.title}\nDescription: ${input.description}`.slice(0, 1000) : input.note,
+    const approval = normalizeApprovalRequest({ type: provider === 'meta' ? 'risky_marketplace_action' : body.operation !== 'internal_note' ? 'customer_facing_publish' : 'integration_change',
+      action: body.operation.startsWith('product_tags_') ? `${body.operation === 'product_tags_add' ? 'Add' : 'Remove'} Shopify tags: ${product.title}` : provider === 'meta' ? `Meta: ${input.operation.replaceAll('_', ' ')}` : body.operation === 'product_content' ? `Update Shopify content: ${product.title}` : `Save internal Shopify note: ${product.title}`,
+      reason: body.operation.startsWith('product_tags_') ? `Exact tags: ${input.tags.join(', ')}. Tags may affect collections and automated workflows. An inverse change needs a new approval.` : provider === 'meta' ? JSON.stringify(input).slice(0,1000) : body.operation === 'product_content' ? `Proposed title: ${input.title}\nDescription: ${input.description}`.slice(0, 1000) : input.note,
       expectedBenefit: 'Apply the exact change reviewed in the Connection Centre.', risk: 'medium', source: 'connection-centre',
       evidence: [{ type: provider === 'meta' ? 'meta_asset' : 'product', id: input.productId || input.catalogId || input.pageId, detail: 'The full proposed change is available in the channel details panel.' }],
       payload: { connectionWriteId: write.id, digest: write.digest } }, actor);
@@ -74,6 +78,12 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
       result = await integrations.executeMetaWrite(state, write, persistClaim);
       if (result.pending) { write.status = 'processing'; addAudit(state, { type: 'connection_write_processing', actor, detail: { provider: write.provider, writeId: write.id } }); return write; }
       write.result = result;
+    } else if (write.input.operation.startsWith('product_tags_')) {
+      const method = write.input.operation === 'product_tags_add' ? 'tagsAdd' : 'tagsRemove';
+      const data = await integrations.shopifyGraphql(`mutation RunvaraProductTags($id: ID!, $tags: [String!]!) { ${method}(id: $id, tags: $tags) { node { id } userErrors { field message } } }`, { id: write.input.productId, tags: write.input.tags }, config);
+      result = data?.[method];
+      if (result?.node?.id !== write.input.productId && !result?.userErrors?.length) throw connectionError('Shopify did not confirm the tag change.', 'WRITE_RESULT_UNKNOWN', 422);
+      write.result = { externalId: result?.node?.id || null, recovery: 'Review current tags in Shopify before preparing a separately approved inverse change. Never remove a tag that existed before this request.' };
     } else if (write.input.operation === 'internal_note') {
       const data = await integrations.shopifyGraphql('mutation RunvaraInternalNote($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { id } userErrors { field message code } } }', { metafields: [{ ownerId: write.input.productId, namespace: '$app:runvara', key: 'internal_note', type: 'single_line_text_field', value: write.input.note.replace(/[\r\n]/g, ' ') }] }, config);
       result = data?.metafieldsSet;
