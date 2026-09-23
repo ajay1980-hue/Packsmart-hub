@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  let api, channels = [], data = {}, selected = null, returnFocus, pollTimer;
+  let api, channels = [], data = {}, selected = null, returnFocus, pollTimer, refreshPending, refreshController, sessionGeneration = 0;
   const busy = new Set();
   const $ = selector => document.querySelector(selector);
   const labels = { connected: 'Connected', degraded: 'Degraded', action_required: 'Action required', disconnected: 'Disconnected', not_configured: 'Not configured', read_only: 'Read-only', approval_gated: 'Approval-gated write', automatic: 'Automatic write', catalogs: 'Catalogues', posts: 'Facebook posts', products: 'Products', variants: 'Variants', inventory: 'Inventory', prices: 'Prices', orders: 'Orders', customers: 'Customers', promotions: 'Promotions', accounts: 'Facebook Pages & Instagram accounts', channels: 'YouTube channels', boards: 'Boards', pins: 'Pins', shops: 'Shops' };
@@ -117,7 +117,14 @@
     $('#connection-meta-write-fields').innerHTML = html;
   }
   async function refresh({ panel = true } = {}) {
-    const payload = await api.request('/api/connection-centre'); channels = payload.channels; data.connectionWrites = payload.writes;
+    const generation = sessionGeneration;
+    if (!refreshPending) {
+      refreshController = new AbortController();
+      refreshPending = api.request('/api/connection-centre', { signal: refreshController.signal }).finally(() => { refreshPending = null; refreshController = null; });
+    }
+    const payload = await refreshPending;
+    if (generation !== sessionGeneration) return;
+    channels = payload.channels; data.connectionWrites = payload.writes;
     data.connectionCentre = channels;
     data.autopilot = { ...data.autopilot, enabled: payload.autopilotEnabled }; cards();
     if (selected && panel) renderPanel();
@@ -129,7 +136,7 @@
     const dialog = $('#connection-dialog'); if (!dialog.open) dialog.showModal();
     if (setup) $('#connection-setup').classList.remove('hidden');
     $('#connection-close').focus(); clearInterval(pollTimer);
-    pollTimer = setInterval(() => { if (selected && !document.hidden) refresh({ panel: false }).catch(() => {}); }, 5000);
+    pollTimer = setInterval(() => { if (selected && !document.hidden && !refreshPending && !busy.size) refresh({ panel: false }).catch(() => {}); }, 15000);
   }
   async function perform(provider, action, body = {}) {
     if (busy.has(provider)) return;
@@ -209,7 +216,7 @@
       $('#connection-refresh').addEventListener('click',async event=>{event.target.disabled=true;try{await refresh();api.notify('Connection status refreshed.');}catch(error){api.notify(error.message,'error');}finally{event.target.disabled=false;}});
     },
     render(next) { data=next;channels=next.connectionCentre || [];cards();journey();if(selected)renderPanel(); },
-    endSession() { if (selected) close(); busy.clear(); channels = []; data = {}; },
+    endSession() { sessionGeneration++; refreshController?.abort(); if (selected) close(); busy.clear(); channels = []; data = {}; },
     open
   };
 })();

@@ -573,3 +573,17 @@ test('Shopify tag actions require approval even in automatic mode and remain ten
   }
   assert.equal(f.calls.filter(call=>call.query.includes('RunvaraProductTags')).length,2);
 });
+
+test('connection polling never overlaps slow status requests',async t=>{
+  const f=await fixture(t);const channel=await f.channel();
+  const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',pretendToBeVisual:true});t.after(()=>dom.window.close());
+  const {window}=dom;window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  let poll,resolve,calls=0;window.setInterval=callback=>{poll=callback;return 1;};window.clearInterval=()=>{};
+  const pending=new Promise(done=>resolve=done);
+  window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  window.RunvaraConnections.init({request:()=>{calls++;return pending;},reload:async()=>{},notify:()=>{},setView:()=>{},date:String,escapeHtml:String});
+  window.RunvaraConnections.render({user:{role:'owner'},connectionCentre:[channel],connectionWrites:[]});window.RunvaraConnections.open('shopify');
+  poll();poll();poll();assert.equal(calls,1);
+  resolve({channels:[channel],writes:[],autopilotEnabled:false});await new Promise(done=>setImmediate(done));
+  window.RunvaraConnections.endSession();
+});

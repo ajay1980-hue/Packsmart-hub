@@ -545,3 +545,17 @@ test('eBay Manager rejects private network targets before making a request', asy
   );
   assert.equal(remoteRequests, 0);
 });
+
+test('eBay marketing preserves campaign reads when one advert request fails and follows pages', async()=>{
+  const service=new IntegrationService({});const calls=[];
+  service.ebayApiGet=async url=>{
+    calls.push(url);const u=new URL(url);
+    if(u.pathname.endsWith('/ad_campaign'))return {campaigns:[{campaignId:'1',campaignStatus:'RUNNING'},{campaignId:'2',campaignStatus:'ENDED'}]};
+    if(u.pathname.endsWith('/2/ad'))throw Object.assign(new Error('provider declined'),{upstreamStatus:409,upstreamErrorIds:['35077'],code:'UPSTREAM_REQUEST_FAILED'});
+    return u.searchParams.get('offset')==='0'?{ads:[{adId:'first'}],next:'provider-continuation',total:101}:{ads:[{adId:'last'}],total:101};
+  };
+  const result=await service.fetchEbayMarketing('test-only','EBAY_GB');
+  assert.equal(result.campaigns.length,2);assert.equal(result.ads.length,2);assert.equal(result.campaignsRead,true);
+  assert.equal(result.adFailures[0].httpStatus,409);assert.equal(result.adFailures[0].campaignId,'2');
+  assert.ok(calls.some(url=>url.includes('offset=100')));
+});

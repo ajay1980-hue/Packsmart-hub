@@ -981,20 +981,31 @@ export class IntegrationService {
   }
 
   async fetchEbayMarketing(accessToken, marketplaceId) {
-    const campaignPayload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}/ad_campaign?limit=100&offset=0`, accessToken, { marketplaceId });
-    const campaigns = payloadItems(campaignPayload, ['campaigns']).slice(0, 100);
-    const ads = [];
+    const list = async (path, key, max) => {
+      const rows = [];
+      for (let offset = 0; offset < max; offset += 100) {
+        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}${path}?limit=100&offset=${offset}`, accessToken, { marketplaceId });
+        const batch = payloadItems(payload, [key]); rows.push(...batch);
+        const more = Boolean(payload.next) || Number(payload.total) > offset + batch.length;
+        if (!more) return rows;
+        if (!batch.length) throw integrationError('eBay marketing pagination was incomplete', 502, 'EBAY_MARKETING_INCOMPLETE');
+      }
+      throw integrationError('eBay marketing coverage limit reached', 422, 'EBAY_MARKETING_COVERAGE_LIMIT');
+    };
+    const campaigns = await list('/ad_campaign', 'campaigns', 500), ads = [], adFailures = [];
     for (let index = 0; index < campaigns.length; index += 5) {
-      const batch = campaigns.slice(index, index + 5);
-      const results = await Promise.all(batch.map(async campaign => {
-        const campaignId = String(campaign.campaignId || '');
-        if (!campaignId) return [];
-        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}/ad_campaign/${encodeURIComponent(campaignId)}/ad?limit=500&offset=0`, accessToken, { marketplaceId });
-        return payloadItems(payload, ['ads']).map(ad => ({ ...ad, campaignId }));
+      const results = await Promise.all(campaigns.slice(index,index+5).map(async campaign => {
+        const campaignId = String(campaign.campaignId || ''); if (!campaignId) return [];
+        try { return (await list(`/ad_campaign/${encodeURIComponent(campaignId)}/ad`, 'ads', 2000)).map(ad => ({ ...ad, campaignId })); }
+        catch (error) {
+          adFailures.push({ campaignId, status: /^[A-Z_]{1,40}$/.test(campaign.campaignStatus || '') ? campaign.campaignStatus : null, httpStatus:error.upstreamStatus || null, errorIds:error.upstreamErrorIds || [], code:error.code || 'EBAY_MARKETING_READ_UNAVAILABLE' });
+          return [];
+        }
       }));
       ads.push(...results.flat());
+      if (ads.length > 5000) throw integrationError('eBay advertising coverage limit reached', 422, 'EBAY_MARKETING_COVERAGE_LIMIT');
     }
-    return { campaigns, ads: ads.slice(0, 5000) };
+    return { campaigns, ads, adFailures, campaignsRead:true };
   }
 
   async syncEbayOAuth(state, config, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
@@ -1035,6 +1046,10 @@ export class IntegrationService {
       optionalRead('inventory', () => this.fetchEbayInventoryItems(accessToken), []),
       optionalRead('marketing', () => this.fetchEbayMarketing(accessToken, config.marketplaceId), { campaigns: [], ads: [] })
     ]);
+    if (marketing.adFailures?.length) {
+      readErrors.marketing = 'EBAY_MARKETING_ADS_PARTIAL';
+      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus)) };
+    }
     const offerPairs = readErrors.inventory
       ? []
       : await optionalRead('offers', () => this.fetchEbayOffers(accessToken, inventoryItems, config.marketplaceId), []);
@@ -1061,7 +1076,7 @@ export class IntegrationService {
       listings: !selected('inventory') || readErrors.inventory || readErrors.offers ? (state.ebay?.listings || []) : mergeSelectedEbay(state.ebay?.listings || [], published.slice(0, 500), areas),
       drafts: !selected('inventory') || readErrors.inventory || readErrors.offers ? (state.ebay?.drafts || []) : drafts.slice(0, 500).map(item => ({ id: item.offerId || item.id, title: item.title, sku: item.sku, updatedAt: null })),
       fees: !selected('orders') || readErrors.orders ? (state.ebay?.fees || []) : fees.slice(0, 1000),
-      promotions: !selected('marketing') || readErrors.marketing ? (state.ebay?.promotions || []) : marketing.campaigns.slice(0, 500),
+      promotions: !selected('marketing') || (readErrors.marketing && !marketing.campaignsRead) ? (state.ebay?.promotions || []) : marketing.campaigns.slice(0, 500),
       health: null,
       inventoryApiComparison: !selected('inventory') || readErrors.inventory || readErrors.offers ? (state.ebay?.inventoryApiComparison || null) : { missingInInventoryApi: missingOnEbay.slice(0, 100), unmatchedInventoryApiSkus: staleOnEbay.slice(0, 100) },
       coverage: {
@@ -1071,6 +1086,7 @@ export class IntegrationService {
         ordersAvailable: selected('orders') ? !readErrors.orders : state.ebay?.coverage?.ordersAvailable ?? false,
         inventoryAvailable: selected('inventory') ? !readErrors.inventory : state.ebay?.coverage?.inventoryAvailable ?? false,
         offersAvailable: selected('inventory') ? !readErrors.inventory && !readErrors.offers : state.ebay?.coverage?.offersAvailable ?? false,
+        marketingCampaignsAvailable: selected('marketing') ? Boolean(marketing.campaignsRead) : state.ebay?.coverage?.marketingCampaignsAvailable ?? false,
         marketingAvailable: selected('marketing') ? !readErrors.marketing : state.ebay?.coverage?.marketingAvailable ?? false,
         unavailableSurfaces: [...new Set([...(state.ebay?.coverage?.unavailableSurfaces || []).filter(surface => !selected(surface)), ...Object.keys(readErrors)])],
         readDiagnostics: { ...Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).filter(([surface]) => !selected(surface))), ...readDiagnostics },

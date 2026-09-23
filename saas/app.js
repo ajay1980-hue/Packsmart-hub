@@ -93,6 +93,7 @@
   }
 
   function showLogin() {
+    $('#loading-screen')?.classList.add('hidden');
     window.RunvaraConnections?.endSession();
     $('#login-screen').classList.remove('hidden');
     request('/api/auth/signup-options').then(options=>$('#signup-options')?.classList.toggle('hidden',!options.enabled)).catch(()=>{});
@@ -101,12 +102,14 @@
   }
 
   function showPasswordSetup() {
+    $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
     $('#password-screen').classList.remove('hidden');
     $('#app-shell').classList.add('hidden');
   }
 
   function showApp() {
+    $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
     $('#password-screen').classList.add('hidden');
     $('#app-shell').classList.remove('hidden');
