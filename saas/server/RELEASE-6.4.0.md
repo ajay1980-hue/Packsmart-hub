@@ -101,3 +101,19 @@ web OAuth client, youtube.readonly scope, External consent/test users and exact
 production redirect. Credentials go only into the existing Render environment.
 Meta public-app approvals, eBay eligibility and any additional Shopify/Meta write
 scope remain external/owner dependencies. No speculative integrations were added.
+
+## Live acceptance follow-up — 6.4.1
+
+Live production verification found that eBay's optional marketing eligibility
+warning could make previously completed onboarding appear incomplete. Setup now
+remains ready only for the specific marketing-only 35077 condition, with verified
+order availability, a connected credential and completed test/import/review
+evidence. The warning remains visible. Order, inventory, authentication and all
+other errors still block setup. A regression test covers those distinctions.
+The exact tag approval preview now uses readable labelled fields.
+
+106/106 server tests and SaaS/syntax guards pass. Live 6.4.0 initially hit a
+30-second startup deadline; the visible retry recovered. The environment's
+production health sample was 10.52 seconds and signup-options 14.70 seconds;
+these do not establish an end-user latency improvement. Further production
+latency observation and real-device mobile acceptance remain necessary.
