@@ -123,6 +123,10 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   cookie = cookieValue(changed.setCookie);
   csrf = changed.payload.csrf;
 
+  const emptyBootstrap = await request('/api/bootstrap', { cookie });
+  assert.equal(emptyBootstrap.payload.products.length, 0, 'dashboard loading never imports data implicitly');
+  const firstSync = await request('/api/integrations/shopify/sync', { method: 'POST', cookie, csrf, body: {} });
+  assert.equal(firstSync.response.status, 200);
   const bootstrap = await request('/api/bootstrap', { cookie });
   assert.equal(bootstrap.response.status, 200);
   assert.equal(bootstrap.payload.products.length, 15);

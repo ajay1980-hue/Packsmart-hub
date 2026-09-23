@@ -15,13 +15,20 @@ export function onboardingJourney(state) {
     return { provider, connected, tested, imported, reviewed, permissionMode: settings.permissionMode, needsAttention: Boolean(health.lastError) };
   });
   const complete = Boolean(saved.platforms?.length) && platforms.every(item => item.tested && item.imported && item.reviewed && !item.needsAttention);
-  return { revision: saved.revision || 0, platforms, complete, completedAt: complete ? saved.completedAt || null : null };
+  return { revision: saved.revision || 0, businessReviewedAt: saved.businessReviewedAt || null, controlsReviewedAt: saved.controlsReviewedAt || null, platforms, complete, completedAt: complete ? saved.completedAt || null : null };
 }
 export function saveOnboardingJourney(state, body, user) {
   if (user.role !== 'owner') throw connectionError('Only the business owner can complete setup.', 'OWNER_APPROVAL_REQUIRED', 403);
   const previous = state.onboardingJourney || {};
   if (body.revision !== (previous.revision || 0)) throw connectionError('Setup changed. Refresh and try again.', 'CONNECTION_CONFLICT', 409);
   const next = structuredClone(previous);
+  if (body.businessName !== undefined) {
+    const name = String(body.businessName || '').trim();
+    if (name.length < 2 || name.length > 120) throw connectionError('Enter a business name of 2–120 characters.');
+    state.workspace.name = name;
+    next.businessReviewedAt = new Date().toISOString();
+  }
+  if (body.reviewControls === true) next.controlsReviewedAt = new Date().toISOString();
   if (body.platforms !== undefined) {
     if (!Array.isArray(body.platforms) || !body.platforms.length || body.platforms.length > Object.keys(CONNECTORS).length || body.platforms.some(key => !Object.hasOwn(CONNECTORS, key))) throw connectionError('Choose at least one supported platform.');
     next.platforms = [...new Set(body.platforms)];

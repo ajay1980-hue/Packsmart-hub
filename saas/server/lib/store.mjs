@@ -257,6 +257,17 @@ class SupabaseStore {
     return text ? JSON.parse(text) : null;
   }
 
+  async getIdentity(workspaceId) {
+    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state->workspace,state->users&limit=1`);
+    const state = rows?.[0];
+    if (!state?.workspace || !Array.isArray(state.users)) return null;
+    assertWorkspace(workspaceId, state);
+    return { workspace: state.workspace, users: state.users.map(user => ({
+      active: true, sessionVersion: 1, ...user,
+      passwordChangeRequired: typeof user.passwordChangeRequired === 'boolean' ? user.passwordChangeRequired : workspaceId === 'packsmart-solutions' && !user.passwordHash
+    })) };
+  }
+
   async get(workspaceId) {
     const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
     if (!rows?.[0]?.state) return null;

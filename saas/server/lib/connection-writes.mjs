@@ -5,6 +5,25 @@ import { addAudit, recordWork } from './events.mjs';
 import { META_WRITES, prepareMetaWrite, requireMetaScopes, metaWriteScopes } from './meta-commerce.mjs';
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+export async function previewShopifyTagTest(state, productId, integrations) {
+  const product = state.products?.find(item => item.id === productId && item.provider === 'shopify');
+  if (!product || !/^gid:\/\/shopify\/Product\/\d+$/.test(product.id)) throw connectionError('Choose a product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
+  if (connectionSettings(state, 'shopify').disconnected) throw connectionError('Reconnect Shopify first.', 'CONNECTION_DISCONNECTED', 409);
+  const config = integrations.shopifyConfig(state);
+  if (config.mode === 'oauth') config.accessToken = (await integrations.connectorCredentials(state, 'shopify')).accessToken;
+  const result = await integrations.shopifyGraphql('query RunvaraTagAcceptancePreview($id: ID!) { product(id: $id) { id title tags } }', { id: product.id }, config);
+  if (result?.product?.id !== product.id || !Array.isArray(result.product.tags)) throw connectionError('Shopify could not confirm current tags.', 'WRITE_BASELINE_UNAVAILABLE', 422);
+  const tag = `runvara-beta-check-${crypto.randomBytes(6).toString('hex')}`;
+  const connection = state.connections?.find(item => item.provider === 'shopify');
+  return { resource: { id: product.id, title: result.product.title, store: config.domain }, checkedAt: new Date().toISOString(),
+    before: result.product.tags, proposed: [...result.product.tags, tag],
+    request: { operation: 'product_tags_add', productId: product.id, tags: [tag], expectedTags: result.product.tags },
+    permissionMode: connectionSettings(state, 'shopify').permissionMode,
+    writeScopeGranted: Boolean(connection?.metadata?.grantedScopes?.includes('write_products')),
+    approval: `Approve adding only the tag ${tag} to ${result.product.title} (${product.id}) in ${config.domain}.`,
+    rollback: { operation: 'product_tags_remove', productId: product.id, tags: [tag], expectedTags: [...result.product.tags, tag] },
+    notice: 'No write or permission change has occurred. Tags may affect storefront collections or external workflows. The inverse removal needs its own exact approval.' };
+}
 export function proposeConnectionWrite(state, provider, body, actor) {
   const settings = connectionSettings(state, provider);
   if (settings.disconnected || settings.permissionMode === 'read_only') throw connectionError('This connection is read-only. The owner must authorise write access first.', 'WRITE_NOT_AUTHORISED', 403);
@@ -22,6 +41,10 @@ export function proposeConnectionWrite(state, provider, body, actor) {
     const tags = typeof body.tags === 'string' ? body.tags.split(',').map(value => value.trim()).filter(Boolean) : body.tags;
     if (!Array.isArray(tags) || !tags.length || tags.length > 50 || tags.some(tag => typeof tag !== 'string' || !tag.trim() || tag.length > 255 || /[\r\n,]/.test(tag))) throw connectionError('Enter 1–50 tags, separated by commas, up to 255 characters each.');
     input.tags = [...new Set(tags.map(tag => tag.trim()))];
+    if (body.expectedTags !== undefined) {
+      if (!Array.isArray(body.expectedTags) || body.expectedTags.length > 250 || body.expectedTags.some(tag => typeof tag !== 'string' || tag.length > 255)) throw connectionError('Invalid tag baseline.');
+      input.expectedTags = [...body.expectedTags].sort();
+    }
   } else {
     if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 200 || typeof body.description !== 'string' || body.description.length > 10000) throw connectionError('Enter a product title and a description of up to 10,000 characters.');
     input.title = body.title.trim(); input.description = body.description;
@@ -69,6 +92,10 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   } else if (settings.consent?.mode !== 'automatic') throw connectionError('Automatic writes need explicit owner consent.', 'OWNER_APPROVAL_REQUIRED', 403);
   const config = write.provider === 'shopify' ? integrations.shopifyConfig(state) : {};
   if (config.mode === 'oauth') config.accessToken = (await integrations.connectorCredentials(state, 'shopify')).accessToken;
+  if (write.input.expectedTags) {
+    const current = await integrations.shopifyGraphql('query RunvaraTagAcceptancePreview($id: ID!) { product(id: $id) { id tags } }', { id: write.input.productId }, config);
+    if (current?.product?.id !== write.input.productId || !Array.isArray(current.product.tags) || JSON.stringify([...current.product.tags].sort()) !== JSON.stringify(write.input.expectedTags)) throw connectionError('Product tags changed since review. Prepare a fresh approval.', 'WRITE_BASELINE_CHANGED', 409);
+  }
   write.status = 'executing'; write.startedAt = new Date().toISOString();
   addAudit(state, { type: 'connection_write_started', actor, detail: { provider: write.provider, writeId: write.id, digest: write.digest } });
   await persistClaim();
