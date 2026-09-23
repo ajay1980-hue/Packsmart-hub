@@ -12,9 +12,19 @@ export function onboardingJourney(state) {
     const tested = connected && Boolean(record?.lastCheckedAt) && !['auth_expired','error'].includes(record?.status);
     const imported = connected && Boolean(health.lastSuccessfulSyncAt || (state.connectionSyncs || []).find(run => run.provider === provider && run.status === 'completed'));
     const reviewed = saved.permissionReviews?.[provider] === settings.revision;
-    return { provider, connected, tested, imported, reviewed, permissionMode: settings.permissionMode, needsAttention: Boolean(health.lastError) };
+    const coverage = state.ebay?.coverage;
+    // Eligibility for optional advertising must not undo a verified commerce
+    // setup. Keep the warning visible; all other read/auth failures still block.
+    const marketingEligibilityOnly = provider === 'ebay' && record?.status === 'connected' &&
+      coverage?.ordersAvailable === true && coverage?.unavailableSurfaces?.length === 1 &&
+      coverage.unavailableSurfaces[0] === 'marketing' &&
+      coverage.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077') &&
+      health.lastError === 'Some eBay read data is currently unavailable: marketing.';
+    const needsAttention = Boolean(health.lastError);
+    return { provider, connected, tested, imported, reviewed, permissionMode: settings.permissionMode, needsAttention,
+      blocksSetup: needsAttention && !marketingEligibilityOnly };
   });
-  const complete = Boolean(saved.platforms?.length) && platforms.every(item => item.tested && item.imported && item.reviewed && !item.needsAttention);
+  const complete = Boolean(saved.platforms?.length) && platforms.every(item => item.tested && item.imported && item.reviewed && !item.blocksSetup);
   return { revision: saved.revision || 0, businessReviewedAt: saved.businessReviewedAt || null, controlsReviewedAt: saved.controlsReviewedAt || null, platforms, complete, completedAt: complete ? saved.completedAt || null : null };
 }
 export function saveOnboardingJourney(state, body, user) {

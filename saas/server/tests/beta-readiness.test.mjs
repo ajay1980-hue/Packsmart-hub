@@ -8,6 +8,7 @@ import { seedWorkspaceState, createStore } from '../lib/store.mjs';
 import { createSessionToken, verifySessionToken, hashPasswordAsync, verifyPasswordAsync } from '../lib/security.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { previewShopifyTagTest, proposeConnectionWrite, executeConnectionWrite } from '../lib/connection-writes.mjs';
+import { onboardingJourney } from '../lib/onboarding.mjs';
 import { monitoredSync } from '../lib/scheduler.mjs';
 
 const secret='isolated-beta-test-session-secret-at-least-32', key='isolated-beta-test-credential-key-at-least-32';
@@ -155,4 +156,21 @@ test('existing signed billing lifecycle records are tenant separated, idempotent
   await event('e3','customer.subscription.updated','past_due',103);assert.equal((await f.server.packsmart.store.get('billing-beta')).subscription.status,'past_due');
   await event('e4','customer.subscription.deleted','canceled',104);assert.equal((await f.server.packsmart.store.get('billing-beta')).subscription.status,'canceled');
   await event('e5','customer.subscription.updated','active',105,'packsmart-solutions');assert.equal((await f.server.packsmart.store.get('packsmart-solutions')).subscription.status,'internal');
+});
+
+
+test('eBay marketing eligibility preserves verified setup without hiding warnings or other failures',()=>{
+  const state=seedWorkspaceState();
+  state.connections=[{provider:'ebay_oauth',encryptedCredentials:'fixture',status:'connected',lastCheckedAt:new Date().toISOString()}];
+  state.connectionSettings={ebay:{revision:1,permissionMode:'read_only'}};
+  state.onboardingJourney={platforms:['ebay'],permissionReviews:{ebay:1},completedAt:'2026-09-23T12:00:00Z'};
+  state.integrationStatus.ebay={lastSuccessfulSyncAt:'2026-09-23T12:00:00Z',lastError:'Some eBay read data is currently unavailable: marketing.'};
+  state.ebay={coverage:{ordersAvailable:true,unavailableSurfaces:['marketing'],readDiagnostics:{marketing:{errorIds:['35077']}}}};
+  let journey=onboardingJourney(state);
+  assert.equal(journey.complete,true);assert.equal(journey.completedAt,state.onboardingJourney.completedAt);
+  assert.equal(journey.platforms[0].needsAttention,true);assert.equal(journey.platforms[0].blocksSetup,false);
+  state.ebay.coverage.ordersAvailable=false;assert.equal(onboardingJourney(state).complete,false);
+  state.ebay.coverage.ordersAvailable=true;state.ebay.coverage.unavailableSurfaces.push('inventory');assert.equal(onboardingJourney(state).complete,false);
+  state.ebay.coverage.unavailableSurfaces=['marketing'];state.integrationStatus.ebay.lastError='AUTH_EXPIRED';assert.equal(onboardingJourney(state).complete,false);
+  state.integrationStatus.ebay.lastError='Some eBay read data is currently unavailable: marketing.';state.connections[0].status='auth_expired';assert.equal(onboardingJourney(state).complete,false);
 });
