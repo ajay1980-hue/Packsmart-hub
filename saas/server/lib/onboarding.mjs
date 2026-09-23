@@ -3,7 +3,7 @@ import { addAudit } from './events.mjs';
 
 export function onboardingJourney(state) {
   const saved = state.onboardingJourney || {};
-  const selected = saved.platforms || Object.keys(CONNECTORS).filter(provider => (state.connections || []).some(record => record.provider === provider && record.encryptedCredentials));
+  const selected = saved.platforms || Object.keys(CONNECTORS).filter(provider => (state.connections || []).some(record => record.provider === (provider === 'ebay' ? 'ebay_oauth' : provider) && record.encryptedCredentials));
   const platforms = selected.map(provider => {
     const settings = connectionSettings(state, provider);
     const record = (state.connections || []).find(item => item.provider === (provider === 'ebay' ? 'ebay_oauth' : provider));

@@ -213,6 +213,7 @@ class SupabaseStore {
   constructor(env, fetchImpl) {
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
+    this.mirrorDigests = new Map();
     this.fetch = fetchImpl;
     let parsed;
     try { parsed = new URL(this.url); } catch { throw new Error('SUPABASE_URL is invalid'); }
@@ -281,8 +282,14 @@ class SupabaseStore {
     const mirror = async (table, rows, conflict) => {
       if (!rows.length) return;
       try {
+        const cacheKey = `${workspaceId}:${table}`, previous = this.mirrorDigests.get(cacheKey) || new Map();
+        const fingerprinted = rows.map(row => ({ row, key: conflict.split(',').map(key => String(row[key])).join(':'), hash: crypto.createHash('sha256').update(JSON.stringify(row)).digest('hex') }));
+        const changed = fingerprinted.filter(item => previous.get(item.key) !== item.hash);
+        if (!changed.length) return;
         if (Date.now() >= deadline) throw Object.assign(new Error('Mirror deferred'), { code: 'MIRROR_DEFERRED' });
-        await this.upsert(table, rows, conflict, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+        await this.upsert(table, changed.map(item => item.row), conflict, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+        // Cache only confirmed writes. Failed mirrors are retried on the next save.
+        this.mirrorDigests.set(cacheKey, new Map(fingerprinted.map(item => [item.key, item.hash])));
       } catch (error) {
         errors.push({ table, code: error.code === 'SUPABASE_PERSISTENCE_FAILED' ? error.code : 'MIRROR_DEFERRED', httpStatus: error.httpStatus || null, databaseCode: error.databaseCode || null });
       }
@@ -530,9 +537,16 @@ class SupabaseStore {
     const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
     if (existing) {
       const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
-      const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`, {
-        method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record)
-      });
+      const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
+      const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
+      let rows;
+      try { rows = await this.request(path, options); }
+      catch (error) {
+        if (error.databaseCode !== '57014') throw error;
+        // PostgreSQL cancelled this statement. Retry the same revision-guarded
+        // write once; do not repeat any provider operation or business callback.
+        rows = await this.request(path, options);
+      }
       if (!rows?.length) throw conflict();
     } else {
       // Atomically create the FK parent, unique login identity and primary state.

@@ -9,7 +9,7 @@ import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, verifySessionToken, decryptCredentials, encryptCredentials } from '../lib/security.mjs';
 import { IntegrationService, mergeSelectedShopify } from '../lib/integrations.mjs';
-import { connectionCentre, connectionDue, saveConnectionSettings } from '../lib/connection-centre.mjs';
+import { connectionCentre, connectionDue, saveConnectionSettings, recoveryFor } from '../lib/connection-centre.mjs';
 import { tiktokSignature } from '../lib/connector-oauth.mjs';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
@@ -572,4 +572,25 @@ test('Shopify tag actions require approval even in automatic mode and remain ten
     await f.request(route,{method:'POST',body:{}});
   }
   assert.equal(f.calls.filter(call=>call.query.includes('RunvaraProductTags')).length,2);
+});
+
+test('connection polling never overlaps slow status requests',async t=>{
+  const f=await fixture(t);const channel=await f.channel();
+  const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',pretendToBeVisual:true});t.after(()=>dom.window.close());
+  const {window}=dom;window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  let poll,resolve,calls=0;window.setInterval=callback=>{poll=callback;return 1;};window.clearInterval=()=>{};
+  const pending=new Promise(done=>resolve=done);
+  window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  window.RunvaraConnections.init({request:()=>{calls++;return pending;},reload:async()=>{},notify:()=>{},setView:()=>{},date:String,escapeHtml:String});
+  window.RunvaraConnections.render({user:{role:'owner'},connectionCentre:[channel],connectionWrites:[]});window.RunvaraConnections.open('shopify');
+  poll();poll();poll();assert.equal(calls,1);
+  resolve({channels:[channel],writes:[],autopilotEnabled:false});await new Promise(done=>setImmediate(done));
+  window.RunvaraConnections.endSession();
+});
+
+test('eBay eligibility recovery explains provider restriction without reconnect advice',()=>{
+  const recovery = recoveryFor('ebay', {status:'degraded'}, {readDiagnostics:{marketing:{httpStatus:409,errorIds:['35077'],stage:'ads'}}});
+  assert.match(recovery.message, /not currently eligible/);
+  assert.match(recovery.message, /Order imports can continue/);
+  assert.equal(recovery.action, 'sync');
 });

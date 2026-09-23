@@ -456,6 +456,64 @@ test('eBay read-only sync stays connected when optional seller APIs are unavaila
   assert.equal(state.ebay.coverage.readDiagnostics.marketing.automaticRetryBlocked, true);
 });
 
+test('eBay marketing eligibility failures pause automatic retries without blocking other reads', async () => {
+  const credentialKey = 'partial-ebay-sync-key-more-than-thirty-two-characters';
+  let marketingRequests = 0;
+  const fetchImpl = async (url) => {
+    if (String(url).includes('/identity/v1/oauth2/token')) {
+      return Response.json({ access_token: 'temporary-access-token', expires_in: 7200 });
+    }
+    if (String(url) === 'https://apiz.ebay.com/commerce/identity/v1/user/') {
+      return Response.json({ username: 'packsmartsolutions20' });
+    }
+    if (String(url).includes('/sell/inventory/v1/inventory_item?')) {
+      return Response.json({ total: 0, inventoryItems: [] });
+    }
+    if (String(url).includes('/sell/fulfillment/v1/order?')) {
+      return Response.json({ errors: [{ errorId: 30500 }] }, { status: 500 });
+    }
+    if (String(url).includes('/sell/marketing/v1/ad_campaign?')) {
+      marketingRequests++;
+      return Response.json({ errors: [{ errorId: 35077 }] }, { status: 409 });
+    }
+    return new Response(null, { status: 404 });
+  };
+  const connection = {
+    id: 'conn-ebay-partial', provider: 'ebay_oauth', label: 'eBay read-only OAuth', status: 'configured',
+    encryptedCredentials: encryptCredentials({
+      mode: 'direct_oauth', refreshToken: 'encrypted-refresh-token-source-value', scopes: EBAY_READONLY_SCOPES,
+      expectedAccount: 'packsmartsolutions20', marketplaceId: 'EBAY_GB'
+    }, credentialKey),
+    metadata: {}, createdAt: '2026-09-08T00:00:00.000Z', updatedAt: '2026-09-08T00:00:00.000Z'
+  };
+  const state = {
+    workspace: { id: 'packsmart-solutions' }, products: [], orders: [], connections: [connection], integrationStatus: {}
+  };
+  const service = new IntegrationService({
+    NODE_ENV: 'production', CREDENTIALS_KEY: credentialKey, EBAY_OAUTH_ENABLED: 'true',
+    EBAY_ENV_WORKSPACE_ID: 'packsmart-solutions', EBAY_CLIENT_ID: 'production-client-id',
+    EBAY_CLIENT_SECRET: 'production-client-secret-value', EBAY_REDIRECT_URI_NAME: 'Packsmart-Operations-ReadOnly-RuName',
+    EBAY_EXPECTED_ACCOUNT: 'packsmartsolutions20', EBAY_MARKETPLACE_ID: 'EBAY_GB'
+  }, { fetchImpl });
+
+  const status = await service.syncEbay(state);
+  assert.equal(status.status, 'connected');
+  assert.equal(status.account, 'packsmartsolutions20');
+  assert.deepEqual(state.ebay.coverage.unavailableSurfaces.sort(), ['marketing', 'orders']);
+  assert.equal(state.ebay.coverage.inventoryAvailable, true);
+  assert.equal(state.ebay.coverage.ordersAvailable, false);
+  assert.equal(state.ebay.coverage.marketingAvailable, false);
+  assert.match(status.detail, /Some eBay read data is currently unavailable: orders, marketing\./);
+  assert.equal(connection.status, 'connected');
+  assert.deepEqual(state.ebay.coverage.readDiagnostics.marketing.errorIds, ['35077']);
+  assert.equal(state.ebay.coverage.readDiagnostics.marketing.httpStatus, 409);
+  await service.syncEbay(state, { automatic: true });
+  assert.equal(marketingRequests, 1, 'automatic runs do not retry an eligibility failure');
+  assert.equal(state.ebay.coverage.readDiagnostics.marketing.automaticRetryBlocked, true);
+  await service.syncEbay(state);
+  assert.equal(marketingRequests, 2, 'manual eligibility recheck remains available');
+});
+
 test('eBay inventory reads use a valid locale and consecutive page offsets without losing records', async () => {
   const offsets = [];
   const service = new IntegrationService({}, { fetchImpl: async (url, options) => {
@@ -544,4 +602,18 @@ test('eBay Manager rejects private network targets before making a request', asy
     error => error.code === 'INTEGRATION_CONFIG_INVALID'
   );
   assert.equal(remoteRequests, 0);
+});
+
+test('eBay marketing preserves campaign reads when one advert request fails and follows pages', async()=>{
+  const service=new IntegrationService({});const calls=[];
+  service.ebayApiGet=async url=>{
+    calls.push(url);const u=new URL(url);
+    if(u.pathname.endsWith('/ad_campaign'))return {campaigns:[{campaignId:'1',campaignStatus:'RUNNING'},{campaignId:'2',campaignStatus:'ENDED'}]};
+    if(u.pathname.endsWith('/2/ad'))throw Object.assign(new Error('provider declined'),{upstreamStatus:409,upstreamErrorIds:['35077'],code:'UPSTREAM_REQUEST_FAILED'});
+    return u.searchParams.get('offset')==='0'?{ads:[{adId:'first'}],next:'provider-continuation',total:101}:{ads:[{adId:'last'}],total:101};
+  };
+  const result=await service.fetchEbayMarketing('test-only','EBAY_GB');
+  assert.equal(result.campaigns.length,2);assert.equal(result.ads.length,2);assert.equal(result.campaignsRead,true);
+  assert.equal(result.adFailures[0].httpStatus,409);assert.equal(result.adFailures[0].campaignId,'2');
+  assert.ok(calls.some(url=>url.includes('offset=100')));
 });

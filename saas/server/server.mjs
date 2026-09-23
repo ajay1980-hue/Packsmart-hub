@@ -47,7 +47,7 @@ import { proposeConnectionWrite, executeConnectionWrite } from './lib/connection
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.3.0';
+const VERSION = '6.3.1';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([

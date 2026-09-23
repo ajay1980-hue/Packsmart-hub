@@ -179,3 +179,32 @@ test('archive failure leaves full primary history intact and primary outage cann
   assert.deepEqual((await store.get(state.workspace.id)).dailyBriefs, state.dailyBriefs);
   assert.equal(fake.calls.filter(call => call.method === 'PATCH').length, 0);
 });
+
+test('reporting mirrors only changed rows and never caches failed writes', async()=>{
+  let fail=false;
+  const fake=fakeSupabase({fault:({table,method})=>fail&&table==='audit_events'&&method==='POST'?{code:'57014',status:500}:null});
+  const store=createStore({SUPABASE_URL:'https://test.supabase.co',SUPABASE_SERVICE_ROLE_KEY:'test-only'},{fetchImpl:fake.fetchImpl});
+  const state=seedWorkspaceState();await store.save(state.workspace.id,state);
+  const count=()=>fake.calls.filter(call=>call.method==='POST'&&call.url.pathname.endsWith('/audit_events')).length;
+  const baseline=count();await store.save(state.workspace.id,state);assert.equal(count(),baseline);
+  state.audit.unshift({id:'new-event',type:'test',actor:'owner',createdAt:new Date().toISOString(),detail:{}});
+  fail=true;await store.save(state.workspace.id,state);assert.equal(count(),baseline+1);
+  fail=false;await store.save(state.workspace.id,state);assert.equal(count(),baseline+2);
+  const written=JSON.parse(fake.calls.filter(call=>call.url.pathname.endsWith('/audit_events')).at(-1).body);
+  assert.equal(written.length,1);assert.equal(written[0].id,'new-event');
+  assert.equal(fake.tables.get('audit_events').length,state.audit.length);
+});
+
+test('cancelled primary statement retries once with identical revision guard; other failures do not retry', async()=>{
+  let failures=0,code='57014';
+  const fake=fakeSupabase({fault:({table,method})=>table==='saas_workspace_state'&&method==='PATCH'&&failures-->0?{code,status:500}:null});
+  const store=createStore({SUPABASE_URL:'https://test.supabase.co',SUPABASE_SERVICE_ROLE_KEY:'test-only'},{fetchImpl:fake.fetchImpl});
+  const state=seedWorkspaceState();await store.save(state.workspace.id,state);
+  const before=fake.calls.length;failures=1;await store.save(state.workspace.id,state);
+  const patches=fake.calls.slice(before).filter(call=>call.method==='PATCH');
+  assert.equal(patches[0].url.href,patches[1].url.href);assert.equal(patches[0].body,patches[1].body);
+  failures=2;await assert.rejects(store.save(state.workspace.id,state),error=>error.databaseCode==='57014');
+  failures=1;code='42501';const start=fake.calls.length;
+  await assert.rejects(store.save(state.workspace.id,state),error=>error.databaseCode==='42501');
+  assert.equal(fake.calls.slice(start).filter(call=>call.method==='PATCH').length,1);
+});

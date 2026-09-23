@@ -7,10 +7,11 @@
   <meta name="color-scheme" content="dark">
   <title>Packsmart Ops — Business Command Centre</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=6.3.0">
+  <link rel="stylesheet" href="/styles.css?v=6.3.1">
 </head>
 <body>
-  <section id="login-screen" class="auth-screen">
+  <section id="loading-screen" class="auth-screen" role="status"><div class="auth-card"><h1>Loading your business workspace…</h1><p>Your connections and data are being checked. You do not need to sign in again while this screen is loading.</p><progress aria-label="Loading workspace"></progress></div></section>
+  <section id="login-screen" class="auth-screen hidden">
     <div class="auth-glow"></div>
     <div class="auth-card">
       <div class="brand-lockup"><span class="brand-mark">PS</span><div><strong>Packsmart Ops</strong><small>Powered by Runvara</small></div></div>
@@ -246,8 +247,8 @@
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
   <dialog id="connection-dialog" aria-labelledby="connection-dialog-title"><div class="connection-dialog-shell"><button id="connection-close" class="secondary connection-close" type="button" aria-label="Close connection details">Close</button><div id="connection-detail"></div></div></dialog>
-  <script src="/connections-ui.js?v=6.3.0"></script>
-  <script src="/control-ui.js?v=6.3.0"></script>
-  <script src="/app.js?v=6.3.0"></script>
+  <script src="/connections-ui.js?v=6.3.1"></script>
+  <script src="/control-ui.js?v=6.3.1"></script>
+  <script src="/app.js?v=6.3.1"></script>
 </body>
 </html>
