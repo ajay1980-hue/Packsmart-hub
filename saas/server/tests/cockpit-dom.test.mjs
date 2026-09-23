@@ -24,6 +24,8 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   t.after(async () => { dom.window.close(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
   const { window } = dom, document = window.document;
   window.Headers = Headers; window.AbortController = AbortController; window.scrollTo = () => {}; window.HTMLElement.prototype.scrollIntoView = () => {};
+  window.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  window.HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new window.Event('close')); };
   window.fetch = async (route, options = {}) => {
     const headers = new Headers(options.headers); headers.set('Cookie', `packsmart_session=${token}`);
     const response = await fetch(base + route, { ...options, headers });
@@ -39,6 +41,45 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   assert.equal(document.querySelector('[onerror]'), null, 'source text is escaped');
   assert.ok(document.querySelector('#attention-queue .attention-item'));
   assert.ok(!document.getElementById('attention-queue').textContent.includes('No recorded exceptions or approvals need attention.'), 'active exceptions never show an all-clear message');
+  const search = document.getElementById('workspace-search-dialog'), searchInput = document.getElementById('workspace-search-input');
+  const openingCalls = calls.length;
+  document.getElementById('open-workspace-search').click();
+  assert.equal(search.open, true);
+  assert.equal(document.activeElement, searchInput);
+  assert.equal(document.querySelectorAll('.search-result').length, 13);
+  searchInput.value = 'billing'; searchInput.dispatchEvent(new window.Event('input'));
+  assert.equal(document.querySelectorAll('.search-result').length, 1);
+  assert.equal(document.querySelector('.search-result').dataset.viewLink, 'audit');
+  searchInput.value = '<img src=x onerror=alert(1)>'; searchInput.dispatchEvent(new window.Event('input'));
+  assert.equal(document.querySelectorAll('.search-result').length, 0);
+  assert.ok(search.textContent.includes('No matching pages'));
+  assert.equal(search.querySelector('[onerror]'), null);
+  searchInput.value = 'approval'; searchInput.dispatchEvent(new window.Event('input'));
+  searchInput.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  assert.ok(document.activeElement.classList.contains('search-result'));
+  document.activeElement.click();
+  assert.equal(search.open, false);
+  assert.equal(searchInput.value, '');
+  assert.equal(document.querySelector('.view.active').id, 'view-approvals');
+  assert.equal(calls.length, openingCalls, 'workspace search is local navigation and does not fetch or mutate data');
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  assert.equal(search.open, true);
+  searchInput.value = 'Shopify'; searchInput.dispatchEvent(new window.Event('input'));
+  searchInput.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  assert.equal(document.querySelector('.view.active').id, 'view-channels');
+  assert.equal(search.open, false);
+  document.getElementById('connection-dialog').showModal();
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  assert.equal(search.open, false, 'search cannot interrupt an existing connection dialog');
+  document.getElementById('connection-dialog').close();
+  document.querySelector('[data-period="week"]').click();
+  assert.equal(document.getElementById('week-metrics').hidden, false);
+  assert.equal(document.getElementById('month-metrics').hidden, true);
+  assert.equal(document.querySelector('[data-period="week"]').getAttribute('aria-pressed'), 'true');
+  document.querySelector('[data-period="month"]').click();
+  assert.equal(document.getElementById('week-metrics').hidden, true);
+  assert.equal(document.getElementById('month-metrics').hidden, false);
+  assert.ok(document.getElementById('revenue-chart').textContent.includes('No channel revenue is available yet'));
   for (const button of document.querySelectorAll('#main-nav [data-view]')) { button.click(); assert.ok(document.getElementById(`view-${button.dataset.view}`).classList.contains('active')); }
   const decision = document.getElementById('decision-form');
   for (const [key, value] of Object.entries({ key: 'ui-goal', category: 'goal', title: 'A verified UI goal', content: 'Check operations daily.', source: 'DOM integration test' })) decision.elements[key].value = value;
@@ -62,4 +103,47 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   assert.equal(saved.approvals[0].status, 'approved'); assert.equal(saved.approvals[0].revision, 2);
   assert.equal(saved.approvals[0].executedExternally, false); assert.ok(saved.decisions.some(item => item.key === 'ui-goal'));
   assert.deepEqual(errors, []); assert.ok(!calls.some(call => call.status >= 400));
+  const bootstrap = await (await window.fetch('/api/bootstrap')).json();
+  for (const scenario of [
+    { name: 'chart keeps positive, negative, zero and unavailable revenue distinct', values: [250, -50, 0, null] },
+    { name: 'chart treats no channels as an empty state', values: [] },
+    { name: 'chart does not turn an unknown value into zero', values: [null, undefined] }
+  ]) await t.test(scenario.name, async () => {
+    const chartErrors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', error => chartErrors.push(error.message));
+    const chartDom = new JSDOM(await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8'), { url: base, runScripts: 'outside-only', virtualConsole });
+    try {
+      const w = chartDom.window;
+      w.Headers = Headers; w.AbortController = AbortController; w.scrollTo = () => {};
+      w.RunvaraControl = { init() {}, render() {} };
+      const data = { ...bootstrap, integrations: scenario.values.map((revenue, index) => ({ id: 'channel-' + index, name: index ? 'Channel ' + index : '<img src=x onerror=alert(1)>', kind: 'commerce', status: 'connected', metrics30d: { revenue } })) };
+      w.fetch = async route => new Response(JSON.stringify(route === '/api/auth/session' ? { user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf } : data), { status: 200 });
+      w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
+      for (let i = 0; i < 100 && w.document.getElementById('app-shell').classList.contains('hidden'); i++) await new Promise(resolve => setTimeout(resolve, 5));
+      assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false);
+      const chart = w.document.getElementById('revenue-chart');
+      assert.equal(chart.querySelector('[onerror]'), null);
+      if (scenario.values.length === 4) {
+        const rows = chart.querySelectorAll('.revenue-row');
+        assert.equal(rows.length, 4);
+        assert.equal(rows[0].querySelector('strong').textContent, '£250.00');
+        assert.equal(rows[1].querySelector('strong').textContent, '-£50.00');
+        assert.equal(rows[2].querySelector('strong').textContent, '£0.00');
+        assert.equal(rows[3].querySelector('strong').textContent, '—');
+        assert.equal(rows[0].querySelector('.revenue-bar').getAttribute('width'), '833.33');
+        assert.equal(rows[1].querySelector('.revenue-bar').getAttribute('x'), '0.00');
+        assert.equal(rows[1].querySelector('.revenue-bar').getAttribute('width'), '166.67');
+        assert.equal(rows[2].querySelector('.revenue-bar').getAttribute('width'), '0.00');
+        assert.equal(rows[3].querySelector('svg'), null);
+      } else assert.ok(chart.textContent.includes('No channel revenue is available yet'));
+      assert.deepEqual(chartErrors, []);
+    } finally { chartDom.window.close(); }
+  });
+  document.getElementById('open-workspace-search').click();
+  document.getElementById('logout').click();
+  await until(() => document.getElementById('app-shell').classList.contains('hidden'));
+  await until(() => document.getElementById('signup-form').elements.invitation.required);
+  assert.equal(search.open, false, 'sign-out closes the navigation overlay');
+  assert.equal(document.getElementById('workspace-search-results').childElementCount, 0);
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  assert.equal(search.open, false, 'a signed-out user cannot open workspace navigation');
 });
