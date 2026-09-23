@@ -24,6 +24,7 @@ function app(service, provider) {
 async function json(service, url, options = {}) {
   const response = await service.fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(20000) });
   let payload; try { payload = await response.json(); } catch { payload = {}; }
+  if (response.status === 429) throw connectionError('The channel is limiting requests. Wait a few minutes before trying again.', 'CONNECTION_RATE_LIMITED', 429);
   if (!response.ok || payload.error) throw Object.assign(connectionError('The channel could not confirm access. Please reconnect or try again.', [400, 401, 403].includes(response.status) ? 'CONNECTION_AUTH_REQUIRED' : 'CONNECTION_READ_FAILED', 422), { upstreamStatus: response.status });
   return payload;
 }
@@ -38,6 +39,13 @@ function packTokens(payload, old = {}) {
 // Methods are installed on the existing service; all connections use the same
 // encrypted records, fetch boundary, tenant state and persistence transaction.
 export const connectorMethods = {
+  connectionAccessExpiry(record) {
+    if (!record?.encryptedCredentials) return null;
+    try {
+      const value = decryptCredentials(record.encryptedCredentials, this.env.CREDENTIALS_KEY).expiresAt;
+      return Number.isFinite(value) && value > 0 ? new Date(value).toISOString() : null;
+    } catch { return null; }
+  },
   oauthReady(provider, state) {
     if (provider === 'ebay') return this.ebayOAuthReady(state);
     if (provider === 'tiktok_shop') return Boolean(enabled(this.env.TIKTOK_SHOP_OAUTH_ENABLED) && this.env.TIKTOK_SHOP_APP_KEY && this.env.TIKTOK_SHOP_APP_SECRET && this.env.TIKTOK_SHOP_SERVICE_ID && String(this.env.CREDENTIALS_KEY || '').length >= 32 && /^https:\/\//.test(this.env.APP_PUBLIC_URL || ''));

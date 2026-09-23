@@ -45,7 +45,7 @@ import { CONNECTORS, connector, connectionCentre, connectionSettings, connection
 import { proposeConnectionWrite, executeConnectionWrite } from './lib/connection-writes.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.2.0';
+const VERSION = '6.2.1';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
