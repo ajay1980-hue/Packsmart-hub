@@ -205,6 +205,26 @@ export function verifyPassword(value, encoded) {
   }
 }
 
+// HTTP authentication uses the worker pool so password derivation does not block
+// dashboards, health probes or other tenants on the Node event loop.
+const deriveAsync = (password, salt, length, options) => new Promise((resolve, reject) => {
+  crypto.scrypt(password, salt, length, options, (error, result) => error ? reject(error) : resolve(result));
+});
+export async function hashPasswordAsync(value) {
+  const password = validatePassword(value), salt = crypto.randomBytes(16), cost = 16384;
+  const result = await deriveAsync(password, salt, 64, { N: cost, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });
+  return `scrypt$${cost}$${salt.toString('base64url')}$${result.toString('base64url')}`;
+}
+export async function verifyPasswordAsync(value, encoded) {
+  try {
+    const [scheme, costRaw, saltRaw, hashRaw, extra] = String(encoded || '').split('$');
+    const cost = Number(costRaw), expected = Buffer.from(hashRaw || '', 'base64url');
+    if (scheme !== 'scrypt' || extra || !saltRaw || expected.length !== 64 || !Number.isInteger(cost) || cost < 16384 || cost > 131072) return false;
+    const actual = await deriveAsync(String(value || ''), Buffer.from(saltRaw, 'base64url'), expected.length, { N: cost, r: 8, p: 1, maxmem: 256 * 1024 * 1024 });
+    return crypto.timingSafeEqual(expected, actual);
+  } catch { return false; }
+}
+
 function encryptionKey(secret) {
   if (!secret || String(secret).length < 32) throw new Error('CREDENTIALS_KEY must contain at least 32 characters');
   return crypto.createHash('sha256').update(secret).digest();

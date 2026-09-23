@@ -13,7 +13,7 @@ import {
   verifyConnectorOAuthState,
   parseCookies,
   encryptCredentials,
-  hashPassword,
+  hashPasswordAsync,
   normalizeEmail,
   publicConnection,
   safeEqual,
@@ -22,7 +22,7 @@ import {
   tokenFromRequest,
   validatePassword,
   verifyEbayOAuthStateToken,
-  verifyPassword,
+  verifyPasswordAsync,
   verifySessionToken
 } from './lib/security.mjs';
 import { IntegrationService } from './lib/integrations.mjs';
@@ -42,12 +42,13 @@ import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunit
 import { recordWork } from './lib/events.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
-import { proposeConnectionWrite, executeConnectionWrite } from './lib/connection-writes.mjs';
+import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
 
+import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.3.1';
+const VERSION = '6.4.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -158,7 +159,7 @@ function cleanEbayCredentials(value) {
   ) {
     throw Object.assign(new Error('The eBay Manager must use a public HTTPS URL without embedded credentials'), { status: 400, code: 'EBAY_URL_INVALID' });
   }
-  const expectedAccount = text(value?.expectedAccount || 'packsmartsolutions20', 100);
+  const expectedAccount = text(value?.expectedAccount, 100);
   if (!/^[A-Za-z0-9._-]{2,100}$/.test(expectedAccount)) {
     throw Object.assign(new Error('Enter the expected eBay seller username'), { status: 400, code: 'EBAY_ACCOUNT_INVALID' });
   }
@@ -302,6 +303,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const locks = new Map();
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  let healthPending;
+  let healthSnapshot;
   const startedAt = new Date().toISOString();
 
   function headers(contentType = 'application/json; charset=utf-8', cache = 'no-store') {
@@ -391,13 +395,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return verifySessionToken(token, env.SESSION_SECRET);
   }
 
-  async function authenticate(req, res) {
+  async function authenticate(req, res, { identityOnly = false } = {}) {
     const session = sessionFrom(req);
     if (!session) {
       send(res, 401, { error: 'Authentication required', code: 'AUTH_REQUIRED' });
       return null;
     }
-    const state = await store.get(session.workspaceId);
+    const state = identityOnly && store.getIdentity ? await store.getIdentity(session.workspaceId) : await store.get(session.workspaceId);
     const user = state?.users?.find(item => item.id === session.sub);
     if (!state || !user || user.active === false || Number(user.sessionVersion || 1) !== Number(session.sessionVersion || 1)) {
       send(res, 401, { error: 'Session is no longer valid', code: 'SESSION_INVALID' }, {
@@ -442,37 +446,6 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       await store.save(auth.session.workspaceId, state);
       return result;
     });
-  }
-
-  async function refreshOperationalState(state, { force = false } = {}) {
-    if (!force && (connectionSettings(state, 'shopify').disconnected || !connectionSettings(state, 'shopify').autoSync)) return false;
-    if (!force && state.connectionSettings?.shopify && !state.autopilot?.enabled) return false;
-    const lastShopify = Date.parse(state.integrationStatus?.shopify?.lastSyncAt || 0);
-    const interval = state.connectionSettings?.shopify ? connectionSettings(state, 'shopify').frequencyMinutes * 60000 : clamp(env.SYNC_INTERVAL_MS, 60000, 86400000, 15 * 60 * 1000);
-    const stale = !Number.isFinite(lastShopify) || Date.now() - lastShopify > interval;
-    const shopifyRefreshAvailable = integrations.shopifyRefreshAvailable(state);
-    const needsLiveCatalogueUpgrade = state.integrationStatus?.shopify?.source === 'repository-snapshot' &&
-      Boolean(integrations.shopifyPublicCatalogueUrl(state)) &&
-      !state.integrationStatus?.shopify?.publicAttemptedAt;
-    if (shopifyRefreshAvailable && (force || !state.products?.length || stale || needsLiveCatalogueUpgrade)) {
-      const previous = state.integrationStatus?.shopify || {};
-      if (!force && (/AUTH|CREDENTIAL|TOKEN_EXPIRED/.test(previous.lastError || '') || Date.now() - Date.parse(previous.lastFailureAt || 0) < 15 * 60000)) return false;
-      try { await monitoredSync(state, integrations, 'shopify', { automatic: !force }); }
-      catch (error) {
-        state.integrationStatus = {
-          ...(state.integrationStatus || {}),
-          shopify: {
-            ...state.integrationStatus?.shopify,
-            status: /AUTH|CREDENTIAL|TOKEN_EXPIRED/.test(error.code || '') ? 'auth_expired' : state.products?.length ? 'degraded' : 'error',
-            detail: state.products?.length ? 'Last known catalogue retained after a live sync error.' : 'Shopify data is unavailable.',
-            lastSyncAt: state.integrationStatus?.shopify?.lastSyncAt || null,
-            lastError: error.code || 'SHOPIFY_SYNC_FAILED'
-          }
-        };
-      }
-      return true;
-    }
-    return false;
   }
 
   function briefSourceSignature(state) {
@@ -521,6 +494,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       version: VERSION,
       workspace: state.workspace,
       user: publicUser(user),
+      launchAdmin: state.workspace.id === CUSTOMER_ZERO_WORKSPACE && user.role === 'owner' && normalizeEmail(user.email) === normalizeEmail(env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com'),
       csrf,
       products: state.products || [],
       orders: state.orders || [],
@@ -577,7 +551,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       send(res, 401, { error: 'Activation link is invalid or expired', code: 'ACTIVATION_INVALID' });
       return;
     }
-    const passwordHash = hashPassword(body.newPassword);
+    const passwordHash = await hashPasswordAsync(body.newPassword);
     const adminEmail = normalizeEmail(env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
     const result = await withWorkspaceLock(CUSTOMER_ZERO_WORKSPACE, async () => {
       const state = await getOrSeed(store, CUSTOMER_ZERO_WORKSPACE, env, {
@@ -647,7 +621,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     const suppliedPassword = String(body.password || '');
     const valid = Boolean(user?.active !== false && (
       user?.passwordHash
-        ? verifyPassword(suppliedPassword, user.passwordHash)
+        ? await verifyPasswordAsync(suppliedPassword, user.passwordHash)
         : Boolean(env.PACKSMART_ADMIN_PASSWORD) && found?.workspaceId === CUSTOMER_ZERO_WORKSPACE && email === adminEmail && safeEqual(suppliedPassword, env.PACKSMART_ADMIN_PASSWORD)
     ));
     if (!valid) {
@@ -681,7 +655,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   async function signup(req, res) {
-    if (!truthy(env.BETA_SIGNUPS_ENABLED)) {
+    if (String(env.SESSION_SECRET || '').length < 32 || String(env.CREDENTIALS_KEY || '').length < 32) throw Object.assign(new Error('Account creation is temporarily unavailable.'), { status: 503, code: 'AUTH_NOT_CONFIGURED' });
+    const rate = signupLimiter.check(requestIp(req));
+    if (!rate.allowed) { send(res, 429, { error: 'Too many signup attempts. Try again later.', code: 'SIGNUP_RATE_LIMITED' }); return; }
+    signupLimiter.fail(requestIp(req));
+    const launchState = await store.get(CUSTOMER_ZERO_WORKSPACE);
+    const mode = launchMode(launchState, env);
+    if (mode === 'closed') {
       send(res, 404, { error: 'Beta onboarding is not open yet', code: 'BETA_CLOSED' });
       return;
     }
@@ -689,12 +669,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     const email = normalizeEmail(body.email);
     const name = text(body.businessName, 120);
     if (!validEmail(email) || name.length < 2) throw Object.assign(new Error('Valid business name and email are required'), { status: 400, code: 'VALIDATION_FAILED' });
+    const invitation = mode === 'beta' ? validateInvite(launchState, body.invitation, email) : null;
     if (await store.findUserByEmail(email)) throw Object.assign(new Error('An account already exists for this email'), { status: 409, code: 'ACCOUNT_EXISTS' });
-    const passwordHash = hashPassword(body.password);
+    const passwordHash = await hashPasswordAsync(body.password);
     const slugBase = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'workspace';
-    const workspaceId = `${slugBase}-${crypto.randomBytes(4).toString('hex')}`;
+    const workspaceId = invitation ? `beta-${invitation.id}` : `${slugBase}-${crypto.randomBytes(8).toString('hex')}`;
     const state = seedWorkspaceState(env, { workspaceId, name, slug: workspaceId, email, passwordHash, plan: PLANS[body.plan] ? body.plan : 'starter' });
     state.users[0].passwordChangeRequired = false;
+    state.subscription.betaAccess = mode === 'beta';
+    state.subscription.status = mode === 'beta' ? 'beta' : 'pending';
+    if (invitation) state.invitationId = invitation.id;
     addAudit(state, { type: 'beta_account_created', actor: state.users[0].id, detail: { plan: state.subscription.plan } });
     await store.save(workspaceId, state);
     const user = state.users[0];
@@ -933,8 +917,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const pathname = url.pathname;
 
       if (['GET', 'HEAD'].includes(req.method) && pathname === '/api/health') {
-        let persistence = false;
-        try { persistence = await store.ping(); } catch {}
+        if (!healthSnapshot || Date.now() - healthSnapshot.checkedMs > 5000) {
+          healthPending ||= (async () => {
+            let persistence = false;
+            try { persistence = await store.ping(); } catch {}
+            healthSnapshot = { persistence, checkedMs: Date.now() };
+          })().finally(() => { healthPending = null; });
+          await healthPending;
+        }
+        const persistence = healthSnapshot.persistence;
         const authConfigured = Boolean(env.SESSION_SECRET && String(env.SESSION_SECRET).length >= 32);
         const encryptionConfigured = Boolean(env.CREDENTIALS_KEY && String(env.CREDENTIALS_KEY).length >= 32);
         const ready = persistence && (!isProduction || (store.provider === 'supabase' && authConfigured && encryptionConfigured));
@@ -943,6 +934,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           version: VERSION,
           commit: env.RENDER_GIT_COMMIT || null,
           startedAt,
+          checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
+          checkCacheMaxAgeMs: 5000,
           storage: store.provider,
           productionReady: persistence && store.provider === 'supabase' && authConfigured && encryptionConfigured,
           checks: {
@@ -970,7 +963,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
       if (req.method === 'GET' && pathname === '/api/auth/signup-options') {
-        send(res, 200, { enabled: truthy(env.BETA_SIGNUPS_ENABLED) }); return;
+        send(res, 200, publicLaunch(await store.get(CUSTOMER_ZERO_WORKSPACE), env)); return;
       }
       if (req.method === 'POST' && pathname === '/api/auth/signup') {
         await signup(req, res);
@@ -986,7 +979,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res);
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/auth/session' });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -996,6 +989,41 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+
+        if (pathname === '/api/admin/launch' || pathname === '/api/admin/invitations') {
+          requireLaunchAdmin(auth, env);
+          if (req.method === 'GET' && pathname === '/api/admin/launch') {
+            send(res, 200, { ...publicLaunch(auth.state, env), invitations: (auth.state.launchControl?.invitations || []).map(({ tokenHash, ...invite }) => invite) }); return;
+          }
+          if (req.method === 'PUT' && pathname === '/api/admin/launch') {
+            const body = await jsonBody(req, 4096);
+            if (!['closed', 'beta', 'public'].includes(body.mode) || (body.mode === 'public' && body.confirm !== 'ENABLE PUBLIC SIGNUP')) throw Object.assign(new Error('Select a valid launch mode and explicitly confirm public signup.'), { status: 400, code: 'LAUNCH_MODE_INVALID' });
+            const result = await mutate(auth, async state => {
+              state.launchControl = { ...state.launchControl, mode: body.mode };
+              addAudit(state, { type: 'launch_mode_changed', actor: auth.user.id, detail: { mode: body.mode } });
+              return publicLaunch(state, env);
+            });
+            send(res, 200, result); return;
+          }
+          if (req.method === 'POST' && pathname === '/api/admin/invitations') {
+            const body = await jsonBody(req, 4096);
+            const result = await mutate(auth, async state => {
+              const issued = issueInvite(state, body.email, auth.user.id);
+              return { ...issued, url: `${publicUrl.replace(/\/$/, '')}/#invite=${issued.token}` };
+            });
+            send(res, 201, result); return;
+          }
+          if (req.method === 'DELETE' && pathname === '/api/admin/invitations') {
+            const body = await jsonBody(req, 4096);
+            await mutate(auth, async state => {
+              const invite = state.launchControl?.invitations?.find(item => item.id === body.id);
+              if (!invite) throw Object.assign(new Error('Invitation not found'), { status: 404 });
+              invite.revoked = true;
+              addAudit(state, { type: 'beta_invitation_revoked', actor: auth.user.id, detail: { invitationId: invite.id } });
+            });
+            send(res, 200, { ok: true }); return;
+          }
+        }
 
         if (req.method === 'GET' && pathname === '/api/auth/session') {
           send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString() });
@@ -1015,12 +1043,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'POST' && pathname === '/api/auth/change-password') {
           const body = await jsonBody(req, 32768);
           validatePassword(body.newPassword);
-          if (!auth.user.passwordChangeRequired && !verifyPassword(body.currentPassword, auth.user.passwordHash)) {
+          if (!auth.user.passwordChangeRequired && !await verifyPasswordAsync(body.currentPassword, auth.user.passwordHash)) {
             throw Object.assign(new Error('Current password is incorrect'), { status: 401, code: 'PASSWORD_INCORRECT' });
           }
           const result = await mutate(auth, async state => {
             const user = state.users.find(item => item.id === auth.user.id);
-            user.passwordHash = hashPassword(body.newPassword);
+            user.passwordHash = await hashPasswordAsync(body.newPassword);
             user.passwordChangeRequired = false;
             user.sessionVersion = Number(user.sessionVersion || 1) + 1;
             user.updatedAt = new Date().toISOString();
@@ -1042,17 +1070,20 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/bootstrap') {
+          if (locks.has(auth.session.workspaceId) || auth.state.controlSignature === briefSourceSignature(auth.state)) {
+            send(res, 200, bootstrapPayload(auth.state, auth.user, auth.session.csrf)); return;
+          }
           const payload = await withWorkspaceLock(auth.session.workspaceId, async () => {
             const state = await store.get(auth.session.workspaceId);
             const briefIdsBefore = new Set((state.dailyBriefs || []).map(item => item.id));
-            const operationalStateChanged = await refreshOperationalState(state);
+            // Dashboard reads never call providers. Scheduler and explicit sync own refreshes.
             ensureControl(state);
             const signature = briefSourceSignature(state);
             const controlChanged = state.controlSignature !== signature;
             if (controlChanged) { detectExceptions(state); detectOpportunities(state); }
             const payload = bootstrapPayload(state, auth.user, auth.session.csrf);
             state.controlSignature = briefSourceSignature(state);
-            if (operationalStateChanged || controlChanged || !briefIdsBefore.has(payload.brief.id)) await store.save(auth.session.workspaceId, state);
+            if (controlChanged || !briefIdsBefore.has(payload.brief.id)) await store.save(auth.session.workspaceId, state);
             return payload;
           });
           send(res, 200, payload);
@@ -1422,6 +1453,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const connectorStart = pathname.match(/^\/api\/integrations\/([a-z_]+)\/oauth\/start$/);
         if (req.method === 'POST' && connectorStart) {
           requireOwner(auth); await startConnectorOAuth(connectorStart[1], auth, await jsonBody(req, 8192), res); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/connections/shopify/write-preview') {
+          requireApprover(auth);
+          const body = await jsonBody(req, 4096);
+          send(res, 200, await previewShopifyTagTest(auth.state, body.productId, integrations)); return;
         }
         const channelAction = pathname.match(/^\/api\/connections\/([a-z_]+)\/(settings|disconnect|test|refresh|sync|setup-request|writes)$/);
         if (channelAction && ['POST', 'PUT'].includes(req.method)) {

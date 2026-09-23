@@ -11,11 +11,13 @@
     productQuery: '', productStatus: 'active', productSort: 'product',
     orderFilter: 'all', approvalFilter: 'pending'
   };
+  let invitationToken = '';
   let ownerActivationToken = '';
   try {
     const fragment = new URLSearchParams(window.location.hash.slice(1));
     ownerActivationToken = String(fragment.get('activate') || '');
-    if (ownerActivationToken) window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    invitationToken = String(fragment.get('invite') || '');
+    if (ownerActivationToken || invitationToken) window.history.replaceState(null, '', window.location.pathname + window.location.search);
   } catch {}
   let ebayReturnResult = '';
   try {
@@ -73,15 +75,17 @@
     const method = String(config.method || 'GET').toUpperCase();
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     if (state.csrf && method !== 'GET' && method !== 'HEAD') headers.set('X-CSRF-Token', state.csrf);
-    let response;
-    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 120000);
+    let response, payload = {};
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), method === 'GET' ? 30000 : 120000);
+    const cancel = () => controller.abort();
+    if (config.signal?.aborted) controller.abort();
+    else config.signal?.addEventListener('abort', cancel, { once: true });
     try {
-      response = await fetch(path, Object.assign({}, config, { headers, credentials: 'same-origin', cache: 'no-store', signal: config.signal || controller.signal }));
+      response = await fetch(path, Object.assign({}, config, { headers, credentials: 'same-origin', cache: 'no-store', signal: controller.signal }));
+      try { payload = await response.json(); } catch (error) { if (controller.signal.aborted) throw error; }
     } catch (cause) {
       throw Object.assign(new Error(cause.name === 'TimeoutError' || cause.name === 'AbortError' ? 'The request took too long. Check connection activity before retrying; it may still be running.' : 'Runvara could not be reached. Check your internet connection and connection activity before retrying any change.'), { code: 'REQUEST_UNAVAILABLE' });
-    } finally { clearTimeout(timeout); }
-    let payload = {};
-    try { payload = await response.json(); } catch {}
+    } finally { clearTimeout(timeout); config.signal?.removeEventListener('abort', cancel); }
     if (response.status === 401 && !path.endsWith('/login') && !path.endsWith('/activate-owner') && !path.endsWith('/signup-options')) {
       state.session = null; state.data = null; state.csrf = ''; showLogin();
     }
@@ -96,7 +100,12 @@
     $('#loading-screen')?.classList.add('hidden');
     window.RunvaraConnections?.endSession();
     $('#login-screen').classList.remove('hidden');
-    request('/api/auth/signup-options').then(options=>$('#signup-options')?.classList.toggle('hidden',!options.enabled)).catch(()=>{});
+    request('/api/auth/signup-options').then(options => {
+      $('#signup-options')?.classList.toggle('hidden', !options.enabled);
+      $('#signup-invitation-label')?.classList.toggle('hidden', !options.invitationRequired);
+      const input = $('#signup-form').elements.invitation; input.required = Boolean(options.invitationRequired); input.value = invitationToken;
+      if (invitationToken && options.enabled) $('#signup-options').open = true;
+    }).catch(error => { $('#login-error').textContent = error.message; });
     $('#password-screen').classList.add('hidden');
     $('#app-shell').classList.add('hidden');
   }
@@ -122,7 +131,7 @@
       if (session.user && session.user.passwordChangeRequired) { showPasswordSetup(); return false; }
       return true;
     } catch (error) {
-      if (error.status !== 401) $('#login-error').textContent = error.message;
+      if (error.status !== 401) throw error;
       showLogin(); return false;
     }
   }
@@ -146,6 +155,12 @@
     }
     const data = await request('/api/bootstrap');
     state.data = data; state.csrf = data.csrf || state.csrf;
+    $('#workspace-label').textContent = data.workspace.name;
+    $('#workspace-heading').textContent = data.workspace.name;
+    $('#sidebar-workspace').textContent = data.workspace.name;
+    $('#sidebar-account').textContent = data.workspace.id === 'packsmart-solutions' ? 'Customer zero · internal' : 'Independent workspace';
+    $('#launch-controls').classList.toggle('hidden', !data.launchAdmin);
+    $('#customer-zero-manager').classList.toggle('hidden', data.workspace.id !== 'packsmart-solutions');
     localStorage.removeItem(LOCAL.economics);
     localStorage.removeItem(LOCAL.automations);
     renderAll(); showApp();
@@ -159,12 +174,14 @@
 
   function setView(view) {
     state.view = view;
-    $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
+    $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
+    document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
     const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
+      if (state.data?.launchAdmin) loadLaunch().catch(error => showMessage(error.message, 'error'));
       loadBilling().catch(error => showMessage(error.message, 'error'));
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -450,9 +467,9 @@
     const billing = await request('/api/billing');
     $('#billing-status').innerHTML = [
       ['Current plan', billing.subscription && billing.subscription.plan || '—'], ['Current status', billing.subscription && billing.subscription.status || '—'],
-      ['Packsmart charge', billing.customerZeroFree ? '£0 · internal testing' : 'Not started'], ['Checkout', billing.checkoutEnabled ? 'Enabled' : 'Disabled']
+      ['Billing', billing.customerZeroFree ? '£0 · internal testing' : 'No charge started'], ['Checkout', billing.checkoutEnabled ? 'Enabled' : 'Disabled']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(statusLabel(item[1])) + '</b></div>').join('');
-    $('#plan-grid').innerHTML = Object.entries(billing.plans || {}).map(([id, plan]) => '<div class="plan"><b>' + escapeHtml(plan.name) + '</b><strong>~£' + escapeHtml(plan.indicativeMonthlyGbp) + '<small>/mo</small></strong><span>' + escapeHtml((plan.features || []).join(' · ')) + '</span><em>' + escapeHtml(id) + '</em></div>').join('');
+    $('#plan-grid').textContent = 'Commercial plans and pricing await owner confirmation.';
   }
 
   async function saveEconomics(button) {
@@ -461,7 +478,7 @@
     const economics = {};
     rows.flatMap(row => Array.from(row.querySelectorAll('.econ-input'))).forEach(field => { economics[field.dataset.field] = field.value; });
     setBusy(button, true, 'Saving…');
-    try { await request('/api/economics', { method: 'PUT', body: JSON.stringify({ sku, economics }) }); await loadBootstrap({ migrate: false }); showMessage('Costs saved to the Packsmart cloud workspace.'); }
+    try { await request('/api/economics', { method: 'PUT', body: JSON.stringify({ sku, economics }) }); await loadBootstrap({ migrate: false }); showMessage('Costs saved to your workspace.'); }
     catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
   }
 
@@ -484,7 +501,7 @@
     event.preventDefault();const form=event.currentTarget, button=form.querySelector('button');$('#signup-error').textContent='';
     if(form.password.value!==form.confirmPassword.value){$('#signup-error').textContent='The passwords do not match.';return;}
     setBusy(button,true,'Creating your workspace…');
-    try {const payload=await request('/api/auth/signup',{method:'POST',body:JSON.stringify({businessName:form.businessName.value,email:form.email.value,password:form.password.value})});state.session=payload;state.csrf=payload.csrf;form.reset();await loadBootstrap();setView('channels');}
+    try {const payload=await request('/api/auth/signup',{method:'POST',body:JSON.stringify({businessName:form.businessName.value,email:form.email.value,password:form.password.value,invitation:form.invitation.value})});state.session=payload;state.csrf=payload.csrf;form.reset();invitationToken='';await loadBootstrap();setView('channels');}
     catch(error){$('#signup-error').textContent=error.message;}
     finally{setBusy(button,false);}
   });
@@ -622,7 +639,7 @@
   $('#sync-shopify').addEventListener('click', event => syncProvider('shopify', event.currentTarget));
   $('#sync-ebay').addEventListener('click', event => syncProvider('ebay', event.currentTarget));
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
-  $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Packsmart operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
+  $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
   $('#logout').addEventListener('click', async () => { try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
@@ -633,13 +650,35 @@
     finally { setBusy(button, false); }
   });
 
+
+  $('#mobile-menu').addEventListener('click', () => { const open = document.body.classList.toggle('nav-open'); $('#mobile-menu').setAttribute('aria-expanded', String(open)); });
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') { document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded', 'false'); } });
+  $('#startup-retry').addEventListener('click', () => window.location.reload());
+  async function loadLaunch() {
+    const launch = await request('/api/admin/launch');
+    $('#launch-mode-form').elements.mode.value = launch.mode;
+    $('#invitation-list').innerHTML = (launch.invitations || []).map(invite => '<div class="control-record"><b>' + escapeHtml(invite.email) + '</b><p>Expires ' + date(invite.expiresAt) + (invite.revoked ? ' · Revoked' : '') + '</p>' + (!invite.revoked ? '<button class="secondary" data-revoke-invite="' + escapeHtml(invite.id) + '">Revoke invitation</button>' : '') + '</div>').join('');
+  }
+  $('#launch-mode-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget;
+    try { const result = await request('/api/admin/launch', { method:'PUT', body:JSON.stringify({mode:form.elements.mode.value,confirm:form.elements.confirm.value}) }); form.elements.confirm.value=''; $('#launch-feedback').textContent='Signup mode: '+result.mode; }
+    catch(error) { $('#launch-feedback').textContent=error.message; }
+  });
+  $('#invite-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form=event.currentTarget, button=form.querySelector('button');setBusy(button,true,'Creating…');
+    try { const result=await request('/api/admin/invitations',{method:'POST',body:JSON.stringify({email:form.elements.email.value})});$('#invite-link').value=result.url;$('#invite-link-label').classList.remove('hidden');await loadLaunch(); }
+    catch(error){$('#launch-feedback').textContent=error.message;}finally{setBusy(button,false);}
+  });
+  $('#invitation-list').addEventListener('click', async event => {
+    const button=event.target.closest('[data-revoke-invite]');if(!button)return;
+    try{await request('/api/admin/invitations',{method:'DELETE',body:JSON.stringify({id:button.dataset.revokeInvite})});await loadLaunch();}catch(error){$('#launch-feedback').textContent=error.message;}
+  });
+
   window.RunvaraControl.init({ request, reload: loadBootstrap, notify: showMessage, setView, money, date, escapeHtml });
   window.RunvaraConnections?.init({ request, reload: loadBootstrap, notify: showMessage, setView, date, escapeHtml });
 
   (async () => {
     try {
-      const health = await request('/api/health');
-      if (!health.ok) throw new Error('Packsmart Ops health check is not ready.');
       if (ownerActivationToken) { showPasswordSetup(); return; }
       if (await loadSession()) {
         await loadBootstrap();
@@ -659,6 +698,6 @@
         else if (ebayReturnResult === 'error') showMessage('eBay sign-in could not be completed. No marketplace change was made.', 'error');
       }
     }
-    catch (error) { $('#login-error').textContent = error.status === 401 ? '' : error.message; showLogin(); }
+    catch (error) { $('#startup-error').textContent = error.message; $('#startup-retry').classList.remove('hidden'); $('#loading-screen').querySelector('.skeleton-group')?.classList.add('hidden'); }
   })();
 })();
