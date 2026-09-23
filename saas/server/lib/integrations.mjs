@@ -1028,7 +1028,7 @@ export class IntegrationService {
     const optionalRead = async (surface, operation, fallback) => {
       if (!selected(surface)) return fallback;
       const previous = state.ebay?.coverage?.readDiagnostics?.[surface];
-      if (automatic && [401, 403].includes(previous?.httpStatus)) {
+      if (automatic && ([401, 403].includes(previous?.httpStatus) || (surface === 'marketing' && previous?.errorIds?.map(String).includes('35077')))) {
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
         readDiagnostics[surface] = { ...previous, automaticRetryBlocked: true };
         return fallback;
@@ -1037,7 +1037,7 @@ export class IntegrationService {
         return await operation();
       } catch (error) {
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
-        readDiagnostics[surface] = { code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401, 403].includes(error.upstreamStatus) };
+        readDiagnostics[surface] = { code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401, 403].includes(error.upstreamStatus) || (surface === 'marketing' && error.upstreamErrorIds?.map(String).includes('35077')) };
         return fallback;
       }
     };
@@ -1048,7 +1048,7 @@ export class IntegrationService {
     ]);
     if (marketing.adFailures?.length) {
       readErrors.marketing = 'EBAY_MARKETING_ADS_PARTIAL';
-      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus)) };
+      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus) || item.errorIds?.map(String).includes('35077')) };
     }
     const offerPairs = readErrors.inventory
       ? []

@@ -9,7 +9,7 @@ import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, verifySessionToken, decryptCredentials, encryptCredentials } from '../lib/security.mjs';
 import { IntegrationService, mergeSelectedShopify } from '../lib/integrations.mjs';
-import { connectionCentre, connectionDue, saveConnectionSettings } from '../lib/connection-centre.mjs';
+import { connectionCentre, connectionDue, saveConnectionSettings, recoveryFor } from '../lib/connection-centre.mjs';
 import { tiktokSignature } from '../lib/connector-oauth.mjs';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
@@ -586,4 +586,11 @@ test('connection polling never overlaps slow status requests',async t=>{
   poll();poll();poll();assert.equal(calls,1);
   resolve({channels:[channel],writes:[],autopilotEnabled:false});await new Promise(done=>setImmediate(done));
   window.RunvaraConnections.endSession();
+});
+
+test('eBay eligibility recovery explains provider restriction without reconnect advice',()=>{
+  const recovery = recoveryFor('ebay', {status:'degraded'}, {readDiagnostics:{marketing:{httpStatus:409,errorIds:['35077'],stage:'ads'}}});
+  assert.match(recovery.message, /not currently eligible/);
+  assert.match(recovery.message, /Order imports can continue/);
+  assert.equal(recovery.action, 'sync');
 });

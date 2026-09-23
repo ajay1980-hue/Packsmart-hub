@@ -24,5 +24,11 @@ This follow-up addresses issues encountered during production checks:
   callback or provider write. Other/ambiguous failures are not automatically retried.
 
 No database schema, access policy, timeout, credential or production permission
-change. Regression coverage: 94 server tests including incremental mirrors,
+change. Regression coverage: 96 server tests including incremental mirrors,
 failed-mirror retry, bounded SQL retry, campaign partial failures and pagination.
+
+Live eBay error 35077 is a provider Promoted Listings eligibility restriction
+(seller level and/or recent sales activity), documented in the official
+[Marketing OpenAPI specification](https://developer.ebay.com/api-docs/master/sell/marketing/openapi/3/sell_marketing_v1_oas3.json).
+Show actionable eligibility guidance and pause automatic marketing retries while
+retaining other reads. Manual recheck remains available after eBay review.
