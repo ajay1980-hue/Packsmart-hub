@@ -45,6 +45,7 @@ export function saveConnectionSettings(state, provider, body, user) {
   }
   if (Object.hasOwn(body, 'permissionMode')) {
     if (!PERMISSION_MODES.includes(body.permissionMode)) throw connectionError('Choose a supported permission setting.');
+    if (body.permissionMode !== 'read_only' && !connector(provider).writes.length) throw connectionError('Write actions are not implemented for this channel. Automatic read syncing is available separately.', 'WRITE_UNSUPPORTED', 422);
     if (body.permissionMode !== previous.permissionMode) {
       if (user.role !== 'owner') throw connectionError('Only the workspace owner can change write permissions.', 'OWNER_APPROVAL_REQUIRED', 403);
       if (body.permissionMode !== 'read_only' && body.confirmPermission !== `${provider}:${body.permissionMode}`) throw connectionError('Confirm the change to write permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
@@ -89,7 +90,7 @@ export function disconnectConnection(state, provider, body, actor, integrations)
 export function recoveryFor(provider, status = {}, coverage = {}) {
   const name = connector(provider).name, code = String(status.lastError || '');
   if (provider === 'meta' && code === 'META_ASSET_REQUIRED') return { message: 'Choose your Pages and catalogues in this panel, then try syncing again.', action: 'open', label: 'Review selected assets' };
-  if (provider === 'meta' && code === 'META_RATE_LIMITED') return { message: 'Meta is limiting requests. Wait a few minutes, then try syncing again.', action: 'sync', label: 'Retry sync' };
+  if (/RATE_LIMITED/.test(code)) return { message: `${name} is limiting requests. Wait a few minutes, then try syncing again.`, action: 'sync', label: 'Retry sync' };
   if (/ACCOUNT_MISMATCH/.test(code)) return { message: `A different ${name} account was returned. Reconnect the account already used by this workspace.`, action: 'reconnect', label: `Reconnect ${name}` };
   if (/CUSTOMER_PERMISSION/.test(code)) return { message: 'Shopify has not granted customer access. Reconnect with customer records selected, or turn off customers in your sync areas.', action: 'reconnect', label: 'Review Shopify access' };
   if (/AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION/.test(code) || status.status === 'auth_expired') return { message: `Your ${name} connection needs reconnecting. Sign in again to renew access.`, action: 'reconnect', label: `Reconnect ${name}` };
@@ -139,11 +140,14 @@ export function connectionCentre(state, integrations) {
     const recovery = recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {});
     const status = settings.disconnected ? 'disconnected' : !configured ? 'not_configured' : recovery?.action === 'reconnect' ? 'action_required' : recovery ? 'degraded' : ['connected', 'configured'].includes(health.status || record?.status) ? (health.status === 'connected' ? 'connected' : 'action_required') : 'action_required';
     const history = (state.connectionSyncs || []).filter(run => run.provider === id).slice(0, 30).map(run => ({ ...run, ...(run.status === 'running' && Date.parse(run.leaseUntil) <= Date.now() ? { status: 'failed', stage: 'Interrupted — retry sync', errorCode: 'WORKER_INTERRUPTED' } : {}) }));
-    const products = id === 'shopify' ? state.products || [] : id === 'ebay' ? state.ebay?.listings || [] : [];
+    const products = id === 'shopify' ? (state.products || []).filter(product => product.provider === 'shopify') : id === 'ebay' ? state.ebay?.listings || [] : [];
     const readData = state.channelData?.[id] || {};
     const counts = { ...(id === 'shopify' || id === 'ebay' ? { products: products.length, orders: (state.orders || []).filter(order => order.provider === id).length } : {}), ...(id === 'shopify' ? { variants: products.reduce((sum, product) => sum + (product.variants?.length || 0), 0), customers: state.channelData?.shopify?.customers?.length || 0 } : {}), ...Object.fromEntries(Object.entries(readData).filter(([,value]) => Array.isArray(value)).map(([key,value]) => [key,value.length])) };
     const granted = record?.metadata?.grantedScopes || [];
     return { id, name: definition.name, status, configured, settings, identity: record?.metadata?.shopDomain || record?.metadata?.account || health.account || null,
+      grantedScopes: granted, accessExpiresAt: integrations.connectionAccessExpiry?.(record) || null,
+      lastFailedSyncAt: history.find(run => ['failed', 'partial'].includes(run.status))?.completedAt || history.find(run => ['failed', 'partial'].includes(run.status))?.startedAt || null,
+      audit: (state.audit || []).filter(event => event.detail?.provider === id).slice(0, 30).map(({ id, type, createdAt }) => ({ id, type, createdAt })),
       areas: definition.areas, counts, recovery: configured ? recovery : null, history, progress: history.find(run => run.status === 'running') || null,
       lastSuccessfulSyncAt: health.lastSuccessfulSyncAt || history.find(run => run.status === 'completed')?.completedAt || (!history.length && !health.lastError ? health.lastSyncAt : null) || null, lastCheckedAt: record?.lastCheckedAt || null,
       oauthReady: Boolean(integrations.oauthReady?.(id, state)), refreshSupported: Boolean(configured && integrations.refreshSupported?.(state, id)),

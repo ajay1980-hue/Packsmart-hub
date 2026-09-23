@@ -73,20 +73,27 @@
     const method = String(config.method || 'GET').toUpperCase();
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     if (state.csrf && method !== 'GET' && method !== 'HEAD') headers.set('X-CSRF-Token', state.csrf);
-    const response = await fetch(path, Object.assign({}, config, { headers, credentials: 'same-origin', cache: 'no-store' }));
+    let response;
+    const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 120000);
+    try {
+      response = await fetch(path, Object.assign({}, config, { headers, credentials: 'same-origin', cache: 'no-store', signal: config.signal || controller.signal }));
+    } catch (cause) {
+      throw Object.assign(new Error(cause.name === 'TimeoutError' || cause.name === 'AbortError' ? 'The request took too long. Check connection activity before retrying; it may still be running.' : 'Runvara could not be reached. Check your internet connection and connection activity before retrying any change.'), { code: 'REQUEST_UNAVAILABLE' });
+    } finally { clearTimeout(timeout); }
     let payload = {};
     try { payload = await response.json(); } catch {}
     if (response.status === 401 && !path.endsWith('/login') && !path.endsWith('/activate-owner')) {
       state.session = null; state.data = null; state.csrf = ''; showLogin();
     }
     if (!response.ok) {
-      const error = new Error(payload.error || 'Request failed (' + response.status + ')');
+      const error = new Error(payload.code === 'AUTH_REQUIRED' ? 'Your Runvara session has expired. Sign in again to continue.' : payload.error || 'Request failed (' + response.status + ')');
       error.status = response.status; error.code = payload.code; throw error;
     }
     return payload;
   }
 
   function showLogin() {
+    window.RunvaraConnections?.endSession();
     $('#login-screen').classList.remove('hidden');
     $('#password-screen').classList.add('hidden');
     $('#app-shell').classList.add('hidden');

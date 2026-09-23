@@ -260,7 +260,7 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   const errors=[], console=new VirtualConsole(); console.on('jsdomError',error=>errors.push(error.message));
   const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',virtualConsole:console,pretendToBeVisual:true});
   t.after(()=>dom.window.close());const {window}=dom, document=window.document;
-  window.Headers=Headers;window.scrollTo=()=>{};window.HTMLElement.prototype.scrollIntoView=()=>{};
+  window.Headers=Headers;window.AbortController=AbortController;window.scrollTo=()=>{};window.HTMLElement.prototype.scrollIntoView=()=>{};
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
   window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
@@ -289,6 +289,11 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   document.querySelector('[data-connection-action="setup-request"]').click();
   await until(()=>document.getElementById('connection-detail').textContent.includes('Setup request recorded'));
   assert.deepEqual(errors,[]);
+  window.fetch=async()=>json({error:'Authentication required',code:'AUTH_REQUIRED'},401);
+  document.getElementById('connection-refresh').click();
+  await until(()=>!document.getElementById('connection-dialog').open);
+  assert.equal(document.getElementById('login-screen').classList.contains('hidden'),false);
+  assert.match(document.getElementById('global-error').textContent,/Runvara session has expired/);
 });
 
 async function metaFixture(t) {
@@ -415,7 +420,7 @@ test('Meta customer controls select assets, request scopes and prepare the exact
   const f=await metaFixture(t);await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products','inventory']}});await f.metaPolicy();
   const errors=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message));
   const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',virtualConsole:vc,pretendToBeVisual:true});t.after(()=>dom.window.close());
-  const {window}=dom,doc=window.document;window.Headers=Headers;window.scrollTo=()=>{};window.HTMLElement.prototype.scrollIntoView=()=>{};
+  const {window}=dom,doc=window.document;window.Headers=Headers;window.AbortController=AbortController;window.scrollTo=()=>{};window.HTMLElement.prototype.scrollIntoView=()=>{};
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
   window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
@@ -465,4 +470,52 @@ test('Meta Connect UI refuses Meta Work, developer portals and lookalike OAuth d
     assert.match(doc.querySelector('#connection-feedback').textContent,/No account was connected/);assert.equal(form.querySelector('button[type=submit]').disabled,false);assert.equal(window.location.href,'https://runvara.example.test/');
   }
   assert.match(doc.querySelector('#connection-onboarding').textContent,/No Meta Work account is needed/);assert.deepEqual(errors,[]);
+});
+
+test('connection diagnostics expose safe expiry and tenant audit summaries, never token material',async t=>{
+  const f=await fixture(t);await f.connect();
+  const state=await f.server.packsmart.store.get('alpha'), record=state.connections.find(item=>item.provider==='shopify');
+  const credentials=decryptCredentials(record.encryptedCredentials,KEY);
+  record.encryptedCredentials=encryptCredentials({...credentials,expiresAt:Date.now()+3600000},KEY);
+  state.audit.unshift({id:'audit-safe',type:'connection_permissions_changed',createdAt:'2026-09-23T12:00:00Z',detail:{provider:'shopify',secret:'must-not-be-exposed'}});
+  await f.server.packsmart.store.save('alpha',state);
+  const value=await f.channel();
+  assert.ok(value.accessExpiresAt);assert.equal(value.audit[0].id,'audit-safe');assert.equal(value.audit[0].detail,undefined);
+  assert.doesNotMatch(JSON.stringify(value),/must-not-be-exposed|test-only-shopify-access-token/);
+  const other=await f.request('/api/connection-centre',{tenant:'beta'});
+  assert.doesNotMatch(JSON.stringify(other.body),/audit-safe/);
+});
+
+test('unsupported channel write modes are rejected without consent or settings mutations',()=>{
+  const state=seedWorkspaceState();const before=JSON.stringify(state);
+  assert.throws(()=>saveConnectionSettings(state,'google_youtube',{revision:0,permissionMode:'automatic',confirmPermission:'google_youtube:automatic'},{id:'owner',role:'owner'}),error=>error.code==='WRITE_UNSUPPORTED');
+  assert.equal(JSON.stringify(state),before);
+});
+
+test('failed sync and failed status refresh restore controls instead of leaving Starting sync',async t=>{
+  const f=await fixture(t);await f.connect();
+  const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only'});t.after(()=>dom.window.close());
+  const {window}=dom, document=window.document;
+  window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  const messages=[];
+  window.RunvaraConnections.init({request:async()=>{throw Object.assign(new Error('Authentication required'),{code:'AUTH_REQUIRED',status:401});},escapeHtml:value=>String(value??''),date:String,notify:message=>messages.push(message),reload:async()=>{},setView:()=>{}});
+  window.RunvaraConnections.render({user:{role:'owner'},connectionCentre:[await f.channel()],connectionWrites:[]});
+  window.RunvaraConnections.open('shopify');document.querySelector('[data-connection-action="sync-selected"]').click();
+  for(let i=0;i<30&&!messages.length;i++)await new Promise(resolve=>setTimeout(resolve,5));
+  assert.match(messages[0],/Runvara session has expired/);
+  assert.doesNotMatch(document.getElementById('connection-progress').textContent,/Starting sync/);
+  assert.equal(document.querySelector('[data-connection-action="test"]').disabled,false);
+  assert.equal(document.getElementById('connection-dialog').hasAttribute('aria-busy'),false);
+  window.RunvaraConnections.endSession();assert.equal(document.getElementById('connection-dialog').open,false);
+});
+
+test('provider rate limits offer retry recovery without incorrectly asking for credentials',async()=>{
+  const service=new IntegrationService({CREDENTIALS_KEY:KEY},{fetchImpl:async()=>json({},429)});
+  service.fetch=async()=>json({},429);
+  await assert.rejects(service.connectorGet('google_youtube','/channels',{accessToken:'test'}),error=>error.code==='CONNECTION_RATE_LIMITED');
+  const state=seedWorkspaceState();state.integrationStatus.google_youtube={status:'degraded',lastError:'CONNECTION_RATE_LIMITED'};
+  state.connections=[{provider:'google_youtube',encryptedCredentials:encryptCredentials({accessToken:'test'},KEY)}];
+  const channel=connectionCentre(state,service).find(item=>item.id==='google_youtube');
+  assert.equal(channel.recovery.action,'sync');assert.match(channel.recovery.message,/limiting requests/);
 });

@@ -23,7 +23,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   const dom = new JSDOM(await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8'), { url: base, runScripts: 'outside-only', virtualConsole: console, pretendToBeVisual: true });
   t.after(async () => { dom.window.close(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
   const { window } = dom, document = window.document;
-  window.Headers = Headers; window.scrollTo = () => {}; window.HTMLElement.prototype.scrollIntoView = () => {};
+  window.Headers = Headers; window.AbortController = AbortController; window.scrollTo = () => {}; window.HTMLElement.prototype.scrollIntoView = () => {};
   window.fetch = async (route, options = {}) => {
     const headers = new Headers(options.headers); headers.set('Cookie', `packsmart_session=${token}`);
     const response = await fetch(base + route, { ...options, headers });
