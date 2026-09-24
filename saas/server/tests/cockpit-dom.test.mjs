@@ -35,7 +35,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
     for (let attempt = 0; attempt < 150; attempt++) { if (await condition()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
     assert.fail(`UI did not reach expected state. Errors: ${errors.join('; ')}; message: ${document.querySelector('#global-error').textContent}`);
   };
-  for (const file of ['control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
   assert.equal(document.querySelector('[onerror]'), null, 'source text is escaped');
@@ -159,6 +159,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
       w.RunvaraControl = { init() {}, render() {}, evidence() { return ''; }, history() { return ''; } };
       const data = { ...bootstrap, integrations: scenario.values.map((revenue, index) => ({ id: 'channel-' + index, name: index ? 'Channel ' + index : '<img src=x onerror=alert(1)>', kind: 'commerce', status: 'connected', metrics30d: { revenue } })) };
       w.fetch = async route => new Response(JSON.stringify(route === '/api/auth/session' ? { user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf } : data), { status: 200 });
+      w.eval(await fs.readFile(new URL('../../presentation.js', import.meta.url), 'utf8'));
       w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
       for (let i = 0; i < 100 && w.document.getElementById('app-shell').classList.contains('hidden'); i++) await new Promise(resolve => setTimeout(resolve, 5));
       assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false, w.document.getElementById('startup-error').textContent + '; ' + chartErrors.join('; '));

@@ -270,20 +270,53 @@
   function channelCard(channel) {
     const metrics = channel.metrics30d;
     const metricHtml = metrics ? '<div class="channel-metrics"><span><b>' + escapeHtml(metrics.orders || 0) + '</b> orders</span><span><b>' + escapeHtml(money(metrics.revenue)) + '</b> revenue</span><span><b>' + escapeHtml(money(metrics.operatingProfit)) + '</b> contribution</span><span><b>' + escapeHtml(money(metrics.advertisingSpend)) + '</b> ads</span></div>' : '';
-    const sync = channel.lastSyncAt ? 'Last sync ' + date(channel.lastSyncAt) : 'No successful live sync';
-    return '<article class="channel-card"><div class="channel-icon">' + escapeHtml(channel.name.slice(0, 2).toUpperCase()) + '</div><div><b>' + escapeHtml(channel.name) + '</b><small>' + escapeHtml(channel.detail) + '</small><div class="capabilities">' + (channel.capabilities || []).map(item => '<span>' + escapeHtml(item) + '</span>').join('') + '</div>' + metricHtml + '<p class="channel-sync">' + escapeHtml(sync) + (channel.lastError ? ' · ' + escapeHtml(statusLabel(channel.lastError)) : '') + (channel.lastFailureAt ? '<br>Last failure ' + escapeHtml(date(channel.lastFailureAt)) : '') + (channel.recommendedRepair ? '<br>' + escapeHtml(channel.recommendedRepair) : '') + '</p></div><span class="tag ' + statusClass(channel.status) + '">' + escapeHtml(statusLabel(channel.status)) + '</span></article>';
+    const connected = (state.data.connectionCentre || []).find(item => item.id === channel.id);
+    const sync = connected?.lastSuccessfulSyncAt || channel.lastSyncAt;
+    const areas = connected ? connected.settings?.areas || [] : channel.capabilities || [];
+    const message = connected ? window.RunvaraUI.connectionMessage(connected) : channel.detail;
+    return `<article class="channel-card"><div class="channel-icon">${window.RunvaraUI.logo(channel.id)}</div><div><b>${escapeHtml(channel.name)}</b><small>${escapeHtml(message)}</small><div class="capabilities">${areas.map(item => `<span>${escapeHtml(statusLabel(item))}</span>`).join('')}</div>${metricHtml}<p class="channel-sync">${escapeHtml(sync ? 'Last successful sync ' + date(sync) : 'No successful live sync')}</p></div><span class="tag ${statusClass(connected?.status || channel.status)}">${escapeHtml(statusLabel(connected?.status || channel.status))}</span></article>`;
   }
 
   function ranking(items, risk) {
     return items.length ? items.map(item => '<button class="ranking-row" data-view-link="profit" data-target-filter="' + (risk ? escapeHtml(item.status) : 'profitable') + '"><span><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.sku) + '</small></span><strong class="' + statusClass(item.status) + '">' + escapeHtml(money(item.contribution)) + '<small>' + escapeHtml(percent(item.margin)) + '</small></strong></button>').join('') : '<div class="empty-state">No fully costed products yet.</div>';
   }
 
+  function renderTrajectory() {
+    const signals = state.data.dashboard?.revenueSignals;
+    const root = $('#revenue-trajectory');
+    if (!signals?.daily?.length) { root.innerHTML = '<p class="empty-state">Import orders to build a revenue history.</p>'; return; }
+    const days = signals.daily, values = days.filter(item => item.revenue !== null).map(item => item.revenue);
+    const minimum = Math.min(0,...values), maximum = Math.max(1,...values), range = maximum - minimum;
+    const x = index => 12 + index * 576 / Math.max(1,days.length - 1), y = value => 140 - (value - minimum) / range * 120;
+    const segments = []; let segment = [];
+    days.forEach((item,index) => { if (item.revenue === null) { if (segment.length) segments.push(segment); segment = []; } else segment.push(`${x(index).toFixed(1)},${y(item.revenue).toFixed(1)}`); });
+    if (segment.length) segments.push(segment);
+    const comparison = signals.comparisons?.[30];
+    const delta = comparison?.change;
+    const comparisonText = delta != null ? `${delta > 0 ? '+' : ''}${delta}% against the previous 30 days` : comparison?.previous?.revenue === null || comparison?.current?.revenue === null ? 'Incomplete revenue values — comparison unavailable' : 'No positive previous-period baseline';
+    const orders = days.reduce((sum,item)=>sum+item.orders,0), unknown = days.reduce((sum,item)=>sum+item.orders-item.knownOrders,0);
+    const caption = orders ? `${orders} settled imported orders. ${unknown ? `${unknown} have unknown revenue; gaps remain visible.` : 'Zero days mean no settled orders in the imported records.'}` : 'No settled orders in the imported records for these dates.';
+    root.innerHTML = `<div class="trajectory-reading"><strong>${money(comparison?.current?.revenue)}</strong><span>${escapeHtml(comparisonText)}<small>Rolling 30-day net revenue</small></span></div><svg class="trajectory" viewBox="0 0 600 168" role="img" aria-label="Daily imported net revenue over 30 UTC days"><title>Daily imported net revenue</title><desc>${escapeHtml(caption)} Exact values are in the data table below.</desc><defs><linearGradient id="revenue-signal" x1="0" x2="1"><stop stop-color="#4c8eff"/><stop offset="1" stop-color="#37d8ef"/></linearGradient></defs><path class="trajectory-grid" d="M12 20H588M12 80H588M12 140H588"/>${segments.map(points=>`<polyline class="trajectory-line" points="${points.join(' ')}"/>`).join('')}${days.map((item,index)=>item.revenue!==null&&item.orders ? `<circle class="trajectory-point" cx="${x(index)}" cy="${y(item.revenue)}" r="3"><title>${escapeHtml(item.date + ': ' + money(item.revenue))}</title></circle>`:'').join('')}<text x="12" y="164">${escapeHtml(days[0].date)}</text><text x="588" y="164" text-anchor="end">${escapeHtml(days.at(-1).date)}</text></svg><p class="signal-note">${escapeHtml(caption)}</p><details class="evidence trajectory-data"><summary>View exact daily values</summary><div class="table-scroll"><table><thead><tr><th scope="col">UTC date</th><th scope="col">Settled orders</th><th scope="col">Net revenue</th></tr></thead><tbody>${days.map(item=>`<tr><td>${escapeHtml(item.date)}</td><td>${item.orders}</td><td>${money(item.revenue)}${item.revenue===null ? ` <small>Known subtotal ${money(item.knownRevenue)}</small>`:''}</td></tr>`).join('')}</tbody></table></div></details>`;
+  }
+
+  function renderOperationsStream() {
+    const ui = window.RunvaraUI, data = state.data;
+    const running = (data.connectionCentre || []).filter(channel=>channel.progress);
+    const records = [...(data.workRecords || [])].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0,4);
+    $('#operations-stream').innerHTML = `<p class="stream-state">${ui.badge(running.length ? 'Sync in progress' : data.autopilot?.enabled ? 'Monitoring scheduled' : 'Monitoring paused',running.length ? 'good':'neutral')}<span>${escapeHtml(running.length ? running.map(channel=>channel.name).join(', ') : data.autopilot?.lastRunAt ? 'Last cycle '+date(data.autopilot.lastRunAt) : 'No monitoring cycle recorded')}</span></p><ol class="operation-timeline">${records.map(item=>{const status=ui.workState(item);return `<li><div class="section-head"><b>${escapeHtml(ui.workName(item,data))}</b>${ui.badge(status.text,status.tone)}</div><small>${escapeHtml(date(item.updatedAt))} · ${escapeHtml(statusLabel(item.source))}</small><p>${escapeHtml(ui.issueCopy(item.evidence?.find(entry=>entry.type==='monitor_failure')?.detail) || `${(item.evidence || []).length} supporting records`)}</p></li>`;}).join('') || '<li class="empty-state">Work appears here when a check or command records a result.</li>'}</ol><button class="text-button" data-view-link="ai-team">Give the Commander a task ↗</button>`;
+  }
+
   function renderOverview() {
     const dashboard = state.data.dashboard || {};
     const brief = state.data.brief || {};
     const today = dashboard.today || {};
+    const top = dashboard.recommendations?.[0];
+    $('#command-headline').textContent = dashboard.pendingApprovals ? `${dashboard.pendingApprovals} decisions await your judgement.` : dashboard.integrationIssues ? 'Your channels need attention.' : dashboard.stockRisks ? 'Keep your inventory in view.' : dashboard.products ? 'Your business, in perspective.' : 'Your command centre starts here.';
+    $('#command-direction').textContent = top ? top.title + '. ' + top.detail : 'Connect your chosen channels to build a reliable operational picture.';
+    $('#command-posture').innerHTML = window.RunvaraUI.badge(state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') + window.RunvaraUI.badge('Owner approval protected','warn') + '<small>Based on recorded workspace data</small>';
+    renderTrajectory(); renderOperationsStream();
     $('#brief-summary').textContent = brief.summary || 'No daily brief is available.';
-    $('#brief-generated').textContent = brief.generatedAt ? 'Generated ' + date(brief.generatedAt) + ' · ' + (brief.logic || 'deterministic') : '';
+    $('#brief-generated').textContent = brief.generatedAt ? 'Generated ' + date(brief.generatedAt) + ' · rules-based assessment' : '';
     $('#readiness-score').textContent = String(dashboard.readiness || 0) + '%';
     const readiness = Number(dashboard.readiness);
     $('#readiness-arc').setAttribute('stroke-dasharray', (Number.isFinite(readiness) ? Math.max(0, Math.min(100, readiness)) : 0) + ' 100');
@@ -409,15 +442,18 @@
 
   function approvalCard(item) {
     const pending = item.status === 'pending';
+    const write = (state.data.connectionWrites || []).find(write => write.approvalId === item.id);
+    const affected = write ? (state.data.connectionCentre || []).find(channel => channel.id === write.provider)?.name || statusLabel(write.provider) : 'See proposal and supporting evidence';
     const executionNote = item.executionStatus === 'ready' ? 'Ready to apply in the Connection Centre.' : item.executionStatus === 'completed' ? 'The channel confirmed the change.' : item.executionStatus === 'cancelled' ? 'No channel change made.' : 'External execution: disabled';
     const actions = pending && state.data.user?.role === 'owner' ? '<div class="approval-actions">' + (item.payload?.connectionWriteId ? '<button class="secondary" data-view-link="channels">Review exact change</button>' : '<button class="secondary" data-modify-approval="' + escapeHtml(item.id) + '">Modify</button>') + '<button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">' + (pending ? 'Awaiting owner decision' : 'Decision recorded ' + date(item.decidedAt)) + ' · ' + escapeHtml(executionNote) + '</p>' + (item.executionStatus === 'ready' ? '<button class="secondary" data-view-link="channels">Open Connection Centre</button>' : '');
-    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Packsmart Ops') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + actions + '</article>';
+    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Affected channel / scope</dt><dd>' + escapeHtml(affected) + '</dd></div><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Runvara') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + actions + '</article>';
   }
 
   function renderApprovals() {
     const approvals = (state.data.approvals || []).filter(item => state.approvalFilter === 'all' || item.status === state.approvalFilter);
     $('#approval-list').innerHTML = approvals.length ? approvals.map(approvalCard).join('') : '<div class="empty-state">No approval requests match this view.</div>';
     const pending = (state.data.approvals || []).filter(item => item.status === 'pending').length;
+    $('#approval-summary').innerHTML = `<div><p class="eyebrow">YOUR JUDGEMENT / RUNVARA EXECUTION</p><h2>${pending} ${pending===1?'decision':'decisions'} waiting for you</h2><p>Review the evidence, benefit and risk. Approval records your decision; supported live changes are applied separately.</p></div>${window.RunvaraUI.badge('Owner controlled','warn')}`;
     $('#nav-approval-count').textContent = String(pending); $('#nav-approval-count').classList.toggle('hidden', !pending);
   }
 
@@ -540,7 +576,12 @@
     $('#commander-last-run').textContent = commander?.lastRun ? date(commander.lastRun) : 'Not run yet';
     $('#commander-status').textContent = commander?.enabled === false ? 'Disabled' : commander?.status || 'Not reported';
     $('#commander-status').className = 'tag ' + (commander?.enabled === false ? 'neutral' : statusClass(String(commander?.status).toLowerCase()));
-    $('#agent-grid').innerHTML = team.map(agent => '<article class="agent-card" data-agent-id="' + escapeHtml(agent.id) + '"><div class="agent-head"><span class="agent-mark">' + agentIcon(agent.id) + '</span><div><b>' + escapeHtml(agent.name) + '</b><small>Level ' + escapeHtml(agent.autonomy) + ' · ' + escapeHtml((state.data.autonomyLevels || {})[agent.autonomy] || 'Unknown') + '</small></div><span class="tag ' + statusClass(String(agent.status).toLowerCase()) + '">' + escapeHtml(agent.status) + '</span></div><p class="agent-finding">' + escapeHtml(agent.lastFinding || 'Not run yet.') + '</p><dl><div><dt>Last run</dt><dd>' + escapeHtml(agent.lastRun ? date(agent.lastRun) : 'Never') + '</dd></div><div><dt>Issues</dt><dd>' + escapeHtml(agent.issuesDetected || 0) + '</dd></div><div><dt>Confidence</dt><dd>' + escapeHtml(agent.confidence === null || agent.confidence === undefined ? '—' : agent.confidence + '%') + '</dd></div></dl></article>').join('') || '<div class="empty-state">No specialists were returned for this workspace.</div>';
+    $('#agent-grid').innerHTML = team.map(agent => {
+      const runs = (state.data.agentRuns || []).filter(run=>agent.id==='commander'||run.results?.some(result=>result.agentId===agent.id));
+      const pending = (state.data.approvals || []).filter(item=>item.status==='pending'&&(item.agentId===agent.id||item.requestedBy===agent.id));
+      const decisions = runs[0]?.decisionContext?.length || 0;
+      return `<article class="agent-card" data-agent-id="${escapeHtml(agent.id)}"><div class="agent-head"><span class="agent-mark">${agentIcon(agent.id)}</span><div><b>${escapeHtml(agent.name)}</b><small>${escapeHtml(window.RunvaraUI.role(agent.id))}</small></div>${window.RunvaraUI.badge(agent.enabled===false?'Disabled':agent.status,agent.enabled===false?'neutral':statusClass(String(agent.status).toLowerCase()))}</div><div class="agent-task"><span class="eyebrow">${agent.currentTask ? 'CURRENT TASK' : 'LATEST FINDING'}</span><p class="agent-finding">${escapeHtml(agent.currentTask || agent.lastFinding || 'Ready for its first analysis.')}</p></div><dl><div><dt>Last run</dt><dd>${escapeHtml(agent.lastRun ? date(agent.lastRun) : 'Not yet run')}</dd></div><div><dt>Issues detected</dt><dd>${escapeHtml(agent.issuesDetected || 0)}</dd></div><div><dt>Rule confidence</dt><dd>${escapeHtml(agent.confidence == null ? '—' : agent.confidence+'%')}</dd></div></dl><div class="agent-context"><span>${runs.length} analyses in recent team history</span><span>${decisions} decisions consulted in latest run</span>${pending.length ? `<button class="text-button" data-view-link="approvals">${pending.length} awaiting approval ↗</button>` : '<span>No pending requests from this agent</span>'}</div></article>`;
+    }).join('') || '<div class="empty-state">No specialists were returned for this workspace.</div>';
     const activity = state.data.agentActivity || [];
     $('#agent-activity').innerHTML = activity.length ? activity.map(item => '<div class="activity-row"><span class="activity-dot ' + statusClass(String(item.status).toLowerCase()) + '"></span><div><b>' + escapeHtml(statusLabel(item.agentId)) + '</b><p>' + escapeHtml(item.message) + '</p><small>' + escapeHtml(date(item.createdAt)) + (item.confidence === undefined ? '' : ' · confidence ' + Math.round(item.confidence * 100) + '%') + '</small></div></div>').join('') : '<div class="empty-state">No agent runs yet. Send the Commander a quick command.</div>';
   }

@@ -16,7 +16,7 @@ const service = new IntegrationService({});
 const payload = {user:state.users[0],products:state.products,autopilot:{enabled:true},connectionWrites:[],connectionCentre:connectionCentre(state,service)};
 const html = await fs.readFile(new URL('../../index.html',import.meta.url),'utf8');
 const css = await fs.readFile(new URL('../../styles.css',import.meta.url),'utf8');
-const js = await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8');
+const js = await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8') + '\n' + await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8');
 const setup = `const fixture=${JSON.stringify(payload)};
 document.getElementById('login-screen').classList.add('hidden');document.getElementById('app-shell').classList.remove('hidden');
 document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id==='view-channels'));
