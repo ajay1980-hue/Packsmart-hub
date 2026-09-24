@@ -32,7 +32,8 @@
   function connectionMessage(channel) {
     if (!channel) return '';
     const code = channel.history?.find(run => run.errorCode)?.errorCode;
-    return channel.recovery?.action === 'reconnect' ? `${issueCopy(code || 'AUTH_REQUIRED',channel.name)}. ${channel.recovery.message}` : channel.recovery?.message || (channel.configured ? 'Selected data is connected. Review coverage and sync history below.' : 'Connect an account to start importing data.');
+    if (channel.id === 'ebay' && channel.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')) return 'Orders remain connected. eBay has restricted Promoted Listings for this seller; review eligibility in Seller Hub.';
+    return channel.recovery?.action === 'reconnect' ? `${issueCopy(code || 'AUTH_REQUIRED',channel.name)}. Reconnect to review and renew access.` : channel.recovery?.message || (channel.configured ? 'Selected data is connected. Review coverage and sync history below.' : 'Connect an account to start importing data.');
   }
   function schedule(channel, data, now = Date.now()) {
     if (!channel.configured) return 'Connect first';

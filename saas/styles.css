@@ -1370,7 +1370,7 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 .platform-mark { width: 25px; height: 25px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex: 0 0 auto; }
 .overview-intro { grid-template-columns: minmax(0,1.28fr) minmax(0,1fr); }
 .overview-intro .hero { display: grid; grid-template-columns: minmax(0,1fr) 116px; grid-template-rows: auto; gap: 1.25rem; background: var(--surface-command); align-items: start; }
-.overview-intro .hero > .command-overview { display: block; min-width: 0; }
+.overview-intro .hero > .command-overview:first-child { display: block; min-width: 0; }
 .overview-intro .hero h2 { font-size: clamp(1.45rem,2.2vw,2rem); line-height: 1.15; margin: .9rem 0; max-width: 22ch; }
 .overview-intro .hero .eyebrow { line-height: 1.6; }
 .overview-intro .hero-score { grid-row: auto; grid-column: auto; width: 116px; height: 116px; margin-top: 2.4rem; box-shadow: 0 0 0 8px #398fce07, 0 0 0 9px #398fce18; }
@@ -1467,3 +1467,5 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 @media (max-width: 900px) { .incident-brief { grid-template-columns: 1fr; gap: .9rem; } }
 @media (max-width: 700px) { .decision-summary { flex-wrap: wrap; } .connection-facts { gap: .8rem; } .approval-create .approval-form { grid-template-columns: 1fr; } .overview-intro .hero { grid-template-columns: minmax(0,1fr) 88px; gap: .8rem; } .overview-intro .hero-score { width: 88px; height: 88px; margin-top: 2rem; } .overview-intro .hero-score strong { font-size: 1.4rem; } .overview-intro .hero-score span { font-size: .52rem; } .overview-intro .hero h2 { font-size: 1.4rem; } .operation-timeline { display: block; } .operation-timeline > li::before { display: block; } .trajectory-reading { gap: .5rem; } .attention-item { grid-template-columns: auto minmax(0,1fr); } .attention-item > span:last-child { grid-column: 2; } }
 @media (max-width: 430px) { .overview-intro .hero { display: flex; flex-direction: column-reverse; align-items: stretch; } .overview-intro .hero-score { align-self: flex-end; margin-top: .4rem; margin-bottom: -.3rem; } .overview-intro .hero h2 { max-width: none; } .connection-facts { grid-template-columns: 1fr; } .operation-timeline .section-head { flex-wrap: wrap; } .decision-summary h2 { font-size: 1.4rem; } }
+
+.connection-coverage .capabilities span { font-size: .7rem; padding: .25rem .4rem; }
