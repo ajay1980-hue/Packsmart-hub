@@ -161,6 +161,30 @@ function channelEconomics(state, now) {
   });
 }
 
+export function revenueSignals(orders = [], now = new Date()) {
+  const end = now.getTime(), day = 86400000;
+  const eligible = orders.filter(order => !order.cancelledAt && settledOrder(order) && Number.isFinite(Date.parse(order.createdAt)) && Date.parse(order.createdAt) <= end);
+  const total = selected => {
+    const values = selected.map(order => orderRevenue(order).netRevenue);
+    const known = values.filter(value => value !== null);
+    const subtotal = Number(known.reduce((sum, value) => sum + value, 0).toFixed(2));
+    return { orders: selected.length, knownOrders: known.length, revenue: known.length === values.length ? subtotal : null, knownRevenue: subtotal };
+  };
+  const buckets = new Map();
+  const today = Date.parse(now.toISOString().slice(0, 10) + 'T00:00:00Z');
+  for (let index = 29; index >= 0; index--) buckets.set(new Date(today - index * day).toISOString().slice(0, 10), []);
+  for (const order of eligible) buckets.get(new Date(order.createdAt).toISOString().slice(0, 10))?.push(order);
+  const comparisons = Object.fromEntries([7,30].map(days => {
+    const boundary = end - days * day;
+    const current = total(eligible.filter(order => Date.parse(order.createdAt) >= boundary));
+    const previous = total(eligible.filter(order => Date.parse(order.createdAt) >= boundary - days * day && Date.parse(order.createdAt) < boundary));
+    // A missing or zero baseline cannot support a percentage comparison.
+    const change = current.revenue !== null && previous.revenue !== null && previous.revenue > 0 ? Number(((current.revenue - previous.revenue) / previous.revenue * 100).toFixed(1)) : null;
+    return [days, { current, previous, change }];
+  }));
+  return { daily: [...buckets].map(([date, rows]) => ({ date, ...total(rows) })), comparisons };
+}
+
 export function deriveOperations(state, { now = new Date(), lowStockThreshold = state.settings?.lowStockThreshold ?? 20, marginFloor = state.settings?.marginFloor ?? 20 } = {}) {
   const products = state.products || [];
   const variants = flattenProducts(products);
@@ -240,7 +264,7 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   recommendations.sort((a, b) => b.priority - a.priority);
 
   return {
-    generatedAt: now.toISOString(), today, last7d, last30d,
+    generatedAt: now.toISOString(), today, last7d, last30d, revenueSignals: revenueSignals(orders, now),
     revenue30d: last30d.revenue, orders30d: last30d.orders, paidOrders30d: last30d.paidOrders,
     refundedOrders30d: refundedOrders.length, openOrders: last30d.openOrders,
     products: products.length, variants: variants.length, productRows, orderProfitability,

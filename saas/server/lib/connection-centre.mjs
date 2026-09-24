@@ -128,7 +128,7 @@ export function finishConnectionSync(state, run, result, error) {
 }
 export function connectionDue(state, provider, now = new Date()) {
   const settings = connectionSettings(state, provider), status = state.integrationStatus?.[provider] || {};
-  if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED/.test(String(status.lastError || ''))) return false;
+  if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION/.test(String(status.lastError || ''))) return false;
   const recent = (state.connectionSyncs || []).find(run => run.provider === provider);
   if (recent?.status === 'running' && Date.parse(recent.leaseUntil) > now.getTime()) return false;
   const at = Date.parse(recent?.startedAt || status.lastAttemptAt || status.lastSyncAt || '');

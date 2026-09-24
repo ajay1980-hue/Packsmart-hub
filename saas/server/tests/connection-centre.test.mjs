@@ -37,6 +37,7 @@ async function fixture(t, extra = {}) {
       const query = body.query || '';
       if (query.includes('ConnectionIdentity')) return json({data:{shop:{id:'gid://shopify/Shop/1',name:'Alpha Store',myshopifyDomain:uri.hostname},currentAppInstallation:{accessScopes:[{handle:'read_products'},{handle:'write_products'}]}}});
       if (query.includes('Products')) {
+        if(flags.readUnavailable) throw Object.assign(new Error('private failure must remain server-side'),{code:'ETIMEDOUT'});
         if(flags.delay) await flags.delay;
         return json({data:{products:{nodes:[{id:'gid://shopify/Product/1',title:'Live product',status:'ACTIVE',description:'Live description',totalInventory:8,variants:{nodes:[{id:'gid://shopify/ProductVariant/1',title:'Box',sku:'BOX-1',price:'20',inventoryQuantity:8}],pageInfo:{hasNextPage:false}}}],pageInfo:{hasNextPage:false}}}});
       }
@@ -265,7 +266,7 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
   window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
-  for(const file of ['connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
+  for(const file of ['presentation.js','connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
   const until=async(fn)=>{for(let i=0;i<200;i++){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail(`UI did not reach expected state: ${errors.join('; ')} ${document.querySelector('#global-error').textContent}`);};
   await until(()=>document.querySelectorAll('.connection-card').length===8);
   document.querySelector('[data-view="channels"]').click();
@@ -425,7 +426,7 @@ test('Meta customer controls select assets, request scopes and prepare the exact
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
   window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
-  for(const file of ['connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
+  for(const file of ['presentation.js','connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
   const until=async(fn)=>{for(let i=0;i<200;i++){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail(errors.join('; ')||'Meta interface did not reach the expected state');};
   await until(()=>doc.querySelectorAll('.connection-card').length===8);doc.querySelector('[data-provider="meta"][data-connection-action="open"]').click();
   assert.equal(doc.querySelector('#connection-meta-assets [name=metaCatalogIds]').checked,true);
@@ -462,6 +463,7 @@ test('Meta Connect UI refuses Meta Work, developer portals and lookalike OAuth d
   const f=await metaFixture(t),errors=[],vc=new VirtualConsole();vc.on('jsdomError',e=>errors.push(e.message));
   const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only',virtualConsole:vc});t.after(()=>dom.window.close());
   const {window}=dom,doc=window.document;window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  window.eval(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'));
   window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
   let next='';
   window.RunvaraConnections.init({request:async()=>({authorizationUrl:next}),escapeHtml:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('"','&quot;'),date:String,notify:()=>{},reload:async()=>{},setView:()=>{}});
@@ -498,6 +500,7 @@ test('failed sync and failed status refresh restore controls instead of leaving 
   const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only'});t.after(()=>dom.window.close());
   const {window}=dom, document=window.document;
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  window.eval(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'));
   window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
   const messages=[];
   window.RunvaraConnections.init({request:async()=>{throw Object.assign(new Error('Authentication required'),{code:'AUTH_REQUIRED',status:401});},escapeHtml:value=>String(value??''),date:String,notify:message=>messages.push(message),reload:async()=>{},setView:()=>{}});
@@ -580,6 +583,7 @@ test('connection polling never overlaps slow status requests',async t=>{
   const {window}=dom;window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   let poll,resolve,calls=0;window.setInterval=callback=>{poll=callback;return 1;};window.clearInterval=()=>{};
   const pending=new Promise(done=>resolve=done);
+  window.eval(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'));
   window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
   window.RunvaraConnections.init({request:()=>{calls++;return pending;},reload:async()=>{},notify:()=>{},setView:()=>{},date:String,escapeHtml:String});
   window.RunvaraConnections.render({user:{role:'owner'},connectionCentre:[channel],connectionWrites:[]});window.RunvaraConnections.open('shopify');
@@ -593,4 +597,41 @@ test('eBay eligibility recovery explains provider restriction without reconnect 
   assert.match(recovery.message, /not currently eligible/);
   assert.match(recovery.message, /Order imports can continue/);
   assert.equal(recovery.action, 'sync');
+});
+
+
+test('reconnection verifies identity, retries selected reads once, preserves failures and never executes a write',async t=>{
+  const f=await fixture(t);await f.connect();
+  const channel=await f.channel();
+  assert.equal((await f.request('/api/connections/shopify/settings',{method:'POST',body:{revision:channel.settings.revision,areas:['products'],autoSync:true,frequencyMinutes:30}})).status,200);
+  async function reconnect(){
+    const start=await f.request('/api/integrations/shopify/oauth/start',{method:'POST',body:{storeDomain:'alpha.myshopify.com'}});
+    const state=new URL(start.body.authorizationUrl).searchParams.get('state'),cookie=start.headers.get('set-cookie').split(';')[0];
+    const url=new URL('/api/integrations/shopify/oauth/callback',f.base);url.search=new URLSearchParams({code:'reconnect-code',shop:'alpha.myshopify.com',state,timestamp:String(Math.floor(Date.now()/1000))}).toString();
+    const message=[...url.searchParams.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([key,value])=>`${key}=${value}`).join('&');
+    url.searchParams.set('hmac',crypto.createHmac('sha256',f.env.SHOPIFY_OAUTH_CLIENT_SECRET).update(message).digest('hex'));
+    const route=url.pathname+url.search;
+    assert.equal((await f.request(route,{cookie})).status,303);
+    const count=f.calls.length;
+    assert.equal((await f.request(route,{cookie})).status,400);
+    assert.equal(f.calls.length,count,'replayed callback never retries provider requests');
+  }
+  await reconnect();
+  let state=await f.server.packsmart.store.get('alpha');
+  assert.equal(state.products[0].title,'Live product');
+  assert.equal(state.orders[0].id,'alpha-historical');
+  assert.equal(f.calls.filter(call=>call.query.includes('Products')).length,1);
+  assert.ok(state.audit.some(item=>item.type==='connection_reconnect_read_sync'));
+  assert.deepEqual((await f.channel()).settings.areas,['products']);
+  assert.equal((await f.channel()).settings.permissionMode,'read_only');
+  const preserved=JSON.stringify(state.products);
+  f.flags.readUnavailable=true;await reconnect();
+  state=await f.server.packsmart.store.get('alpha');
+  assert.equal(JSON.stringify(state.products),preserved,'failed retry retains last good import');
+  assert.equal((await f.channel()).history[0].status,'failed');
+  assert.ok(!f.calls.some(call=>call.query.includes('mutation')));
+  assert.equal((await f.server.packsmart.store.get('beta')).products[0].title,'Before');
+  assert.ok(!JSON.stringify((await f.channel())).includes('private failure'));
+  state.integrationStatus.shopify.lastError='SHOPIFY_PERMISSION_REQUIRED';
+  assert.equal(connectionDue(state,'shopify',new Date(Date.now()+86400000)),false,'permission loss waits for owner repair');
 });

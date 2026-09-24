@@ -8,7 +8,7 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
-    "check": "node --check lib/launch.mjs && node --check lib/onboarding.mjs && node --check ../connections-ui.js && node --check lib/connection-centre.mjs && node --check lib/connector-oauth.mjs && node --check lib/connection-writes.mjs && node --check lib/meta-commerce.mjs && node --check lib/meta-capabilities.mjs && node --check ../control-ui.js && node --check lib/control.mjs && node --check lib/events.mjs && node --check lib/scheduler.mjs && node --check ../app.js && node --check server.mjs && node --check lib/security.mjs && node --check lib/store.mjs && node --check lib/profit.mjs && node --check lib/operations.mjs && node --check lib/integrations.mjs && node --check lib/agents.mjs"
+    "check": "node --check ../presentation.js && node --check lib/launch.mjs && node --check lib/onboarding.mjs && node --check ../connections-ui.js && node --check lib/connection-centre.mjs && node --check lib/connector-oauth.mjs && node --check lib/connection-writes.mjs && node --check lib/meta-commerce.mjs && node --check lib/meta-capabilities.mjs && node --check ../control-ui.js && node --check lib/control.mjs && node --check lib/events.mjs && node --check lib/scheduler.mjs && node --check ../app.js && node --check server.mjs && node --check lib/security.mjs && node --check lib/store.mjs && node --check lib/profit.mjs && node --check lib/operations.mjs && node --check lib/integrations.mjs && node --check lib/agents.mjs"
   },
   "devDependencies": {
     "jsdom": "26.1.0"

@@ -48,13 +48,14 @@ import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdm
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.6.0';
+const VERSION = '6.7.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
   ['/', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
+  ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
@@ -374,7 +375,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/control-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(200, {
         ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
@@ -838,13 +839,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], status: 'connected', lastError: null, detail: 'Connected successfully. Choose what to sync.' } };
         integrations.clearConnectionCache(state, provider);
         addAudit(state, { type: 'connection_authorised', actor: user.id, detail: { provider, account: identity.shopDomain || identity.account, readOnlyPolicy: true, writeAccessRequested: challenge.writeAccess, catalogAccessRequested: Boolean(challenge.catalogAccess), businessInstagramAccessRequested: Boolean(challenge.businessInstagramAccess) } });
-        if (provider === 'ebay') {
-          addAudit(state, { type: 'ebay_oauth_connected', actor: user.id, detail: { account: identity.account, existingManagerPreserved: true, readOnly: true } });
+        if (provider === 'ebay' || existing) {
+          if (provider === 'ebay') addAudit(state, { type: 'ebay_oauth_connected', actor: user.id, detail: { account: identity.account, existingManagerPreserved: true, readOnly: true } });
           const run = beginConnectionSync(state, provider, { actor: user.id });
           await store.save(token.workspaceId, state);
           try {
             await monitoredSync(state, integrations, provider, { run });
-            addAudit(state, { type: 'ebay_read_sync', actor: user.id, detail: { readOnly: true } });
+            addAudit(state, { type: provider === 'ebay' ? 'ebay_read_sync' : 'connection_reconnect_read_sync', actor: user.id, detail: { provider, readOnly: true } });
           } catch { /* Connection is saved; its failed sync and recovery remain visible. */ }
         }
       } catch (error) {
