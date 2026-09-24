@@ -98,6 +98,7 @@
 
   function showLogin() {
     closeWorkspaceSearch();
+    $('#commander-result').replaceChildren(); $('#commander-result').classList.add('hidden');
     $('#loading-screen')?.classList.add('hidden');
     window.RunvaraConnections?.endSession();
     $('#login-screen').classList.remove('hidden');
@@ -500,9 +501,46 @@
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
   }
 
+  // Presentation-only glyphs. The server's aiTeam array remains the source of
+  // specialist identity, status, policy, findings and membership.
+  const agentGlyphs = {
+    commander: '<path d="m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3z"/><circle cx="12" cy="12" r="2"/>',
+    stock: '<path d="m3 7 9-4 9 4-9 4zM3 7v10l9 4 9-4V7M12 11v10M7 5l9 4"/>',
+    pricing: '<path d="M3 21h18M6 17v-5m6 5V8m6 9V3M4 8l5-4 4 1 6-4"/>',
+    product_scout: '<circle cx="10" cy="10" r="7"/><path d="m15 15 6 6M7 10h6m-3-3v6"/>',
+    supplier: '<path d="M2 6h12v12H2zM14 10h4l4 5v3h-8"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="19" r="2"/>',
+    ebay: '<path d="M3 9h18l-2-6H5zM4 9v12h16V9M9 21v-7h6v7M3 9c0 4 5 4 5 0 0 4 8 4 8 0 0 4 5 4 5 0"/>',
+    shopify: '<path d="M4 7h16v14H4zM8 7V5a4 4 0 0 1 8 0v2M9 13l2 2 4-4"/>',
+    seo: '<circle cx="10" cy="10" r="7"/><path d="m15 15 6 6M5 10h10M10 3c-4 4-4 10 0 14 4-4 4-10 0-14"/>',
+    marketing: '<path d="m3 9 16-6v18L3 15zM3 9v6m4 1 2 5h4l-2-4M22 8v8"/>',
+    customer_service: '<path d="M4 13V9a8 8 0 0 1 16 0v8c0 3-2 4-6 4M4 11H2v7h4v-7zm16 0h2v7h-4v-7zM11 21h3"/>',
+    sales: '<path d="m3 17 6-6 4 4 8-10M15 5h6v6M3 22h18"/>',
+    finance: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M8 6h8M8 11h1m6 0h1m-8 4h1m6 0h1m-8 4h1m6 0h1"/>',
+    health_watch: '<path d="M2 12h5l3-8 4 16 3-8h5"/>',
+    operations: '<rect x="8" y="8" width="8" height="8" rx="2"/><path d="M9 2v6m6-6v6M9 16v6m6-6v6M2 9h6m-6 6h6m8-6h6m-6 6h6"/>',
+    compliance: '<path d="m12 2 8 4v6c0 5-8 10-8 10S4 17 4 12V6zM8 12l3 3 5-6"/>'
+  };
+  function agentIcon(id) {
+    return '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">' + (Object.hasOwn(agentGlyphs, id) ? agentGlyphs[id] : '<circle cx="12" cy="12" r="8"/><path d="M8 12h8m-4-4v8"/>') + '</svg>';
+  }
+
+  function renderCommanderBrief(run) {
+    const name = id => (state.data.aiTeam || []).find(agent => agent.id === id)?.name || statusLabel(id);
+    const outcome = String(run.workStatus || run.status || 'Unknown');
+    const tone = outcome === 'COMPLETED' ? 'good' : outcome === 'FAILED' ? 'bad' : ['REQUIRES APPROVAL', 'BLOCKED'].includes(outcome) ? 'warn' : 'neutral';
+    $('#commander-result').innerHTML = '<div class="brief-result-heading"><span class="agent-mark commander-mark">' + agentIcon('commander') + '</span><div><p class="eyebrow">COMMANDER BRIEF</p><span class="muted tiny">Analysis returned by your team</span></div><span class="tag ' + tone + '">' + escapeHtml(outcome) + '</span></div><h3 class="brief-result-summary">' + escapeHtml(run.summary) + '</h3><div class="delegation"><span class="delegation-label">Delegated <span aria-hidden="true">→</span></span><div class="delegation-agents">' + ((run.routedAgents || []).map(id => '<span class="delegation-chip">' + agentIcon(id) + escapeHtml(name(id)) + '</span>').join('') || '<span class="muted">No specialist delegation returned.</span>') + '</div></div>' + ((run.priorities || []).length ? '<ol class="brief-priorities">' + run.priorities.map(item => '<li><span class="priority-agent">' + agentIcon(item.agentId) + escapeHtml(name(item.agentId)) + '</span><p>' + escapeHtml(item.action) + '</p></li>').join('') + '</ol>' : '');
+    $('#commander-result').classList.remove('hidden');
+  }
+
   function renderAiTeam() {
     const team = state.data.aiTeam || [];
-    $('#agent-grid').innerHTML = team.map(agent => '<article class="agent-card" data-agent-id="' + escapeHtml(agent.id) + '"><div class="agent-head"><span class="agent-mark">' + escapeHtml(agent.name.slice(0, 2).toUpperCase()) + '</span><div><b>' + escapeHtml(agent.name) + '</b><small>Level ' + escapeHtml(agent.autonomy) + ' · ' + escapeHtml((state.data.autonomyLevels || {})[agent.autonomy] || 'Unknown') + '</small></div><span class="tag ' + statusClass(String(agent.status).toLowerCase()) + '">' + escapeHtml(agent.status) + '</span></div><p>' + escapeHtml(agent.lastFinding || 'Not run yet.') + '</p><dl><div><dt>Last run</dt><dd>' + escapeHtml(agent.lastRun ? date(agent.lastRun) : 'Never') + '</dd></div><div><dt>Issues</dt><dd>' + escapeHtml(agent.issuesDetected || 0) + '</dd></div><div><dt>Confidence</dt><dd>' + escapeHtml(agent.confidence === null ? '—' : agent.confidence + '%') + '</dd></div></dl></article>').join('');
+    const commander = team.find(agent => agent.id === 'commander');
+    $('#commander-team-size').textContent = String(team.filter(agent => agent.id !== 'commander').length) + ' specialists';
+    $('#commander-autonomy').textContent = commander ? (state.data.autonomyLevels || {})[commander.autonomy] || 'Unknown' : 'Not reported';
+    $('#commander-last-run').textContent = commander?.lastRun ? date(commander.lastRun) : 'Not run yet';
+    $('#commander-status').textContent = commander?.enabled === false ? 'Disabled' : commander?.status || 'Not reported';
+    $('#commander-status').className = 'tag ' + (commander?.enabled === false ? 'neutral' : statusClass(String(commander?.status).toLowerCase()));
+    $('#agent-grid').innerHTML = team.map(agent => '<article class="agent-card" data-agent-id="' + escapeHtml(agent.id) + '"><div class="agent-head"><span class="agent-mark">' + agentIcon(agent.id) + '</span><div><b>' + escapeHtml(agent.name) + '</b><small>Level ' + escapeHtml(agent.autonomy) + ' · ' + escapeHtml((state.data.autonomyLevels || {})[agent.autonomy] || 'Unknown') + '</small></div><span class="tag ' + statusClass(String(agent.status).toLowerCase()) + '">' + escapeHtml(agent.status) + '</span></div><p class="agent-finding">' + escapeHtml(agent.lastFinding || 'Not run yet.') + '</p><dl><div><dt>Last run</dt><dd>' + escapeHtml(agent.lastRun ? date(agent.lastRun) : 'Never') + '</dd></div><div><dt>Issues</dt><dd>' + escapeHtml(agent.issuesDetected || 0) + '</dd></div><div><dt>Confidence</dt><dd>' + escapeHtml(agent.confidence === null || agent.confidence === undefined ? '—' : agent.confidence + '%') + '</dd></div></dl></article>').join('') || '<div class="empty-state">No specialists were returned for this workspace.</div>';
     const activity = state.data.agentActivity || [];
     $('#agent-activity').innerHTML = activity.length ? activity.map(item => '<div class="activity-row"><span class="activity-dot ' + statusClass(String(item.status).toLowerCase()) + '"></span><div><b>' + escapeHtml(statusLabel(item.agentId)) + '</b><p>' + escapeHtml(item.message) + '</p><small>' + escapeHtml(date(item.createdAt)) + (item.confidence === undefined ? '' : ' · confidence ' + Math.round(item.confidence * 100) + '%') + '</small></div></div>').join('') : '<div class="empty-state">No agent runs yet. Send the Commander a quick command.</div>';
   }
@@ -592,13 +630,13 @@
 
   $('#commander-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#commander-error'); error.textContent = ''; setBusy(button, true, 'Team working…');
+    form.closest('.command-card').setAttribute('aria-busy', 'true');
     try {
       const payload = await request('/api/agents/command', { method: 'POST', body: JSON.stringify({ command: form.command.value }) });
-      const run = payload.run; $('#commander-result').classList.remove('hidden');
-      $('#commander-result').innerHTML = '<p class="eyebrow">COMMANDER BRIEF</p><h3>' + escapeHtml(run.summary) + '</h3><p class="muted">Delegated to: ' + escapeHtml((run.routedAgents || []).map(statusLabel).join(', ')) + '</p>' + ((run.priorities || []).length ? '<ol>' + run.priorities.map(item => '<li><b>' + escapeHtml(statusLabel(item.agentId)) + '</b> — ' + escapeHtml(item.action) + '</li>').join('') + '</ol>' : '');
+      const run = payload.run; renderCommanderBrief(run);
       form.reset(); await loadBootstrap({ migrate: false }); setView('ai-team'); showMessage('Commander analysis: ' + run.workStatus + '. Evidence is recorded in Value & Work.');
     } catch (commandError) { error.textContent = commandError.message; }
-    finally { setBusy(button, false); }
+    finally { form.closest('.command-card').setAttribute('aria-busy', 'false'); setBusy(button, false); }
   });
 
   $('#economics-body').addEventListener('click', event => {

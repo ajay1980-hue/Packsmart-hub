@@ -48,7 +48,7 @@ import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdm
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.5.1';
+const VERSION = '6.6.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([

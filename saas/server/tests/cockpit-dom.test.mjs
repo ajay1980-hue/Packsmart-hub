@@ -103,6 +103,48 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   assert.equal(saved.approvals[0].status, 'approved'); assert.equal(saved.approvals[0].revision, 2);
   assert.equal(saved.approvals[0].executedExternally, false); assert.ok(saved.decisions.some(item => item.key === 'ui-goal'));
   assert.deepEqual(errors, []); assert.ok(!calls.some(call => call.status >= 400));
+  await t.test('Commander console renders real delegation and preserves approval gates', async () => {
+    const form = document.getElementById('commander-form'), card = form.closest('.command-card');
+    const input = form.elements.command, button = form.querySelector('button');
+    const result = document.getElementById('commander-result');
+    // jsdom does not implement browser named properties on HTMLFormElement.
+    Object.defineProperty(form, 'command', { value: input });
+    const submit = async command => {
+      input.value = command;
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+      assert.equal(card.getAttribute('aria-busy'), 'true'); assert.equal(button.disabled, true);
+      await until(() => card.getAttribute('aria-busy') === 'false');
+      assert.equal(button.disabled, false);
+    };
+    await submit('Check pricing');
+    let recorded = await server.packsmart.store.get('ui-test'), run = recorded.agentRuns[0];
+    assert.equal(document.getElementById('commander-error').textContent, '');
+    assert.equal(result.classList.contains('hidden'), false);
+    assert.equal(result.querySelector('.brief-result-summary').textContent, run.summary);
+    assert.deepEqual([...result.querySelectorAll('.delegation-chip')].map(chip => chip.textContent), ['Pricing & Margin']);
+    assert.equal(document.getElementById('commander-team-size').textContent, '14 specialists');
+    assert.equal(document.querySelectorAll('#agent-grid .agent-mark svg').length, 15);
+    assert.equal(document.querySelectorAll('[data-agent-form]').length, 15);
+    assert.equal(recorded.products.length, 1);
+    assert.equal(run.executedExternally, false);
+    assert.equal(result.querySelector('[onerror]'), null);
+    await submit('Change prices for all products');
+    recorded = await server.packsmart.store.get('ui-test'); run = recorded.agentRuns[0];
+    assert.equal(result.querySelector('.brief-result-heading .tag').textContent, 'REQUIRES APPROVAL');
+    assert.equal(run.workStatus, 'REQUIRES APPROVAL');
+    assert.equal(recorded.approvals.find(item => item.id === run.approvalId).status, 'pending');
+    assert.equal(run.executedExternally, false);
+    assert.equal(recorded.products[0].variants[0].price, 10);
+    assert.equal(result.querySelector('.brief-result-summary').textContent, run.summary);
+    recorded.agentSettings.commander.enabled = false;
+    await server.packsmart.store.save('ui-test', recorded);
+    const runCount = recorded.agentRuns.length;
+    await submit('Check pricing');
+    assert.match(document.getElementById('commander-error').textContent, /disabled/i);
+    assert.equal(input.value, 'Check pricing', 'a failed command remains available to retry');
+    assert.equal((await server.packsmart.store.get('ui-test')).agentRuns.length, runCount);
+    assert.deepEqual(errors, []);
+  });
   const bootstrap = await (await window.fetch('/api/bootstrap')).json();
   for (const scenario of [
     { name: 'chart keeps positive, negative, zero and unavailable revenue distinct', values: [250, -50, 0, null] },
@@ -114,12 +156,12 @@ test('cockpit renders authenticated controls and submits real persisted workflow
     try {
       const w = chartDom.window;
       w.Headers = Headers; w.AbortController = AbortController; w.scrollTo = () => {};
-      w.RunvaraControl = { init() {}, render() {} };
+      w.RunvaraControl = { init() {}, render() {}, evidence() { return ''; }, history() { return ''; } };
       const data = { ...bootstrap, integrations: scenario.values.map((revenue, index) => ({ id: 'channel-' + index, name: index ? 'Channel ' + index : '<img src=x onerror=alert(1)>', kind: 'commerce', status: 'connected', metrics30d: { revenue } })) };
       w.fetch = async route => new Response(JSON.stringify(route === '/api/auth/session' ? { user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf } : data), { status: 200 });
       w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
       for (let i = 0; i < 100 && w.document.getElementById('app-shell').classList.contains('hidden'); i++) await new Promise(resolve => setTimeout(resolve, 5));
-      assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false);
+      assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false, w.document.getElementById('startup-error').textContent + '; ' + chartErrors.join('; '));
       const chart = w.document.getElementById('revenue-chart');
       assert.equal(chart.querySelector('[onerror]'), null);
       if (scenario.values.length === 4) {
@@ -144,6 +186,8 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   await until(() => document.getElementById('signup-form').elements.invitation.required);
   assert.equal(search.open, false, 'sign-out closes the navigation overlay');
   assert.equal(document.getElementById('workspace-search-results').childElementCount, 0);
+  assert.equal(document.getElementById('commander-result').childElementCount, 0, 'sign-out clears the previous workspace brief');
+  assert.equal(document.getElementById('commander-result').classList.contains('hidden'), true);
   document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
   assert.equal(search.open, false, 'a signed-out user cannot open workspace navigation');
 });
