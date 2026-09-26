@@ -14,8 +14,8 @@ export const DECISION_CATEGORIES = Object.freeze(['supplier', 'pricing', 'margin
 export function ensureControl(state) {
   for (const key of ['exceptions', 'opportunities', 'decisions', 'workRecords', 'automationRuns']) if (!Array.isArray(state[key])) state[key] = [];
   const defaults = Object.fromEntries(AUTOMATION_DEFINITIONS.map(rule => [rule.id, {
-    permitted: true, risk: 'low', intervalMinutes: rule.id === 'dailyOpsBrief' ? 1440 : rule.id === 'channelSync' ? 30 : 15,
-    maxRunsPerDay: rule.id === 'dailyOpsBrief' ? 3 : rule.id === 'channelSync' ? 48 : 96, spendLimit: 0
+    permitted: true, risk: 'low', intervalMinutes: rule.id === 'dailyOpsBrief' ? 1440 : rule.id === 'channelSync' ? 30 : rule.id === 'marketingPlanner' ? 1440 : rule.id === 'marketingCreativeWorker' ? 15 : 15,
+    maxRunsPerDay: rule.id === 'dailyOpsBrief' ? 3 : rule.id === 'channelSync' ? 48 : rule.id === 'marketingPlanner' ? 2 : rule.id === 'marketingCreativeWorker' ? 32 : 96, spendLimit: 0
   }]));
   const previous = state.autopilot || {};
   state.autopilot = { enabled: state.workspace?.id === 'packsmart-solutions', spendLimit: 0, morningHour: 7, timeZone: 'Europe/London', ...previous,

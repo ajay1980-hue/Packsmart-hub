@@ -46,9 +46,10 @@ import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest }
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
+import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.7.1';
+const VERSION = '6.8.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -507,6 +508,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       settings: state.settings || {},
       automations: state.automations || {},
       automationDefinitions: AUTOMATION_DEFINITIONS,
+      marketing: marketingSnapshot(state, env),
       approvals: state.approvals || [],
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
@@ -1254,6 +1256,85 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        if (req.method === 'GET' && pathname === '/api/marketing') {
+          send(res, 200, marketingSnapshot(auth.state, env));
+          return;
+        }
+
+        if (req.method === 'PUT' && pathname === '/api/marketing/settings') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const settings = await mutate(auth, async state => {
+            const next = updateMarketingSettings(state, body, auth.user.id);
+            addAudit(state, { type: 'marketing_settings_updated', actor: auth.user.id, detail: { mode: next.mode, enabled: next.enabled, autoCreative: next.autoCreative, autoPublishOrganic: next.autoPublishOrganic } });
+            return next;
+          });
+          send(res, 200, { settings });
+          return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/marketing/campaigns') {
+          requireOwner(auth);
+          const campaign = await mutate(auth, async state => {
+            const next = draftMarketingCampaign(state, { source: 'owner' });
+            addAudit(state, { type: 'marketing_campaign_prepared', actor: auth.user.id, detail: { campaignId: next.id, sku: next.product.sku, channels: next.channels } });
+            return next;
+          });
+          send(res, 201, { campaign });
+          return;
+        }
+
+        const marketingCreativeMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/creatives\/advance$/);
+        if (req.method === 'POST' && marketingCreativeMatch) {
+          requireOwner(auth);
+          const result = await mutate(auth, async state => {
+            ensureMarketing(state);
+            const campaign = state.marketing.campaigns.find(item => item.id === marketingCreativeMatch[1]);
+            if (!campaign) throw Object.assign(new Error('Marketing campaign not found'), { status: 404, code: 'MARKETING_CAMPAIGN_NOT_FOUND' });
+            const snapshot = state.marketing.campaigns;
+            state.marketing.campaigns = [campaign, ...snapshot.filter(item => item.id !== campaign.id)];
+            const advanced = await marketingCreativeCycle(state, { env });
+            addAudit(state, { type: 'marketing_creatives_advanced', actor: auth.user.id, detail: { campaignId: campaign.id, advanced: advanced.advanced, statuses: campaign.creativeRequests?.map(item => [item.provider, item.status]) || [] } });
+            return campaign;
+          });
+          send(res, 200, { campaign: result });
+          return;
+        }
+
+        const marketingApprovalMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/request-publish-approval$/);
+        if (req.method === 'POST' && marketingApprovalMatch) {
+          requireOwner(auth);
+          const approval = await mutate(auth, async state => {
+            ensureMarketing(state);
+            const campaign = state.marketing.campaigns.find(item => item.id === marketingApprovalMatch[1]);
+            if (!campaign) throw Object.assign(new Error('Marketing campaign not found'), { status: 404, code: 'MARKETING_CAMPAIGN_NOT_FOUND' });
+            if (campaign.publish?.approvalId) {
+              const existing = state.approvals.find(item => item.id === campaign.publish.approvalId);
+              if (existing) return existing;
+            }
+            const next = normalizeApprovalRequest({
+              type: 'social_commerce_publish',
+              action: `Publish marketing campaign for ${campaign.product.title}`,
+              reason: 'Runvara Marketing Autopilot prepared this campaign from recorded stock, margin and sales evidence.',
+              financialImpact: null,
+              expectedBenefit: 'Promote an in-stock product above the configured margin floor across selected organic channels.',
+              risk: 'Customer-facing content. Review copy, creative assets and destination links before publication.',
+              source: 'marketing-autopilot',
+              agentId: 'marketing',
+              evidence: campaign.evidence || [],
+              payload: { marketingCampaignId: campaign.id }
+            }, auth.user.id);
+            state.approvals.unshift(next);
+            campaign.publish = { ...(campaign.publish || {}), approvalRequired: true, approvalId: next.id, status: 'awaiting_approval' };
+            campaign.status = 'awaiting_approval';
+            campaign.updatedAt = new Date().toISOString();
+            addAudit(state, { type: 'marketing_publish_approval_requested', actor: auth.user.id, detail: { campaignId: campaign.id, approvalId: next.id } });
+            return next;
+          });
+          send(res, 202, { approvalRequired: true, approval, executedExternally: false });
+          return;
+        }
+
         if (req.method === 'PUT' && pathname === '/api/automations') {
           requireOwner(auth);
           const body = await jsonBody(req, 32768);
@@ -1679,7 +1760,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   });
 
-  const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief,
+  const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
     enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
   server.once('listening', () => scheduler.start());
   server.once('close', () => scheduler.stop());

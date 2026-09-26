@@ -2,6 +2,7 @@ import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensur
 import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
 import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS } from './connection-centre.mjs';
+import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
@@ -36,7 +37,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   }
 }
 
-export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, enabled = true, intervalMs = 60000 }) {
+export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000 }) {
   let timer = null, running = false, stopped = false;
   const status = { lastTickAt: null, lastError: null, running: false };
 
@@ -85,6 +86,12 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           } else if (run.ruleId === 'channelMismatchAlerts') {
             if (!ebayComparisonAvailable(state.ebay)) throw Object.assign(new Error('Full marketplace coverage unavailable'), { code: 'COVERAGE_UNAVAILABLE' });
             evidence = [{ type: 'channel_comparison', id: 'ebay', detail: JSON.stringify(Object.fromEntries(Object.entries(state.ebay.health).map(([key, value]) => [key, Array.isArray(value) ? value.length : value]))) }];
+          } else if (run.ruleId === 'marketingPlanner') {
+            const result = marketingPlannerCycle(state, { now, source: 'autopilot' });
+            evidence = [{ type: 'marketing_campaign', id: result.campaign?.id || run.id, detail: result.created ? `Prepared campaign for ${result.campaign.product.title}; publishing remains approval-gated.` : result.reason }];
+          } else if (run.ruleId === 'marketingCreativeWorker') {
+            const result = await marketingCreativeCycle(state, { env });
+            evidence = [{ type: 'marketing_creative', id: result.campaign?.id || run.id, detail: result.advanced ? `Advanced Canva/Runway creative jobs for ${result.campaign.product.title}. No publishing or credit purchase was attempted.` : result.reason }];
           } else {
             const d = deriveOperations(state);
             if (!d.products && !d.orders30d) throw Object.assign(new Error('No recorded business data'), { code: 'NO_RECORDED_DATA' });

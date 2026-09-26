@@ -46,7 +46,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   document.getElementById('open-workspace-search').click();
   assert.equal(search.open, true);
   assert.equal(document.activeElement, searchInput);
-  assert.equal(document.querySelectorAll('.search-result').length, 13);
+  assert.equal(document.querySelectorAll('.search-result').length, 14);
   searchInput.value = 'billing'; searchInput.dispatchEvent(new window.Event('input'));
   assert.equal(document.querySelectorAll('.search-result').length, 1);
   assert.equal(document.querySelector('.search-result').dataset.viewLink, 'audit');

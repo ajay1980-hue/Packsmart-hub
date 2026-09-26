@@ -181,7 +181,7 @@
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
+    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -193,7 +193,7 @@
 
   const navigationHints = {
     overview: 'Dashboard, daily brief and business performance', issues: 'Exceptions, alerts and problems to review',
-    'ai-team': 'Commander and specialist agents', profit: 'Products, inventory, stock and margins',
+    'ai-team': 'Commander and specialist agents', marketing: 'Campaign planning, creatives and channel publishing controls', profit: 'Products, inventory, stock and margins',
     orders: 'Sales, refunds and order profitability', suppliers: 'Supplier records and product costs',
     channels: 'Connection Centre, onboarding, Shopify, eBay and Meta', approvals: 'Review proposed actions and approval history',
     automations: 'Automation rules, policies and autopilot', opportunities: 'Recommendations and potential improvements',
@@ -457,6 +457,35 @@
     $('#nav-approval-count').textContent = String(pending); $('#nav-approval-count').classList.toggle('hidden', !pending);
   }
 
+  function renderMarketing() {
+    const marketing = state.data.marketing || {};
+    const settings = marketing.settings || {};
+    const modes = marketing.modes || [];
+    const providers = marketing.providers || {};
+    const campaigns = marketing.campaigns || [];
+    $('#marketing-pending-count').textContent = String(marketing.pendingCampaigns || 0);
+    $('#marketing-last-run').textContent = marketing.lastPlannerRunAt ? 'Planner last ran ' + date(marketing.lastPlannerRunAt) : 'Planner has not run yet';
+    $('#marketing-provider-chips').innerHTML = Object.values(providers).map(provider => '<span class="tag ' + (provider.configured ? 'good' : 'warn') + '">' + escapeHtml(provider.name) + ' · ' + (provider.configured ? 'Runvara ready' : 'API setup required') + '</span>').join('');
+    $('#marketing-provider-list').innerHTML = Object.values(providers).map(provider => '<div class="control-row"><div><b>' + escapeHtml(provider.name + ' ' + provider.planTarget) + '</b><small>' + escapeHtml(provider.capability) + '</small></div><div><span class="tag ' + (provider.configured ? 'good' : 'warn') + '">' + (provider.configured ? 'Configured' : 'Needs API setup') + '</span>' + (!provider.configured && provider.needs?.length ? '<small>' + escapeHtml(provider.needs.join(' · ')) + '</small>' : '') + '</div></div>').join('');
+    const form = $('#marketing-settings-form');
+    $('#marketing-mode').innerHTML = modes.map(mode => '<option value="' + escapeHtml(mode.id) + '"' + (mode.id === settings.mode ? ' selected' : '') + '>' + escapeHtml(mode.name) + '</option>').join('');
+    form.elements.dailyOrganicLimit.value = settings.dailyOrganicLimit ?? 2;
+    form.elements.minMarginPercent.value = settings.minMarginPercent ?? 20;
+    form.elements.minInventory.value = settings.minInventory ?? 5;
+    form.elements.enabled.checked = settings.enabled !== false;
+    form.elements.autoCreative.checked = settings.autoCreative !== false;
+    $('#marketing-campaign-list').innerHTML = campaigns.length ? campaigns.map(campaign => {
+      const product = campaign.product || {};
+      const copy = campaign.copy || {};
+      const providerStates = (campaign.creativeRequests || []).map(item => item.provider + ': ' + item.status).join(' · ');
+      const approvalButton = campaign.publish?.approvalId
+        ? '<button class="secondary small-button" data-view-link="approvals">Open approval</button>'
+        : '<button class="secondary small-button" data-marketing-approval="' + escapeHtml(campaign.id) + '">Request publish approval</button>';
+      const creativeButton = (campaign.creativeRequests || []).some(item => ['pending', 'in_progress', 'failed'].includes(item.status)) ? '<button class="secondary small-button" data-marketing-creatives="' + escapeHtml(campaign.id) + '">Generate / refresh creatives</button>' : '';
+      return '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + creativeButton + approvalButton + '</div></article>';
+    }).join('') : '<div class="empty-state">No campaigns prepared yet. Runvara will only select active, in-stock products that meet the configured margin floor and have an image.</div>';
+  }
+
   function renderAutomations() {
     $('#automation-list').innerHTML = (state.data.automationDefinitions || []).map(rule => {
       const enabled = Boolean(state.data.automations && state.data.automations[rule.id]);
@@ -590,7 +619,7 @@
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
-    renderOverview(); renderAiTeam(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    renderOverview(); renderAiTeam(); renderMarketing(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
     window.RunvaraControl.render(state.data);
   }
 
@@ -686,6 +715,64 @@
     const save = event.target.closest('.save-economics'); if (save) saveEconomics(save);
   });
   $('#order-list').addEventListener('click', event => { const save = event.target.closest('.save-order-costs'); if (save) { event.preventDefault(); saveOrderCosts(save); } });
+
+  $('#marketing-settings-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    setBusy(button, true, 'Saving…');
+    try {
+      await request('/api/marketing/settings', { method: 'PUT', body: JSON.stringify({
+        enabled: form.elements.enabled.checked,
+        mode: form.elements.mode.value,
+        dailyOrganicLimit: Number(form.elements.dailyOrganicLimit.value),
+        minMarginPercent: Number(form.elements.minMarginPercent.value),
+        minInventory: Number(form.elements.minInventory.value),
+        autoCreative: form.elements.autoCreative.checked,
+        allowPaidAds: false
+      }) });
+      await loadBootstrap({ migrate: false });
+      showMessage('Marketing Autopilot controls saved.');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
+
+  $('#marketing-new-campaign').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    setBusy(button, true, 'Preparing…');
+    try {
+      const payload = await request('/api/marketing/campaigns', { method: 'POST', body: '{}' });
+      await loadBootstrap({ migrate: false });
+      setView('marketing');
+      showMessage('Campaign prepared for ' + (payload.campaign?.product?.title || 'an eligible product') + '.');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
+
+  $('#marketing-campaign-list').addEventListener('click', async event => {
+    const creativeButton = event.target.closest('[data-marketing-creatives]');
+    if (creativeButton) {
+      setBusy(creativeButton, true, 'Working…');
+      try {
+        await request('/api/marketing/campaigns/' + encodeURIComponent(creativeButton.dataset.marketingCreatives) + '/creatives/advance', { method: 'POST', body: '{}' });
+        await loadBootstrap({ migrate: false });
+        setView('marketing');
+        showMessage('Creative jobs advanced. Runvara will continue them automatically.');
+      } catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(creativeButton, false); }
+      return;
+    }
+    const button = event.target.closest('[data-marketing-approval]');
+    if (!button) return;
+    setBusy(button, true, 'Requesting…');
+    try {
+      await request('/api/marketing/campaigns/' + encodeURIComponent(button.dataset.marketingApproval) + '/request-publish-approval', { method: 'POST', body: '{}' });
+      await loadBootstrap({ migrate: false });
+      setView('approvals');
+      showMessage('Marketing publication approval added to the Approval Centre.');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
 
   $('#automation-list').addEventListener('click', async event => {
     const button = event.target.closest('[data-automation]'); if (!button) return; const id = button.dataset.automation; const enabled = !Boolean(state.data.automations[id]); button.disabled = true;
