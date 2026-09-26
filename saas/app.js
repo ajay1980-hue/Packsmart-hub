@@ -481,7 +481,8 @@
       const approvalButton = campaign.publish?.approvalId
         ? '<button class="secondary small-button" data-view-link="approvals">Open approval</button>'
         : '<button class="secondary small-button" data-marketing-approval="' + escapeHtml(campaign.id) + '">Request publish approval</button>';
-      return '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + approvalButton + '</div></article>';
+      const creativeButton = (campaign.creativeRequests || []).some(item => ['pending', 'in_progress', 'failed'].includes(item.status)) ? '<button class="secondary small-button" data-marketing-creatives="' + escapeHtml(campaign.id) + '">Generate / refresh creatives</button>' : '';
+      return '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + creativeButton + approvalButton + '</div></article>';
     }).join('') : '<div class="empty-state">No campaigns prepared yet. Runvara will only select active, in-stock products that meet the configured margin floor and have an image.</div>';
   }
 
@@ -749,6 +750,18 @@
   });
 
   $('#marketing-campaign-list').addEventListener('click', async event => {
+    const creativeButton = event.target.closest('[data-marketing-creatives]');
+    if (creativeButton) {
+      setBusy(creativeButton, true, 'Working…');
+      try {
+        await request('/api/marketing/campaigns/' + encodeURIComponent(creativeButton.dataset.marketingCreatives) + '/creatives/advance', { method: 'POST', body: '{}' });
+        await loadBootstrap({ migrate: false });
+        setView('marketing');
+        showMessage('Creative jobs advanced. Runvara will continue them automatically.');
+      } catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(creativeButton, false); }
+      return;
+    }
     const button = event.target.closest('[data-marketing-approval]');
     if (!button) return;
     setBusy(button, true, 'Requesting…');
