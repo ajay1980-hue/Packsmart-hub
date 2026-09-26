@@ -217,3 +217,53 @@ function packsmartEnableTierPicker(){
   sync();
 }
 document.addEventListener('DOMContentLoaded',packsmartEnableTierPicker);
+
+
+/* Packsmart B2B Quick Order */
+function packsmartQuickOrder(){
+  const root=document.querySelector('[data-quick-order]');
+  if(!root)return;
+  const search=root.querySelector('[data-quick-order-search]');
+  const rows=[...root.querySelectorAll('[data-quick-order-row]')];
+  const add=root.querySelector('[data-quick-add]');
+  const summary=root.querySelector('[data-quick-summary]');
+  const status=root.querySelector('[data-quick-status]');
+  const empty=root.querySelector('[data-quick-order-empty]');
+  function updateSummary(){
+    const selected=rows.reduce((sum,row)=>sum+Math.max(0,Number.parseInt(row.querySelector('[data-quick-qty]')?.value,10)||0),0);
+    if(summary)summary.textContent=`${selected} pack${selected===1?'':'s'} selected`;
+    if(add)add.disabled=selected===0;
+  }
+  rows.forEach(row=>{
+    const select=row.querySelector('[data-quick-variant]');
+    const price=row.querySelector('[data-quick-price]');
+    const qty=row.querySelector('[data-quick-qty]');
+    if(select&&price)select.addEventListener('change',()=>{price.textContent=select.options[select.selectedIndex]?.dataset?.price||''});
+    qty?.addEventListener('input',updateSummary);
+  });
+  search?.addEventListener('input',()=>{
+    const q=search.value.trim().toLowerCase();
+    let visible=0;
+    rows.forEach(row=>{const show=!q||String(row.dataset.search||'').includes(q);row.hidden=!show;if(show)visible+=1});
+    if(empty)empty.hidden=visible!==0;
+  });
+  add?.addEventListener('click',async()=>{
+    const items=rows.map(row=>{
+      const qty=Math.max(0,Number.parseInt(row.querySelector('[data-quick-qty]')?.value,10)||0);
+      const id=Number(row.querySelector('[data-quick-variant]')?.value);
+      return qty>0&&Number.isFinite(id)?{id,quantity:qty}:null;
+    }).filter(Boolean);
+    if(!items.length)return;
+    add.disabled=true;add.textContent='Adding…';if(status){status.textContent='';status.classList.remove('is-error')}
+    try{
+      const response=await fetch('/cart/add.js',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({items})});
+      if(!response.ok)throw new Error('Basket update failed');
+      window.location.assign('/cart');
+    }catch(error){
+      add.disabled=false;add.textContent='Add selected to basket';
+      if(status){status.textContent='We could not add the full order. Check the selected products and try again.';status.classList.add('is-error')}
+    }
+  });
+  updateSummary();
+}
+document.addEventListener('DOMContentLoaded',packsmartQuickOrder);
