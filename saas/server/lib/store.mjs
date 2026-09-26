@@ -95,7 +95,9 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     migrations: {},
     storageReady: false
   };
-  return ensureMarketing(ensureControl(seeded));
+  ensureControl(seeded);
+  ensureMarketing(seeded);
+  return seeded;
 }
 
 function id(prefix) {
@@ -144,7 +146,9 @@ export function upgradeState(state, env = process.env) {
     integrationStatus: state?.integrationStatus && typeof state.integrationStatus === 'object' ? state.integrationStatus : {},
     migrations: state?.migrations && typeof state.migrations === 'object' ? state.migrations : {}
   };
-  return ensureMarketing(ensureControl(upgraded));
+  ensureControl(upgraded);
+  ensureMarketing(upgraded);
+  return upgraded;
 }
 
 class FileStore {
