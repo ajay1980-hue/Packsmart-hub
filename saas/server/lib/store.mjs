@@ -490,6 +490,25 @@ class SupabaseStore {
       updated_at: state.subscription?.updatedAt || new Date().toISOString()
     }], 'workspace_id');
 
+    await mirror('ai_usage_events', (state.aiUsage?.ledger || []).filter(entry => !entry.topUpCredits).map(entry => ({
+      id: entry.id,
+      workspace_id: workspaceId,
+      user_id: entry.userId || null,
+      campaign_id: entry.campaignId || null,
+      request_key: entry.requestKey || null,
+      provider: entry.provider || 'unknown',
+      operation: entry.operation || 'unknown',
+      credits: Math.max(0, Math.round(Number(entry.credits || 0))),
+      status: entry.status,
+      estimated_provider_cost_minor: Math.max(0, Math.round(Number(entry.estimatedProviderCostMinor || 0))),
+      actual_provider_cost_minor: entry.actualProviderCostMinor == null ? null : Math.max(0, Math.round(Number(entry.actualProviderCostMinor || 0))),
+      provider_reference: entry.providerReference || null,
+      metadata: entry.metadata || {},
+      created_at: entry.createdAt,
+      settled_at: entry.settledAt || null,
+      released_at: entry.releasedAt || null
+    })), 'id');
+
     await mirror('orders', (state.orders || []).map(order => ({
       id: order.id,
       workspace_id: workspaceId,
