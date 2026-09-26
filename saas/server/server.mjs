@@ -1257,7 +1257,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/marketing') {
-          send(res, 200, marketingSnapshot(state, env));
+          send(res, 200, marketingSnapshot(auth.state, env));
           return;
         }
 
