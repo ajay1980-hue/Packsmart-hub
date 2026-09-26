@@ -94,7 +94,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     integrationStatus: {},
     migrations: {},
     storageReady: false
-  });
+  };
   return ensureMarketing(ensureControl(seeded));
 }
 
