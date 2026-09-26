@@ -308,3 +308,49 @@ function packsmartQuickOrder(){
   updateSummary();
 }
 document.addEventListener('DOMContentLoaded',packsmartQuickOrder);
+
+
+/* Customer-facing Packaging Assistant: catalogue-only, no Runvara admin API exposure. */
+function packsmartPackagingAssistant(){
+  const root=document.querySelector('[data-packaging-assistant]');if(!root)return;
+  const form=root.querySelector('[data-packaging-assistant-form]');
+  const input=root.querySelector('[data-packaging-assistant-input]');
+  const result=root.querySelector('[data-packaging-assistant-result]');
+  const products={
+    mailSmall:{title:'Grey Mailing Bags · 230 × 300mm',handle:'grey-mailing-bags-230-x-300mm-9-x-12',reason:'a compact self-seal mailer for smaller soft goods and lightweight ecommerce orders'},
+    mailMedium:{title:'Grey Mailing Bags · 250 × 350mm',handle:'grey-mailing-bags-250-x-350mm-10-x-14',reason:'a versatile mailing-bag size for folded clothing and everyday ecommerce orders'},
+    mailLarge:{title:'Grey Mailing Bags · 350 × 525mm',handle:'grey-mailing-bags-350-x-525mm-14-x-21',reason:'the largest mailing-bag size currently in the catalogue for bulkier soft goods'},
+    ep3:{title:'Padded Bubble Envelopes EP3 · 150 × 215mm',handle:'padded-bubble-envelopes-ep3-150-215mm',reason:'a compact padded mailer for media, stationery and accessories needing everyday protection'},
+    ep4:{title:'Padded Bubble Envelopes EP4 · 180 × 265mm',handle:'bubble-envelopes-ep4-180-x-265mm',reason:'a versatile padded envelope for books and smaller boxed items'},
+    ep5:{title:'Padded Bubble Envelopes EP5 · 220 × 265mm',handle:'padded-bubble-envelopes-ep5-220-265mm',reason:'a roomier padded envelope for larger books and accessories'},
+    bp1:{title:'Self-Seal Bubble Pouches BP1 · 100 × 135mm',handle:'self-seal-bubble-pouches-bp1-100-135mm',reason:'compact cushioning for jewellery, small parts and delicate accessories'},
+    bp3:{title:'Self-Seal Bubble Pouches BP3 · 180 × 235mm',handle:'self-seal-bubble-pouches-bp3-180-x-235mm',reason:'a larger cushioned pouch for accessories and components'},
+    bp5:{title:'Self-Seal Bubble Pouches BP5 · 280 × 360mm',handle:'self-seal-bubble-pouches-bp5-280-360mm',reason:'the largest bubble pouch currently in the catalogue for bulkier protected items'}
+  };
+  function choose(value){
+    const q=String(value||'').toLowerCase();
+    const large=/large|big|bulky|coat|jacket|jumper|hoodie/.test(q);
+    const small=/small|tiny|jewel|ring|earring|component|part|accessor/.test(q);
+    if(/cloth|hoodie|shirt|t.?shirt|garment|jumper|coat|fashion|vinted/.test(q))return large?products.mailLarge:small?products.mailSmall:products.mailMedium;
+    if(/book|media|dvd|game|stationery|boxed|box/.test(q))return large?products.ep5:small?products.ep3:products.ep4;
+    if(/fragile|delicate|electronic|jewel|accessor|component|part/.test(q))return large?products.bp5:small?products.bp1:products.bp3;
+    return null;
+  }
+  function render(rec){
+    result.replaceChildren();
+    const e=document.createElement('span');e.className='ps-assistant-result__eyebrow';e.textContent=rec?'Recommended starting point':'Need one more detail';
+    const h=document.createElement('h3');h.textContent=rec?rec.title:'Tell us the type of item';
+    const p=document.createElement('p');p.textContent=rec?`This is ${rec.reason}.`:'Try mentioning clothing, books, accessories or a delicate component so the recommendation can stay grounded in the current catalogue.';
+    result.append(e,h,p);
+    if(rec){
+      const caveat=document.createElement('p');caveat.className='ps-assistant-result__caveat';caveat.textContent='Check the packed item dimensions before ordering. Product thickness and cushioning can change the required size.';
+      const actions=document.createElement('div');actions.className='ps-assistant-result__actions';
+      const view=document.createElement('a');view.className='btn primary';view.href=`/products/${rec.handle}`;view.textContent='View product';
+      const all=document.createElement('a');all.className='btn secondary';all.href='/collections/all';all.textContent='Compare all packaging';
+      actions.append(view,all);result.append(caveat,actions);
+    }
+  }
+  form?.addEventListener('submit',event=>{event.preventDefault();render(choose(input?.value));});
+  root.querySelectorAll('[data-assistant-example]').forEach(button=>button.addEventListener('click',()=>{if(input)input.value=button.dataset.assistantExample||'';render(choose(button.dataset.assistantExample));}));
+}
+document.addEventListener('DOMContentLoaded',packsmartPackagingAssistant);
