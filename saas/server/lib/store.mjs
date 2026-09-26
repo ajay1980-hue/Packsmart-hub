@@ -10,7 +10,11 @@ import { ensureMarketing } from './marketing.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
-const SUPABASE_EMBEDDED_AUDIT_LIMIT = 500;
+const SUPABASE_EMBEDDED_AUDIT_LIMIT = 300;
+const SUPABASE_WORK_RECORD_LIMIT = 100;
+const SUPABASE_CONNECTION_SYNC_LIMIT = 100;
+const SUPABASE_AGENT_RUN_LIMIT = 1;
+const SUPABASE_DAILY_BRIEF_LIMIT = 30;
 const SUPABASE_STATE_WARN_BYTES = 1572864;
 const SUPABASE_STATE_HARD_BYTES = 2097152;
 function markPersisted(state) { Object.defineProperty(state, PERSISTED, { value: true, configurable: true }); return state; }
@@ -635,13 +639,92 @@ class SupabaseStore {
     }
   }
 
+  async archiveHistory(workspaceId, collection, records) {
+    if (!records.length) return;
+    const rows = records.map((record, index) => ({
+      workspace_id: workspaceId,
+      collection,
+      record_id: String(record?.id || `${collection}_${index}_${crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex').slice(0, 24)}`),
+      payload: record,
+      occurred_at: record?.completedAt || record?.startedAt || record?.updatedAt || record?.createdAt || null,
+      archived_at: new Date().toISOString()
+    }));
+    for (let offset = 0; offset < rows.length; offset += 200) {
+      await this.upsert('runvara_history', rows.slice(offset, offset + 200), 'workspace_id,collection,record_id');
+    }
+  }
+
+  async archiveAndCompact(workspaceId, state) {
+    const audit = state.audit || [];
+    if (audit.length) {
+      for (let offset = 0; offset < audit.length; offset += 200) {
+        await this.upsert('audit_events', audit.slice(offset, offset + 200).map(event => ({
+          id: event.id,
+          workspace_id: workspaceId,
+          type: event.type,
+          actor: event.actor,
+          detail: event.detail || {},
+          created_at: event.createdAt
+        })), 'id');
+      }
+    }
+
+    const workRecords = state.workRecords || [];
+    await this.archiveHistory(workspaceId, 'workRecords', workRecords.slice(SUPABASE_WORK_RECORD_LIMIT));
+    state.workRecords = workRecords.slice(0, SUPABASE_WORK_RECORD_LIMIT);
+
+    const syncs = state.connectionSyncs || [];
+    const keptSyncs = [], archivedSyncs = [];
+    for (const run of syncs) {
+      if (run.status === 'running' || keptSyncs.length < SUPABASE_CONNECTION_SYNC_LIMIT) keptSyncs.push(run);
+      else archivedSyncs.push(run);
+    }
+    await this.archiveHistory(workspaceId, 'connectionSyncs', archivedSyncs);
+    state.connectionSyncs = keptSyncs;
+
+    const agentRuns = state.agentRuns || [];
+    await this.archiveHistory(workspaceId, 'agentRuns', agentRuns.slice(SUPABASE_AGENT_RUN_LIMIT));
+    state.agentRuns = agentRuns.slice(0, SUPABASE_AGENT_RUN_LIMIT);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const seenRules = new Set();
+    const keptAutomation = [], archivedAutomation = [];
+    for (const run of state.automationRuns || []) {
+      const ruleId = String(run.ruleId || 'unknown');
+      const isToday = String(run.startedAt || '').slice(0, 10) === today;
+      if (isToday || !seenRules.has(ruleId) || run.status === 'IN PROGRESS') {
+        keptAutomation.push(run);
+        seenRules.add(ruleId);
+      } else archivedAutomation.push(run);
+    }
+    await this.archiveHistory(workspaceId, 'automationRuns', archivedAutomation);
+    state.automationRuns = keptAutomation;
+
+    const briefs = state.dailyBriefs || [];
+    const keepBriefs = briefs.slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
+    const archivedBriefs = briefs.slice(SUPABASE_DAILY_BRIEF_LIMIT);
+    for (const brief of archivedBriefs) {
+      if (!brief?.id) continue;
+      await this.upsert('operations_briefs', [{
+        id: brief.id,
+        workspace_id: workspaceId,
+        summary: brief.summary || '',
+        metrics: brief.archive ? ((await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(brief.id)}&select=metrics&limit=1`))?.[0]?.metrics || brief) : brief,
+        logic: brief.logic || 'deterministic-v1',
+        created_at: brief.generatedAt || new Date().toISOString()
+      }], 'id');
+    }
+    state.dailyBriefs = keepBriefs;
+    state.audit = audit.slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
+  }
+
   async save(workspaceId, state) {
     assertWorkspace(workspaceId, state);
     const existing = Boolean(state[PERSISTED] || state._revision);
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
-    // Supabase keeps the complete audit trail in audit_events. Bound only the duplicated
-    // JSON working set so primary-state rewrites remain fast; FileStore remains lossless.
-    upgraded.audit = (upgraded.audit || []).slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
+    // Archive append-only operational histories before compacting the hot state.
+    // A failed archive write aborts the save so history is never silently discarded.
+    await this.archiveAndCompact(workspaceId, upgraded);
     upgraded.workspace.updatedAt = new Date().toISOString();
     if (existing) {
       const briefs = [];
