@@ -50,7 +50,7 @@ build and container health checks. Adds browser layout checks at 320, 390, 768
 and 1200 pixels and an uploaded mobile screenshot. Added security, first-sync,
 recovery, retry/lease, encrypted rotation, tenant and archive tests.
 
-Local baseline: 121 passing tests. Implementation validation: 134 passing tests,
+Local baseline: 121 passing tests. Implementation validation: 136 passing tests,
 no skipped tests; Phase 1 safety guards pass. Two pre-existing OAuth tests now
 wait for the authorised background read to finish before checking callback replay
 and audit evidence; their security assertions are unchanged.

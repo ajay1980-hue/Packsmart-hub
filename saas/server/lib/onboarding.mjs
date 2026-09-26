@@ -20,7 +20,7 @@ export function onboardingJourney(state) {
       coverage?.ordersAvailable === true && coverage?.unavailableSurfaces?.length === 1 &&
       coverage.unavailableSurfaces[0] === 'marketing' &&
       coverage.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077') &&
-      (health.lastError === 'Some eBay read data is currently unavailable: marketing.' || firstSync?.status === 'partial' && Object.keys(firstSync.failures).length === 1 && firstSync.failures.promotions && health.lastError === 'CONNECTION_READ_FAILED');
+      (health.lastError === 'Some eBay read data is currently unavailable: marketing.' || firstSync?.status === 'partial' && Object.keys(firstSync.failures).length === 1 && firstSync.failures.promotions && (!health.lastError || health.lastError === 'CONNECTION_READ_FAILED'));
     const needsAttention = Boolean(health.lastError || firstSync && firstSync.status !== 'completed');
     return { provider, connected, tested, imported, reviewed, permissionMode: settings.permissionMode, needsAttention,
       firstSync: firstSync || null,

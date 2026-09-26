@@ -39,6 +39,12 @@ export function validateImportedData(state, provider) {
       seen.add(String(key));
     }
   }
+  if (provider === 'google_youtube' && Array.isArray(groups.channels) && !groups.channels.length) problems.push('channels');
+  if (provider === 'meta' && Array.isArray(groups.accounts) && !groups.accounts.length) problems.push('accounts');
+  if (provider === 'shopify') for (const product of groups.products) {
+    const ids = (product.variants || []).map(variant => variant.id);
+    if (ids.some(id => id == null || id === '') || new Set(ids).size !== ids.length) problems.push('variants');
+  }
   if (provider === 'shopify') counts.variants = groups.products.reduce((sum, p) => sum + (p.variants?.length || 0), 0);
   return { ok: problems.length === 0, counts, problemAreas: [...new Set(problems)], checkedAt: iso() };
 }

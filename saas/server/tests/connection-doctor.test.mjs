@@ -130,3 +130,27 @@ test('doctor events archive before hot-state trimming, restore durably and stay 
   const beta=seedWorkspaceState({}, {workspaceId:'doctor-beta',email:'beta@example.test',passwordHash:'test'});await store.save('doctor-beta',beta);
   assert.deepEqual(doctorNotifications(await store.get('doctor-beta')),[]);assert.equal(doctorNotifications(restored).length,1);
 });
+
+test('empty authorised assets and duplicate variants cannot produce a business-ready first sync',async()=>{
+  for(const [provider,area] of [['meta','accounts'],['google_youtube','channels']]) {
+    const state=stateFor(provider);state.channelData={[provider]:{[area]:[]}};queueFirstSync(state,provider,'owner');
+    await runFirstSync(state,provider,{integrations:service(),readSync:monitoredSync,save:async()=>{}});
+    assert.notEqual(state.connectionFirstSync[provider].status,'completed');assert.equal(onboardingJourney(state).complete,false);
+    assert.equal(classifyConnectionIssue(state,provider).kind,'missing_asset');
+  }
+  const state=stateFor();state.products=[{provider:'shopify',id:'p1',variants:[{id:'v1'},{id:'v1'}]}];
+  assert.deepEqual(validateImportedData(state,'shopify').problemAreas,['variants']);
+});
+
+test('eBay provider eligibility pauses marketing retries while independent commerce reads continue',async()=>{
+  const state=stateFor('ebay');state.connectionSettings.ebay.managedReadSchedule=true;
+  state.ebay={coverage:{ordersAvailable:true,unavailableSurfaces:['marketing'],readDiagnostics:{marketing:{errorIds:['35077']}}}};
+  state.integrationStatus.ebay={status:'connected',lastError:'Some eBay read data is currently unavailable: marketing.'};
+  state.onboardingJourney={platforms:['ebay'],permissionReviews:{ebay:0}};
+  state.connectionFirstSync={ebay:{status:'partial',areas:{orders:'completed',promotions:'failed'},failures:{promotions:{code:'CONNECTION_READ_FAILED'}},validation:{ok:true},previousSuccessfulSyncAt:now.toISOString()}};
+  let called=[];
+  await doctor(state,service({syncProvider:async(s,p,{areas})=>{called.push(areas);return {status:'connected',lastError:null};}}));
+  assert.equal(called.length,1);assert.ok(called[0].includes('orders'));assert.ok(!called[0].includes('promotions'));
+  assert.equal(onboardingJourney(state).complete,true);assert.equal(classifyConnectionIssue(state,'ebay').kind,'provider_restriction');
+  assert.ok(!doctorNotifications(state).some(n=>n.message.includes('repaired')));
+});
