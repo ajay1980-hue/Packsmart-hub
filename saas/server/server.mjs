@@ -47,6 +47,7 @@ import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest }
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
+import { aiUsageSnapshot } from './lib/ai-usage.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.8.0';
@@ -1257,7 +1258,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/marketing') {
-          send(res, 200, marketingSnapshot(auth.state, env));
+          send(res, 200, { ...marketingSnapshot(auth.state, env), aiUsage: aiUsageSnapshot(auth.state, env) });
+          return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/ai-usage') {
+          send(res, 200, aiUsageSnapshot(auth.state, env));
           return;
         }
 
@@ -1293,7 +1299,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             if (!campaign) throw Object.assign(new Error('Marketing campaign not found'), { status: 404, code: 'MARKETING_CAMPAIGN_NOT_FOUND' });
             const snapshot = state.marketing.campaigns;
             state.marketing.campaigns = [campaign, ...snapshot.filter(item => item.id !== campaign.id)];
-            const advanced = await marketingCreativeCycle(state, { env });
+            const advanced = await marketingCreativeCycle(state, { env, actor: auth.user.id });
             addAudit(state, { type: 'marketing_creatives_advanced', actor: auth.user.id, detail: { campaignId: campaign.id, advanced: advanced.advanced, statuses: campaign.creativeRequests?.map(item => [item.provider, item.status]) || [] } });
             return campaign;
           });
