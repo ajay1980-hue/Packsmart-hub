@@ -242,6 +242,18 @@ create index if not exists briefs_workspace_created_idx on public.operations_bri
 
 -- Transitional atomic state document. It supports lossless customer-zero migration
 -- while the normalized tables above are the beta reporting/onboarding foundation.
+create table if not exists public.runvara_history (
+  workspace_id text not null references public.workspaces(id) on delete cascade,
+  collection text not null check (collection in ('workRecords','automationRuns','connectionSyncs','agentRuns')),
+  record_id text not null,
+  payload jsonb not null,
+  occurred_at timestamptz,
+  archived_at timestamptz not null default now(),
+  primary key (workspace_id, collection, record_id)
+);
+create index if not exists runvara_history_workspace_collection_time_idx
+  on public.runvara_history (workspace_id, collection, occurred_at desc nulls last);
+
 create table if not exists public.saas_workspace_state (
   workspace_id text primary key references public.workspaces(id) on delete cascade,
   state jsonb not null default '{}'::jsonb,
@@ -265,6 +277,7 @@ alter table public.orders enable row level security;
 alter table public.order_financials enable row level security;
 alter table public.advertising_costs enable row level security;
 alter table public.operations_briefs enable row level security;
+alter table public.runvara_history enable row level security;
 alter table public.saas_workspace_state enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
@@ -285,6 +298,8 @@ comment on table public.saas_workspace_state is
   'Server-only lossless workspace state used during Packsmart customer-zero and normalized-table migration.';
 comment on table public.audit_events is
   'Server-only workspace audit trail. Application routes never expose cross-workspace rows.';
+comment on table public.runvara_history is
+  'Server-only durable archive for append-only Runvara operational histories compacted out of saas_workspace_state.';
 
 create index if not exists variants_workspace_sku_idx on public.variants (workspace_id, sku);
 create index if not exists variants_workspace_source_idx on public.variants (workspace_id, product_id, external_id);
