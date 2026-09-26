@@ -656,9 +656,10 @@ class SupabaseStore {
 
   async archiveAndCompact(workspaceId, state) {
     const audit = state.audit || [];
-    if (audit.length) {
-      for (let offset = 0; offset < audit.length; offset += 200) {
-        await this.upsert('audit_events', audit.slice(offset, offset + 200).map(event => ({
+    const archivedAudit = audit.slice(SUPABASE_EMBEDDED_AUDIT_LIMIT);
+    if (archivedAudit.length) {
+      for (let offset = 0; offset < archivedAudit.length; offset += 200) {
+        await this.upsert('audit_events', archivedAudit.slice(offset, offset + 200).map(event => ({
           id: event.id,
           workspace_id: workspaceId,
           type: event.type,
