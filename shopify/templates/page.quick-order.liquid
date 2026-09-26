@@ -1,0 +1,59 @@
+{{ 'quick-order-packsmart.css' | asset_url | stylesheet_tag }}
+<section class="quick-order-hero">
+  <div class="wrap">
+    <p class="quick-order-hero__eyebrow">Built for repeat buyers</p>
+    <h1>Quick Order</h1>
+    <p>Find products by name or SKU, choose pack sizes, enter quantities and add everything to your basket at once.</p>
+  </div>
+</section>
+<section class="quick-order-page" data-quick-order>
+  <div class="wrap">
+    <div class="quick-order-tools">
+      <div>
+        <label for="QuickOrderSearch">Find a product or SKU</label>
+        <input id="QuickOrderSearch" type="search" placeholder="Try mailing bag, EP3, BP2 or 305 x 405" autocomplete="off" data-quick-order-search>
+      </div>
+      <div class="quick-order-tools__aside"><p><strong>{{ collections.all.products_count }}</strong> products available</p><div class="quick-order-saved"><button type="button" data-quick-save>Save this list</button><button type="button" data-quick-load>Load saved list</button><button type="button" data-quick-clear>Clear saved list</button></div></div>
+    </div>
+    <div class="quick-order-table" role="table" aria-label="Packsmart quick order">
+      <div class="quick-order-row quick-order-row--head" role="row">
+        <span>Product</span><span>Pack size</span><span>Price</span><span>Quantity</span>
+      </div>
+      {% for product in collections.all.products %}
+        {% if product.available %}
+        <div class="quick-order-row" role="row" data-quick-order-row data-search="{{ product.title | downcase | escape }} {% for variant in product.variants %}{{ variant.sku | downcase | escape }} {{ variant.title | downcase | escape }} {% endfor %}">
+          <div class="quick-order-product">
+            <a href="{{ product.url }}">
+              {% if product.featured_image %}{{ product.featured_image | image_url: width: 160 | image_tag: loading: 'lazy', alt: product.title }}{% endif %}
+            </a>
+            <div><strong><a href="{{ product.url }}">{{ product.title }}</a></strong><small>{{ product.type | default: 'Packaging' }}</small></div>
+          </div>
+          <div>
+            <label class="visually-hidden" for="QuickVariant-{{ product.id }}">Choose {{ product.title }} pack size</label>
+            <select id="QuickVariant-{{ product.id }}" data-quick-variant>
+              {% for variant in product.variants %}
+                <option value="{{ variant.id }}" data-price="{{ variant.price | money | escape }}" data-available="{{ variant.available }}"{% unless variant.available %} disabled{% endunless %}>{{ variant.title }}{% if variant.sku != blank %} · {{ variant.sku }}{% endif %}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="quick-order-price" data-quick-price>{{ product.selected_or_first_available_variant.price | money }}</div>
+          <div>
+            <label class="visually-hidden" for="QuickQty-{{ product.id }}">Quantity for {{ product.title }}</label>
+            <input id="QuickQty-{{ product.id }}" type="number" min="0" value="0" inputmode="numeric" data-quick-qty>
+          </div>
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <div class="quick-order-empty" data-quick-order-empty hidden>
+      <h2>No products found</h2>
+      <p>Try a broader product name, size or SKU.</p>
+    </div>
+    <div class="quick-order-bar">
+      <div><strong data-quick-summary>0 packs selected</strong><span>VAT-inclusive product prices</span></div>
+      <button class="btn primary" type="button" data-quick-add disabled>Add selected to basket</button>
+    </div>
+    <p class="quick-order-status" role="status" aria-live="polite" data-quick-status></p>
+    <aside class="quick-order-help"><div><strong>Ordering regularly?</strong><span>Save the current product, pack-size and quantity selections on this device so the next order takes seconds.</span></div><a href="/pages/trade-ordering">Trade &amp; repeat ordering</a></aside>
+  </div>
+</section>

@@ -1,14 +1,36 @@
 // Packsmart theme interactions
 const recommendations={
-  'Clothing|Small (A5)|1 item':{title:'Grey mailing bag 230 × 300mm',band:'Likely Large Letter if packed depth remains under 25mm.',note:'Ideal for children\'s clothing, lightweight tops and small garments.'},
-  'Clothing|Medium (A4)|1 item':{title:'Grey mailing bag 250 × 350mm',band:'Potential Large Letter if packed depth remains under 25mm.',note:'A strong everyday choice for one folded T-shirt or shirt.'},
-  'Clothing|Large|1 item':{title:'Grey mailing bag 305 × 405mm',band:'Usually Small Parcel.',note:'Recommended for hoodies, jumpers and dresses.'},
-  'Books & media|Small (A5)|1 item':{title:'EP4 bubble envelope',band:'Often Large Letter depending on thickness and weight.',note:'Protects book corners and small boxed media.'},
-  'Small items|Small (A5)|1 item':{title:'EP1 bubble envelope',band:'Often Large Letter.',note:'Use suitable internal protection for jewellery and valuable parts.'},
-  'Fragile items|Medium (A4)|1 item':{title:'Foam wrap plus corrugated box',band:'Small Parcel or courier service.',note:'Fragile goods should not be posted in a mailing bag alone.'}
+  'Clothing|Small':{title:'Grey Mailing Bags · 230 × 300mm',handle:'grey-mailing-bags-230-x-300mm-9-x-12',note:'A compact self-seal mailer for smaller folded garments and lightweight ecommerce orders.'},
+  'Clothing|Medium':{title:'Grey Mailing Bags · 250 × 350mm',handle:'grey-mailing-bags-250-x-350mm-10-x-14',note:'A practical all-round size for clothing, textiles and everyday ecommerce orders.'},
+  'Clothing|Large':{title:'Grey Mailing Bags · 350 × 525mm',handle:'grey-mailing-bags-350-x-525mm-14-x-21',note:'The largest mailing-bag size currently in the Packsmart range for bulkier soft goods.'},
+  'Books & media|Small':{title:'Padded Bubble Envelopes EP3 · 150 × 215mm',handle:'padded-bubble-envelopes-ep3-150-215mm',note:'A padded option for compact media, stationery and accessories that need everyday protection.'},
+  'Books & media|Medium':{title:'Padded Bubble Envelopes EP4 · 180 × 265mm',handle:'bubble-envelopes-ep4-180-x-265mm',note:'A versatile A5-size padded mailer suited to books and ecommerce orders needing extra protection.'},
+  'Books & media|Large':{title:'Padded Bubble Envelopes EP5 · 220 × 265mm',handle:'padded-bubble-envelopes-ep5-220-265mm',note:'A roomier padded envelope for larger books and boxed accessories.'},
+  'Small accessories|Small':{title:'Self-Seal Bubble Pouches BP1 · 100 × 135mm',handle:'self-seal-bubble-pouches-bp1-100-135mm',note:'Compact bubble protection for jewellery, small components and delicate accessories.'},
+  'Small accessories|Medium':{title:'Self-Seal Bubble Pouches BP3 · 180 × 235mm',handle:'self-seal-bubble-pouches-bp3-180-x-235mm',note:'A larger self-seal pouch for accessories and components needing cushioning.'},
+  'Small accessories|Large':{title:'Self-Seal Bubble Pouches BP5 · 280 × 360mm',handle:'self-seal-bubble-pouches-bp5-280-360mm',note:'The largest bubble pouch currently in the range for bulkier protected items.'},
+  'Delicate components|Small':{title:'Self-Seal Bubble Pouches BP1 · 100 × 135mm',handle:'self-seal-bubble-pouches-bp1-100-135mm',note:'Built-in bubble protection for small components where a plain mailing bag is not enough.'},
+  'Delicate components|Medium':{title:'Self-Seal Bubble Pouches BP4 · 230 × 285mm',handle:'self-seal-bubble-pouches-bp4-230-285mm',note:'A versatile cushioned pouch for larger accessories, electronics and boxed items.'},
+  'Delicate components|Large':{title:'Self-Seal Bubble Pouches BP5 · 280 × 360mm',handle:'self-seal-bubble-pouches-bp5-280-360mm',note:'The largest protective pouch currently available in the Packsmart catalogue.'}
 };
-function renderFinderResult(rec){const el=document.querySelector('#finderResult');if(!el)return;el.replaceChildren();const h=document.createElement('h3');h.textContent=rec.title;const band=document.createElement('p');const strong=document.createElement('strong');strong.textContent='Postal guidance: ';band.append(strong,document.createTextNode(rec.band));const note=document.createElement('p');note.textContent=rec.note;el.append(h,band,note)}
-function findSize(){const send=document.querySelector('#sendType')?.value||'Clothing';const size=document.querySelector('#itemSize')?.value||'Medium (A4)';const qty=document.querySelector('#quantity')?.value||'1 item';renderFinderResult(recommendations[`${send}|${size}|${qty}`]||{title:'Speak to Packsmart for a tailored recommendation',band:'Postal band depends on packed dimensions and weight.',note:'For multi-item or bulky orders, we will help calculate the best packaging and carrier.'})}
+function renderFinderResult(rec,orderPattern){
+  const el=document.querySelector('#finderResult');if(!el)return;el.replaceChildren();
+  const eyebrow=document.createElement('span');eyebrow.className='finder-result__eyebrow';eyebrow.textContent='Recommended starting point';
+  const h=document.createElement('h3');h.textContent=rec.title;
+  const note=document.createElement('p');note.textContent=rec.note;
+  const caveat=document.createElement('p');caveat.className='finder-result__caveat';caveat.textContent='Check your packed item dimensions before ordering. Fit can vary with product thickness and cushioning.';
+  const actions=document.createElement('div');actions.className='finder-result__actions';
+  const product=document.createElement('a');product.className='btn primary';product.href=`/products/${rec.handle}`;product.textContent='View recommended product';
+  const secondary=document.createElement('a');secondary.className='btn secondary';secondary.href=orderPattern==='Bulk / repeat'?'/pages/quick-order':'/collections/all';secondary.textContent=orderPattern==='Bulk / repeat'?'Build a Quick Order':'Compare all packaging';
+  actions.append(product,secondary);el.append(eyebrow,h,note,caveat,actions);
+}
+function findSize(){
+  const send=document.querySelector('#sendType')?.value||'Clothing';
+  const size=document.querySelector('#itemSize')?.value||'Medium';
+  const order=document.querySelector('#quantity')?.value||'Single / occasional';
+  const rec=recommendations[`${send}|${size}`]||recommendations['Clothing|Medium'];
+  renderFinderResult(rec,order);
+}
 function updateProductImage(button){const image=document.getElementById('ProductMainImage');if(!image)return;image.src=button.dataset.productImage;image.alt=button.dataset.productAlt||image.alt;document.querySelectorAll('.product-thumb').forEach(item=>item.classList.remove('is-active'));button.classList.add('is-active')}
 function updateVariant(select){const option=select.options[select.selectedIndex];const price=document.getElementById('ProductPrice');if(!price)return;const compare=option.dataset.comparePrice||'';const current=option.dataset.price||'';const unit=option.dataset.unitLabel||'';price.replaceChildren();if(compare){const del=document.createElement('del');del.textContent=compare;price.append(del)}price.append(document.createTextNode(current));const unitEl=document.getElementById('ProductUnitPrice');if(unitEl){unitEl.textContent=unit;unitEl.hidden=!unit}}
 document.addEventListener('click',event=>{const thumb=event.target.closest('[data-product-image]');if(thumb){updateProductImage(thumb);return}const finder=event.target.closest('[data-finder-submit]');if(finder){findSize();return}const chip=event.target.closest('.chip');if(chip){document.querySelectorAll('.chip').forEach(item=>item.classList.remove('active'));chip.classList.add('active');try{renderFinderResult(JSON.parse(chip.dataset.result||'{}'))}catch(error){console.warn('Unable to read packaging recommendation.',error)}}});
@@ -187,3 +209,148 @@ function packsmartRunConversionBoost(){
 }
 
 document.addEventListener('DOMContentLoaded',packsmartRunConversionBoost);
+
+
+/* Packsmart commerce upgrade: progressive pack-size cards + mobile purchase bar. */
+function packsmartEnableTierPicker(){
+  const select=document.getElementById('ProductVariant');
+  const picker=document.querySelector('[data-tier-picker]');
+  if(!select||!picker)return;
+  picker.hidden=false;
+  const fallback=document.querySelector('[data-variant-fallback]');
+  if(fallback)fallback.hidden=true;
+  const mobile=document.querySelector('[data-mobile-buy]');
+  if(mobile)mobile.hidden=false;
+  const label=document.getElementById('MobileVariantLabel');
+  const price=document.getElementById('MobileVariantPrice');
+  function sync(){
+    const selected=select.options[select.selectedIndex];
+    document.querySelectorAll('[data-tier-variant]').forEach(card=>card.classList.toggle('is-selected',String(card.dataset.tierVariant)===String(select.value)));
+    if(label)label.textContent=(selected?.textContent||'').split(' — ')[0];
+    if(price)price.textContent=selected?.dataset?.price||'';
+  }
+  document.querySelectorAll('[data-tier-variant]').forEach(card=>card.addEventListener('click',()=>{
+    if(card.disabled)return;
+    select.value=card.dataset.tierVariant;
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    sync();
+  }));
+  select.addEventListener('change',sync);
+  sync();
+}
+document.addEventListener('DOMContentLoaded',packsmartEnableTierPicker);
+
+
+/* Packsmart B2B Quick Order */
+function packsmartQuickOrder(){
+  const root=document.querySelector('[data-quick-order]');
+  if(!root)return;
+  const search=root.querySelector('[data-quick-order-search]');
+  const rows=[...root.querySelectorAll('[data-quick-order-row]')];
+  const add=root.querySelector('[data-quick-add]');
+  const summary=root.querySelector('[data-quick-summary]');
+  const status=root.querySelector('[data-quick-status]');
+  const empty=root.querySelector('[data-quick-order-empty]');
+  function updateSummary(){
+    const selected=rows.reduce((sum,row)=>sum+Math.max(0,Number.parseInt(row.querySelector('[data-quick-qty]')?.value,10)||0),0);
+    if(summary)summary.textContent=`${selected} pack${selected===1?'':'s'} selected`;
+    if(add)add.disabled=selected===0;
+  }
+  rows.forEach(row=>{
+    const select=row.querySelector('[data-quick-variant]');
+    const price=row.querySelector('[data-quick-price]');
+    const qty=row.querySelector('[data-quick-qty]');
+    if(select&&price)select.addEventListener('change',()=>{price.textContent=select.options[select.selectedIndex]?.dataset?.price||''});
+    qty?.addEventListener('input',updateSummary);
+  });
+  search?.addEventListener('input',()=>{
+    const q=search.value.trim().toLowerCase();
+    let visible=0;
+    rows.forEach(row=>{const show=!q||String(row.dataset.search||'').includes(q);row.hidden=!show;if(show)visible+=1});
+    if(empty)empty.hidden=visible!==0;
+  });
+  add?.addEventListener('click',async()=>{
+    const items=rows.map(row=>{
+      const qty=Math.max(0,Number.parseInt(row.querySelector('[data-quick-qty]')?.value,10)||0);
+      const id=Number(row.querySelector('[data-quick-variant]')?.value);
+      return qty>0&&Number.isFinite(id)?{id,quantity:qty}:null;
+    }).filter(Boolean);
+    if(!items.length)return;
+    add.disabled=true;add.textContent='Adding…';if(status){status.textContent='';status.classList.remove('is-error')}
+    try{
+      const response=await fetch('/cart/add.js',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({items})});
+      if(!response.ok)throw new Error('Basket update failed');
+      window.location.assign('/cart');
+    }catch(error){
+      add.disabled=false;add.textContent='Add selected to basket';
+      if(status){status.textContent='We could not add the full order. Check the selected products and try again.';status.classList.add('is-error')}
+    }
+  });
+  const save=root.querySelector('[data-quick-save]');
+  const load=root.querySelector('[data-quick-load]');
+  const clear=root.querySelector('[data-quick-clear]');
+  const storageKey='packsmart-quick-order-v1';
+  function currentList(){
+    return rows.map(row=>({id:String(row.querySelector('[data-quick-variant]')?.value||''),qty:Math.max(0,Number.parseInt(row.querySelector('[data-quick-qty]')?.value,10)||0)})).filter(item=>item.qty>0&&item.id);
+  }
+  save?.addEventListener('click',()=>{
+    const list=currentList();
+    if(!list.length){if(status)status.textContent='Add at least one product quantity before saving a list.';return}
+    try{localStorage.setItem(storageKey,JSON.stringify(list));if(status)status.textContent='Purchasing list saved on this device.'}catch(e){if(status){status.textContent='This browser could not save the list.';status.classList.add('is-error')}}
+  });
+  load?.addEventListener('click',()=>{
+    let list=[];try{list=JSON.parse(localStorage.getItem(storageKey)||'[]')}catch(e){}
+    rows.forEach(row=>{const qty=row.querySelector('[data-quick-qty]');if(qty)qty.value='0'});
+    list.forEach(item=>{const row=rows.find(r=>[...r.querySelectorAll('[data-quick-variant] option')].some(o=>String(o.value)===String(item.id)));if(!row)return;const select=row.querySelector('[data-quick-variant]');const qty=row.querySelector('[data-quick-qty]');if(select&&qty){select.value=String(item.id);qty.value=String(item.qty);select.dispatchEvent(new Event('change',{bubbles:true}))}});
+    updateSummary();if(status)status.textContent=list.length?'Saved purchasing list loaded.':'No saved purchasing list was found on this device.';
+  });
+  clear?.addEventListener('click',()=>{try{localStorage.removeItem(storageKey)}catch(e){}if(status)status.textContent='Saved purchasing list cleared.'});
+  updateSummary();
+}
+document.addEventListener('DOMContentLoaded',packsmartQuickOrder);
+
+
+/* Customer-facing Packaging Assistant: catalogue-only, no Runvara admin API exposure. */
+function packsmartPackagingAssistant(){
+  const root=document.querySelector('[data-packaging-assistant]');if(!root)return;
+  const form=root.querySelector('[data-packaging-assistant-form]');
+  const input=root.querySelector('[data-packaging-assistant-input]');
+  const result=root.querySelector('[data-packaging-assistant-result]');
+  const products={
+    mailSmall:{title:'Grey Mailing Bags · 230 × 300mm',handle:'grey-mailing-bags-230-x-300mm-9-x-12',reason:'a compact self-seal mailer for smaller soft goods and lightweight ecommerce orders'},
+    mailMedium:{title:'Grey Mailing Bags · 250 × 350mm',handle:'grey-mailing-bags-250-x-350mm-10-x-14',reason:'a versatile mailing-bag size for folded clothing and everyday ecommerce orders'},
+    mailLarge:{title:'Grey Mailing Bags · 350 × 525mm',handle:'grey-mailing-bags-350-x-525mm-14-x-21',reason:'the largest mailing-bag size currently in the catalogue for bulkier soft goods'},
+    ep3:{title:'Padded Bubble Envelopes EP3 · 150 × 215mm',handle:'padded-bubble-envelopes-ep3-150-215mm',reason:'a compact padded mailer for media, stationery and accessories needing everyday protection'},
+    ep4:{title:'Padded Bubble Envelopes EP4 · 180 × 265mm',handle:'bubble-envelopes-ep4-180-x-265mm',reason:'a versatile padded envelope for books and smaller boxed items'},
+    ep5:{title:'Padded Bubble Envelopes EP5 · 220 × 265mm',handle:'padded-bubble-envelopes-ep5-220-265mm',reason:'a roomier padded envelope for larger books and accessories'},
+    bp1:{title:'Self-Seal Bubble Pouches BP1 · 100 × 135mm',handle:'self-seal-bubble-pouches-bp1-100-135mm',reason:'compact cushioning for jewellery, small parts and delicate accessories'},
+    bp3:{title:'Self-Seal Bubble Pouches BP3 · 180 × 235mm',handle:'self-seal-bubble-pouches-bp3-180-x-235mm',reason:'a larger cushioned pouch for accessories and components'},
+    bp5:{title:'Self-Seal Bubble Pouches BP5 · 280 × 360mm',handle:'self-seal-bubble-pouches-bp5-280-360mm',reason:'the largest bubble pouch currently in the catalogue for bulkier protected items'}
+  };
+  function choose(value){
+    const q=String(value||'').toLowerCase();
+    const large=/large|big|bulky|coat|jacket|jumper|hoodie/.test(q);
+    const small=/small|tiny|jewel|ring|earring|component|part|accessor/.test(q);
+    if(/cloth|hoodie|shirt|t.?shirt|garment|jumper|coat|fashion|vinted/.test(q))return large?products.mailLarge:small?products.mailSmall:products.mailMedium;
+    if(/book|media|dvd|game|stationery|boxed|box/.test(q))return large?products.ep5:small?products.ep3:products.ep4;
+    if(/fragile|delicate|electronic|jewel|accessor|component|part/.test(q))return large?products.bp5:small?products.bp1:products.bp3;
+    return null;
+  }
+  function render(rec){
+    result.replaceChildren();
+    const e=document.createElement('span');e.className='ps-assistant-result__eyebrow';e.textContent=rec?'Recommended starting point':'Need one more detail';
+    const h=document.createElement('h3');h.textContent=rec?rec.title:'Tell us the type of item';
+    const p=document.createElement('p');p.textContent=rec?`This is ${rec.reason}.`:'Try mentioning clothing, books, accessories or a delicate component so the recommendation can stay grounded in the current catalogue.';
+    result.append(e,h,p);
+    if(rec){
+      const caveat=document.createElement('p');caveat.className='ps-assistant-result__caveat';caveat.textContent='Check the packed item dimensions before ordering. Product thickness and cushioning can change the required size.';
+      const actions=document.createElement('div');actions.className='ps-assistant-result__actions';
+      const view=document.createElement('a');view.className='btn primary';view.href=`/products/${rec.handle}`;view.textContent='View product';
+      const all=document.createElement('a');all.className='btn secondary';all.href='/collections/all';all.textContent='Compare all packaging';
+      actions.append(view,all);result.append(caveat,actions);
+    }
+  }
+  form?.addEventListener('submit',event=>{event.preventDefault();render(choose(input?.value));});
+  root.querySelectorAll('[data-assistant-example]').forEach(button=>button.addEventListener('click',()=>{if(input)input.value=button.dataset.assistantExample||'';render(choose(button.dataset.assistantExample));}));
+}
+document.addEventListener('DOMContentLoaded',packsmartPackagingAssistant);

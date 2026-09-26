@@ -1,0 +1,27 @@
+<section class="ps-assistant-section" aria-labelledby="PackagingAssistantTitle" data-packaging-assistant>
+  <div class="wrap ps-assistant-card">
+    <div class="ps-assistant-copy">
+      <p class="ps-assistant-eyebrow">Smart Packaging Assistant</p>
+      <h2 id="PackagingAssistantTitle">Describe what you need to pack</h2>
+      <p>Type what you are sending and, if you know them, the approximate dimensions or monthly quantity. The assistant only recommends products that exist in the current Packsmart catalogue.</p>
+      <form class="ps-assistant-form" data-packaging-assistant-form>
+        <label for="PackagingAssistantInput">What are you packing?</label>
+        <div class="ps-assistant-input-row">
+          <input id="PackagingAssistantInput" type="text" maxlength="240" placeholder="Example: I send 400 hoodies a month" autocomplete="off" data-packaging-assistant-input>
+          <button class="btn primary" type="submit">Recommend packaging</button>
+        </div>
+      </form>
+      <div class="ps-assistant-suggestions" aria-label="Example questions">
+        <button type="button" data-assistant-example="I send hoodies and jumpers">Hoodies &amp; clothing</button>
+        <button type="button" data-assistant-example="I post small jewellery and accessories">Jewellery &amp; accessories</button>
+        <button type="button" data-assistant-example="I send books and small boxed items">Books &amp; boxed items</button>
+        <button type="button" data-assistant-example="I ship delicate electronic components">Delicate components</button>
+      </div>
+    </div>
+    <div class="ps-assistant-result" data-packaging-assistant-result aria-live="polite">
+      <span class="ps-assistant-result__eyebrow">Catalogue-grounded</span>
+      <h3>Ask Packsmart for a starting point</h3>
+      <p>Recommendations are based on current product types and dimensions. Always check your packed-item dimensions before ordering.</p>
+    </div>
+  </div>
+</section>
