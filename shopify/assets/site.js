@@ -1,14 +1,36 @@
 // Packsmart theme interactions
 const recommendations={
-  'Clothing|Small (A5)|1 item':{title:'Grey mailing bag 230 × 300mm',band:'Likely Large Letter if packed depth remains under 25mm.',note:'Ideal for children\'s clothing, lightweight tops and small garments.'},
-  'Clothing|Medium (A4)|1 item':{title:'Grey mailing bag 250 × 350mm',band:'Potential Large Letter if packed depth remains under 25mm.',note:'A strong everyday choice for one folded T-shirt or shirt.'},
-  'Clothing|Large|1 item':{title:'Grey mailing bag 305 × 405mm',band:'Usually Small Parcel.',note:'Recommended for hoodies, jumpers and dresses.'},
-  'Books & media|Small (A5)|1 item':{title:'EP4 bubble envelope',band:'Often Large Letter depending on thickness and weight.',note:'Protects book corners and small boxed media.'},
-  'Small items|Small (A5)|1 item':{title:'EP1 bubble envelope',band:'Often Large Letter.',note:'Use suitable internal protection for jewellery and valuable parts.'},
-  'Fragile items|Medium (A4)|1 item':{title:'Foam wrap plus corrugated box',band:'Small Parcel or courier service.',note:'Fragile goods should not be posted in a mailing bag alone.'}
+  'Clothing|Small':{title:'Grey Mailing Bags · 230 × 300mm',handle:'grey-mailing-bags-230-x-300mm-9-x-12',note:'A compact self-seal mailer for smaller folded garments and lightweight ecommerce orders.'},
+  'Clothing|Medium':{title:'Grey Mailing Bags · 250 × 350mm',handle:'grey-mailing-bags-250-x-350mm-10-x-14',note:'A practical all-round size for clothing, textiles and everyday ecommerce orders.'},
+  'Clothing|Large':{title:'Grey Mailing Bags · 350 × 525mm',handle:'grey-mailing-bags-350-x-525mm-14-x-21',note:'The largest mailing-bag size currently in the Packsmart range for bulkier soft goods.'},
+  'Books & media|Small':{title:'Padded Bubble Envelopes EP3 · 150 × 215mm',handle:'padded-bubble-envelopes-ep3-150-215mm',note:'A padded option for compact media, stationery and accessories that need everyday protection.'},
+  'Books & media|Medium':{title:'Padded Bubble Envelopes EP4 · 180 × 265mm',handle:'bubble-envelopes-ep4-180-x-265mm',note:'A versatile A5-size padded mailer suited to books and ecommerce orders needing extra protection.'},
+  'Books & media|Large':{title:'Padded Bubble Envelopes EP5 · 220 × 265mm',handle:'padded-bubble-envelopes-ep5-220-265mm',note:'A roomier padded envelope for larger books and boxed accessories.'},
+  'Small accessories|Small':{title:'Self-Seal Bubble Pouches BP1 · 100 × 135mm',handle:'self-seal-bubble-pouches-bp1-100-135mm',note:'Compact bubble protection for jewellery, small components and delicate accessories.'},
+  'Small accessories|Medium':{title:'Self-Seal Bubble Pouches BP3 · 180 × 235mm',handle:'self-seal-bubble-pouches-bp3-180-x-235mm',note:'A larger self-seal pouch for accessories and components needing cushioning.'},
+  'Small accessories|Large':{title:'Self-Seal Bubble Pouches BP5 · 280 × 360mm',handle:'self-seal-bubble-pouches-bp5-280-360mm',note:'The largest bubble pouch currently in the range for bulkier protected items.'},
+  'Delicate components|Small':{title:'Self-Seal Bubble Pouches BP1 · 100 × 135mm',handle:'self-seal-bubble-pouches-bp1-100-135mm',note:'Built-in bubble protection for small components where a plain mailing bag is not enough.'},
+  'Delicate components|Medium':{title:'Self-Seal Bubble Pouches BP4 · 230 × 285mm',handle:'self-seal-bubble-pouches-bp4-230-285mm',note:'A versatile cushioned pouch for larger accessories, electronics and boxed items.'},
+  'Delicate components|Large':{title:'Self-Seal Bubble Pouches BP5 · 280 × 360mm',handle:'self-seal-bubble-pouches-bp5-280-360mm',note:'The largest protective pouch currently available in the Packsmart catalogue.'}
 };
-function renderFinderResult(rec){const el=document.querySelector('#finderResult');if(!el)return;el.replaceChildren();const h=document.createElement('h3');h.textContent=rec.title;const band=document.createElement('p');const strong=document.createElement('strong');strong.textContent='Postal guidance: ';band.append(strong,document.createTextNode(rec.band));const note=document.createElement('p');note.textContent=rec.note;el.append(h,band,note)}
-function findSize(){const send=document.querySelector('#sendType')?.value||'Clothing';const size=document.querySelector('#itemSize')?.value||'Medium (A4)';const qty=document.querySelector('#quantity')?.value||'1 item';renderFinderResult(recommendations[`${send}|${size}|${qty}`]||{title:'Speak to Packsmart for a tailored recommendation',band:'Postal band depends on packed dimensions and weight.',note:'For multi-item or bulky orders, we will help calculate the best packaging and carrier.'})}
+function renderFinderResult(rec,orderPattern){
+  const el=document.querySelector('#finderResult');if(!el)return;el.replaceChildren();
+  const eyebrow=document.createElement('span');eyebrow.className='finder-result__eyebrow';eyebrow.textContent='Recommended starting point';
+  const h=document.createElement('h3');h.textContent=rec.title;
+  const note=document.createElement('p');note.textContent=rec.note;
+  const caveat=document.createElement('p');caveat.className='finder-result__caveat';caveat.textContent='Check your packed item dimensions before ordering. Fit can vary with product thickness and cushioning.';
+  const actions=document.createElement('div');actions.className='finder-result__actions';
+  const product=document.createElement('a');product.className='btn primary';product.href=`/products/${rec.handle}`;product.textContent='View recommended product';
+  const secondary=document.createElement('a');secondary.className='btn secondary';secondary.href=orderPattern==='Bulk / repeat'?'/pages/quick-order':'/collections/all';secondary.textContent=orderPattern==='Bulk / repeat'?'Build a Quick Order':'Compare all packaging';
+  actions.append(product,secondary);el.append(eyebrow,h,note,caveat,actions);
+}
+function findSize(){
+  const send=document.querySelector('#sendType')?.value||'Clothing';
+  const size=document.querySelector('#itemSize')?.value||'Medium';
+  const order=document.querySelector('#quantity')?.value||'Single / occasional';
+  const rec=recommendations[`${send}|${size}`]||recommendations['Clothing|Medium'];
+  renderFinderResult(rec,order);
+}
 function updateProductImage(button){const image=document.getElementById('ProductMainImage');if(!image)return;image.src=button.dataset.productImage;image.alt=button.dataset.productAlt||image.alt;document.querySelectorAll('.product-thumb').forEach(item=>item.classList.remove('is-active'));button.classList.add('is-active')}
 function updateVariant(select){const option=select.options[select.selectedIndex];const price=document.getElementById('ProductPrice');if(!price)return;const compare=option.dataset.comparePrice||'';const current=option.dataset.price||'';const unit=option.dataset.unitLabel||'';price.replaceChildren();if(compare){const del=document.createElement('del');del.textContent=compare;price.append(del)}price.append(document.createTextNode(current));const unitEl=document.getElementById('ProductUnitPrice');if(unitEl){unitEl.textContent=unit;unitEl.hidden=!unit}}
 document.addEventListener('click',event=>{const thumb=event.target.closest('[data-product-image]');if(thumb){updateProductImage(thumb);return}const finder=event.target.closest('[data-finder-submit]');if(finder){findSize();return}const chip=event.target.closest('.chip');if(chip){document.querySelectorAll('.chip').forEach(item=>item.classList.remove('active'));chip.classList.add('active');try{renderFinderResult(JSON.parse(chip.dataset.result||'{}'))}catch(error){console.warn('Unable to read packaging recommendation.',error)}}});
