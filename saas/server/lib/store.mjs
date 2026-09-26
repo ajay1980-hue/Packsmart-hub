@@ -6,6 +6,7 @@ import { compactDailyBrief, defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { ensureControl } from './control.mjs';
+import { ensureMarketing } from './marketing.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
@@ -21,7 +22,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   const workspaceId = options.workspaceId || 'packsmart-solutions';
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
-  return ensureControl({
+  const seeded = {
     schemaVersion: 6,
     workspace: {
       id: workspaceId,
@@ -94,6 +95,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     migrations: {},
     storageReady: false
   });
+  return ensureMarketing(ensureControl(seeded));
 }
 
 function id(prefix) {
@@ -142,7 +144,7 @@ export function upgradeState(state, env = process.env) {
     integrationStatus: state?.integrationStatus && typeof state.integrationStatus === 'object' ? state.integrationStatus : {},
     migrations: state?.migrations && typeof state.migrations === 'object' ? state.migrations : {}
   };
-  return ensureControl(upgraded);
+  return ensureMarketing(ensureControl(upgraded));
 }
 
 class FileStore {
