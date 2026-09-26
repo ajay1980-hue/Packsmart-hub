@@ -931,7 +931,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const persistence = healthSnapshot.persistence;
         const authConfigured = Boolean(env.SESSION_SECRET && String(env.SESSION_SECRET).length >= 32);
         const encryptionConfigured = Boolean(env.CREDENTIALS_KEY && String(env.CREDENTIALS_KEY).length >= 32);
-        const ready = persistence && (!isProduction || (store.provider === 'supabase' && authConfigured && encryptionConfigured));
+        const persistenceDetails = typeof store.diagnostics === 'function' ? store.diagnostics() : null;
+        const primaryPersistence = persistenceDetails?.primaryPersistence ?? persistence;
+        const stateSizeSafe = !persistenceDetails || persistenceDetails.stateSizeStatus !== 'critical';
+        const ready = persistence && primaryPersistence && stateSizeSafe && (!isProduction || (store.provider === 'supabase' && authConfigured && encryptionConfigured));
         send(res, ready ? 200 : 503, req.method === 'HEAD' ? '' : {
           ok: ready,
           version: VERSION,
@@ -940,9 +943,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
           checkCacheMaxAgeMs: 5000,
           storage: store.provider,
-          productionReady: persistence && store.provider === 'supabase' && authConfigured && encryptionConfigured,
+          productionReady: persistence && primaryPersistence && stateSizeSafe && store.provider === 'supabase' && authConfigured && encryptionConfigured,
+          persistence: persistenceDetails,
           checks: {
             persistence,
+            primaryPersistence,
+            stateSizeSafe,
             authentication: authConfigured,
             credentialEncryption: encryptionConfigured,
             billingCharging: truthy(env.BILLING_CHECKOUT_ENABLED)
@@ -1762,8 +1768,26 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
     enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
-  server.once('listening', () => scheduler.start());
-  server.once('close', () => scheduler.stop());
+  let integrityTimer = null;
+  const runIntegrityCheck = async () => {
+    if (store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
+    try {
+      const result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
+      if (!result.healthy) console.warn(JSON.stringify({ event: 'persistence_integrity_warning', ...result }));
+    } catch (error) {
+      console.warn(JSON.stringify({ event: 'persistence_integrity_check_failed', code: error.code || 'PERSISTENCE_UNAVAILABLE' }));
+    }
+  };
+  server.once('listening', () => {
+    scheduler.start();
+    runIntegrityCheck();
+    integrityTimer = setInterval(runIntegrityCheck, clamp(env.PERSISTENCE_INTEGRITY_CHECK_MS, 300000, 86400000, 3600000));
+    integrityTimer.unref?.();
+  });
+  server.once('close', () => {
+    scheduler.stop();
+    if (integrityTimer) clearInterval(integrityTimer);
+  });
   server.headersTimeout = 15000;
   server.requestTimeout = 120000;
   server.packsmart = { store, integrations, env, scheduler };
