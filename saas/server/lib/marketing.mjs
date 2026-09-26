@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { deriveOperations } from './operations.mjs';
+import { advanceCampaignCreatives } from './marketing-providers.mjs';
 
 export const MARKETING_MODES = Object.freeze({
   draft: { id: 'draft', name: 'Draft only', description: 'Prepare campaigns and creatives without publishing.' },
@@ -179,6 +180,23 @@ export function marketingPlannerCycle(state, options = {}) {
   }
   const campaign = draftMarketingCampaign(state, { now, source: options.source || 'autopilot' });
   return { created: 1, campaign, reason: null };
+}
+
+export async function marketingCreativeCycle(state, { env = process.env } = {}) {
+  const marketing = ensureMarketing(state);
+  if (!marketing.settings.enabled || !marketing.settings.autoCreative) return { advanced: 0, campaign: null, reason: 'AUTO_CREATIVE_OFF' };
+  const providers = marketingProviderStatus(env);
+  const campaign = marketing.campaigns.find(item =>
+    ['draft', 'creative_generation', 'creative_attention'].includes(item.status) &&
+    (item.creativeRequests || []).some(request =>
+      request.status === 'in_progress' ||
+      (request.status === 'pending' && providers[request.provider]?.configured)
+    )
+  );
+  if (!campaign) return { advanced: 0, campaign: null, reason: 'NO_CREATIVE_WORK' };
+  await advanceCampaignCreatives(campaign, env);
+  marketing.lastCreativeRunAt = nowIso();
+  return { advanced: 1, campaign, reason: null };
 }
 
 export function marketingProviderStatus(env = process.env) {
