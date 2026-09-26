@@ -2,7 +2,8 @@
 // Run with: node tests/render-connection-preview.mjs /absolute/output.html
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { connectionCentre } from '../lib/connection-centre.mjs';
+import { intelligentConnections } from '../lib/connection-intelligence.mjs';
+import { onboardingJourney } from '../lib/onboarding.mjs';
 import { IntegrationService } from '../lib/integrations.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 
@@ -13,14 +14,16 @@ state.ebay = {source:'ebay-oauth-readonly',coverage:{fullCatalogueAvailable:fals
 state.products = Array.from({length:4},(_,index)=>({id:`gid://shopify/Product/${index+1}`,provider:'shopify',title:`Example product ${index+1}`,variants:[{id:'v'+index}]}));
 state.connectionSyncs = [{id:'fixture-sync',provider:'shopify',areas:['products','variants','inventory','prices','orders'],status:'completed',startedAt:'2026-09-21T10:00:00Z',completedAt:'2026-09-21T10:00:03Z'}];
 const service = new IntegrationService({});
-const payload = {user:state.users[0],products:state.products,autopilot:{enabled:true},connectionWrites:[],connectionCentre:connectionCentre(state,service)};
+state.onboardingJourney={platforms:['shopify','tiktok_shop'],permissionReviews:{shopify:0}};
+state.connectionFirstSync={shopify:{status:'partial',identityVerifiedAt:'2026-09-21T10:00:00Z',startedAt:'2026-09-21T10:00:00Z',completedAt:'2026-09-21T10:00:03Z',areas:{products:'completed',variants:'completed',inventory:'completed',orders:'failed'},failures:{orders:{code:'UPSTREAM_REQUEST_FAILED'}},validation:{ok:true,counts:{products:4,variants:4,orders:0}}}};
+const payload = {workspace:state.workspace,launchAdmin:false,user:state.users[0],products:state.products,onboarding:{journey:onboardingJourney(state)},autopilot:{enabled:true},connectionWrites:[],connectionCentre:intelligentConnections(state,service)};
 const html = await fs.readFile(new URL('../../index.html',import.meta.url),'utf8');
 const css = await fs.readFile(new URL('../../styles.css',import.meta.url),'utf8');
 const js = await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8') + '\n' + await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8');
 const setup = `const fixture=${JSON.stringify(payload)};
 document.getElementById('login-screen').classList.add('hidden');document.getElementById('app-shell').classList.remove('hidden');
 document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id==='view-channels'));
-document.getElementById('page-title').textContent='Connection Centre';
+document.getElementById('page-title').textContent='Connection Centre';document.getElementById('advanced-channel-connections').classList.add('hidden');
 const escapeHtml=value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
 RunvaraConnections.init({escapeHtml,date:value=>new Date(value).toLocaleString('en-GB'),notify:message=>{document.getElementById('global-success').textContent=message;document.getElementById('global-success').classList.remove('hidden');},setView:()=>{},reload:async()=>{},request:async()=>({channels:fixture.connectionCentre,writes:[],autopilotEnabled:true})});RunvaraConnections.render(fixture);`;
 const frame = html.replace(/<link[^>]+href="\/styles.css[^>]+>/,'<style>'+css+'</style>').replace(/<script src="[^"\n]+"><\/script>/g,'')

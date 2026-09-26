@@ -46,10 +46,12 @@ import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest }
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
+import { intelligentConnections, providerReadiness, doctorNotifications, recommendations } from './lib/connection-intelligence.mjs';
+import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.8.0';
+const VERSION = '6.9.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -512,13 +514,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       approvals: state.approvals || [],
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
-      connectionCentre: connectionCentre(state, integrations),
+      connectionCentre: intelligentConnections(state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status }),
+      connectionNotifications: doctorNotifications(state),
+      connectionRecommendations: recommendations(state, connectionCentre(state, integrations)),
       connectionWrites: (state.connectionWrites || []).slice(0, 50),
       integrations: integrationMatrix(state, env),
       ebayOAuth: integrations.ebayOAuthStatus(state),
       ebay: state.ebay || null,
       dashboard: deriveOperations(state, {
-        lowStockThreshold: clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
+        lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
         marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
       }),
       brief,
@@ -785,7 +789,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   async function startConnectorOAuth(provider, auth, body, res) {
     connector(provider);
-    if (!integrations.oauthReady(provider, auth.state)) throw connectionError('Secure sign-in for this channel is not available yet. Open its setup guide for the next step.', 'OAUTH_NOT_CONFIGURED', 409);
+    if (!integrations.oauthReady(provider, auth.state)) throw connectionError('Secure sign-in for this channel is not available yet. Request access or skip this channel for now.', 'OAUTH_NOT_CONFIGURED', 409);
     if (provider === 'meta' && body.catalogAccess && body.confirmCatalogAccess !== 'meta') throw connectionError('Confirm Meta catalogue access, which includes provider-side read and write permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
     if (provider === 'meta' && body.businessInstagramAccess && (!body.writeAccess || body.confirmBusinessInstagramAccess !== 'meta')) throw connectionError('Confirm the additional Meta business permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
     if ((body.writeAccess || body.allowAccountChange || body.catalogAccess || body.businessInstagramAccess) && auth.user.role !== 'owner') throw connectionError('Only the workspace owner can authorise write access or change the connected account.', 'OWNER_APPROVAL_REQUIRED', 403);
@@ -838,25 +842,38 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         Object.assign(record, { label: connector(provider).name, status: 'connected', encryptedCredentials: encryptCredentials(credentials, env.CREDENTIALS_KEY), metadata: { ...identity, grantedScopes: identity.grantedScopes || credentials.scopes || [], ...(provider === 'ebay' ? { marketplaceId: credentials.marketplaceId, channel: 'direct_oauth' } : {}) }, lastError: null, updatedAt: now, lastCheckedAt: now });
         state.connections = [record, ...(state.connections || []).filter(item => item.id !== record.id)];
         activateConnection(state, provider, user.id);
+        if (state.connectionAuthAttention) delete state.connectionAuthAttention[provider];
         state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], status: 'connected', lastError: null, detail: 'Connected successfully. Choose what to sync.' } };
         integrations.clearConnectionCache(state, provider);
         addAudit(state, { type: 'connection_authorised', actor: user.id, detail: { provider, account: identity.shopDomain || identity.account, readOnlyPolicy: true, writeAccessRequested: challenge.writeAccess, catalogAccessRequested: Boolean(challenge.catalogAccess), businessInstagramAccessRequested: Boolean(challenge.businessInstagramAccess) } });
-        if (provider === 'ebay' || existing) {
-          if (provider === 'ebay') addAudit(state, { type: 'ebay_oauth_connected', actor: user.id, detail: { account: identity.account, existingManagerPreserved: true, readOnly: true } });
-          const run = beginConnectionSync(state, provider, { actor: user.id });
-          await store.save(token.workspaceId, state);
-          try {
-            await monitoredSync(state, integrations, provider, { run });
-            addAudit(state, { type: provider === 'ebay' ? 'ebay_read_sync' : 'connection_reconnect_read_sync', actor: user.id, detail: { provider, readOnly: true } });
-          } catch { /* Connection is saved; its failed sync and recovery remain visible. */ }
+        if (!existing) {
+          state.connectionSettings[provider].managedReadSchedule = true;
+          if (provider === 'shopify' && challenge.includeCustomers) state.connectionSettings[provider].areas = [...new Set([...state.connectionSettings[provider].areas, 'customers'])];
+        }
+        queueFirstSync(state, provider, user.id);
+        if (provider === 'ebay') addAudit(state, { type:'ebay_oauth_connected', actor:user.id, detail:{provider, account:identity.account, existingManagerPreserved:true, readOnly:true} });
+        await store.save(token.workspaceId, state);
+        // Return immediately so the customer can watch persisted read progress.
+        // The same workspace lock remains held until the first read is saved.
+        const destination = provider === 'ebay' ? `${publicUrl.replace(/\/$/, '')}/?ebay=connected` : `/?channel=${encodeURIComponent(provider)}&connection=connected`;
+        res.writeHead(303, { ...headers(), Location:destination, 'Set-Cookie':oauthCookie(provider, '', true) }); res.end();
+        try {
+          await runFirstSync(state, provider, { integrations, readSync:monitoredSync, save:() => store.save(token.workspaceId, state) });
+          addAudit(state, { type:provider === 'ebay' ? 'ebay_read_sync' : existing ? 'connection_reconnect_read_sync' : 'connection_initial_read_sync', actor:user.id, detail:{provider, readOnly:true} });
+        } catch (error) {
+          if (/PERSISTENCE|SUPABASE|STATE_CONFLICT/.test(error.code || '')) throw error;
+          // A saved connection is retained if its first read is interrupted.
+          addAudit(state, { type:'connection_first_sync_interrupted', actor:user.id, detail:{provider} });
         }
       } catch (error) {
+        if (res.headersSent) throw error;
         result = error.code === 'OAUTH_DECLINED' ? 'cancelled' : error.code === 'ACCOUNT_MISMATCH' ? 'account-mismatch' : 'failed';
+        if (error.code === 'ACCOUNT_MISMATCH' || error.code === 'ACCOUNT_UNCONFIRMED') state.connectionAuthAttention = {...state.connectionAuthAttention,[provider]:{code:error.code,at:new Date().toISOString()}};
         addAudit(state, { type: 'connection_authorisation_failed', actor: user.id, detail: { provider, code: /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'OAUTH_FAILED' } });
       }
       await store.save(token.workspaceId, state);
       const destination = provider === 'ebay' ? `${publicUrl.replace(/\/$/, '')}/?ebay=${result}` : `/?channel=${encodeURIComponent(provider)}&connection=${result}`;
-      res.writeHead(303, { ...headers(), Location: destination, 'Set-Cookie': oauthCookie(provider, '', true) }); res.end();
+      if (!res.headersSent) { res.writeHead(303, { ...headers(), Location: destination, 'Set-Cookie': oauthCookie(provider, '', true) }); res.end(); }
     });
   }
 
@@ -1536,7 +1553,29 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/connection-centre') {
-          send(res, 200, { channels: connectionCentre(auth.state, integrations), writes: (auth.state.connectionWrites || []).slice(0, 50), autopilotEnabled: Boolean(auth.state.autopilot?.enabled) }); return;
+          const channels = intelligentConnections(auth.state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status });
+          send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
+        }
+        if (req.method === 'GET' && pathname === '/api/operator/providers') {
+          requireLaunchAdmin(auth, env);
+          const providers = providerReadiness(auth.state, integrations, {operator:true}).map(p => ({...p, activeConnections:0, waitingForAccess:0, recentFailures:[], outageEvidence:[]}));
+          for (const workspaceId of await store.listWorkspaceIds()) {
+            const state = await store.get(workspaceId); if (!state) continue;
+            for (const provider of providers) {
+              const record = state.connections?.find(r => r.provider === (provider.id === 'ebay' ? 'ebay_oauth' : provider.id));
+              if (record?.encryptedCredentials && !connectionSettings(state,provider.id).disconnected) provider.activeConnections++;
+              if (state.connectionSettings?.[provider.id]?.supportRequestedAt && !record?.encryptedCredentials) provider.waitingForAccess++;
+              const recent = (state.audit || []).filter(e => e.detail?.provider === provider.id && ['connection_doctor_repair_failure','connection_doctor_provider_outage','connection_authorisation_failed'].includes(e.type));
+              for (const e of recent.slice(0,5)) {
+                const evidence = {type:e.type,at:e.createdAt,code:e.detail.code || null};
+                if (e.type === 'connection_doctor_provider_outage') provider.outageEvidence.push(evidence);
+                else provider.recentFailures.push(evidence);
+              }
+              provider.recentFailures = provider.recentFailures.sort((a,b)=>b.at.localeCompare(a.at)).slice(0,20);
+              provider.outageEvidence = provider.outageEvidence.sort((a,b)=>b.at.localeCompare(a.at)).slice(0,10);
+            }
+          }
+          send(res,200,{providers,scheduler:{...scheduler.status},persistence:store.diagnostics?.() || null}); return;
         }
         const connectorStart = pathname.match(/^\/api\/integrations\/([a-z_]+)\/oauth\/start$/);
         if (req.method === 'POST' && connectorStart) {
@@ -1559,11 +1598,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               const settings = connectionSettings(state, provider); settings.supportRequestedAt = new Date().toISOString(); settings.revision++;
               state.connectionSettings = { ...state.connectionSettings, [provider]: settings };
               addAudit(state, { type: 'connection_setup_requested', actor: auth.user.id, detail: { provider } });
-              return { ok: true, message: 'Setup request saved in this workspace. The Runvara operator must enable this channel before customers can connect.' };
+              return { ok:true, message:'Access requested. Your data is safe. You can continue with another channel while access is being prepared.' };
             }
             if (action === 'writes') return { write: proposeConnectionWrite(state, provider, body, auth.user.id) };
             try {
               if (action === 'sync') {
+                state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
+                if (state.connectionFirstSync?.[provider] && state.connectionFirstSync[provider].status !== 'completed' && !body.areas) {
+                  const firstSync = await runFirstSync(state,provider,{integrations,readSync:monitoredSync,save:()=>store.save(auth.session.workspaceId,state),retryFailedOnly:true});
+                  return {status:state.integrationStatus?.[provider],firstSync};
+                }
                 const run = beginConnectionSync(state, provider, { areas: body.areas, actor: auth.user.id });
                 await store.save(auth.session.workspaceId, state);
                 return { status: await monitoredSync(state, integrations, provider, { areas: run.areas, run }), run };
@@ -1762,7 +1806,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const safe = sanitizeError(error);
       const path = String(req.url || '').split('?')[0].slice(0, 200);
       console.error(JSON.stringify({ event: 'request_error', requestId, method: req.method, path, status: safe.status, code: safe.code }));
-      send(res, safe.status, { error: safe.publicMessage, code: safe.code });
+      if (!res.headersSent) send(res, safe.status, { error: safe.publicMessage, code: safe.code });
     }
   });
 
@@ -1798,7 +1842,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   server.headersTimeout = 15000;
   server.requestTimeout = 120000;
-  server.packsmart = { store, integrations, env, scheduler };
+  server.packsmart = { store, integrations, env, scheduler, drain:async()=>{scheduler.stop();await Promise.all([...locks.values()]);} };
   return server;
 }
 
@@ -1810,7 +1854,7 @@ export async function start() {
   });
   const shutdown = signal => {
     console.log(JSON.stringify({ event: 'server_stopping', signal }));
-    server.close(() => process.exit(0));
+    server.close(async () => { await server.packsmart.drain(); process.exit(0); });
     setTimeout(() => process.exit(1), 10000).unref();
   };
   process.once('SIGTERM', () => shutdown('SIGTERM'));

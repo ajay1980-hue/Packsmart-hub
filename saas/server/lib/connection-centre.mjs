@@ -112,9 +112,7 @@ export function beginConnectionSync(state, provider, { areas, automatic = false,
   if (connectionSettings(state, provider).disconnected) throw connectionError('Connect this channel before syncing.', 'CONNECTION_DISCONNECTED', 409);
   const run = { id: `sync_${crypto.randomUUID()}`, provider, areas: selected, automatic, actor, status: 'running', stage: 'Reading selected data', startedAt: new Date(now).toISOString(), leaseUntil: new Date(now + 10 * 60000).toISOString() };
   state.connectionSyncs.unshift(run);
-  // Keep a useful window without unbounded growth in the existing state document.
-  // Durable audit events retain the summary of every completed sync.
-  state.connectionSyncs = state.connectionSyncs.filter((item, index) => index < 300 || item.status === 'running');
+  // Supabase archives before trimming on save; never discard unarchived runs here.
   return run;
 }
 export function finishConnectionSync(state, run, result, error) {
@@ -128,7 +126,10 @@ export function finishConnectionSync(state, run, result, error) {
 }
 export function connectionDue(state, provider, now = new Date()) {
   const settings = connectionSettings(state, provider), status = state.integrationStatus?.[provider] || {};
-  if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION/.test(String(status.lastError || ''))) return false;
+  if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;
+  const doctor = state.connectionDoctor?.[provider];
+  if (state.connectionAuthAttention?.[provider]) return false;
+  if (doctor?.exhausted || Date.parse(doctor?.nextRetryAt) > now.getTime() || Date.parse(status.retryAt) > now.getTime()) return false;
   const recent = (state.connectionSyncs || []).find(run => run.provider === provider);
   if (recent?.status === 'running' && Date.parse(recent.leaseUntil) > now.getTime()) return false;
   const at = Date.parse(recent?.startedAt || status.lastAttemptAt || status.lastSyncAt || '');
@@ -152,7 +153,7 @@ export function connectionCentre(state, integrations) {
       lastFailedSyncAt: history.find(run => ['failed', 'partial'].includes(run.status))?.completedAt || history.find(run => ['failed', 'partial'].includes(run.status))?.startedAt || null,
       audit: (state.audit || []).filter(event => event.detail?.provider === id).slice(0, 30).map(({ id, type, createdAt }) => ({ id, type, createdAt })),
       areas: definition.areas, counts, recovery: configured ? recovery : null, history, progress: history.find(run => run.status === 'running') || null,
-      lastSuccessfulSyncAt: health.lastSuccessfulSyncAt || history.find(run => run.status === 'completed')?.completedAt || (!history.length && !health.lastError ? health.lastSyncAt : null) || null, lastCheckedAt: record?.lastCheckedAt || null,
+      lastSuccessfulSyncAt: state.connectionFirstSync?.[id] && state.connectionFirstSync[id].status !== 'completed' ? state.connectionFirstSync[id].previousSuccessfulSyncAt : health.lastSuccessfulSyncAt || history.find(run => run.status === 'completed')?.completedAt || (!history.length && !health.lastError ? health.lastSyncAt : null) || null, lastCheckedAt: record?.lastCheckedAt || null,
       oauthReady: Boolean(integrations.oauthReady?.(id, state)),
       customerSetup: integrations.oauthReady?.(id, state) ? 'one_click_oauth' : 'provider_setup_pending',
       customerManagedSetup: true,

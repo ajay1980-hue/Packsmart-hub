@@ -353,7 +353,9 @@ async function responseJson(response, label) {
       ? `${label} authentication failed`
       : `${label} request failed (${response.status})`;
     const upstreamErrorIds = (Array.isArray(data?.errors) ? data.errors : []).map(item => String(item.errorId || '')).filter(id => /^\d{1,12}$/.test(id)).slice(0, 10);
-    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status, upstreamErrorIds });
+    const retry = response.headers.get('retry-after');
+    const retryAfterMs = /^\d+$/.test(retry || '') ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : response.status === 429 ? 'CONNECTION_RATE_LIMITED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status, upstreamErrorIds, retryAfterMs:Number.isFinite(retryAfterMs) ? Math.min(86400000,Math.max(60000,retryAfterMs)) : null });
   }
   return data;
 }

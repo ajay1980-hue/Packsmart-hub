@@ -442,6 +442,8 @@ test('eBay read-only OAuth uses a one-time callback while preserving the existin
   assert.equal(callback.response.headers.get('location'), 'http://localhost:8787/?ebay=connected');
   assert.equal(String(callback.payload).includes(refreshSecret), false);
 
+  // Customer redirect is immediate; the authorised read continues durably.
+  for(let i=0;i<200;i++){const current=await server.packsmart.store.get('packsmart-solutions');if(current.audit.some(e=>e.type==='ebay_read_sync'))break;await new Promise(resolve=>setTimeout(resolve,5));}
   const persisted = await server.packsmart.store.get('packsmart-solutions');
   const managerConnection = persisted.connections.find(item => item.provider === 'ebay');
   const oauthConnection = persisted.connections.find(item => item.provider === 'ebay_oauth');

@@ -38,7 +38,7 @@
   function schedule(channel, data, now = Date.now()) {
     if (!channel.configured) return 'Connect first';
     if (channel.progress) return 'Sync in progress';
-    if (!channel.settings?.autoSync || !data.autopilot?.enabled || data.automations?.channelSync === false || data.autopilot?.rules?.channelSync?.permitted === false) return 'Automatic sync paused';
+    if (!channel.settings?.autoSync || (!channel.settings?.managedReadSchedule && (!data.autopilot?.enabled || data.automations?.channelSync === false || data.autopilot?.rules?.channelSync?.permitted === false))) return 'Automatic sync paused';
     if (channel.recovery?.action === 'reconnect') return 'Access needs review';
     const latest = channel.history?.[0]?.startedAt || channel.lastSuccessfulSyncAt;
     const next = Date.parse(latest) + Number(channel.settings?.frequencyMinutes || 30) * 60000;
