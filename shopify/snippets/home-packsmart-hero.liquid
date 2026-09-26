@@ -1,1 +1,25 @@
-<section class="ps-home-hero ps-home-approved-hero" aria-label="Packsmart Solutions premium packaging"><div class="wrap"><a class="ps-home-approved-banner" href="{{ routes.all_products_collection_url }}" aria-label="Shop Packsmart packaging products"><img src="https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-hero-banner-approved.png?v=1785852285" width="1864" height="896" alt="Packsmart Solutions premium packaging hero banner" loading="eager" fetchpriority="high"></a></div></section>
+<section class="ps-home-hero ps-commerce-hero" aria-labelledby="PacksmartHeroTitle">
+  <div class="wrap ps-commerce-hero__grid">
+    <div class="ps-commerce-hero__copy">
+      <p class="ps-commerce-hero__eyebrow">Packaging for UK businesses</p>
+      <h1 id="PacksmartHeroTitle">Find it. Choose the right pack. Get back to business.</h1>
+      <p class="ps-commerce-hero__lead">Practical packaging in clear pack sizes, with VAT-inclusive pricing and straightforward product information.</p>
+      <form class="ps-commerce-search" action="{{ routes.search_url }}" method="get" role="search">
+        <label for="HomeProductSearch">What packaging do you need?</label>
+        <div><input id="HomeProductSearch" type="search" name="q" placeholder="Try 305 x 405, mailing bag, EP3 or bubble pouch" autocomplete="off"><input type="hidden" name="type" value="product"><button type="submit">Find packaging</button></div>
+      </form>
+      <div class="ps-commerce-hero__actions">
+        <a class="btn primary" href="{{ routes.all_products_collection_url }}">Shop all packaging</a>
+        <a class="btn secondary" href="/pages/packaging-size-guide">Use the size guide</a>
+      </div>
+      <ul class="ps-commerce-hero__proof" aria-label="Packsmart buying benefits">
+        <li>VAT-inclusive prices</li>
+        <li>Small packs to bulk quantities</li>
+        <li>Secure Shopify checkout</li>
+      </ul>
+    </div>
+    <a class="ps-home-approved-banner ps-commerce-hero__visual" href="{{ routes.all_products_collection_url }}" aria-label="Shop Packsmart packaging products">
+      <img src="https://cdn.shopify.com/s/files/1/1059/3917/3710/files/packsmart-hero-banner-approved.png?v=1785852285" width="1864" height="896" alt="Packsmart Solutions packaging range" loading="eager" fetchpriority="high">
+    </a>
+  </div>
+</section>
