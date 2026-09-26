@@ -57,7 +57,8 @@ export const AUTOMATION_DEFINITIONS = Object.freeze([
   { id: 'customerReplyDrafts', name: 'Customer-service issue detection', detail: 'Identifies order follow-up from recorded payment and fulfilment states. Inbox messages are not connected.' },
   { id: 'channelMismatchAlerts', name: 'Channel mismatch alerts', detail: 'Compares marketplace and social-channel catalogue health.' },
   { id: 'lossMakingAlerts', name: 'Loss-making SKU alerts', detail: 'Surfaces fully costed products and orders with negative contribution.' },
-  { id: 'marketingPlanner', name: 'Marketing Autopilot planner', detail: 'Prepares one evidence-backed product campaign per day. Publishing and paid advertising remain approval-gated.' }
+  { id: 'marketingPlanner', name: 'Marketing Autopilot planner', detail: 'Prepares one evidence-backed product campaign per day. Publishing and paid advertising remain approval-gated.' },
+  { id: 'marketingCreativeWorker', name: 'Marketing creative worker', detail: 'Advances configured Canva and Runway creative jobs. It cannot buy credits, publish content or change advertising spend.' }
 ]);
 
 export function defaultAutomations() {
