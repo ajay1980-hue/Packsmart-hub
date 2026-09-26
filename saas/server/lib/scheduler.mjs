@@ -37,7 +37,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   }
 }
 
-export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, enabled = true, intervalMs = 60000 }) {
+export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000 }) {
   let timer = null, running = false, stopped = false;
   const status = { lastTickAt: null, lastError: null, running: false };
 
