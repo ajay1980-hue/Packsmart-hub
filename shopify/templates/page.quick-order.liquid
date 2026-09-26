@@ -13,7 +13,7 @@
         <label for="QuickOrderSearch">Find a product or SKU</label>
         <input id="QuickOrderSearch" type="search" placeholder="Try mailing bag, EP3, BP2 or 305 x 405" autocomplete="off" data-quick-order-search>
       </div>
-      <p><strong>{{ collections.all.products_count }}</strong> products available</p>
+      <div class="quick-order-tools__aside"><p><strong>{{ collections.all.products_count }}</strong> products available</p><div class="quick-order-saved"><button type="button" data-quick-save>Save this list</button><button type="button" data-quick-load>Load saved list</button><button type="button" data-quick-clear>Clear saved list</button></div></div>
     </div>
     <div class="quick-order-table" role="table" aria-label="Packsmart quick order">
       <div class="quick-order-row quick-order-row--head" role="row">
@@ -54,5 +54,6 @@
       <button class="btn primary" type="button" data-quick-add disabled>Add selected to basket</button>
     </div>
     <p class="quick-order-status" role="status" aria-live="polite" data-quick-status></p>
+    <aside class="quick-order-help"><div><strong>Ordering regularly?</strong><span>Save the current product, pack-size and quantity selections on this device so the next order takes seconds.</span></div><a href="/pages/trade-ordering">Trade &amp; repeat ordering</a></aside>
   </div>
 </section>
