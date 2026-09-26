@@ -7,6 +7,7 @@ import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
+import { ensureWebIntelligence } from './web-intelligence.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
@@ -97,6 +98,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   };
   ensureControl(seeded);
   ensureMarketing(seeded);
+  ensureWebIntelligence(seeded);
   return seeded;
 }
 
@@ -148,6 +150,7 @@ export function upgradeState(state, env = process.env) {
   };
   ensureControl(upgraded);
   ensureMarketing(upgraded);
+  ensureWebIntelligence(upgraded);
   return upgraded;
 }
 

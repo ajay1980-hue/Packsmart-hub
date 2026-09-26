@@ -181,7 +181,7 @@
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
+    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -193,7 +193,7 @@
 
   const navigationHints = {
     overview: 'Dashboard, daily brief and business performance', issues: 'Exceptions, alerts and problems to review',
-    'ai-team': 'Commander and specialist agents', marketing: 'Campaign planning, creatives and channel publishing controls', profit: 'Products, inventory, stock and margins',
+    'ai-team': 'Commander and specialist agents', marketing: 'Campaign planning, creatives and channel publishing controls', 'market-radar': 'Competitor, supplier and market web intelligence', profit: 'Products, inventory, stock and margins',
     orders: 'Sales, refunds and order profitability', suppliers: 'Supplier records and product costs',
     channels: 'Connection Centre, onboarding, Shopify, eBay and Meta', approvals: 'Review proposed actions and approval history',
     automations: 'Automation rules, policies and autopilot', opportunities: 'Recommendations and potential improvements',
@@ -486,6 +486,27 @@
     }).join('') : '<div class="empty-state">No campaigns prepared yet. Runvara will only select active, in-stock products that meet the configured margin floor and have an image.</div>';
   }
 
+  function renderMarketRadar() {
+    const intelligence = state.data.webIntelligence || {};
+    const provider = intelligence.provider || {};
+    const radar = intelligence.radar || {};
+    const targets = intelligence.targets || [];
+    const findings = intelligence.findings || [];
+    $('#radar-provider-chip').innerHTML = '<span class="tag ' + (provider.configured ? 'good' : 'warn') + '">Firecrawl · ' + escapeHtml(provider.configured ? 'Runvara ready' : 'API setup required') + '</span>';
+    $('#radar-change-count').textContent = String(radar.changes24h || 0);
+    $('#radar-target-count').textContent = String(radar.monitoredTargets || 0);
+    $('#radar-price-count').textContent = String(radar.priceSignals24h || 0);
+    $('#radar-competitor-count').textContent = String(radar.competitorChanges24h || 0);
+    $('#radar-supplier-count').textContent = String(radar.supplierChanges24h || 0);
+    $('#radar-last-run').textContent = radar.lastRunAt ? 'Last scan ' + date(radar.lastRunAt) : 'No scans yet';
+    $('#radar-target-list').innerHTML = targets.length ? targets.map(target =>
+      '<div class="control-row"><div><b>' + escapeHtml(target.name) + '</b><small>' + escapeHtml(statusLabel(target.kind)) + ' · ' + escapeHtml(target.url) + '</small><small>' + escapeHtml(target.lastScannedAt ? 'Last scanned ' + date(target.lastScannedAt) : 'Not scanned yet') + (target.lastError ? ' · ' + escapeHtml(target.lastError) : '') + '</small></div><div class="button-row"><span class="tag ' + statusClass(target.lastStatus) + '">' + escapeHtml(statusLabel(target.lastStatus)) + '</span><button class="secondary small-button" data-radar-scan="' + escapeHtml(target.id) + '">Scan</button><button class="toggle ' + (target.active ? 'on' : '') + '" data-radar-toggle="' + escapeHtml(target.id) + '" aria-pressed="' + target.active + '" aria-label="Toggle ' + escapeHtml(target.name) + '"><span></span></button></div></div>'
+    ).join('') : '<div class="empty-state">Add competitor or supplier pages to start building your Market Radar.</div>';
+    $('#radar-finding-list').innerHTML = findings.length ? findings.map(item =>
+      '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + (item.type === 'price_change' ? 'warn' : 'neutral') + '">' + escapeHtml(statusLabel(item.type)) + '</span><h3>' + escapeHtml(item.title) + '</h3></div><small>' + escapeHtml(date(item.detectedAt)) + '</small></div><p>' + escapeHtml(item.detail) + '</p><a class="text-button" href="' + escapeHtml(item.sourceUrl) + '" target="_blank" rel="noopener noreferrer">Open evidence ↗</a></article>'
+    ).join('') : '<div class="empty-state">No market changes recorded yet. The first successful scan establishes a baseline.</div>';
+  }
+
   function renderAutomations() {
     $('#automation-list').innerHTML = (state.data.automationDefinitions || []).map(rule => {
       const enabled = Boolean(state.data.automations && state.data.automations[rule.id]);
@@ -619,7 +640,7 @@
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
-    renderOverview(); renderAiTeam(); renderMarketing(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    renderOverview(); renderAiTeam(); renderMarketing(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
     window.RunvaraControl.render(state.data);
   }
 
@@ -772,6 +793,48 @@
       showMessage('Marketing publication approval added to the Approval Centre.');
     } catch (error) { showMessage(error.message, 'error'); }
     finally { setBusy(button, false); }
+  });
+
+  $('#radar-target-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget, button = form.querySelector('button[type="submit"]');
+    setBusy(button, true, 'Adding…');
+    try {
+      await request('/api/web-intelligence/targets', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) });
+      form.reset(); await loadBootstrap({ migrate: false }); setView('market-radar');
+      showMessage('Market Radar watchlist updated.');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
+
+  $('#radar-scan-all').addEventListener('click', async event => {
+    const button = event.currentTarget; setBusy(button, true, 'Scanning…');
+    try {
+      const payload = await request('/api/web-intelligence/scan', { method: 'POST', body: '{}' });
+      await loadBootstrap({ migrate: false }); setView('market-radar');
+      showMessage('Market Radar scanned ' + (payload.result?.scanned || 0) + ' page(s).');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
+
+  $('#radar-target-list').addEventListener('click', async event => {
+    const scan = event.target.closest('[data-radar-scan]');
+    if (scan) {
+      setBusy(scan, true, 'Scanning…');
+      try {
+        await request('/api/web-intelligence/scan', { method: 'POST', body: JSON.stringify({ targetId: scan.dataset.radarScan }) });
+        await loadBootstrap({ migrate: false }); setView('market-radar'); showMessage('Web intelligence scan completed.');
+      } catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(scan, false); }
+      return;
+    }
+    const toggle = event.target.closest('[data-radar-toggle]');
+    if (!toggle) return;
+    toggle.disabled = true;
+    try {
+      await request('/api/web-intelligence/targets/' + encodeURIComponent(toggle.dataset.radarToggle), { method: 'PUT', body: JSON.stringify({ active: toggle.getAttribute('aria-pressed') !== 'true' }) });
+      await loadBootstrap({ migrate: false }); setView('market-radar');
+    } catch (error) { showMessage(error.message, 'error'); toggle.disabled = false; }
   });
 
   $('#automation-list').addEventListener('click', async event => {

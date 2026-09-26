@@ -3,6 +3,7 @@ import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
 import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS } from './connection-centre.mjs';
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
+import { runWebIntelligence } from './web-intelligence.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
@@ -92,6 +93,9 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           } else if (run.ruleId === 'marketingCreativeWorker') {
             const result = await marketingCreativeCycle(state, { env });
             evidence = [{ type: 'marketing_creative', id: result.campaign?.id || run.id, detail: result.advanced ? `Advanced Canva/Runway creative jobs for ${result.campaign.product.title}. No publishing or credit purchase was attempted.` : result.reason }];
+          } else if (run.ruleId === 'marketRadar') {
+            const result = await runWebIntelligence(state, { env, actor: 'autopilot' });
+            evidence = [{ type: 'web_intelligence', id: run.id, detail: `Scanned ${result.scanned || 0} public pages; ${result.changed || 0} changed and ${result.priceChanged || 0} had price-signal changes. No external writes were attempted.` }];
           } else {
             const d = deriveOperations(state);
             if (!d.products && !d.orders30d) throw Object.assign(new Error('No recorded business data'), { code: 'NO_RECORDED_DATA' });

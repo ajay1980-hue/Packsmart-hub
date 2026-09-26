@@ -58,7 +58,8 @@ export const AUTOMATION_DEFINITIONS = Object.freeze([
   { id: 'channelMismatchAlerts', name: 'Channel mismatch alerts', detail: 'Compares marketplace and social-channel catalogue health.' },
   { id: 'lossMakingAlerts', name: 'Loss-making SKU alerts', detail: 'Surfaces fully costed products and orders with negative contribution.' },
   { id: 'marketingPlanner', name: 'Marketing Autopilot planner', detail: 'Prepares one evidence-backed product campaign per day. Publishing and paid advertising remain approval-gated.' },
-  { id: 'marketingCreativeWorker', name: 'Marketing creative worker', detail: 'Advances configured Canva and Runway creative jobs. It cannot buy credits, publish content or change advertising spend.' }
+  { id: 'marketingCreativeWorker', name: 'Marketing creative worker', detail: 'Advances configured Canva and Runway creative jobs. It cannot buy credits, publish content or change advertising spend.' },
+  { id: 'marketRadar', name: 'Market Radar', detail: 'Monitors approved public competitor and supplier pages for evidence-backed changes. It cannot change prices, buy stock or publish content.' }
 ]);
 
 export function defaultAutomations() {
