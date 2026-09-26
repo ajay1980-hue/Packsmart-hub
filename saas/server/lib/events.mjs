@@ -8,8 +8,8 @@ export function addAudit(state, event) {
     detail: event.detail && typeof event.detail === 'object' ? event.detail : {},
     createdAt: event.createdAt || new Date().toISOString()
   };
-  // Keep only a bounded in-state working set. The durable audit history lives in audit_events.
-  state.audit = [entry, ...(state.audit || [])].slice(0, 500);
+  // Retention applies to API pages, never to the authoritative audit history.
+  state.audit = [entry, ...(state.audit || [])];
   return entry;
 }
 
