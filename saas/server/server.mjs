@@ -1772,8 +1772,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const runIntegrityCheck = async () => {
     if (store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
     try {
-      const result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
-      if (!result.healthy) console.warn(JSON.stringify({ event: 'persistence_integrity_warning', ...result }));
+      let result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
+      if (!result.healthy) {
+        console.warn(JSON.stringify({ event: 'persistence_integrity_warning', ...result }));
+        await withWorkspaceLock(CUSTOMER_ZERO_WORKSPACE, async () => {
+          const state = await store.get(CUSTOMER_ZERO_WORKSPACE);
+          if (state) await store.save(CUSTOMER_ZERO_WORKSPACE, state);
+        });
+        result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
+        console.log(JSON.stringify({ event: 'persistence_integrity_repaired', ...result }));
+      }
     } catch (error) {
       console.warn(JSON.stringify({ event: 'persistence_integrity_check_failed', code: error.code || 'PERSISTENCE_UNAVAILABLE' }));
     }
