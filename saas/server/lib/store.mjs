@@ -138,7 +138,7 @@ export function upgradeState(state, env = process.env) {
     agentRuns: Array.isArray(state?.agentRuns) ? state.agentRuns : [],
     agentActivity: Array.isArray(state?.agentActivity) ? state.agentActivity : [],
     approvals: Array.isArray(state?.approvals) ? state.approvals : [],
-    audit: Array.isArray(state?.audit) ? state.audit : seeded.audit,
+    audit: Array.isArray(state?.audit) ? state.audit.slice(0, 500) : seeded.audit,
     dailyBriefs: Array.isArray(state?.dailyBriefs) ? state.dailyBriefs : [],
     subscription: { ...seeded.subscription, ...(state?.subscription || {}) },
     connections: Array.isArray(state?.connections) ? state.connections : [],
