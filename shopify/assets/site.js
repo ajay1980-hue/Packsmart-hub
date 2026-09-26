@@ -286,6 +286,25 @@ function packsmartQuickOrder(){
       if(status){status.textContent='We could not add the full order. Check the selected products and try again.';status.classList.add('is-error')}
     }
   });
+  const save=root.querySelector('[data-quick-save]');
+  const load=root.querySelector('[data-quick-load]');
+  const clear=root.querySelector('[data-quick-clear]');
+  const storageKey='packsmart-quick-order-v1';
+  function currentList(){
+    return rows.map(row=>({id:String(row.querySelector('[data-quick-variant]')?.value||''),qty:Math.max(0,Number.parseInt(row.querySelector('[data-quick-qty]')?.value,10)||0)})).filter(item=>item.qty>0&&item.id);
+  }
+  save?.addEventListener('click',()=>{
+    const list=currentList();
+    if(!list.length){if(status)status.textContent='Add at least one product quantity before saving a list.';return}
+    try{localStorage.setItem(storageKey,JSON.stringify(list));if(status)status.textContent='Purchasing list saved on this device.'}catch(e){if(status){status.textContent='This browser could not save the list.';status.classList.add('is-error')}}
+  });
+  load?.addEventListener('click',()=>{
+    let list=[];try{list=JSON.parse(localStorage.getItem(storageKey)||'[]')}catch(e){}
+    rows.forEach(row=>{const qty=row.querySelector('[data-quick-qty]');if(qty)qty.value='0'});
+    list.forEach(item=>{const row=rows.find(r=>[...r.querySelectorAll('[data-quick-variant] option')].some(o=>String(o.value)===String(item.id)));if(!row)return;const select=row.querySelector('[data-quick-variant]');const qty=row.querySelector('[data-quick-qty]');if(select&&qty){select.value=String(item.id);qty.value=String(item.qty);select.dispatchEvent(new Event('change',{bubbles:true}))}});
+    updateSummary();if(status)status.textContent=list.length?'Saved purchasing list loaded.':'No saved purchasing list was found on this device.';
+  });
+  clear?.addEventListener('click',()=>{try{localStorage.removeItem(storageKey)}catch(e){}if(status)status.textContent='Saved purchasing list cleared.'});
   updateSummary();
 }
 document.addEventListener('DOMContentLoaded',packsmartQuickOrder);
