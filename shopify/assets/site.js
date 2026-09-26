@@ -187,3 +187,33 @@ function packsmartRunConversionBoost(){
 }
 
 document.addEventListener('DOMContentLoaded',packsmartRunConversionBoost);
+
+
+/* Packsmart commerce upgrade: progressive pack-size cards + mobile purchase bar. */
+function packsmartEnableTierPicker(){
+  const select=document.getElementById('ProductVariant');
+  const picker=document.querySelector('[data-tier-picker]');
+  if(!select||!picker)return;
+  picker.hidden=false;
+  const fallback=document.querySelector('[data-variant-fallback]');
+  if(fallback)fallback.hidden=true;
+  const mobile=document.querySelector('[data-mobile-buy]');
+  if(mobile)mobile.hidden=false;
+  const label=document.getElementById('MobileVariantLabel');
+  const price=document.getElementById('MobileVariantPrice');
+  function sync(){
+    const selected=select.options[select.selectedIndex];
+    document.querySelectorAll('[data-tier-variant]').forEach(card=>card.classList.toggle('is-selected',String(card.dataset.tierVariant)===String(select.value)));
+    if(label)label.textContent=(selected?.textContent||'').split(' — ')[0];
+    if(price)price.textContent=selected?.dataset?.price||'';
+  }
+  document.querySelectorAll('[data-tier-variant]').forEach(card=>card.addEventListener('click',()=>{
+    if(card.disabled)return;
+    select.value=card.dataset.tierVariant;
+    select.dispatchEvent(new Event('change',{bubbles:true}));
+    sync();
+  }));
+  select.addEventListener('change',sync);
+  sync();
+}
+document.addEventListener('DOMContentLoaded',packsmartEnableTierPicker);
