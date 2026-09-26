@@ -1743,7 +1743,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   });
 
-  const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief,
+  const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
     enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
   server.once('listening', () => scheduler.start());
   server.once('close', () => scheduler.stop());
