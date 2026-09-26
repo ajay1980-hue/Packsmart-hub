@@ -166,6 +166,7 @@ function photo(name, kind = 'remote') {
   };
 
   const backend = backendLib.createBackend({ fetchImpl: fakeFetch, baseUrl: 'https://manager.example' });
+  assert.equal(backendLib.DEFAULT_ROUTES.listing[0], '/api/ebay/create-listing', 'live Site listing route must be preferred');
   const result = await backend.saveDraft(draft, [main[0], local, main[1]]);
   assert.equal(result.data.ok, true);
   assert.equal(calls.length, 2, 'backend should try next compatible route only after 404/405');
