@@ -287,9 +287,9 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   assert.ok(document.getElementById('connection-onboarding'));
   document.getElementById('connection-close').click();
   document.querySelector('[data-provider="amazon"][data-connection-action="open"]').click();
-  assert.match(document.getElementById('connection-detail').textContent,/provider setup pending/i);
+  assert.match(document.getElementById('connection-detail').textContent,/access is being prepared/i);
   document.querySelector('[data-connection-action="setup-request"]').click();
-  await until(()=>document.getElementById('connection-detail').textContent.includes('Provider setup is already being tracked'));
+  await until(()=>document.getElementById('connection-detail').textContent.includes('Access requested'));
   assert.deepEqual(errors,[]);
   window.fetch=async()=>json({error:'Authentication required',code:'AUTH_REQUIRED'},401);
   document.getElementById('connection-refresh').click();
