@@ -184,6 +184,27 @@ create table if not exists public.subscriptions (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.ai_usage_events (
+  id text primary key,
+  workspace_id text not null references public.workspaces(id) on delete cascade,
+  user_id text,
+  campaign_id text,
+  request_key text,
+  provider text not null,
+  operation text not null,
+  credits integer not null check (credits >= 0),
+  status text not null check (status in ('reserved', 'settled', 'released')),
+  estimated_provider_cost_minor integer not null default 0 check (estimated_provider_cost_minor >= 0),
+  actual_provider_cost_minor integer check (actual_provider_cost_minor is null or actual_provider_cost_minor >= 0),
+  provider_reference text,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  settled_at timestamptz,
+  released_at timestamptz
+);
+create index if not exists ai_usage_workspace_created_idx on public.ai_usage_events (workspace_id, created_at desc);
+create index if not exists ai_usage_workspace_status_idx on public.ai_usage_events (workspace_id, status, created_at desc);
+
 create table if not exists public.orders (
   workspace_id text not null references public.workspaces(id) on delete cascade,
   id text not null,
@@ -261,6 +282,7 @@ alter table public.automation_rules enable row level security;
 alter table public.approval_requests enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.subscriptions enable row level security;
+alter table public.ai_usage_events enable row level security;
 alter table public.orders enable row level security;
 alter table public.order_financials enable row level security;
 alter table public.advertising_costs enable row level security;
@@ -269,6 +291,8 @@ alter table public.saas_workspace_state enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
 grant select, insert, update, delete on all tables in schema public to service_role;
+revoke all on public.ai_usage_events from anon, authenticated;
+grant select, insert, update, delete on public.ai_usage_events to service_role;
 
 -- Supabase's optional automatic-RLS project setting creates this helper in the
 -- public schema. Keep the event trigger, but prevent browser roles from calling
