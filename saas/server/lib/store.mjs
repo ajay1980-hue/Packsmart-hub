@@ -722,9 +722,16 @@ class SupabaseStore {
     assertWorkspace(workspaceId, state);
     const existing = Boolean(state[PERSISTED] || state._revision);
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
-    // Archive append-only operational histories before compacting the hot state.
-    // A failed archive write aborts the save so history is never silently discarded.
-    await this.archiveAndCompact(workspaceId, upgraded);
+    // Archive append-only operational histories before compacting existing hot state.
+    // New workspaces have no parent FK row yet and start below retention limits.
+    if (existing) await this.archiveAndCompact(workspaceId, upgraded);
+    else {
+      upgraded.audit = (upgraded.audit || []).slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
+      upgraded.workRecords = (upgraded.workRecords || []).slice(0, SUPABASE_WORK_RECORD_LIMIT);
+      upgraded.connectionSyncs = (upgraded.connectionSyncs || []).slice(0, SUPABASE_CONNECTION_SYNC_LIMIT);
+      upgraded.agentRuns = (upgraded.agentRuns || []).slice(0, SUPABASE_AGENT_RUN_LIMIT);
+      upgraded.dailyBriefs = (upgraded.dailyBriefs || []).slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
+    }
     upgraded.workspace.updatedAt = new Date().toISOString();
     if (existing) {
       const briefs = [];
