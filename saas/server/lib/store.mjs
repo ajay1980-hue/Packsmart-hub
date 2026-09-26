@@ -7,6 +7,7 @@ import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
+import { ensureAiUsage } from './ai-usage.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
@@ -97,6 +98,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   };
   ensureControl(seeded);
   ensureMarketing(seeded);
+  ensureAiUsage(seeded, env);
   return seeded;
 }
 
@@ -148,6 +150,7 @@ export function upgradeState(state, env = process.env) {
   };
   ensureControl(upgraded);
   ensureMarketing(upgraded);
+  ensureAiUsage(upgraded, env);
   return upgraded;
 }
 
@@ -486,6 +489,25 @@ class SupabaseStore {
       usage: state.subscription?.usage || {},
       updated_at: state.subscription?.updatedAt || new Date().toISOString()
     }], 'workspace_id');
+
+    await mirror('ai_usage_events', (state.aiUsage?.ledger || []).filter(entry => !entry.topUpCredits).map(entry => ({
+      id: entry.id,
+      workspace_id: workspaceId,
+      user_id: entry.userId || null,
+      campaign_id: entry.campaignId || null,
+      request_key: entry.requestKey || null,
+      provider: entry.provider || 'unknown',
+      operation: entry.operation || 'unknown',
+      credits: Math.max(0, Math.round(Number(entry.credits || 0))),
+      status: entry.status,
+      estimated_provider_cost_minor: Math.max(0, Math.round(Number(entry.estimatedProviderCostMinor || 0))),
+      actual_provider_cost_minor: entry.actualProviderCostMinor == null ? null : Math.max(0, Math.round(Number(entry.actualProviderCostMinor || 0))),
+      provider_reference: entry.providerReference || null,
+      metadata: entry.metadata || {},
+      created_at: entry.createdAt,
+      settled_at: entry.settledAt || null,
+      released_at: entry.releasedAt || null
+    })), 'id');
 
     await mirror('orders', (state.orders || []).map(order => ({
       id: order.id,
