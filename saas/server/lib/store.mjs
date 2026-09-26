@@ -138,7 +138,7 @@ export function upgradeState(state, env = process.env) {
     agentRuns: Array.isArray(state?.agentRuns) ? state.agentRuns : [],
     agentActivity: Array.isArray(state?.agentActivity) ? state.agentActivity : [],
     approvals: Array.isArray(state?.approvals) ? state.approvals : [],
-    audit: Array.isArray(state?.audit) ? state.audit.slice(0, 500) : seeded.audit,
+    audit: Array.isArray(state?.audit) ? state.audit : seeded.audit,
     dailyBriefs: Array.isArray(state?.dailyBriefs) ? state.dailyBriefs : [],
     subscription: { ...seeded.subscription, ...(state?.subscription || {}) },
     connections: Array.isArray(state?.connections) ? state.connections : [],
@@ -576,6 +576,9 @@ class SupabaseStore {
     assertWorkspace(workspaceId, state);
     const existing = Boolean(state[PERSISTED] || state._revision);
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
+    // Supabase keeps the complete audit trail in audit_events. Bound only the duplicated
+    // JSON working set so primary-state rewrites remain fast; FileStore remains lossless.
+    upgraded.audit = (upgraded.audit || []).slice(0, 500);
     upgraded.workspace.updatedAt = new Date().toISOString();
     if (existing) {
       const briefs = [];
