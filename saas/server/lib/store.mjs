@@ -10,6 +10,9 @@ import { ensureMarketing } from './marketing.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
+const SUPABASE_EMBEDDED_AUDIT_LIMIT = 500;
+const SUPABASE_STATE_WARN_BYTES = 1572864;
+const SUPABASE_STATE_HARD_BYTES = 2097152;
 function markPersisted(state) { Object.defineProperty(state, PERSISTED, { value: true, configurable: true }); return state; }
 function conflict() { return Object.assign(new Error('Workspace changed; refresh and try again'), { status: 409, code: 'STATE_CONFLICT' }); }
 function assertWorkspace(workspaceId, state) {
@@ -221,6 +224,23 @@ class SupabaseStore {
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
     this.mirrorDigests = new Map();
     this.fetch = fetchImpl;
+    this.telemetry = {
+      lastSuccessfulReadAt: null,
+      lastSuccessfulWriteAt: null,
+      lastPrimaryWriteAt: null,
+      lastPrimaryFailureAt: null,
+      lastFailureAt: null,
+      lastFailureCode: null,
+      lastFailureHttpStatus: null,
+      lastFailureTable: null,
+      stateBytes: null,
+      stateWarnBytes: SUPABASE_STATE_WARN_BYTES,
+      stateHardBytes: SUPABASE_STATE_HARD_BYTES,
+      embeddedAuditLimit: SUPABASE_EMBEDDED_AUDIT_LIMIT,
+      reportingFailures: 0,
+      reportingLastError: null,
+      lastIntegrityCheckAt: null
+    };
     let parsed;
     try { parsed = new URL(this.url); } catch { throw new Error('SUPABASE_URL is invalid'); }
     if (parsed.protocol !== 'https:' && env.NODE_ENV === 'production') throw new Error('SUPABASE_URL must use HTTPS');
@@ -238,11 +258,27 @@ class SupabaseStore {
   }
 
   async request(pathname, options = {}) {
-    const response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
-      ...options,
-      headers: this.headers(options.headers),
-      signal: options.signal || AbortSignal.timeout(20000)
-    });
+    const method = String(options.method || 'GET').toUpperCase();
+    let response;
+    try {
+      response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
+        ...options,
+        headers: this.headers(options.headers),
+        signal: options.signal || AbortSignal.timeout(20000)
+      });
+    } catch (cause) {
+      const error = Object.assign(new Error('Supabase persistence request failed'), {
+        code: 'SUPABASE_PERSISTENCE_FAILED',
+        table: pathname.split('?')[0],
+        payloadBytes: Buffer.byteLength(options.body || ''),
+        cause
+      });
+      this.telemetry.lastFailureAt = new Date().toISOString();
+      this.telemetry.lastFailureCode = cause?.name === 'TimeoutError' ? 'TIMEOUT' : 'NETWORK_ERROR';
+      this.telemetry.lastFailureHttpStatus = null;
+      this.telemetry.lastFailureTable = error.table;
+      throw error;
+    }
     if (!response.ok) {
       const error = new Error(`Supabase persistence request failed (${response.status})`);
       error.code = 'SUPABASE_PERSISTENCE_FAILED';
@@ -256,9 +292,16 @@ class SupabaseStore {
           error.databaseCode = payload.code;
         }
       } catch { /* Non-JSON error responses retain HTTP/table diagnostics. */ }
+      this.telemetry.lastFailureAt = new Date().toISOString();
+      this.telemetry.lastFailureCode = error.databaseCode || error.code;
+      this.telemetry.lastFailureHttpStatus = response.status;
+      this.telemetry.lastFailureTable = error.table;
       throw error;
     }
-    if (response.status === 204 || options.method === 'HEAD') return null;
+    const succeededAt = new Date().toISOString();
+    if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
+    else this.telemetry.lastSuccessfulWriteAt = succeededAt;
+    if (response.status === 204 || method === 'HEAD') return null;
     const text = await response.text();
     return text ? JSON.parse(text) : null;
   }
@@ -551,6 +594,18 @@ class SupabaseStore {
   }
 
   async commit(workspaceId, state, expectedRevision, existing) {
+    const stateBytes = Buffer.byteLength(JSON.stringify(state));
+    this.telemetry.stateBytes = stateBytes;
+    if (stateBytes >= SUPABASE_STATE_HARD_BYTES) {
+      const error = Object.assign(new Error('Workspace state is too large to persist safely'), {
+        status: 503, code: 'STATE_SIZE_LIMIT', stateBytes
+      });
+      this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
+      throw error;
+    }
+    if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
+      console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
+    }
     const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
     if (existing) {
       const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
@@ -562,13 +617,21 @@ class SupabaseStore {
         if (error.databaseCode !== '57014') throw error;
         // PostgreSQL cancelled this statement. Retry the same revision-guarded
         // write once; do not repeat any provider operation or business callback.
+        await new Promise(resolve => setTimeout(resolve, 250));
         rows = await this.request(path, options);
       }
       if (!rows?.length) throw conflict();
+      this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
     } else {
       // Atomically create the FK parent, unique login identity and primary state.
-      try { await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) }); }
-      catch (error) { if (error.databaseCode === '23505') throw conflict(); throw error; }
+      try {
+        await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) });
+        this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
+      } catch (error) {
+        this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
+        if (error.databaseCode === '23505') throw conflict();
+        throw error;
+      }
     }
   }
 
@@ -578,7 +641,7 @@ class SupabaseStore {
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
     // Supabase keeps the complete audit trail in audit_events. Bound only the duplicated
     // JSON working set so primary-state rewrites remain fast; FileStore remains lossless.
-    upgraded.audit = (upgraded.audit || []).slice(0, 500);
+    upgraded.audit = (upgraded.audit || []).slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
     upgraded.workspace.updatedAt = new Date().toISOString();
     if (existing) {
       const briefs = [];
@@ -600,6 +663,8 @@ class SupabaseStore {
     state.dailyBriefs = upgraded.dailyBriefs;
     markPersisted(state);
     const failures = await this.mirrorNormalized(workspaceId, upgraded);
+    this.telemetry.reportingFailures = failures.length;
+    this.telemetry.reportingLastError = failures[0]?.databaseCode || failures[0]?.code || null;
     const report = { status: failures.length ? 'degraded' : 'connected', detail: failures.length ? `${failures.length} reporting tables need repair; primary workspace data remains durable.` : 'Reporting refresh completed.',
       lastSyncAt: failures.length ? (state.integrationStatus?.reporting?.lastSyncAt || null) : now,
       lastFailureAt: failures.length ? now : (state.integrationStatus?.reporting?.lastFailureAt || null), lastError: failures[0]?.databaseCode || failures[0]?.code || null, failures };
@@ -646,6 +711,41 @@ class SupabaseStore {
       ids.push(...(rows || []).map(row => row.workspace_id));
       if ((rows || []).length < 200) return ids;
     }
+  }
+
+  diagnostics() {
+    const primaryPersistence = !this.telemetry.lastPrimaryFailureAt ||
+      (this.telemetry.lastPrimaryWriteAt && this.telemetry.lastPrimaryWriteAt >= this.telemetry.lastPrimaryFailureAt);
+    return {
+      ...this.telemetry,
+      primaryPersistence,
+      stateSizeStatus: this.telemetry.stateBytes === null ? 'unknown' :
+        this.telemetry.stateBytes >= SUPABASE_STATE_HARD_BYTES ? 'critical' :
+        this.telemetry.stateBytes >= SUPABASE_STATE_WARN_BYTES ? 'warning' : 'healthy'
+    };
+  }
+
+  async integrityCheck(workspaceId) {
+    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
+    const state = rows?.[0]?.state;
+    if (!state) return { workspaceId, healthy: false, code: 'WORKSPACE_STATE_MISSING' };
+    const stateBytes = Buffer.byteLength(JSON.stringify(state));
+    const embeddedAuditCount = Array.isArray(state.audit) ? state.audit.length : 0;
+    const reportingStatus = state.integrationStatus?.reporting?.status || 'unknown';
+    this.telemetry.stateBytes = stateBytes;
+    this.telemetry.lastIntegrityCheckAt = new Date().toISOString();
+    const healthy = stateBytes < SUPABASE_STATE_HARD_BYTES && embeddedAuditCount <= SUPABASE_EMBEDDED_AUDIT_LIMIT;
+    return {
+      workspaceId,
+      healthy,
+      stateBytes,
+      stateWarnBytes: SUPABASE_STATE_WARN_BYTES,
+      stateHardBytes: SUPABASE_STATE_HARD_BYTES,
+      embeddedAuditCount,
+      embeddedAuditLimit: SUPABASE_EMBEDDED_AUDIT_LIMIT,
+      reportingStatus,
+      checkedAt: this.telemetry.lastIntegrityCheckAt
+    };
   }
 
   async ping() {
