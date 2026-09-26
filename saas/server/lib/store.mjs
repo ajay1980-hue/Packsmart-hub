@@ -743,7 +743,7 @@ class SupabaseStore {
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
     await this.commit(workspaceId, upgraded, state._revision, existing);
     state._revision = upgraded._revision;
-    state.dailyBriefs = upgraded.dailyBriefs;
+    for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) state[key] = upgraded[key];
     markPersisted(state);
     const failures = await this.mirrorNormalized(workspaceId, upgraded);
     this.telemetry.reportingFailures = failures.length;
@@ -814,10 +814,20 @@ class SupabaseStore {
     if (!state) return { workspaceId, healthy: false, code: 'WORKSPACE_STATE_MISSING' };
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
     const embeddedAuditCount = Array.isArray(state.audit) ? state.audit.length : 0;
+    const workRecordCount = Array.isArray(state.workRecords) ? state.workRecords.length : 0;
+    const connectionSyncCount = Array.isArray(state.connectionSyncs) ? state.connectionSyncs.length : 0;
+    const agentRunCount = Array.isArray(state.agentRuns) ? state.agentRuns.length : 0;
+    const dailyBriefCount = Array.isArray(state.dailyBriefs) ? state.dailyBriefs.length : 0;
+    const automationRunCount = Array.isArray(state.automationRuns) ? state.automationRuns.length : 0;
     const reportingStatus = state.integrationStatus?.reporting?.status || 'unknown';
     this.telemetry.stateBytes = stateBytes;
     this.telemetry.lastIntegrityCheckAt = new Date().toISOString();
-    const healthy = stateBytes < SUPABASE_STATE_HARD_BYTES && embeddedAuditCount <= SUPABASE_EMBEDDED_AUDIT_LIMIT;
+    const healthy = stateBytes < SUPABASE_STATE_HARD_BYTES &&
+      embeddedAuditCount <= SUPABASE_EMBEDDED_AUDIT_LIMIT &&
+      workRecordCount <= SUPABASE_WORK_RECORD_LIMIT &&
+      connectionSyncCount <= SUPABASE_CONNECTION_SYNC_LIMIT + 20 &&
+      agentRunCount <= SUPABASE_AGENT_RUN_LIMIT &&
+      dailyBriefCount <= SUPABASE_DAILY_BRIEF_LIMIT;
     return {
       workspaceId,
       healthy,
@@ -826,6 +836,11 @@ class SupabaseStore {
       stateHardBytes: SUPABASE_STATE_HARD_BYTES,
       embeddedAuditCount,
       embeddedAuditLimit: SUPABASE_EMBEDDED_AUDIT_LIMIT,
+      workRecordCount,
+      automationRunCount,
+      connectionSyncCount,
+      agentRunCount,
+      dailyBriefCount,
       reportingStatus,
       checkedAt: this.telemetry.lastIntegrityCheckAt
     };
