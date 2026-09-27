@@ -23,8 +23,8 @@ test('AI router respects workload type, operator mode and plan ceilings', () => 
 });
 
 test('AI token cost accounting handles cache writes and long context', () => {
-  assert.equal(estimateAiCostUsd('gpt-5.6-luna',{inputTokens:1_000_000,outputTokens:1_000_000}),1.4);
-  assert.equal(estimateAiCostUsd('gpt-5.6-terra',{inputTokens:1_000_000,cachedInputTokens:500_000,cacheWriteTokens:250_000,outputTokens:0}),1.725);
+  assert.equal(estimateAiCostUsd('gpt-5.6-luna',{inputTokens:100_000,outputTokens:100_000}),0.14);
+  assert.equal(estimateAiCostUsd('gpt-5.6-terra',{inputTokens:200_000,cachedInputTokens:100_000,cacheWriteTokens:50_000,outputTokens:0}),0.245);
   assert.equal(estimateAiCostUsd('gpt-5.6-sol',{inputTokens:300_000,outputTokens:100_000}),5.4);
   const usage=normalizeAiUsage({workspaceId:'w',taskType:'agent_command',model:'gpt-5.6-luna',inputTokens:100,cachedInputTokens:20,cacheWriteTokens:10,outputTokens:50});
   assert.ok(usage.estimatedCostUsd>0);
