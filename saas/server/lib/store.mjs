@@ -454,13 +454,22 @@ class SupabaseStore {
     return persisted;
   }
 
+  async schedulerRevision(workspaceId) {
+    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=revision:state->>_revision&limit=1`);
+    return rows?.[0]?.revision || null;
+  }
+
   async getForScheduler(workspaceId) {
     const cached = this.schedulerCache.get(workspaceId);
     if (cached && Date.now() - cached.at < this.schedulerCacheMaxAgeMs) {
-      this.telemetry.schedulerCacheHits++;
-      const state = upgradeState(structuredClone(cached.state));
-      state.storageReady = true;
-      return markPersisted(state);
+      const revision = await this.schedulerRevision(workspaceId);
+      if (revision && revision === cached.state?._revision) {
+        this.telemetry.schedulerCacheHits++;
+        const state = upgradeState(structuredClone(cached.state));
+        state.storageReady = true;
+        return markPersisted(state);
+      }
+      this.schedulerCache.delete(workspaceId);
     }
     this.telemetry.schedulerCacheMisses++;
     return this.get(workspaceId);
