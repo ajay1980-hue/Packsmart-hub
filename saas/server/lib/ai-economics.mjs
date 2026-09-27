@@ -99,3 +99,11 @@ export function normalizeAiUsage({workspaceId,jobId=null,taskType,provider='open
 export function publicModelCatalog() {
   return Object.values(AI_MODEL_CATALOG).map(item=>({...item,pricingUpdatedAt:AI_PRICING_UPDATED_AT}));
 }
+
+export function planMonthlyValueGbp(state) {
+  if (state?.workspace?.id === 'packsmart-solutions' || state?.subscription?.plan === 'customer-zero') return { amount:0, source:'internal' };
+  const explicit=Number(state?.subscription?.monthlyAmountGbp);
+  if (Number.isFinite(explicit) && explicit >= 0) return { amount:Number(explicit.toFixed(2)), source:'billing' };
+  const listed={starter:29,growth:79,pro:149}[state?.subscription?.plan];
+  return { amount:Number(listed||0), source:listed?'indicative_list_price':'unknown' };
+}
