@@ -52,7 +52,7 @@ import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.10.0';
+const VERSION = '6.11.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -1499,6 +1499,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'GET' && pathname === '/api/operator/agent-ops') {
           requireLaunchAdmin(auth, env);
           send(res, 200, await agentOps.fleetSnapshot()); return;
+        }
+        const operatorAgentOpsWorkspace = pathname.match(/^\/api\/operator\/agent-ops\/workspaces\/([^/]+)$/);
+        if (req.method === 'PUT' && operatorAgentOpsWorkspace) {
+          requireLaunchAdmin(auth, env);
+          const body = await jsonBody(req, 8192);
+          const settings = await agentOps.configureWorkspace(text(operatorAgentOpsWorkspace[1], 160), body, auth.user.id);
+          send(res, 200, { settings }); return;
+        }
+        const operatorAgentOpsRetry = pathname.match(/^\/api\/operator\/agent-ops\/workspaces\/([^/]+)\/jobs\/([^/]+)\/retry$/);
+        if (req.method === 'POST' && operatorAgentOpsRetry) {
+          requireLaunchAdmin(auth, env);
+          const job = await agentOps.retry(text(operatorAgentOpsRetry[1], 160), text(operatorAgentOpsRetry[2], 160), auth.user.id);
+          send(res, 202, { job }); return;
         }
         if (req.method === 'GET' && pathname === '/api/briefs') {
           send(res, 200, { briefs: auth.state.dailyBriefs || [] }); return;

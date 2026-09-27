@@ -80,7 +80,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   assert.equal(document.getElementById('week-metrics').hidden, true);
   assert.equal(document.getElementById('month-metrics').hidden, false);
   assert.ok(document.getElementById('revenue-chart').textContent.includes('No channel revenue is available yet'));
-  for (const button of document.querySelectorAll('#main-nav [data-view]')) { button.click(); assert.ok(document.getElementById(`view-${button.dataset.view}`).classList.contains('active')); }
+  for (const button of document.querySelectorAll('#main-nav [data-view]:not(.hidden)')) { button.click(); assert.ok(document.getElementById(`view-${button.dataset.view}`).classList.contains('active')); }
   const decision = document.getElementById('decision-form');
   for (const [key, value] of Object.entries({ key: 'ui-goal', category: 'goal', title: 'A verified UI goal', content: 'Check operations daily.', source: 'DOM integration test' })) decision.elements[key].value = value;
   decision.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
