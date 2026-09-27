@@ -3,9 +3,9 @@ import crypto from 'node:crypto';
 export const AI_PRICING_UPDATED_AT = '2026-09-27';
 export const AI_MODEL_CATALOG = Object.freeze({
   deterministic: { provider:'runvara', model:'deterministic', inputPerMillionUsd:0, cachedInputPerMillionUsd:0, outputPerMillionUsd:0, tier:'deterministic' },
-  'gpt-5.6-luna': { provider:'openai', model:'gpt-5.6-luna', inputPerMillionUsd:0.20, cachedInputPerMillionUsd:0.02, outputPerMillionUsd:1.20, tier:'economy' },
-  'gpt-5.6-terra': { provider:'openai', model:'gpt-5.6-terra', inputPerMillionUsd:2.00, cachedInputPerMillionUsd:0.20, outputPerMillionUsd:12.00, tier:'balanced' },
-  'gpt-5.6-sol': { provider:'openai', model:'gpt-5.6-sol', inputPerMillionUsd:4.00, cachedInputPerMillionUsd:0.40, outputPerMillionUsd:20.00, tier:'quality' }
+  'gpt-5.6-luna': { provider:'openai', model:'gpt-5.6-luna', inputPerMillionUsd:0.20, cachedInputPerMillionUsd:0.02, cacheWritePerMillionUsd:0.25, outputPerMillionUsd:1.20, tier:'economy' },
+  'gpt-5.6-terra': { provider:'openai', model:'gpt-5.6-terra', inputPerMillionUsd:2.00, cachedInputPerMillionUsd:0.20, cacheWritePerMillionUsd:2.50, outputPerMillionUsd:12.00, tier:'balanced' },
+  'gpt-5.6-sol': { provider:'openai', model:'gpt-5.6-sol', inputPerMillionUsd:4.00, cachedInputPerMillionUsd:0.40, cacheWritePerMillionUsd:5.00, outputPerMillionUsd:20.00, tier:'quality' }
 });
 
 const planCeiling = plan => plan === 'starter' ? 'economy' : plan === 'growth' ? 'balanced' : 'quality';
@@ -76,16 +76,19 @@ export function routeAiWork(state,{jobType,payload={}}={}) {
 
 export function estimateAiCostUsd(modelName,usage={}) {
   const model=AI_MODEL_CATALOG[modelName]||AI_MODEL_CATALOG.deterministic;
-  const input=safeNumber(usage.inputTokens), cached=Math.min(input,safeNumber(usage.cachedInputTokens)), output=safeNumber(usage.outputTokens);
-  const uncached=Math.max(0,input-cached);
-  return Number(((uncached/1e6)*model.inputPerMillionUsd + (cached/1e6)*model.cachedInputPerMillionUsd + (output/1e6)*model.outputPerMillionUsd).toFixed(8));
+  const input=safeNumber(usage.inputTokens), cached=Math.min(input,safeNumber(usage.cachedInputTokens));
+  const cacheWrite=Math.min(input-cached,safeNumber(usage.cacheWriteTokens)), output=safeNumber(usage.outputTokens);
+  const uncached=Math.max(0,input-cached-cacheWrite);
+  const longContext=input>272000;
+  const inputMultiplier=longContext?2:1, outputMultiplier=longContext?1.5:1;
+  return Number((((uncached/1e6)*model.inputPerMillionUsd + (cached/1e6)*model.cachedInputPerMillionUsd + (cacheWrite/1e6)*(model.cacheWritePerMillionUsd||model.inputPerMillionUsd))*inputMultiplier + (output/1e6)*model.outputPerMillionUsd*outputMultiplier).toFixed(8));
 }
 
-export function normalizeAiUsage({workspaceId,jobId=null,taskType,provider='openai',model,inputTokens=0,cachedInputTokens=0,outputTokens=0,requestId=null,occurredAt=new Date().toISOString()}) {
+export function normalizeAiUsage({workspaceId,jobId=null,taskType,provider='openai',model,inputTokens=0,cachedInputTokens=0,cacheWriteTokens=0,outputTokens=0,requestId=null,occurredAt=new Date().toISOString()}) {
   const chosen=AI_MODEL_CATALOG[model];
   if (!chosen || chosen.provider !== provider) throw Object.assign(new Error('Unknown AI model pricing record'),{status:400,code:'AI_MODEL_UNKNOWN'});
-  const usage={inputTokens:Math.floor(safeNumber(inputTokens)),cachedInputTokens:Math.floor(safeNumber(cachedInputTokens)),outputTokens:Math.floor(safeNumber(outputTokens))};
-  if (usage.cachedInputTokens > usage.inputTokens) throw Object.assign(new Error('Cached input cannot exceed input tokens'),{status:400,code:'AI_USAGE_INVALID'});
+  const usage={inputTokens:Math.floor(safeNumber(inputTokens)),cachedInputTokens:Math.floor(safeNumber(cachedInputTokens)),cacheWriteTokens:Math.floor(safeNumber(cacheWriteTokens)),outputTokens:Math.floor(safeNumber(outputTokens))};
+  if (usage.cachedInputTokens + usage.cacheWriteTokens > usage.inputTokens) throw Object.assign(new Error('Cached and cache-write input cannot exceed input tokens'),{status:400,code:'AI_USAGE_INVALID'});
   return {
     id:`ai_usage_${crypto.randomUUID()}`, workspaceId, jobId, taskType:String(taskType||'unknown').slice(0,80),
     provider, model, ...usage, estimatedCostUsd:estimateAiCostUsd(model,usage),
