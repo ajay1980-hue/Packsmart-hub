@@ -210,6 +210,8 @@ class FileStore {
     try { return await write; } finally { if (fileQueues.get(this.filePath) === write) fileQueues.delete(this.filePath); }
   }
 
+  async getForScheduler(workspaceId) { return this.get(workspaceId); }
+  invalidateSchedulerCache() {}
   async listWorkspaceIds() { return Object.keys(await this.readAll()); }
 
   async getBrief(workspaceId, briefId) { return (await this.get(workspaceId))?.dailyBriefs?.find(item => item.id === briefId) || null; }
@@ -334,6 +336,8 @@ class SupabaseStore {
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
     this.mirrorDigests = new Map();
+    this.schedulerCache = new Map();
+    this.schedulerCacheMaxAgeMs = Math.max(300000, Math.min(21600000, Number(env.SCHEDULER_STATE_CACHE_MS) || 3600000));
     this.fetch = fetchImpl;
     this.telemetry = {
       lastSuccessfulReadAt: null,
@@ -350,7 +354,9 @@ class SupabaseStore {
       embeddedAuditLimit: SUPABASE_EMBEDDED_AUDIT_LIMIT,
       reportingFailures: 0,
       reportingLastError: null,
-      lastIntegrityCheckAt: null
+      lastIntegrityCheckAt: null,
+      schedulerCacheHits: 0,
+      schedulerCacheMisses: 0
     };
     let parsed;
     try { parsed = new URL(this.url); } catch { throw new Error('SUPABASE_URL is invalid'); }
@@ -428,13 +434,36 @@ class SupabaseStore {
     })) };
   }
 
+  rememberSchedulerState(workspaceId, state) {
+    if (!state) { this.schedulerCache.delete(workspaceId); return; }
+    this.schedulerCache.set(workspaceId, { at:Date.now(), state:structuredClone(state) });
+  }
+
+  invalidateSchedulerCache(workspaceId) {
+    this.schedulerCache.delete(workspaceId);
+  }
+
   async get(workspaceId) {
     const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
-    if (!rows?.[0]?.state) return null;
+    if (!rows?.[0]?.state) { this.rememberSchedulerState(workspaceId, null); return null; }
     const state = upgradeState(rows[0].state);
     state.storageReady = true;
     assertWorkspace(workspaceId, state);
-    return markPersisted(state);
+    const persisted = markPersisted(state);
+    this.rememberSchedulerState(workspaceId, persisted);
+    return persisted;
+  }
+
+  async getForScheduler(workspaceId) {
+    const cached = this.schedulerCache.get(workspaceId);
+    if (cached && Date.now() - cached.at < this.schedulerCacheMaxAgeMs) {
+      this.telemetry.schedulerCacheHits++;
+      const state = upgradeState(structuredClone(cached.state));
+      state.storageReady = true;
+      return markPersisted(state);
+    }
+    this.telemetry.schedulerCacheMisses++;
+    return this.get(workspaceId);
   }
 
   async upsert(table, rows, conflict, options = {}) {
@@ -881,7 +910,9 @@ class SupabaseStore {
       upgraded.integrationStatus.reporting = { status: 'degraded', detail: 'Reporting status update deferred; primary workspace data is durable.', lastError: 'REPORTING_STATUS_DEFERRED' };
       console.warn(JSON.stringify({ event: 'reporting_status_deferred', workspaceId, code: error.code || 'PERSISTENCE_UNAVAILABLE' }));
     }
-    return markPersisted(upgraded);
+    const persisted = markPersisted(upgraded);
+    this.rememberSchedulerState(workspaceId, persisted);
+    return persisted;
   }
 
   async findUserByEmail(email) {
