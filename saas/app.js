@@ -7,7 +7,7 @@
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
   const state = {
-    csrf: '', session: null, data: null, audit: [], view: 'overview',
+    csrf: '', session: null, data: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
     orderFilter: 'all', approvalFilter: 'pending'
   };
@@ -163,6 +163,9 @@
     $('#sidebar-workspace').textContent = data.workspace.name;
     $('#sidebar-account').textContent = data.workspace.id === 'packsmart-solutions' ? 'Customer zero · internal' : 'Independent workspace';
     $('#launch-controls').classList.toggle('hidden', !data.launchAdmin);
+    $('#operator-fleet-nav').classList.toggle('hidden', !data.launchAdmin);
+    $('#operator-nav-label').classList.toggle('hidden', !data.launchAdmin);
+    if (!data.launchAdmin && state.view === 'fleet') state.view = 'overview';
     $('#customer-zero-manager').classList.toggle('hidden', data.workspace.id !== 'packsmart-solutions');
     localStorage.removeItem(LOCAL.economics);
     localStorage.removeItem(LOCAL.automations);
@@ -181,12 +184,16 @@
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account' };
+    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
       if (state.data?.launchAdmin) loadLaunch().catch(error => showMessage(error.message, 'error'));
       loadBilling().catch(error => showMessage(error.message, 'error'));
+    }
+    if (view === 'fleet') {
+      if (!state.data?.launchAdmin) { setView('overview'); return; }
+      loadFleet().catch(error => showMessage(error.message, 'error'));
     }
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }
@@ -198,7 +205,8 @@
     channels: 'Connection Centre, onboarding, Shopify, eBay and Meta', approvals: 'Review proposed actions and approval history',
     automations: 'Automation rules, policies and autopilot', opportunities: 'Recommendations and potential improvements',
     memory: 'Business decisions, goals and context', value: 'Results, action history and proof of work',
-    audit: 'Account, billing, subscription, settings and audit history'
+    audit: 'Account, billing, subscription, settings and audit history',
+    fleet: 'Platform owner fleet health, AI usage, queue pressure and workspace controls'
   };
 
   function closeWorkspaceSearch() {
@@ -615,6 +623,63 @@
     $('#agent-activity').innerHTML = activity.length ? activity.map(item => '<div class="activity-row"><span class="activity-dot ' + statusClass(String(item.status).toLowerCase()) + '"></span><div><b>' + escapeHtml(statusLabel(item.agentId)) + '</b><p>' + escapeHtml(item.message) + '</p><small>' + escapeHtml(date(item.createdAt)) + (item.confidence === undefined ? '' : ' · confidence ' + Math.round(item.confidence * 100) + '%') + '</small></div></div>').join('') : '<div class="empty-state">No agent runs yet. Send the Commander a quick command.</div>';
   }
 
+  function fleetRisk(workspace) {
+    return Number(workspace.counts?.dead_letter || 0) * 5 + Number(workspace.counts?.blocked || 0) * 4 +
+      Number(workspace.unhealthyConnections || 0) * 3 + Number(workspace.openExceptions || 0) * 2 +
+      Number(workspace.counts?.queued || 0);
+  }
+
+  function fleetTone(workspace) {
+    if ((workspace.counts?.dead_letter || 0) || workspace.unhealthyConnections || workspace.openExceptions) return 'bad';
+    if ((workspace.counts?.blocked || 0) || (workspace.counts?.queued || 0) || workspace.paused) return 'warn';
+    return 'good';
+  }
+
+  function renderFleet() {
+    if (!state.fleet || !state.data?.launchAdmin) return;
+    const fleet = state.fleet, totals = fleet.totals || {}, worker = fleet.worker || {};
+    const workerHealthy = !worker.lastError && Boolean(worker.lastTickAt);
+    $('#fleet-worker-status').textContent = workerHealthy ? 'Worker healthy' : worker.lastError ? 'Worker needs attention' : 'Worker starting';
+    $('#fleet-worker-status').className = 'tag ' + (workerHealthy ? 'good' : worker.lastError ? 'bad' : 'warn');
+    $('#fleet-kpis').innerHTML = [
+      ['Workspaces', totals.workspaces || 0, 'independent tenants'],
+      ['Running', totals.running || 0, 'jobs now'],
+      ['Queued', totals.queued || 0, 'waiting safely'],
+      ['Blocked', totals.blocked || 0, 'needs attention'],
+      ['Dead letter', totals.dead_letter || 0, 'manual retry'],
+      ['AI today', totals.aiUnitsToday || 0, 'of ' + (totals.dailyAiUnitLimit || 0) + ' units']
+    ].map(item => '<article class="card kpi"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong><small>' + escapeHtml(item[2]) + '</small></article>').join('');
+    $('#fleet-worker-detail').innerHTML = [
+      ['Worker ID', worker.workerId || '—'],
+      ['Last tick', worker.lastTickAt ? date(worker.lastTickAt) : 'Not yet'],
+      ['Processed', worker.processed || 0],
+      ['Failures', worker.failed || 0],
+      ['Dead-lettered', worker.deadLettered || 0],
+      ['Last error', worker.lastError || 'None']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
+    const used = Number(totals.aiUnitsToday || 0), limit = Number(totals.dailyAiUnitLimit || 0), pct = limit ? Math.min(100, used / limit * 100) : 0;
+    $('#fleet-ai-capacity').innerHTML = '<div class="fleet-meter"><span style="width:' + pct.toFixed(1) + '%"></span></div><div class="section-head"><b>' + escapeHtml(used) + ' AI units reserved today</b><span class="tag ' + (pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : 'good') + '">' + escapeHtml(limit ? Math.round(pct) + '%' : 'No limit') + '</span></div><p class="muted tiny">Allowance is reserved when a job is queued, preventing burst traffic from oversubscribing customer limits.</p>';
+
+    const query = String(state.fleetQuery || '').trim().toLowerCase();
+    const workspaces = (fleet.workspaces || []).filter(item => !query || [item.name,item.workspaceId,item.plan,item.subscriptionStatus].join(' ').toLowerCase().includes(query));
+    $('#fleet-workspaces').innerHTML = workspaces.length ? workspaces.map(workspace => {
+      const counts = workspace.counts || {}, risk = fleetRisk(workspace), tone = fleetTone(workspace);
+      const aiPct = workspace.dailyAiUnitLimit ? Math.min(100, Number(workspace.aiUnitsToday || 0) / Number(workspace.dailyAiUnitLimit) * 100) : 0;
+      const jobs = (workspace.jobs || []).filter(job => ['running','queued','blocked','dead_letter'].includes(job.status));
+      const jobHtml = jobs.length ? jobs.map(job => '<div class="fleet-job"><div><b>' + escapeHtml(statusLabel(job.type)) + '</b><small>' + escapeHtml(job.provider ? statusLabel(job.provider) + ' · ' : '') + escapeHtml(statusLabel(job.status)) + ' · attempt ' + escapeHtml(job.attempts || 0) + '/' + escapeHtml(job.maxAttempts || '—') + '</small>' + (job.errorCode ? '<small class="bad-text">' + escapeHtml(job.errorCode) + '</small>' : '') + '</div>' + (['blocked','dead_letter'].includes(job.status) ? '<button class="secondary" data-fleet-retry="' + escapeHtml(job.id) + '" data-workspace="' + escapeHtml(workspace.workspaceId) + '">Retry safely</button>' : '') + '</div>').join('') : '<div class="empty-state compact">No active or failed jobs.</div>';
+      return '<article class="fleet-workspace" data-fleet-workspace="' + escapeHtml(workspace.workspaceId) + '"><div class="fleet-workspace-head"><div><span class="tag ' + tone + '">' + escapeHtml(risk ? 'Attention ' + risk : 'Healthy') + '</span><h3>' + escapeHtml(workspace.name) + '</h3><small>' + escapeHtml(workspace.workspaceId) + ' · ' + escapeHtml(statusLabel(workspace.plan)) + ' · ' + escapeHtml(statusLabel(workspace.subscriptionStatus)) + '</small></div><div class="fleet-workspace-actions"><button class="secondary" data-fleet-pause="' + escapeHtml(workspace.workspaceId) + '" data-paused="' + (workspace.paused ? 'true' : 'false') + '">' + (workspace.paused ? 'Resume Agent Ops' : 'Pause Agent Ops') + '</button></div></div>' +
+        '<div class="fleet-signal-grid"><div><span>Running</span><b>' + escapeHtml(counts.running || 0) + '</b></div><div><span>Queued</span><b>' + escapeHtml(counts.queued || 0) + '</b></div><div><span>Blocked</span><b>' + escapeHtml(counts.blocked || 0) + '</b></div><div><span>Dead letter</span><b>' + escapeHtml(counts.dead_letter || 0) + '</b></div><div><span>Connection issues</span><b>' + escapeHtml(workspace.unhealthyConnections || 0) + '</b></div><div><span>Exceptions</span><b>' + escapeHtml(workspace.openExceptions || 0) + '</b></div></div>' +
+        '<div class="fleet-meter small"><span style="width:' + aiPct.toFixed(1) + '%"></span></div><div class="fleet-ai-line"><span>AI units ' + escapeHtml(workspace.aiUnitsToday || 0) + ' / ' + escapeHtml(workspace.dailyAiUnitLimit || 0) + '</span><span>' + escapeHtml(workspace.pendingApprovals || 0) + ' pending approvals</span></div>' +
+        '<form class="fleet-settings" data-fleet-settings="' + escapeHtml(workspace.workspaceId) + '"><label>Concurrent jobs<input name="maxConcurrentJobs" type="number" min="1" max="10" value="' + escapeHtml(workspace.maxConcurrentJobs || 1) + '" required></label><label>Daily AI units<input name="dailyAiUnitLimit" type="number" min="0" max="100000" value="' + escapeHtml(workspace.dailyAiUnitLimit || 0) + '" required></label><button class="secondary" type="submit">Save limits</button></form><details class="fleet-jobs"><summary>Recent queue activity</summary>' + jobHtml + '</details></article>';
+    }).join('') : '<div class="empty-state">No workspaces match this filter.</div>';
+  }
+
+  async function loadFleet() {
+    if (!state.data?.launchAdmin) return;
+    state.fleet = await request('/api/operator/agent-ops');
+    renderFleet();
+  }
+
   function renderAll() {
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
@@ -692,6 +757,33 @@
     const link = event.target.closest('[data-view-link]');
     if (link) { event.preventDefault(); setView(link.dataset.viewLink); applyTarget(link.dataset.viewLink, link.dataset.targetFilter); }
   });
+  $('#fleet-refresh').addEventListener('click', async event => {
+    const button=event.currentTarget; setBusy(button,true,'Refreshing…');
+    try { await loadFleet(); showMessage('Fleet status refreshed.'); } catch(error) { showMessage(error.message,'error'); }
+    finally { setBusy(button,false); }
+  });
+  $('#fleet-search').addEventListener('input', event => { state.fleetQuery=event.target.value; renderFleet(); });
+  $('#fleet-workspaces').addEventListener('click', async event => {
+    const pause=event.target.closest('[data-fleet-pause]');
+    const retry=event.target.closest('[data-fleet-retry]');
+    if (pause) {
+      setBusy(pause,true,pause.dataset.paused==='true'?'Resuming…':'Pausing…');
+      try { await request('/api/operator/agent-ops/workspaces/'+encodeURIComponent(pause.dataset.fleetPause),{method:'PUT',body:JSON.stringify({paused:pause.dataset.paused!=='true'})}); await loadFleet(); showMessage('Workspace Agent Ops control updated.'); }
+      catch(error){showMessage(error.message,'error');} finally{setBusy(pause,false);}
+    }
+    if (retry) {
+      setBusy(retry,true,'Queueing…');
+      try { await request('/api/operator/agent-ops/workspaces/'+encodeURIComponent(retry.dataset.workspace)+'/jobs/'+encodeURIComponent(retry.dataset.fleetRetry)+'/retry',{method:'POST',body:'{}'}); await loadFleet(); showMessage('Job returned to the safe queue.'); }
+      catch(error){showMessage(error.message,'error');} finally{setBusy(retry,false);}
+    }
+  });
+  $('#fleet-workspaces').addEventListener('submit', async event => {
+    const form=event.target.closest('[data-fleet-settings]'); if(!form)return; event.preventDefault();
+    const button=form.querySelector('button[type="submit"]'); setBusy(button,true,'Saving…');
+    try { await request('/api/operator/agent-ops/workspaces/'+encodeURIComponent(form.dataset.fleetSettings),{method:'PUT',body:JSON.stringify({maxConcurrentJobs:Number(form.elements.maxConcurrentJobs.value),dailyAiUnitLimit:Number(form.elements.dailyAiUnitLimit.value)})}); await loadFleet(); showMessage('Fleet limits saved.'); }
+    catch(error){showMessage(error.message,'error');} finally{setBusy(button,false);}
+  });
+
   $('#product-search').addEventListener('input', event => { state.productQuery = event.target.value; renderProducts(); });
   $('#product-status').addEventListener('change', event => { state.productStatus = event.target.value; renderProducts(); });
   $('#product-sort').addEventListener('change', event => { state.productSort = event.target.value; renderProducts(); });
