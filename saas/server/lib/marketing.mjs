@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import { deriveOperations } from './operations.mjs';
 import { advanceCampaignCreatives } from './marketing-providers.mjs';
-import { quoteCreativeCredits, releaseAiCredits, reserveAiCredits, settleAiCredits } from './ai-usage.mjs';
 
 export const MARKETING_MODES = Object.freeze({
   draft: { id: 'draft', name: 'Draft only', description: 'Prepare campaigns and creatives without publishing.' },
@@ -183,7 +182,7 @@ export function marketingPlannerCycle(state, options = {}) {
   return { created: 1, campaign, reason: null };
 }
 
-export async function marketingCreativeCycle(state, { env = process.env, actor = 'system' } = {}) {
+export async function marketingCreativeCycle(state, { env = process.env } = {}) {
   const marketing = ensureMarketing(state);
   if (!marketing.settings.enabled || !marketing.settings.autoCreative) return { advanced: 0, campaign: null, reason: 'AUTO_CREATIVE_OFF' };
   const providers = marketingProviderStatus(env);
@@ -195,49 +194,7 @@ export async function marketingCreativeCycle(state, { env = process.env, actor =
     )
   );
   if (!campaign) return { advanced: 0, campaign: null, reason: 'NO_CREATIVE_WORK' };
-
-  const reservations = new Map();
-  for (let index = 0; index < (campaign.creativeRequests || []).length; index += 1) {
-    const request = campaign.creativeRequests[index];
-    if (request.status !== 'pending' || !providers[request.provider]?.configured) continue;
-    const quote = quoteCreativeCredits(request, env);
-    const reservation = reserveAiCredits(state, {
-      userId: actor,
-      campaignId: campaign.id,
-      requestKey: `${campaign.id}:${index}:${request.provider}`,
-      provider: quote.provider,
-      operation: quote.operation,
-      credits: quote.credits,
-      estimatedProviderCostMinor: quote.estimatedProviderCostMinor,
-      metadata: { kind: request.kind, formats: request.formats || [] }
-    }, env);
-    reservations.set(index, reservation);
-    request.aiUsageId = reservation.id;
-    request.runvaraCredits = reservation.credits;
-  }
-
-  try {
-    await advanceCampaignCreatives(campaign, env);
-  } catch (error) {
-    for (const reservation of reservations.values()) releaseAiCredits(state, reservation.id, { reason: error.code || 'creative_cycle_failed' }, env);
-    throw error;
-  }
-
-  for (let index = 0; index < (campaign.creativeRequests || []).length; index += 1) {
-    const request = campaign.creativeRequests[index];
-    const reservation = reservations.get(index);
-    if (!reservation) continue;
-    if (request.status === 'failed') {
-      releaseAiCredits(state, reservation.id, { reason: request.errorCode || 'provider_request_failed' }, env);
-      request.aiUsageStatus = 'released';
-    } else {
-      settleAiCredits(state, reservation.id, {
-        providerReference: request.taskId || request.jobId || request.designId || null
-      }, env);
-      request.aiUsageStatus = 'settled';
-    }
-  }
-
+  await advanceCampaignCreatives(campaign, env);
   marketing.lastCreativeRunAt = nowIso();
   return { advanced: 1, campaign, reason: null };
 }

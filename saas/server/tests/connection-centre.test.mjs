@@ -79,7 +79,7 @@ async function fixture(t, extra = {}) {
     await server.packsmart.store.save(name,state); tenants[name]=state;
   }
   server.listen(0,'127.0.0.1');await once(server,'listening');
-  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await fs.rm(directory,{recursive:true,force:true});});
+  t.after(async()=>{await new Promise(resolve=>server.close(resolve));await server.packsmart.drain();await fs.rm(directory,{recursive:true,force:true});});
   const base=`http://127.0.0.1:${server.address().port}`;
   async function request(route,{tenant='alpha',role='owner',method='GET',body,cookie,csrf=true}={}) {
     const user=tenants[tenant].users.find(user=>user.role===role);
@@ -286,10 +286,10 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   assert.equal((await f.channel()).status,'disconnected');
   assert.ok(document.getElementById('connection-onboarding'));
   document.getElementById('connection-close').click();
-  document.querySelector('[data-provider="amazon"][data-connection-action="connect"]').click();
-  assert.match(document.getElementById('connection-detail').textContent,/not been enabled yet/);
+  document.querySelector('[data-provider="amazon"][data-connection-action="open"]').click();
+  assert.match(document.getElementById('connection-detail').textContent,/access is being prepared/i);
   document.querySelector('[data-connection-action="setup-request"]').click();
-  await until(()=>document.getElementById('connection-detail').textContent.includes('Setup request recorded'));
+  await until(()=>document.getElementById('connection-detail').textContent.includes('Access requested'));
   assert.deepEqual(errors,[]);
   window.fetch=async()=>json({error:'Authentication required',code:'AUTH_REQUIRED'},401);
   document.getElementById('connection-refresh').click();
@@ -612,6 +612,9 @@ test('reconnection verifies identity, retries selected reads once, preserves fai
     url.searchParams.set('hmac',crypto.createHmac('sha256',f.env.SHOPIFY_OAUTH_CLIENT_SECRET).update(message).digest('hex'));
     const route=url.pathname+url.search;
     assert.equal((await f.request(route,{cookie})).status,303);
+    // The redirect now precedes the persisted first read. Wait for that one
+    // authorised job before proving callback replay makes no new provider calls.
+    for(let i=0;i<200;i++){const current=await f.server.packsmart.store.get('alpha');if(current.connectionFirstSync?.shopify?.completedAt && current.audit.some(e=>e.type==='connection_reconnect_read_sync'&&e.createdAt>=current.connectionFirstSync.shopify.startedAt))break;await new Promise(resolve=>setTimeout(resolve,5));}
     const count=f.calls.length;
     assert.equal((await f.request(route,{cookie})).status,400);
     assert.equal(f.calls.length,count,'replayed callback never retries provider requests');
@@ -634,4 +637,50 @@ test('reconnection verifies identity, retries selected reads once, preserves fai
   assert.ok(!JSON.stringify((await f.channel())).includes('private failure'));
   state.integrationStatus.shopify.lastError='SHOPIFY_PERMISSION_REQUIRED';
   assert.equal(connectionDue(state,'shopify',new Date(Date.now()+86400000)),false,'permission loss waits for owner repair');
+});
+
+test('new Shopify OAuth returns during durable first sync, completes defaults and preserves the other tenant',async t=>{
+  const f=await fixture(t);let release;f.flags.delay=new Promise(resolve=>release=resolve);
+  t.after(()=>release());
+  const started=await f.request('/api/integrations/shopify/oauth/start',{method:'POST',body:{storeDomain:'alpha.myshopify.com'}});
+  const url=new URL('/api/integrations/shopify/oauth/callback',f.base);
+  url.search=new URLSearchParams({code:'initial-code',shop:'alpha.myshopify.com',state:new URL(started.body.authorizationUrl).searchParams.get('state'),timestamp:String(Math.floor(Date.now()/1000))}).toString();
+  const message=[...url.searchParams.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([k,v])=>`${k}=${v}`).join('&');
+  url.searchParams.set('hmac',crypto.createHmac('sha256',f.env.SHOPIFY_OAUTH_CLIENT_SECRET).update(message).digest('hex'));
+  const response=await f.request(url.pathname+url.search,{cookie:started.headers.get('set-cookie').split(';')[0]});assert.equal(response.status,303);
+  for(let i=0;i<100&&!f.calls.some(c=>c.query.includes('Products'));i++)await new Promise(r=>setTimeout(r,5));
+  const during=await f.channel();assert.equal(during.firstSync.status,'running');assert.equal(during.firstSync.areas.products,'running');assert.equal(during.firstSync.areas.orders,'pending');assert.equal(during.settings.permissionMode,'read_only');assert.equal(during.settings.managedReadSchedule,true);assert.ok(!during.settings.areas.includes('customers'));
+  release();await f.server.packsmart.drain();
+  const after=await f.channel();assert.equal(after.firstSync.status,'completed');assert.equal(after.firstSync.validation.ok,true);assert.equal(after.counts.products,1);assert.ok(after.lastSuccessfulSyncAt);
+  assert.equal((await f.request('/api/onboarding')).body.journey.complete,true);
+  assert.equal((await f.channel('shopify','beta')).firstSync,null);assert.equal((await f.server.packsmart.store.get('beta')).products[0].title,'Before');
+  assert.ok(!f.calls.some(c=>c.query.includes('mutation')));
+});
+
+test('operator readiness endpoint refuses every customer role and returns only safe aggregate operator evidence',async t=>{
+  const f=await fixture(t,{PACKSMART_ADMIN_EMAIL:'operator@example.test'});
+  for(const role of ['owner','admin','viewer'])assert.equal((await f.request('/api/operator/providers',{role})).status,403);
+  const state=seedWorkspaceState({}, {workspaceId:'packsmart-solutions',email:'operator@example.test',passwordHash:'test'});
+  await f.server.packsmart.store.save('packsmart-solutions',state);
+  const user=state.users[0],token=createSessionToken({userId:user.id,workspaceId:'packsmart-solutions',email:user.email,role:'owner',sessionVersion:1},SESSION);
+  const result=await f.request('/api/operator/providers',{cookie:`__Host-packsmart_session=${token}`});assert.equal(result.status,200);
+  assert.ok(result.body.providers.every(p=>typeof p.activeConnections==='number'&&typeof p.waitingForAccess==='number'));
+  assert.doesNotMatch(JSON.stringify(result.body),/app-secret-test|pinterest-secret-test|encryptedCredentials|refreshToken|accessToken/);
+  const customer=await f.request('/api/connection-centre');assert.ok(customer.body.channels.every(c=>c.readiness.setupMessage===undefined));
+});
+
+test('customer wizard renders provider pending, optional settings and real stages without developer setup',async t=>{
+  const f=await fixture(t,{TIKTOK_SHOP_OAUTH_ENABLED:'false'});
+  const payload=(await f.request('/api/bootstrap')).body;
+  const dom=new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'),{url:'https://runvara.example.test',runScripts:'outside-only'});t.after(()=>dom.window.close());
+  const {window}=dom;window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  window.eval(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'));window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  window.RunvaraConnections.init({request:async()=>({}),escapeHtml:value=>String(value??'').replaceAll('<','&lt;').replaceAll('>','&gt;'),date:String,notify:()=>{},reload:async()=>{},setView:()=>{}});
+  window.RunvaraConnections.render(payload);window.RunvaraConnections.open('tiktok_shop');
+  assert.match(window.document.querySelector('#connection-detail').textContent,/access is being prepared/i);
+  assert.doesNotMatch(window.document.querySelector('#connection-detail').textContent,/API keys|app secrets|developer apps|callback URLs|Render settings/);
+  assert.equal(window.document.querySelector('#connection-operator').hidden,true);assert.equal(window.document.querySelectorAll('.setup-choice').length,6);
+  assert.equal(window.document.querySelectorAll('#connection-detail input').length,0);
+  assert.equal(window.document.querySelector('#journey-recommended').disabled,false);
+  window.RunvaraConnections.endSession();
 });

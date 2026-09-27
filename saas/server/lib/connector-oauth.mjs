@@ -24,7 +24,11 @@ function app(service, provider) {
 async function json(service, url, options = {}) {
   const response = await service.fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(20000) });
   let payload; try { payload = await response.json(); } catch { payload = {}; }
-  if (response.status === 429) throw connectionError('The channel is limiting requests. Wait a few minutes before trying again.', 'CONNECTION_RATE_LIMITED', 429);
+  if (response.status === 429) {
+    const retry = response.headers.get('retry-after');
+    const retryAfterMs = /^\d+$/.test(retry || '') ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+    throw Object.assign(connectionError('The channel is limiting requests. Runvara will wait before retrying.', 'CONNECTION_RATE_LIMITED', 429), { upstreamStatus:429, retryAfterMs:Number.isFinite(retryAfterMs) ? Math.min(86400000, Math.max(60000, retryAfterMs)) : 60000 });
+  }
   if (!response.ok || payload.error) throw Object.assign(connectionError('The channel could not confirm access. Please reconnect or try again.', [400, 401, 403].includes(response.status) ? 'CONNECTION_AUTH_REQUIRED' : 'CONNECTION_READ_FAILED', 422), { upstreamStatus: response.status });
   return payload;
 }

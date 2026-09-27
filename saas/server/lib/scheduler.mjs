@@ -3,6 +3,7 @@ import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
 import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS } from './connection-centre.mjs';
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
+import { runConnectionDoctor } from './connection-doctor.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
@@ -19,20 +20,24 @@ export async function monitoredSync(state, integrations, provider, { automatic =
     attempts++;
     try {
       const result = integrations.syncProvider ? await integrations.syncProvider(state, provider, { automatic, areas }) : await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic, areas });
-      const status = { ...previous, ...result, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
+      const status = { ...previous, ...result, failedAreas:result.failedAreas || [], transient: Boolean(result.transient), upstreamStatus: result.upstreamStatus || null, retryAt: null, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
       state.integrationStatus = { ...state.integrationStatus, [provider]: status };
       finishConnectionSync(state, run, status);
       return status;
     } catch (error) {
       const transient = error.upstreamStatus === 429 || error.upstreamStatus >= 500 || ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name);
-      if (retry && attempts < 2 && transient && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
+      // Rate limits are durable scheduled retries, never a tight retry loop.
+      const rateLimited = error.upstreamStatus === 429 || /RATE_LIMIT/.test(error.code || '');
+      if (retry && attempts < 2 && transient && !rateLimited && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
       const code = safeCode(error);
       state.integrationStatus = { ...state.integrationStatus, [provider]: { ...previous, status: authFailure(error) ? 'auth_expired' : 'error',
-        detail: 'Read sync failed; last known data was retained.', lastSyncAt: previous.lastSyncAt || null, lastFailureAt: now, lastAttemptAt: now, lastError: code, attempts } };
-      const connection = provider === 'shopify' ? integrations.shopifyConnection?.(state) : integrations.ebayConnection?.(state);
+        detail: 'Read sync failed; last known data was retained.', lastSyncAt: previous.lastSyncAt || null, lastFailureAt: now, lastAttemptAt: now, lastError: code, attempts,
+        transient: transient || rateLimited, upstreamStatus: error.upstreamStatus || null,
+        retryAt: rateLimited ? new Date(Date.now() + Math.max(60000, Math.min(86400000, Number(error.retryAfterMs) || 60000))).toISOString() : null } };
+      const connection = provider === 'shopify' ? integrations.shopifyConnection?.(state) : provider === 'ebay' ? integrations.ebayConnection?.(state) : state.connections?.find(c => c.provider === provider);
       if (connection) { connection.status = state.integrationStatus[provider].status; connection.lastError = code; }
       finishConnectionSync(state, run, null, { code });
-      throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus });
+      throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus, retryAfterMs: error.retryAfterMs, name: error.name });
     }
   }
 }
@@ -46,6 +51,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
       const state = await store.get(workspaceId);
       if (!state) return { skipped: true, reason: 'WORKSPACE_NOT_FOUND' };
       ensureControl(state);
+      await runConnectionDoctor(state, { integrations, readSync: monitoredSync, save: () => store.save(workspaceId, state), now });
       const expired = state.automationRuns.filter(run => run.status === 'IN PROGRESS' && Date.parse(run.leaseUntil) <= now.getTime());
       for (const run of expired) finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true, evidence: [{ type: 'expired_lease', id: run.id, detail: 'No completion evidence before the worker lease expired.' }] });
       const rules = dueRules(state, now);

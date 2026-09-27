@@ -1469,3 +1469,78 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 @media (max-width: 430px) { .overview-intro .hero { display: flex; flex-direction: column-reverse; align-items: stretch; } .overview-intro .hero-score { align-self: flex-end; margin-top: .4rem; margin-bottom: -.3rem; } .overview-intro .hero h2 { max-width: none; } .connection-facts { grid-template-columns: 1fr; } .operation-timeline .section-head { flex-wrap: wrap; } .decision-summary h2 { font-size: 1.4rem; } }
 
 .connection-coverage .capabilities span { font-size: .7rem; padding: .25rem .4rem; }
+
+/* Connection setup: real persisted stages, readable at 320px and keyboard safe. */
+.setup-section{padding:22px 0;border-top:1px solid var(--line,rgba(130,170,210,.16));margin-top:20px}
+.setup-channel-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;border:0;padding:10px 0 18px;min-width:0}
+.setup-channel-choices legend{padding-bottom:10px;color:var(--muted)}
+.setup-choice{display:flex;gap:12px;align-items:center;padding:16px;border:1px solid rgba(91,166,231,.25);border-radius:14px;background:rgba(22,49,78,.25);min-width:0;cursor:pointer;min-height:72px}
+.setup-choice:has(input:checked){border-color:#66b9ff;background:rgba(51,127,221,.13)}
+.setup-choice input{flex:0 0 20px;width:20px;height:20px}.setup-choice span{min-width:0}.setup-choice small{display:block;margin-top:5px;color:var(--muted);font-size:12px}
+.setup-provider{min-width:0;padding:18px;margin:12px 0;border:1px solid rgba(130,170,210,.18);border-radius:16px;background:rgba(10,26,44,.36)}
+.setup-provider h4{font-size:17px;margin:0}.setup-provider p,.setup-provider dd{overflow-wrap:anywhere}.setup-provider dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}.setup-provider dd{margin:0}
+.setup-steps{list-style:none;padding:0;margin:18px 0;display:grid;gap:10px}.setup-steps li{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:center;min-height:30px}
+.setup-steps small{color:var(--muted)}.setup-step-marker{color:#89bde9}.setup-steps [data-step-status=completed] .setup-step-marker{color:#68d4a8}.setup-steps [data-step-status=failed] .setup-step-marker{color:#efc371}
+.setup-import-summary{color:#a8d5ff}.setup-preferences{margin-top:18px}.setup-preferences summary{min-height:44px;display:flex;align-items:center;cursor:pointer}
+.setup-recommendations{list-style:none;padding:0;display:grid;gap:12px}.setup-recommendations li{display:flex;gap:12px;justify-content:space-between}.setup-recommendations small{color:var(--muted)}
+.setup-operator-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+#connection-journey{min-width:0;overflow-wrap:anywhere}#connection-journey progress{width:100%;height:8px;accent-color:#61acff}#connection-journey button,#connection-dialog button{min-height:44px;white-space:normal}#connection-journey input,#connection-journey select{min-width:0;max-width:100%}
+#connection-notifications:empty{display:none}#connection-operator[hidden]{display:none!important}
+@media(max-width:680px){.setup-channel-choices,.setup-operator-grid{grid-template-columns:minmax(0,1fr)}.setup-provider{padding:14px}.setup-steps li{grid-template-columns:20px minmax(0,1fr);gap:8px}.setup-steps small{grid-column:2}.setup-section{padding:18px 0}#connection-journey .button-row{display:grid;grid-template-columns:minmax(0,1fr)}#connection-dialog{width:calc(100vw - 16px);max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);box-sizing:border-box}#connection-dialog .connection-dialog-shell{min-width:0;overflow-wrap:anywhere}.setup-provider dl{grid-template-columns:minmax(0,1fr)} }
+
+/* Keep keyboard focus and channel actions clear of the mobile sticky header. */
+@media(max-width:700px){html{scroll-padding-top:10rem}.connection-card button,#connection-journey button,#connection-journey summary{scroll-margin-block:10rem 1rem}}
+
+
+/* Operator Fleet */
+.fleet-hero { background: radial-gradient(circle at 92% 10%, #1f87d622, transparent 34%), linear-gradient(135deg,#0d1724,#08111b); }
+.fleet-kpis { margin-top: 1rem; }
+.fleet-ops-grid { margin-top: 1rem; }
+.fleet-capacity { display:grid; gap:.8rem; }
+.fleet-meter { height: 12px; overflow:hidden; border-radius:999px; background:#ffffff0b; border:1px solid var(--line); }
+.fleet-meter.small { height:8px; margin-top:1rem; }
+.fleet-meter > span { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,var(--blue),var(--gold-light)); }
+.fleet-workspaces { display:grid; gap:1rem; }
+.fleet-workspace { border:1px solid var(--line); border-radius:18px; padding:1rem; background:linear-gradient(180deg,#ffffff04,#ffffff01); }
+.fleet-workspace-head { display:flex; justify-content:space-between; gap:1rem; align-items:flex-start; }
+.fleet-workspace-head h3 { margin:.45rem 0 .2rem; }
+.fleet-workspace-head small { color:var(--muted); }
+.fleet-workspace-actions { display:flex; gap:.5rem; flex-wrap:wrap; }
+.fleet-signal-grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:.6rem; margin-top:1rem; }
+.fleet-signal-grid > div { padding:.75rem; border:1px solid var(--line); border-radius:12px; background:#ffffff03; }
+.fleet-signal-grid span { display:block; color:var(--muted); font-size:.68rem; }
+.fleet-signal-grid b { display:block; margin-top:.25rem; font-size:1.15rem; }
+.fleet-ai-line { display:flex; justify-content:space-between; gap:1rem; margin-top:.45rem; color:var(--muted); font-size:.72rem; }
+.fleet-settings { display:grid; grid-template-columns:minmax(0,150px) minmax(0,180px) auto; align-items:end; gap:.7rem; margin-top:1rem; }
+.fleet-settings label,.fleet-filter { font-size:.72rem; color:var(--muted); }
+.fleet-settings input,.fleet-filter input { margin-top:.35rem; }
+.fleet-filter { min-width:min(100%,280px); }
+.fleet-jobs { margin-top:1rem; border-top:1px solid var(--line); padding-top:.6rem; }
+.fleet-jobs summary { cursor:pointer; color:var(--blue); font-size:.8rem; }
+.fleet-job { display:flex; justify-content:space-between; gap:1rem; align-items:center; padding:.7rem 0; border-bottom:1px solid var(--line); }
+.fleet-job small { display:block; margin-top:.2rem; color:var(--muted); }
+.bad-text { color:#ff9f9f !important; }
+.empty-state.compact { padding:.7rem 0; }
+@media (max-width: 900px) {
+  .fleet-signal-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+@media (max-width: 680px) {
+  .fleet-workspace-head,.fleet-ai-line,.fleet-job { align-items:stretch; flex-direction:column; }
+  .fleet-settings { grid-template-columns:1fr; }
+  .fleet-signal-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+
+
+/* AI routing & fleet economics */
+.fleet-economics-grid { margin-top:1rem; }
+.model-catalog { display:grid; gap:.65rem; }
+.model-row { display:flex; justify-content:space-between; align-items:center; gap:1rem; padding:.75rem 0; border-bottom:1px solid var(--line); }
+.model-row:last-child { border-bottom:0; }
+.model-row > div { display:grid; grid-template-columns:auto 1fr; gap:.35rem .55rem; align-items:center; }
+.model-row b { font-size:.82rem; }
+.model-row small { grid-column:1 / -1; color:var(--muted); font-size:.68rem; }
+.model-row > span { color:var(--muted); font-size:.72rem; text-align:right; }
+.fleet-settings-economics { grid-template-columns:minmax(0,130px) minmax(0,140px) minmax(0,150px) minmax(0,170px) auto; }
+.fleet-settings select { margin-top:.35rem; }
+@media (max-width:1100px) { .fleet-settings-economics { grid-template-columns:repeat(2,minmax(0,1fr)); } .fleet-settings-economics button { align-self:end; } }
+@media (max-width:680px) { .model-row { align-items:stretch; flex-direction:column; } .model-row > span { text-align:left; } .fleet-settings-economics { grid-template-columns:1fr; } }

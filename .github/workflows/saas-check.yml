@@ -30,6 +30,19 @@ jobs:
         run: node saas/tests/saas-guard.test.cjs
       - name: Phase 2 security and tenancy tests
         run: npm --prefix saas/server test
+      - name: Install browser for mobile layout checks
+        run: cd saas/server && npx playwright install --with-deps chromium
+      - name: Verify customer onboarding on mobile and desktop
+        run: |
+          node saas/server/tests/render-connection-preview.mjs /tmp/runvara-mobile-preview.html
+          node saas/server/tests/mobile-connection-check.mjs /tmp/runvara-mobile-preview.html
+      - name: Upload responsive verification image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-mobile-onboarding
+          path: /tmp/runvara-onboarding-mobile.png
+          if-no-files-found: ignore
       - name: Build production container
         run: docker build -f saas/server/Dockerfile -t packsmart-ops:test .
       - name: Boot container and smoke-test health

@@ -335,6 +335,25 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(isolated.payload.workspace.id, 'beta-workspace');
   assert.notEqual(isolated.payload.workspace.id, 'packsmart-solutions');
 
+  const deniedFleet = await request('/api/operator/agent-ops', { cookie: betaCookie });
+  assert.equal(deniedFleet.response.status, 403);
+  assert.equal(deniedFleet.payload.code, 'PLATFORM_ADMIN_REQUIRED');
+
+  const fleet = await request('/api/operator/agent-ops', { cookie });
+  assert.equal(fleet.response.status, 200);
+  assert.equal(fleet.payload.workspaces.some(item => item.workspaceId === 'beta-workspace'), true);
+  assert.equal(JSON.stringify(fleet.payload).includes('passwordHash'), false);
+
+  const fleetControl = await request('/api/operator/agent-ops/workspaces/beta-workspace', {
+    method: 'PUT', cookie, csrf, body: { paused: true, maxConcurrentJobs: 3, dailyAiUnitLimit: 50 }
+  });
+  assert.equal(fleetControl.response.status, 200);
+  assert.equal(fleetControl.payload.settings.paused, true);
+  const betaAfterFleetControl = await server.packsmart.store.get('beta-workspace');
+  assert.equal(betaAfterFleetControl.agentOps.paused, true);
+  assert.equal(betaAfterFleetControl.agentOps.maxConcurrentJobs, 3);
+  assert.equal(betaAfterFleetControl.agentOps.dailyAiUnitLimit, 50);
+
   const logout = await request('/api/auth/logout', {
     method: 'POST',
     cookie,
@@ -442,6 +461,8 @@ test('eBay read-only OAuth uses a one-time callback while preserving the existin
   assert.equal(callback.response.headers.get('location'), 'http://localhost:8787/?ebay=connected');
   assert.equal(String(callback.payload).includes(refreshSecret), false);
 
+  // Customer redirect is immediate; the authorised read continues durably.
+  for(let i=0;i<200;i++){const current=await server.packsmart.store.get('packsmart-solutions');if(current.audit.some(e=>e.type==='ebay_read_sync'))break;await new Promise(resolve=>setTimeout(resolve,5));}
   const persisted = await server.packsmart.store.get('packsmart-solutions');
   const managerConnection = persisted.connections.find(item => item.provider === 'ebay');
   const oauthConnection = persisted.connections.find(item => item.provider === 'ebay_oauth');

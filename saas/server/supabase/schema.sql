@@ -184,27 +184,6 @@ create table if not exists public.subscriptions (
   updated_at timestamptz not null default now()
 );
 
-create table if not exists public.ai_usage_events (
-  id text primary key,
-  workspace_id text not null references public.workspaces(id) on delete cascade,
-  user_id text,
-  campaign_id text,
-  request_key text,
-  provider text not null,
-  operation text not null,
-  credits integer not null check (credits >= 0),
-  status text not null check (status in ('reserved', 'settled', 'released')),
-  estimated_provider_cost_minor integer not null default 0 check (estimated_provider_cost_minor >= 0),
-  actual_provider_cost_minor integer check (actual_provider_cost_minor is null or actual_provider_cost_minor >= 0),
-  provider_reference text,
-  metadata jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default now(),
-  settled_at timestamptz,
-  released_at timestamptz
-);
-create index if not exists ai_usage_workspace_created_idx on public.ai_usage_events (workspace_id, created_at desc);
-create index if not exists ai_usage_workspace_status_idx on public.ai_usage_events (workspace_id, status, created_at desc);
-
 create table if not exists public.orders (
   workspace_id text not null references public.workspaces(id) on delete cascade,
   id text not null,
@@ -263,6 +242,18 @@ create index if not exists briefs_workspace_created_idx on public.operations_bri
 
 -- Transitional atomic state document. It supports lossless customer-zero migration
 -- while the normalized tables above are the beta reporting/onboarding foundation.
+create table if not exists public.runvara_history (
+  workspace_id text not null references public.workspaces(id) on delete cascade,
+  collection text not null check (collection in ('workRecords','automationRuns','connectionSyncs','agentRuns')),
+  record_id text not null,
+  payload jsonb not null,
+  occurred_at timestamptz,
+  archived_at timestamptz not null default now(),
+  primary key (workspace_id, collection, record_id)
+);
+create index if not exists runvara_history_workspace_collection_time_idx
+  on public.runvara_history (workspace_id, collection, occurred_at desc nulls last);
+
 create table if not exists public.saas_workspace_state (
   workspace_id text primary key references public.workspaces(id) on delete cascade,
   state jsonb not null default '{}'::jsonb,
@@ -282,17 +273,15 @@ alter table public.automation_rules enable row level security;
 alter table public.approval_requests enable row level security;
 alter table public.audit_events enable row level security;
 alter table public.subscriptions enable row level security;
-alter table public.ai_usage_events enable row level security;
 alter table public.orders enable row level security;
 alter table public.order_financials enable row level security;
 alter table public.advertising_costs enable row level security;
 alter table public.operations_briefs enable row level security;
+alter table public.runvara_history enable row level security;
 alter table public.saas_workspace_state enable row level security;
 
 revoke all on all tables in schema public from anon, authenticated;
 grant select, insert, update, delete on all tables in schema public to service_role;
-revoke all on public.ai_usage_events from anon, authenticated;
-grant select, insert, update, delete on public.ai_usage_events to service_role;
 
 -- Supabase's optional automatic-RLS project setting creates this helper in the
 -- public schema. Keep the event trigger, but prevent browser roles from calling
@@ -309,6 +298,8 @@ comment on table public.saas_workspace_state is
   'Server-only lossless workspace state used during Packsmart customer-zero and normalized-table migration.';
 comment on table public.audit_events is
   'Server-only workspace audit trail. Application routes never expose cross-workspace rows.';
+comment on table public.runvara_history is
+  'Server-only durable archive for append-only Runvara operational histories compacted out of saas_workspace_state.';
 
 create index if not exists variants_workspace_sku_idx on public.variants (workspace_id, sku);
 create index if not exists variants_workspace_source_idx on public.variants (workspace_id, product_id, external_id);

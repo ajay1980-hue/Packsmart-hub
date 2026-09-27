@@ -7,10 +7,17 @@ import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
-import { ensureAiUsage } from './ai-usage.mjs';
+import { ensureAiEconomics } from './ai-economics.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
+const SUPABASE_EMBEDDED_AUDIT_LIMIT = 300;
+const SUPABASE_WORK_RECORD_LIMIT = 100;
+const SUPABASE_CONNECTION_SYNC_LIMIT = 100;
+const SUPABASE_AGENT_RUN_LIMIT = 1;
+const SUPABASE_DAILY_BRIEF_LIMIT = 30;
+const SUPABASE_STATE_WARN_BYTES = 1572864;
+const SUPABASE_STATE_HARD_BYTES = 2097152;
 function markPersisted(state) { Object.defineProperty(state, PERSISTED, { value: true, configurable: true }); return state; }
 function conflict() { return Object.assign(new Error('Workspace changed; refresh and try again'), { status: 409, code: 'STATE_CONFLICT' }); }
 function assertWorkspace(workspaceId, state) {
@@ -24,7 +31,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
   const seeded = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     workspace: {
       id: workspaceId,
       name: options.name || (workspaceId === 'packsmart-solutions' ? 'Packsmart Solutions Ltd' : 'New business'),
@@ -98,7 +105,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   };
   ensureControl(seeded);
   ensureMarketing(seeded);
-  ensureAiUsage(seeded, env);
+  ensureAiEconomics(seeded);
   return seeded;
 }
 
@@ -117,7 +124,7 @@ export function upgradeState(state, env = process.env) {
   const upgraded = {
     ...seeded,
     ...(state || {}),
-    schemaVersion: 6,
+    schemaVersion: 7,
     workspace: { ...seeded.workspace, ...(state?.workspace || {}), updatedAt: state?.workspace?.updatedAt || new Date().toISOString() },
     users: Array.isArray(state?.users) && state.users.length ? state.users.map(user => {
       const upgradedUser = { active: true, sessionVersion: 1, passwordHash: null, ...user };
@@ -150,7 +157,7 @@ export function upgradeState(state, env = process.env) {
   };
   ensureControl(upgraded);
   ensureMarketing(upgraded);
-  ensureAiUsage(upgraded, env);
+  ensureAiEconomics(upgraded);
   return upgraded;
 }
 
@@ -158,6 +165,8 @@ class FileStore {
   constructor(env) {
     const defaultPath = fileURLToPath(new URL('../data/state.json', import.meta.url));
     this.filePath = env.SAAS_STATE_FILE || defaultPath;
+    this.agentJobs = [];
+    this.aiUsage = [];
   }
 
   get provider() { return 'file'; }
@@ -215,6 +224,108 @@ class FileStore {
     return null;
   }
 
+  async enqueueAgentJob(workspaceId, job) {
+    const existing = this.agentJobs.find(item => item.workspace_id === workspaceId && item.idempotency_key === job.idempotencyKey);
+    if (existing) return structuredClone(existing);
+    const row = {
+      id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
+      result: null, status: 'queued', priority: job.priority, attempts: 0, max_attempts: job.maxAttempts,
+      ai_units: job.aiUnits, concurrency_limit: job.concurrencyLimit, idempotency_key: job.idempotencyKey,
+      actor: job.actor, ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
+      available_at: job.availableAt, lease_until: null, worker_id: null, error_code: null,
+      created_at: job.createdAt, updated_at: job.updatedAt, completed_at: null
+    };
+    this.agentJobs.push(row);
+    return structuredClone(row);
+  }
+
+  async claimAgentJobs(workerId, limit = 8, leaseSeconds = 300) {
+    const now = Date.now();
+    for (const row of this.agentJobs) if (row.status === 'running' && Date.parse(row.lease_until) <= now) {
+      Object.assign(row, { status:'queued', worker_id:null, lease_until:null, available_at:new Date(now).toISOString(), updated_at:new Date(now).toISOString(), error_code:'WORKER_LEASE_EXPIRED' });
+    }
+    const runningByWorkspace = new Map();
+    for (const row of this.agentJobs) if (row.status === 'running' && Date.parse(row.lease_until) > now) runningByWorkspace.set(row.workspace_id, (runningByWorkspace.get(row.workspace_id) || 0) + 1);
+    const runningProviders = new Set(this.agentJobs.filter(row => row.status === 'running' && Date.parse(row.lease_until) > now && row.provider).map(row => `${row.workspace_id}:${row.provider}`));
+    const claimed = [];
+    const seenWorkspace = new Set();
+    for (const row of [...this.agentJobs].filter(row => row.status === 'queued' && Date.parse(row.available_at) <= now).sort((a,b) => b.priority-a.priority || Date.parse(a.created_at)-Date.parse(b.created_at))) {
+      if (claimed.length >= limit || seenWorkspace.has(row.workspace_id)) continue;
+      if ((runningByWorkspace.get(row.workspace_id) || 0) >= row.concurrency_limit) continue;
+      if (row.provider && runningProviders.has(`${row.workspace_id}:${row.provider}`)) continue;
+      Object.assign(row, { status:'running', attempts:row.attempts+1, worker_id:workerId, lease_until:new Date(now + leaseSeconds*1000).toISOString(), updated_at:new Date(now).toISOString() });
+      claimed.push(structuredClone(row)); seenWorkspace.add(row.workspace_id);
+    }
+    return claimed;
+  }
+
+  async finishAgentJob(job, update) {
+    const row = this.agentJobs.find(item => item.id === job.id);
+    if (!row || (row.worker_id && job.worker_id && row.worker_id !== job.worker_id)) return null;
+    Object.assign(row, {
+      status:update.status, result:update.result ?? row.result, error_code:update.errorCode ?? null,
+      completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+    });
+    return structuredClone(row);
+  }
+
+  async rescheduleAgentJob(job, update) {
+    const row = this.agentJobs.find(item => item.id === job.id);
+    if (!row || (row.worker_id && job.worker_id && row.worker_id !== job.worker_id)) return null;
+    Object.assign(row, { status:'queued', error_code:update.errorCode || null, available_at:update.availableAt, lease_until:null, worker_id:null, updated_at:new Date().toISOString() });
+    return structuredClone(row);
+  }
+
+  async listAgentJobs(workspaceId, limit = 100) {
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0, limit).map(item => structuredClone(item));
+  }
+
+  async retryAgentJob(workspaceId, jobId) {
+    const row = this.agentJobs.find(item => item.workspace_id === workspaceId && item.id === jobId);
+    if (!row) return null;
+    if (!['blocked','dead_letter'].includes(row.status)) return structuredClone(row);
+    Object.assign(row, { status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null, error_code:null, completed_at:null, updated_at:new Date().toISOString() });
+    return structuredClone(row);
+  }
+
+  async agentOpsUsage(workspaceId, day) {
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId && String(item.created_at).slice(0,10) === day)
+      .reduce((sum,item)=>sum + Number(item.ai_units || 0), 0);
+  }
+
+  async recordAiUsage(workspaceId, usage) {
+    const existing = usage.requestId ? this.aiUsage.find(item => item.workspace_id === workspaceId && item.provider === usage.provider && item.request_id === usage.requestId) : null;
+    if (existing) return structuredClone(existing);
+    const row = {
+      id:usage.id, workspace_id:workspaceId, job_id:usage.jobId, task_type:usage.taskType,
+      provider:usage.provider, model:usage.model, input_tokens:usage.inputTokens,
+      cached_input_tokens:usage.cachedInputTokens, cache_write_tokens:usage.cacheWriteTokens,
+      output_tokens:usage.outputTokens, estimated_cost_usd:usage.estimatedCostUsd,
+      request_id:usage.requestId, occurred_at:usage.occurredAt, recorded_at:new Date().toISOString()
+    };
+    this.aiUsage.push(row);
+    return structuredClone(row);
+  }
+
+  async aiUsageSummary(workspaceId, startAt, endAt) {
+    const rows=this.aiUsage.filter(item => item.workspace_id === workspaceId && Date.parse(item.occurred_at) >= Date.parse(startAt) && Date.parse(item.occurred_at) < Date.parse(endAt));
+    const byModel={};
+    for(const row of rows) {
+      const model=row.model || 'unknown';
+      const current=byModel[model] ||= {model,requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0};
+      current.requests++; current.inputTokens+=Number(row.input_tokens||0); current.cachedInputTokens+=Number(row.cached_input_tokens||0);
+      current.cacheWriteTokens+=Number(row.cache_write_tokens||0); current.outputTokens+=Number(row.output_tokens||0);
+      current.estimatedCostUsd+=Number(row.estimated_cost_usd||0);
+    }
+    const totals=Object.values(byModel).reduce((out,item)=>({
+      requests:out.requests+item.requests,inputTokens:out.inputTokens+item.inputTokens,cachedInputTokens:out.cachedInputTokens+item.cachedInputTokens,
+      cacheWriteTokens:out.cacheWriteTokens+item.cacheWriteTokens,outputTokens:out.outputTokens+item.outputTokens,estimatedCostUsd:out.estimatedCostUsd+item.estimatedCostUsd
+    }),{requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0});
+    totals.estimatedCostUsd=Number(totals.estimatedCostUsd.toFixed(8));
+    for(const item of Object.values(byModel)) item.estimatedCostUsd=Number(item.estimatedCostUsd.toFixed(8));
+    return {totals,byModel:Object.values(byModel).sort((a,b)=>b.estimatedCostUsd-a.estimatedCostUsd)};
+  }
+
   async ping() { return true; }
 }
 
@@ -224,6 +335,23 @@ class SupabaseStore {
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
     this.mirrorDigests = new Map();
     this.fetch = fetchImpl;
+    this.telemetry = {
+      lastSuccessfulReadAt: null,
+      lastSuccessfulWriteAt: null,
+      lastPrimaryWriteAt: null,
+      lastPrimaryFailureAt: null,
+      lastFailureAt: null,
+      lastFailureCode: null,
+      lastFailureHttpStatus: null,
+      lastFailureTable: null,
+      stateBytes: null,
+      stateWarnBytes: SUPABASE_STATE_WARN_BYTES,
+      stateHardBytes: SUPABASE_STATE_HARD_BYTES,
+      embeddedAuditLimit: SUPABASE_EMBEDDED_AUDIT_LIMIT,
+      reportingFailures: 0,
+      reportingLastError: null,
+      lastIntegrityCheckAt: null
+    };
     let parsed;
     try { parsed = new URL(this.url); } catch { throw new Error('SUPABASE_URL is invalid'); }
     if (parsed.protocol !== 'https:' && env.NODE_ENV === 'production') throw new Error('SUPABASE_URL must use HTTPS');
@@ -241,11 +369,27 @@ class SupabaseStore {
   }
 
   async request(pathname, options = {}) {
-    const response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
-      ...options,
-      headers: this.headers(options.headers),
-      signal: options.signal || AbortSignal.timeout(20000)
-    });
+    const method = String(options.method || 'GET').toUpperCase();
+    let response;
+    try {
+      response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
+        ...options,
+        headers: this.headers(options.headers),
+        signal: options.signal || AbortSignal.timeout(20000)
+      });
+    } catch (cause) {
+      const error = Object.assign(new Error('Supabase persistence request failed'), {
+        code: 'SUPABASE_PERSISTENCE_FAILED',
+        table: pathname.split('?')[0],
+        payloadBytes: Buffer.byteLength(options.body || ''),
+        cause
+      });
+      this.telemetry.lastFailureAt = new Date().toISOString();
+      this.telemetry.lastFailureCode = cause?.name === 'TimeoutError' ? 'TIMEOUT' : 'NETWORK_ERROR';
+      this.telemetry.lastFailureHttpStatus = null;
+      this.telemetry.lastFailureTable = error.table;
+      throw error;
+    }
     if (!response.ok) {
       const error = new Error(`Supabase persistence request failed (${response.status})`);
       error.code = 'SUPABASE_PERSISTENCE_FAILED';
@@ -259,9 +403,16 @@ class SupabaseStore {
           error.databaseCode = payload.code;
         }
       } catch { /* Non-JSON error responses retain HTTP/table diagnostics. */ }
+      this.telemetry.lastFailureAt = new Date().toISOString();
+      this.telemetry.lastFailureCode = error.databaseCode || error.code;
+      this.telemetry.lastFailureHttpStatus = response.status;
+      this.telemetry.lastFailureTable = error.table;
       throw error;
     }
-    if (response.status === 204 || options.method === 'HEAD') return null;
+    const succeededAt = new Date().toISOString();
+    if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
+    else this.telemetry.lastSuccessfulWriteAt = succeededAt;
+    if (response.status === 204 || method === 'HEAD') return null;
     const text = await response.text();
     return text ? JSON.parse(text) : null;
   }
@@ -490,25 +641,6 @@ class SupabaseStore {
       updated_at: state.subscription?.updatedAt || new Date().toISOString()
     }], 'workspace_id');
 
-    await mirror('ai_usage_events', (state.aiUsage?.ledger || []).filter(entry => !entry.topUpCredits).map(entry => ({
-      id: entry.id,
-      workspace_id: workspaceId,
-      user_id: entry.userId || null,
-      campaign_id: entry.campaignId || null,
-      request_key: entry.requestKey || null,
-      provider: entry.provider || 'unknown',
-      operation: entry.operation || 'unknown',
-      credits: Math.max(0, Math.round(Number(entry.credits || 0))),
-      status: entry.status,
-      estimated_provider_cost_minor: Math.max(0, Math.round(Number(entry.estimatedProviderCostMinor || 0))),
-      actual_provider_cost_minor: entry.actualProviderCostMinor == null ? null : Math.max(0, Math.round(Number(entry.actualProviderCostMinor || 0))),
-      provider_reference: entry.providerReference || null,
-      metadata: entry.metadata || {},
-      created_at: entry.createdAt,
-      settled_at: entry.settledAt || null,
-      released_at: entry.releasedAt || null
-    })), 'id');
-
     await mirror('orders', (state.orders || []).map(order => ({
       id: order.id,
       workspace_id: workspaceId,
@@ -573,6 +705,18 @@ class SupabaseStore {
   }
 
   async commit(workspaceId, state, expectedRevision, existing) {
+    const stateBytes = Buffer.byteLength(JSON.stringify(state));
+    this.telemetry.stateBytes = stateBytes;
+    if (stateBytes >= SUPABASE_STATE_HARD_BYTES) {
+      const error = Object.assign(new Error('Workspace state is too large to persist safely'), {
+        status: 503, code: 'STATE_SIZE_LIMIT', stateBytes
+      });
+      this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
+      throw error;
+    }
+    if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
+      console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
+    }
     const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
     if (existing) {
       const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
@@ -584,20 +728,118 @@ class SupabaseStore {
         if (error.databaseCode !== '57014') throw error;
         // PostgreSQL cancelled this statement. Retry the same revision-guarded
         // write once; do not repeat any provider operation or business callback.
+        await new Promise(resolve => setTimeout(resolve, 250));
         rows = await this.request(path, options);
       }
       if (!rows?.length) throw conflict();
+      this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
     } else {
       // Atomically create the FK parent, unique login identity and primary state.
-      try { await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) }); }
-      catch (error) { if (error.databaseCode === '23505') throw conflict(); throw error; }
+      try {
+        await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) });
+        this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
+      } catch (error) {
+        this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
+        if (error.databaseCode === '23505') throw conflict();
+        throw error;
+      }
     }
+  }
+
+  async archiveHistory(workspaceId, collection, records) {
+    if (!records.length) return;
+    const rows = records.map((record, index) => ({
+      workspace_id: workspaceId,
+      collection,
+      record_id: String(record?.id || `${collection}_${index}_${crypto.createHash('sha256').update(JSON.stringify(record)).digest('hex').slice(0, 24)}`),
+      payload: record,
+      occurred_at: record?.completedAt || record?.startedAt || record?.updatedAt || record?.createdAt || null,
+      archived_at: new Date().toISOString()
+    }));
+    for (let offset = 0; offset < rows.length; offset += 200) {
+      await this.upsert('runvara_history', rows.slice(offset, offset + 200), 'workspace_id,collection,record_id');
+    }
+  }
+
+  async archiveAndCompact(workspaceId, state) {
+    const audit = state.audit || [];
+    const archivedAudit = audit.slice(SUPABASE_EMBEDDED_AUDIT_LIMIT);
+    if (archivedAudit.length) {
+      for (let offset = 0; offset < archivedAudit.length; offset += 200) {
+        await this.upsert('audit_events', archivedAudit.slice(offset, offset + 200).map(event => ({
+          id: event.id,
+          workspace_id: workspaceId,
+          type: event.type,
+          actor: event.actor,
+          detail: event.detail || {},
+          created_at: event.createdAt
+        })), 'id');
+      }
+    }
+
+    const workRecords = state.workRecords || [];
+    await this.archiveHistory(workspaceId, 'workRecords', workRecords.slice(SUPABASE_WORK_RECORD_LIMIT));
+    state.workRecords = workRecords.slice(0, SUPABASE_WORK_RECORD_LIMIT);
+
+    const syncs = state.connectionSyncs || [];
+    const keptSyncs = [], archivedSyncs = [];
+    for (const run of syncs) {
+      if (run.status === 'running' || keptSyncs.length < SUPABASE_CONNECTION_SYNC_LIMIT) keptSyncs.push(run);
+      else archivedSyncs.push(run);
+    }
+    await this.archiveHistory(workspaceId, 'connectionSyncs', archivedSyncs);
+    state.connectionSyncs = keptSyncs;
+
+    const agentRuns = state.agentRuns || [];
+    await this.archiveHistory(workspaceId, 'agentRuns', agentRuns.slice(SUPABASE_AGENT_RUN_LIMIT));
+    state.agentRuns = agentRuns.slice(0, SUPABASE_AGENT_RUN_LIMIT);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const seenRules = new Set();
+    const keptAutomation = [], archivedAutomation = [];
+    for (const run of state.automationRuns || []) {
+      const ruleId = String(run.ruleId || 'unknown');
+      const isToday = String(run.startedAt || '').slice(0, 10) === today;
+      if (isToday || !seenRules.has(ruleId) || run.status === 'IN PROGRESS') {
+        keptAutomation.push(run);
+        seenRules.add(ruleId);
+      } else archivedAutomation.push(run);
+    }
+    await this.archiveHistory(workspaceId, 'automationRuns', archivedAutomation);
+    state.automationRuns = keptAutomation;
+
+    const briefs = state.dailyBriefs || [];
+    const keepBriefs = briefs.slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
+    const archivedBriefs = briefs.slice(SUPABASE_DAILY_BRIEF_LIMIT);
+    for (const brief of archivedBriefs) {
+      if (!brief?.id) continue;
+      await this.upsert('operations_briefs', [{
+        id: brief.id,
+        workspace_id: workspaceId,
+        summary: brief.summary || '',
+        metrics: brief.archive ? ((await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(brief.id)}&select=metrics&limit=1`))?.[0]?.metrics || brief) : brief,
+        logic: brief.logic || 'deterministic-v1',
+        created_at: brief.generatedAt || new Date().toISOString()
+      }], 'id');
+    }
+    state.dailyBriefs = keepBriefs;
+    state.audit = audit.slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
   }
 
   async save(workspaceId, state) {
     assertWorkspace(workspaceId, state);
     const existing = Boolean(state[PERSISTED] || state._revision);
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
+    // Archive append-only operational histories before compacting existing hot state.
+    // New workspaces have no parent FK row yet and start below retention limits.
+    if (existing) await this.archiveAndCompact(workspaceId, upgraded);
+    else {
+      upgraded.audit = (upgraded.audit || []).slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
+      upgraded.workRecords = (upgraded.workRecords || []).slice(0, SUPABASE_WORK_RECORD_LIMIT);
+      upgraded.connectionSyncs = (upgraded.connectionSyncs || []).slice(0, SUPABASE_CONNECTION_SYNC_LIMIT);
+      upgraded.agentRuns = (upgraded.agentRuns || []).slice(0, SUPABASE_AGENT_RUN_LIMIT);
+      upgraded.dailyBriefs = (upgraded.dailyBriefs || []).slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
+    }
     upgraded.workspace.updatedAt = new Date().toISOString();
     if (existing) {
       const briefs = [];
@@ -616,9 +858,11 @@ class SupabaseStore {
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
     await this.commit(workspaceId, upgraded, state._revision, existing);
     state._revision = upgraded._revision;
-    state.dailyBriefs = upgraded.dailyBriefs;
+    for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) state[key] = upgraded[key];
     markPersisted(state);
     const failures = await this.mirrorNormalized(workspaceId, upgraded);
+    this.telemetry.reportingFailures = failures.length;
+    this.telemetry.reportingLastError = failures[0]?.databaseCode || failures[0]?.code || null;
     const report = { status: failures.length ? 'degraded' : 'connected', detail: failures.length ? `${failures.length} reporting tables need repair; primary workspace data remains durable.` : 'Reporting refresh completed.',
       lastSyncAt: failures.length ? (state.integrationStatus?.reporting?.lastSyncAt || null) : now,
       lastFailureAt: failures.length ? now : (state.integrationStatus?.reporting?.lastFailureAt || null), lastError: failures[0]?.databaseCode || failures[0]?.code || null, failures };
@@ -658,6 +902,114 @@ class SupabaseStore {
     return rows[0].metrics;
   }
 
+  async enqueueAgentJob(workspaceId, job) {
+    const key = encodeURIComponent(job.idempotencyKey);
+    const existing = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
+    if (existing?.[0]) return existing[0];
+    const row = {
+      id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
+      status:'queued', priority:job.priority, attempts:0, max_attempts:job.maxAttempts, ai_units:job.aiUnits,
+      concurrency_limit:job.concurrencyLimit, idempotency_key:job.idempotencyKey, actor:job.actor,
+      ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
+      available_at:job.availableAt, created_at:job.createdAt, updated_at:job.updatedAt
+    };
+    try {
+      const rows = await this.request('runvara_agent_jobs?select=*', { method:'POST', headers:{ Prefer:'return=representation' }, body:JSON.stringify(row) });
+      return rows?.[0] || row;
+    } catch (error) {
+      if (error.httpStatus !== 409 && error.databaseCode !== '23505') throw error;
+      const raced = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
+      if (raced?.[0]) return raced[0];
+      throw error;
+    }
+  }
+
+  async claimAgentJobs(workerId, limit = 8, leaseSeconds = 300) {
+    return await this.request('rpc/runvara_claim_agent_jobs', { method:'POST', body:JSON.stringify({ p_worker_id:workerId, p_limit:limit, p_lease_seconds:leaseSeconds }) }) || [];
+  }
+
+  async finishAgentJob(job, update) {
+    const worker = encodeURIComponent(job.worker_id || '');
+    const rows = await this.request(`runvara_agent_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${worker}&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:update.status, result:update.result ?? null, error_code:update.errorCode ?? null,
+        completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+      })
+    });
+    return rows?.[0] || null;
+  }
+
+  async rescheduleAgentJob(job, update) {
+    const worker = encodeURIComponent(job.worker_id || '');
+    const rows = await this.request(`runvara_agent_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${worker}&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:'queued', error_code:update.errorCode || null, available_at:update.availableAt,
+        lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+      })
+    });
+    return rows?.[0] || null;
+  }
+
+  async listAgentJobs(workspaceId, limit = 100) {
+    return await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=*&order=created_at.desc&limit=${Math.max(1,Math.min(500,Number(limit)||100))}`) || [];
+  }
+
+  async retryAgentJob(workspaceId, jobId) {
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&status=in.(blocked,dead_letter)&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null,
+        error_code:null, completed_at:null, updated_at:new Date().toISOString()
+      })
+    });
+    if (rows?.[0]) return rows[0];
+    return (await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=*&limit=1`))?.[0] || null;
+  }
+
+  async agentOpsUsage(workspaceId, day) {
+    const next = new Date(`${day}T00:00:00.000Z`); next.setUTCDate(next.getUTCDate()+1);
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&select=ai_units`);
+    return (rows || []).reduce((sum,row)=>sum + Number(row.ai_units || 0),0);
+  }
+
+  async recordAiUsage(workspaceId, usage) {
+    const row={
+      id:usage.id, workspace_id:workspaceId, job_id:usage.jobId, task_type:usage.taskType,
+      provider:usage.provider, model:usage.model, input_tokens:usage.inputTokens,
+      cached_input_tokens:usage.cachedInputTokens, cache_write_tokens:usage.cacheWriteTokens,
+      output_tokens:usage.outputTokens, estimated_cost_usd:usage.estimatedCostUsd,
+      request_id:usage.requestId, occurred_at:usage.occurredAt
+    };
+    try {
+      const rows=await this.request('runvara_ai_usage?select=*',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify(row)});
+      return rows?.[0]||row;
+    } catch(error) {
+      if ((error.httpStatus===409 || error.databaseCode==='23505') && usage.requestId) {
+        const rows=await this.request(`runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(usage.provider)}&request_id=eq.${encodeURIComponent(usage.requestId)}&select=*&limit=1`);
+        if(rows?.[0]) return rows[0];
+      }
+      throw error;
+    }
+  }
+
+  async aiUsageSummary(workspaceId, startAt, endAt) {
+    const rows=await this.request(`runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&occurred_at=gte.${encodeURIComponent(startAt)}&occurred_at=lt.${encodeURIComponent(endAt)}&select=model,input_tokens,cached_input_tokens,cache_write_tokens,output_tokens,estimated_cost_usd`)||[];
+    const byModel={};
+    for(const row of rows) {
+      const model=row.model||'unknown';
+      const current=byModel[model] ||= {model,requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0};
+      current.requests++; current.inputTokens+=Number(row.input_tokens||0); current.cachedInputTokens+=Number(row.cached_input_tokens||0);
+      current.cacheWriteTokens+=Number(row.cache_write_tokens||0); current.outputTokens+=Number(row.output_tokens||0);
+      current.estimatedCostUsd+=Number(row.estimated_cost_usd||0);
+    }
+    const totals=Object.values(byModel).reduce((out,item)=>({
+      requests:out.requests+item.requests,inputTokens:out.inputTokens+item.inputTokens,cachedInputTokens:out.cachedInputTokens+item.cachedInputTokens,
+      cacheWriteTokens:out.cacheWriteTokens+item.cacheWriteTokens,outputTokens:out.outputTokens+item.outputTokens,estimatedCostUsd:out.estimatedCostUsd+item.estimatedCostUsd
+    }),{requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0});
+    totals.estimatedCostUsd=Number(totals.estimatedCostUsd.toFixed(8));
+    for(const item of Object.values(byModel)) item.estimatedCostUsd=Number(item.estimatedCostUsd.toFixed(8));
+    return {totals,byModel:Object.values(byModel).sort((a,b)=>b.estimatedCostUsd-a.estimatedCostUsd)};
+  }
+
   async listWorkspaceIds() {
     const ids = [];
     for (let offset = 0; ; offset += 200) {
@@ -665,6 +1017,56 @@ class SupabaseStore {
       ids.push(...(rows || []).map(row => row.workspace_id));
       if ((rows || []).length < 200) return ids;
     }
+  }
+
+  diagnostics() {
+    const primaryPersistence = !this.telemetry.lastPrimaryFailureAt ||
+      (this.telemetry.lastPrimaryWriteAt && this.telemetry.lastPrimaryWriteAt >= this.telemetry.lastPrimaryFailureAt);
+    return {
+      ...this.telemetry,
+      primaryPersistence,
+      stateSizeStatus: this.telemetry.stateBytes === null ? 'unknown' :
+        this.telemetry.stateBytes >= SUPABASE_STATE_HARD_BYTES ? 'critical' :
+        this.telemetry.stateBytes >= SUPABASE_STATE_WARN_BYTES ? 'warning' : 'healthy'
+    };
+  }
+
+  async integrityCheck(workspaceId) {
+    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
+    const state = rows?.[0]?.state;
+    if (!state) return { workspaceId, healthy: false, code: 'WORKSPACE_STATE_MISSING' };
+    const stateBytes = Buffer.byteLength(JSON.stringify(state));
+    const embeddedAuditCount = Array.isArray(state.audit) ? state.audit.length : 0;
+    const workRecordCount = Array.isArray(state.workRecords) ? state.workRecords.length : 0;
+    const connectionSyncCount = Array.isArray(state.connectionSyncs) ? state.connectionSyncs.length : 0;
+    const agentRunCount = Array.isArray(state.agentRuns) ? state.agentRuns.length : 0;
+    const dailyBriefCount = Array.isArray(state.dailyBriefs) ? state.dailyBriefs.length : 0;
+    const automationRunCount = Array.isArray(state.automationRuns) ? state.automationRuns.length : 0;
+    const reportingStatus = state.integrationStatus?.reporting?.status || 'unknown';
+    this.telemetry.stateBytes = stateBytes;
+    this.telemetry.lastIntegrityCheckAt = new Date().toISOString();
+    const healthy = stateBytes < SUPABASE_STATE_HARD_BYTES &&
+      embeddedAuditCount <= SUPABASE_EMBEDDED_AUDIT_LIMIT &&
+      workRecordCount <= SUPABASE_WORK_RECORD_LIMIT &&
+      connectionSyncCount <= SUPABASE_CONNECTION_SYNC_LIMIT + 20 &&
+      agentRunCount <= SUPABASE_AGENT_RUN_LIMIT &&
+      dailyBriefCount <= SUPABASE_DAILY_BRIEF_LIMIT;
+    return {
+      workspaceId,
+      healthy,
+      stateBytes,
+      stateWarnBytes: SUPABASE_STATE_WARN_BYTES,
+      stateHardBytes: SUPABASE_STATE_HARD_BYTES,
+      embeddedAuditCount,
+      embeddedAuditLimit: SUPABASE_EMBEDDED_AUDIT_LIMIT,
+      workRecordCount,
+      automationRunCount,
+      connectionSyncCount,
+      agentRunCount,
+      dailyBriefCount,
+      reportingStatus,
+      checkedAt: this.telemetry.lastIntegrityCheckAt
+    };
   }
 
   async ping() {

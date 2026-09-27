@@ -208,3 +208,26 @@ test('cancelled primary statement retries once with identical revision guard; ot
   await assert.rejects(store.save(state.workspace.id,state),error=>error.databaseCode==='42501');
   assert.equal(fake.calls.slice(start).filter(call=>call.method==='PATCH').length,1);
 });
+
+
+test('existing Supabase workspaces archive growing operational histories before compacting hot state', async () => {
+  const state = seedWorkspaceState();
+  const fake = fakeSupabase();
+  const store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test-only' }, { fetchImpl: fake.fetchImpl });
+  await store.save(state.workspace.id, state);
+  assert.equal(fake.calls.some(call => call.url.pathname.endsWith('/runvara_history')), false, 'new workspace must not archive before its FK parent exists');
+
+  const loaded = await store.get(state.workspace.id);
+  loaded.workRecords = Array.from({ length: 140 }, (_, i) => ({ id: `work_${i}`, title: `Work ${i}`, status: 'COMPLETED', evidence: [{ type: 'test', id: String(i) }], updatedAt: new Date(Date.now() - i * 1000).toISOString() }));
+  loaded.automationRuns = Array.from({ length: 40 }, (_, i) => ({ id: `automation_${i}`, ruleId: 'profitGuard', status: 'COMPLETED', startedAt: new Date(Date.now() - (i < 5 ? i * 1000 : 86400000 + i * 1000)).toISOString(), completedAt: new Date().toISOString(), evidence: [] }));
+  loaded.connectionSyncs = Array.from({ length: 130 }, (_, i) => ({ id: `sync_${i}`, provider: 'shopify', status: 'completed', startedAt: new Date(Date.now() - i * 1000).toISOString() }));
+  loaded.agentRuns = [{ id: 'agent_new', completedAt: new Date().toISOString(), results: [] }, { id: 'agent_old', completedAt: new Date(Date.now() - 86400000).toISOString(), results: [] }];
+  await store.save(state.workspace.id, loaded);
+
+  const persisted = await store.get(state.workspace.id);
+  assert.equal(persisted.workRecords.length, 100);
+  assert.ok(persisted.automationRuns.length < 40);
+  assert.equal(persisted.connectionSyncs.length, 100);
+  assert.equal(persisted.agentRuns.length, 1);
+  assert.ok((fake.tables.get('runvara_history') || []).length >= 72);
+});
