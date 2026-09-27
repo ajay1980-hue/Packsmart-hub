@@ -246,7 +246,13 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         unhealthyConnections,
         pendingApprovals:(state.approvals || []).filter(item => item.status === 'pending').length,
         openExceptions:(state.exceptions || []).filter(item => ['open','acknowledged'].includes(item.status)).length,
-        updatedAt:state.workspace?.updatedAt || null
+        updatedAt:state.workspace?.updatedAt || null,
+        jobs:snapshot.jobs.slice(0,10).map(job => ({
+          id:job.id, type:job.type, provider:job.provider || null, status:job.status,
+          priority:job.priority, attempts:job.attempts, maxAttempts:job.max_attempts ?? job.maxAttempts,
+          aiUnits:Number(job.ai_units ?? job.aiUnits ?? 0), errorCode:job.error_code ?? job.errorCode ?? null,
+          createdAt:job.created_at ?? job.createdAt ?? null, completedAt:job.completed_at ?? job.completedAt ?? null
+        }))
       });
     }
     workspaces.sort((a,b) => (b.counts.dead_letter + b.counts.blocked + b.unhealthyConnections + b.openExceptions) - (a.counts.dead_letter + a.counts.blocked + a.unhealthyConnections + a.openExceptions) || a.name.localeCompare(b.name));
