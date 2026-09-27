@@ -272,7 +272,7 @@ class FileStore {
   }
 
   async listAgentJobs(workspaceId, limit = 100) {
-    return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0, limit).map(structuredClone);
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0, limit).map(item => structuredClone(item));
   }
 
   async retryAgentJob(workspaceId, jobId) {
