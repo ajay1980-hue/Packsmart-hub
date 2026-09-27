@@ -275,6 +275,14 @@ class FileStore {
     return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0, limit).map(structuredClone);
   }
 
+  async retryAgentJob(workspaceId, jobId) {
+    const row = this.agentJobs.find(item => item.workspace_id === workspaceId && item.id === jobId);
+    if (!row) return null;
+    if (!['blocked','dead_letter'].includes(row.status)) return structuredClone(row);
+    Object.assign(row, { status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null, error_code:null, completed_at:null, updated_at:new Date().toISOString() });
+    return structuredClone(row);
+  }
+
   async agentOpsUsage(workspaceId, day) {
     return this.agentJobs.filter(item => item.workspace_id === workspaceId && String(item.created_at).slice(0,10) === day && item.status !== 'queued')
       .reduce((sum,item)=>sum + Number(item.ai_units || 0), 0);
@@ -905,6 +913,17 @@ class SupabaseStore {
 
   async listAgentJobs(workspaceId, limit = 100) {
     return await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=*&order=created_at.desc&limit=${Math.max(1,Math.min(500,Number(limit)||100))}`) || [];
+  }
+
+  async retryAgentJob(workspaceId, jobId) {
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&status=in.(blocked,dead_letter)&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null,
+        error_code:null, completed_at:null, updated_at:new Date().toISOString()
+      })
+    });
+    if (rows?.[0]) return rows[0];
+    return (await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=*&limit=1`))?.[0] || null;
   }
 
   async agentOpsUsage(workspaceId, day) {
