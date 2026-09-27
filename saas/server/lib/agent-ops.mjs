@@ -212,6 +212,17 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     });
   }
 
+  async function configureWorkspace(workspaceId, input, actor='platform-owner') {
+    return withWorkspaceLock(workspaceId, async () => {
+      const state = await store.get(workspaceId);
+      if (!state) throw Object.assign(new Error('Workspace not found'), { status:404, code:'WORKSPACE_NOT_FOUND' });
+      const settings = configureAgentOps(state, input, actor);
+      addAudit(state, { type:'agent_ops_operator_updated', actor, detail:{ workspaceId, paused:settings.paused, enabled:settings.enabled, maxConcurrentJobs:settings.maxConcurrentJobs, dailyAiUnitLimit:settings.dailyAiUnitLimit } });
+      await store.save(workspaceId, state);
+      return settings;
+    });
+  }
+
   async function fleetSnapshot() {
     const workspaceIds = await store.listWorkspaceIds();
     const workspaces = [];
@@ -219,23 +230,37 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       const state = await store.get(workspaceId);
       if (!state) continue;
       const snapshot = await workspaceSnapshot(workspaceId, state);
+      const connectionStates = Object.values(state.integrationStatus || {});
+      const unhealthyConnections = connectionStates.filter(item => ['degraded','error','auth_expired'].includes(item?.status)).length;
       workspaces.push({
         workspaceId,
         name:state.workspace?.name || workspaceId,
         plan:state.subscription?.plan || 'unknown',
+        subscriptionStatus:state.subscription?.status || 'unknown',
         paused:Boolean(snapshot.settings?.paused),
+        enabled:snapshot.settings?.enabled !== false,
+        maxConcurrentJobs:snapshot.settings?.maxConcurrentJobs || 0,
         counts:snapshot.counts,
         aiUnitsToday:snapshot.usage.aiUnitsToday,
-        dailyAiUnitLimit:snapshot.usage.dailyAiUnitLimit
+        dailyAiUnitLimit:snapshot.usage.dailyAiUnitLimit,
+        unhealthyConnections,
+        pendingApprovals:(state.approvals || []).filter(item => item.status === 'pending').length,
+        openExceptions:(state.exceptions || []).filter(item => ['open','acknowledged'].includes(item.status)).length,
+        updatedAt:state.workspace?.updatedAt || null
       });
     }
+    workspaces.sort((a,b) => (b.counts.dead_letter + b.counts.blocked + b.unhealthyConnections + b.openExceptions) - (a.counts.dead_letter + a.counts.blocked + a.unhealthyConnections + a.openExceptions) || a.name.localeCompare(b.name));
     return {
       worker:{ ...status },
       totals:workspaces.reduce((out,item) => {
         for (const [key,value] of Object.entries(item.counts)) out[key]=(out[key]||0)+value;
         out.aiUnitsToday=(out.aiUnitsToday||0)+item.aiUnitsToday;
+        out.dailyAiUnitLimit=(out.dailyAiUnitLimit||0)+item.dailyAiUnitLimit;
+        out.unhealthyConnections=(out.unhealthyConnections||0)+item.unhealthyConnections;
+        out.pendingApprovals=(out.pendingApprovals||0)+item.pendingApprovals;
+        out.openExceptions=(out.openExceptions||0)+item.openExceptions;
         return out;
-      }, {}),
+      }, { workspaces:workspaces.length }),
       workspaces
     };
   }
@@ -243,5 +268,5 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   function start() { if (!enabled || timer) return; stopped=false; timer=setInterval(()=>{ void tick(); }, Math.max(1000, intervalMs)); timer.unref?.(); void tick(); }
   function stop() { stopped=true; if (timer) clearInterval(timer); timer=null; }
 
-  return { enqueue, retry, tick, start, stop, status, workspaceSnapshot, fleetSnapshot, workerId };
+  return { enqueue, retry, configureWorkspace, tick, start, stop, status, workspaceSnapshot, fleetSnapshot, workerId };
 }
