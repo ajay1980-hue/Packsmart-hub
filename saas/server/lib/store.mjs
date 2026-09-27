@@ -284,7 +284,7 @@ class FileStore {
   }
 
   async agentOpsUsage(workspaceId, day) {
-    return this.agentJobs.filter(item => item.workspace_id === workspaceId && String(item.created_at).slice(0,10) === day && item.status !== 'queued')
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId && String(item.created_at).slice(0,10) === day)
       .reduce((sum,item)=>sum + Number(item.ai_units || 0), 0);
   }
 
@@ -928,7 +928,7 @@ class SupabaseStore {
 
   async agentOpsUsage(workspaceId, day) {
     const next = new Date(`${day}T00:00:00.000Z`); next.setUTCDate(next.getUTCDate()+1);
-    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&status=neq.queued&select=ai_units`);
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&select=ai_units`);
     return (rows || []).reduce((sum,row)=>sum + Number(row.ai_units || 0),0);
   }
 
