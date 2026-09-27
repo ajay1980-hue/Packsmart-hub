@@ -162,6 +162,7 @@ class FileStore {
   constructor(env) {
     const defaultPath = fileURLToPath(new URL('../data/state.json', import.meta.url));
     this.filePath = env.SAAS_STATE_FILE || defaultPath;
+    this.agentJobs = [];
   }
 
   get provider() { return 'file'; }
@@ -217,6 +218,74 @@ class FileStore {
       if (user) return { ...user, workspaceId: state.workspace.id };
     }
     return null;
+  }
+
+  async enqueueAgentJob(workspaceId, job) {
+    const existing = this.agentJobs.find(item => item.workspace_id === workspaceId && item.idempotency_key === job.idempotencyKey);
+    if (existing) return structuredClone(existing);
+    const row = {
+      id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
+      result: null, status: 'queued', priority: job.priority, attempts: 0, max_attempts: job.maxAttempts,
+      ai_units: job.aiUnits, concurrency_limit: job.concurrencyLimit, idempotency_key: job.idempotencyKey,
+      actor: job.actor, available_at: job.availableAt, lease_until: null, worker_id: null, error_code: null,
+      created_at: job.createdAt, updated_at: job.updatedAt, completed_at: null
+    };
+    this.agentJobs.push(row);
+    return structuredClone(row);
+  }
+
+  async claimAgentJobs(workerId, limit = 8, leaseSeconds = 300) {
+    const now = Date.now();
+    for (const row of this.agentJobs) if (row.status === 'running' && Date.parse(row.lease_until) <= now) {
+      Object.assign(row, { status:'queued', worker_id:null, lease_until:null, available_at:new Date(now).toISOString(), updated_at:new Date(now).toISOString(), error_code:'WORKER_LEASE_EXPIRED' });
+    }
+    const runningByWorkspace = new Map();
+    for (const row of this.agentJobs) if (row.status === 'running' && Date.parse(row.lease_until) > now) runningByWorkspace.set(row.workspace_id, (runningByWorkspace.get(row.workspace_id) || 0) + 1);
+    const runningProviders = new Set(this.agentJobs.filter(row => row.status === 'running' && Date.parse(row.lease_until) > now && row.provider).map(row => `${row.workspace_id}:${row.provider}`));
+    const claimed = [];
+    const seenWorkspace = new Set();
+    for (const row of [...this.agentJobs].filter(row => row.status === 'queued' && Date.parse(row.available_at) <= now).sort((a,b) => b.priority-a.priority || Date.parse(a.created_at)-Date.parse(b.created_at))) {
+      if (claimed.length >= limit || seenWorkspace.has(row.workspace_id)) continue;
+      if ((runningByWorkspace.get(row.workspace_id) || 0) >= row.concurrency_limit) continue;
+      if (row.provider && runningProviders.has(`${row.workspace_id}:${row.provider}`)) continue;
+      Object.assign(row, { status:'running', attempts:row.attempts+1, worker_id:workerId, lease_until:new Date(now + leaseSeconds*1000).toISOString(), updated_at:new Date(now).toISOString() });
+      claimed.push(structuredClone(row)); seenWorkspace.add(row.workspace_id);
+    }
+    return claimed;
+  }
+
+  async finishAgentJob(job, update) {
+    const row = this.agentJobs.find(item => item.id === job.id);
+    if (!row || (row.worker_id && job.worker_id && row.worker_id !== job.worker_id)) return null;
+    Object.assign(row, {
+      status:update.status, result:update.result ?? row.result, error_code:update.errorCode ?? null,
+      completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+    });
+    return structuredClone(row);
+  }
+
+  async rescheduleAgentJob(job, update) {
+    const row = this.agentJobs.find(item => item.id === job.id);
+    if (!row || (row.worker_id && job.worker_id && row.worker_id !== job.worker_id)) return null;
+    Object.assign(row, { status:'queued', error_code:update.errorCode || null, available_at:update.availableAt, lease_until:null, worker_id:null, updated_at:new Date().toISOString() });
+    return structuredClone(row);
+  }
+
+  async listAgentJobs(workspaceId, limit = 100) {
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0, limit).map(item => structuredClone(item));
+  }
+
+  async retryAgentJob(workspaceId, jobId) {
+    const row = this.agentJobs.find(item => item.workspace_id === workspaceId && item.id === jobId);
+    if (!row) return null;
+    if (!['blocked','dead_letter'].includes(row.status)) return structuredClone(row);
+    Object.assign(row, { status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null, error_code:null, completed_at:null, updated_at:new Date().toISOString() });
+    return structuredClone(row);
+  }
+
+  async agentOpsUsage(workspaceId, day) {
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId && String(item.created_at).slice(0,10) === day)
+      .reduce((sum,item)=>sum + Number(item.ai_units || 0), 0);
   }
 
   async ping() { return true; }
@@ -793,6 +862,74 @@ class SupabaseStore {
     const rows = await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=metrics&limit=1`);
     if (!rows?.[0]?.metrics) throw Object.assign(new Error('Historical brief is temporarily unavailable'), { status: 503, code: 'BRIEF_ARCHIVE_UNAVAILABLE' });
     return rows[0].metrics;
+  }
+
+  async enqueueAgentJob(workspaceId, job) {
+    const key = encodeURIComponent(job.idempotencyKey);
+    const existing = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
+    if (existing?.[0]) return existing[0];
+    const row = {
+      id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
+      status:'queued', priority:job.priority, attempts:0, max_attempts:job.maxAttempts, ai_units:job.aiUnits,
+      concurrency_limit:job.concurrencyLimit, idempotency_key:job.idempotencyKey, actor:job.actor,
+      available_at:job.availableAt, created_at:job.createdAt, updated_at:job.updatedAt
+    };
+    try {
+      const rows = await this.request('runvara_agent_jobs?select=*', { method:'POST', headers:{ Prefer:'return=representation' }, body:JSON.stringify(row) });
+      return rows?.[0] || row;
+    } catch (error) {
+      if (error.httpStatus !== 409 && error.databaseCode !== '23505') throw error;
+      const raced = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
+      if (raced?.[0]) return raced[0];
+      throw error;
+    }
+  }
+
+  async claimAgentJobs(workerId, limit = 8, leaseSeconds = 300) {
+    return await this.request('rpc/runvara_claim_agent_jobs', { method:'POST', body:JSON.stringify({ p_worker_id:workerId, p_limit:limit, p_lease_seconds:leaseSeconds }) }) || [];
+  }
+
+  async finishAgentJob(job, update) {
+    const worker = encodeURIComponent(job.worker_id || '');
+    const rows = await this.request(`runvara_agent_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${worker}&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:update.status, result:update.result ?? null, error_code:update.errorCode ?? null,
+        completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+      })
+    });
+    return rows?.[0] || null;
+  }
+
+  async rescheduleAgentJob(job, update) {
+    const worker = encodeURIComponent(job.worker_id || '');
+    const rows = await this.request(`runvara_agent_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${worker}&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:'queued', error_code:update.errorCode || null, available_at:update.availableAt,
+        lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+      })
+    });
+    return rows?.[0] || null;
+  }
+
+  async listAgentJobs(workspaceId, limit = 100) {
+    return await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=*&order=created_at.desc&limit=${Math.max(1,Math.min(500,Number(limit)||100))}`) || [];
+  }
+
+  async retryAgentJob(workspaceId, jobId) {
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&status=in.(blocked,dead_letter)&select=*`, {
+      method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
+        status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null,
+        error_code:null, completed_at:null, updated_at:new Date().toISOString()
+      })
+    });
+    if (rows?.[0]) return rows[0];
+    return (await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=*&limit=1`))?.[0] || null;
+  }
+
+  async agentOpsUsage(workspaceId, day) {
+    const next = new Date(`${day}T00:00:00.000Z`); next.setUTCDate(next.getUTCDate()+1);
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&select=ai_units`);
+    return (rows || []).reduce((sum,row)=>sum + Number(row.ai_units || 0),0);
   }
 
   async listWorkspaceIds() {

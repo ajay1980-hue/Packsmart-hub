@@ -41,6 +41,7 @@ import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, 
 import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
 import { recordWork } from './lib/events.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
+import { createAgentOperations, configureAgentOps } from './lib/agent-ops.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
 
@@ -51,7 +52,7 @@ import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.9.0';
+const VERSION = '6.10.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -962,6 +963,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           storage: store.provider,
           productionReady: persistence && primaryPersistence && stateSizeSafe && store.provider === 'supabase' && authConfigured && encryptionConfigured,
           persistence: persistenceDetails,
+          agentOps: { running: agentOps?.status?.running || false, lastTickAt: agentOps?.status?.lastTickAt || null, lastError: agentOps?.status?.lastError || null },
           checks: {
             persistence,
             primaryPersistence,
@@ -1470,7 +1472,33 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/control') {
-          send(res, 200, { ...controlSnapshot(auth.state), scheduler: scheduler.status }); return;
+          send(res, 200, { ...controlSnapshot(auth.state), scheduler: scheduler.status, agentOps: agentOps.status }); return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/agent-ops') {
+          send(res, 200, await agentOps.workspaceSnapshot(auth.session.workspaceId, auth.state)); return;
+        }
+        if (req.method === 'PUT' && pathname === '/api/agent-ops') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 8192);
+          const settings = await mutate(auth, async state => configureAgentOps(state, body, auth.user.id));
+          send(res, 200, { settings }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/agent-ops/jobs') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const job = await agentOps.enqueue(auth.session.workspaceId, body, auth.user.id);
+          send(res, 202, { job }); return;
+        }
+        const agentJobRetry = pathname.match(/^\/api\/agent-ops\/jobs\/([^/]+)\/retry$/);
+        if (req.method === 'POST' && agentJobRetry) {
+          requireOwner(auth);
+          const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), auth.user.id);
+          send(res, 202, { job }); return;
+        }
+        if (req.method === 'GET' && pathname === '/api/operator/agent-ops') {
+          requireLaunchAdmin(auth, env);
+          send(res, 200, await agentOps.fleetSnapshot()); return;
         }
         if (req.method === 'GET' && pathname === '/api/briefs') {
           send(res, 200, { briefs: auth.state.dailyBriefs || [] }); return;
@@ -1812,6 +1840,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
     enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
+  const agentOps = createAgentOperations({ store, integrations, withWorkspaceLock, env,
+    enabled: options.agentOpsEnabled ?? isProduction, intervalMs: clamp(env.AGENT_OPS_TICK_MS, 1000, 60000, 2500) });
   let integrityTimer = null;
   const runIntegrityCheck = async () => {
     if (store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
@@ -1832,17 +1862,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   };
   server.once('listening', () => {
     scheduler.start();
+    agentOps.start();
     runIntegrityCheck();
     integrityTimer = setInterval(runIntegrityCheck, clamp(env.PERSISTENCE_INTEGRITY_CHECK_MS, 300000, 86400000, 3600000));
     integrityTimer.unref?.();
   });
   server.once('close', () => {
     scheduler.stop();
+    agentOps.stop();
     if (integrityTimer) clearInterval(integrityTimer);
   });
   server.headersTimeout = 15000;
   server.requestTimeout = 120000;
-  server.packsmart = { store, integrations, env, scheduler, drain:async()=>{scheduler.stop();await Promise.all([...locks.values()]);} };
+  server.packsmart = { store, integrations, env, scheduler, agentOps, drain:async()=>{scheduler.stop();agentOps.stop();await Promise.all([...locks.values()]);} };
   return server;
 }
 
