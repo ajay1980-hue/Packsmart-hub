@@ -235,6 +235,7 @@ test('existing Supabase workspaces archive growing operational histories before 
 
 test('scheduler cache uses tiny revision probes, avoids repeated full-state egress and notices remote changes', async () => {
   const state = seedWorkspaceState();
+  state._revision = 'seed-revision';
   const fake = fakeSupabase({ initialStates:[state] });
   const store = createStore({
     SUPABASE_URL:'https://test.supabase.co',
