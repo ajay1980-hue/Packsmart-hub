@@ -198,8 +198,49 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     return { settings, usage:{ aiUnitsToday:usage, dailyAiUnitLimit:settings?.dailyAiUnitLimit ?? 0 }, counts, jobs, worker:{ running:status.running, lastTickAt:status.lastTickAt } };
   }
 
+  async function retry(workspaceId, jobId, actor) {
+    return withWorkspaceLock(workspaceId, async () => {
+      const state = await store.get(workspaceId);
+      if (!state) throw Object.assign(new Error('Workspace not found'), { status:404, code:'WORKSPACE_NOT_FOUND' });
+      const job = await store.retryAgentJob(workspaceId, jobId);
+      if (!job) throw Object.assign(new Error('Agent job not found'), { status:404, code:'AGENT_JOB_NOT_FOUND' });
+      if (job.status !== 'queued') throw Object.assign(new Error('Only blocked or dead-letter jobs can be retried'), { status:409, code:'AGENT_JOB_NOT_RETRYABLE' });
+      addAudit(state, { type:'agent_job_retried', actor, detail:{ jobId, type:job.type, provider:job.provider || null } });
+      await store.save(workspaceId, state);
+      return job;
+    });
+  }
+
+  async function fleetSnapshot() {
+    const workspaceIds = await store.listWorkspaceIds();
+    const workspaces = [];
+    for (const workspaceId of workspaceIds) {
+      const state = await store.get(workspaceId);
+      if (!state) continue;
+      const snapshot = await workspaceSnapshot(workspaceId, state);
+      workspaces.push({
+        workspaceId,
+        name:state.workspace?.name || workspaceId,
+        plan:state.subscription?.plan || 'unknown',
+        paused:Boolean(snapshot.settings?.paused),
+        counts:snapshot.counts,
+        aiUnitsToday:snapshot.usage.aiUnitsToday,
+        dailyAiUnitLimit:snapshot.usage.dailyAiUnitLimit
+      });
+    }
+    return {
+      worker:{ ...status },
+      totals:workspaces.reduce((out,item) => {
+        for (const [key,value] of Object.entries(item.counts)) out[key]=(out[key]||0)+value;
+        out.aiUnitsToday=(out.aiUnitsToday||0)+item.aiUnitsToday;
+        return out;
+      }, {}),
+      workspaces
+    };
+  }
+
   function start() { if (!enabled || timer) return; stopped=false; timer=setInterval(()=>{ void tick(); }, Math.max(1000, intervalMs)); timer.unref?.(); void tick(); }
   function stop() { stopped=true; if (timer) clearInterval(timer); timer=null; }
 
-  return { enqueue, tick, start, stop, status, workspaceSnapshot, workerId };
+  return { enqueue, retry, tick, start, stop, status, workspaceSnapshot, fleetSnapshot, workerId };
 }
