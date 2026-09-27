@@ -342,6 +342,8 @@ class SupabaseStore {
     this.schedulerCache = new Map();
     this.schedulerCacheMaxAgeMs = Math.max(300000, Math.min(21600000, Number(env.SCHEDULER_STATE_CACHE_MS) || 3600000));
     this.fetch = fetchImpl;
+    this.requestTimeoutMs = Math.max(20000, Math.min(60000, Number(env.SUPABASE_REQUEST_TIMEOUT_MS) || 30000));
+    this.mirrorDeadlineMs = Math.max(12000, Math.min(60000, Number(env.SUPABASE_MIRROR_DEADLINE_MS) || 30000));
     this.telemetry = {
       lastSuccessfulReadAt: null,
       lastSuccessfulWriteAt: null,
@@ -359,7 +361,9 @@ class SupabaseStore {
       reportingLastError: null,
       lastIntegrityCheckAt: null,
       schedulerCacheHits: 0,
-      schedulerCacheMisses: 0
+      schedulerCacheMisses: 0,
+      requestTimeoutMs: this.requestTimeoutMs,
+      mirrorDeadlineMs: this.mirrorDeadlineMs
     };
     let parsed;
     try { parsed = new URL(this.url); } catch { throw new Error('SUPABASE_URL is invalid'); }
@@ -384,7 +388,7 @@ class SupabaseStore {
       response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
         ...options,
         headers: this.headers(options.headers),
-        signal: options.signal || AbortSignal.timeout(20000)
+        signal: options.signal || AbortSignal.timeout(this.requestTimeoutMs)
       });
     } catch (cause) {
       const error = Object.assign(new Error('Supabase persistence request failed'), {
@@ -480,17 +484,26 @@ class SupabaseStore {
 
   async upsert(table, rows, conflict, options = {}) {
     if (!rows.length) return;
-    await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, {
+    const requestOptions = {
       method: 'POST',
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(rows),
       ...options
-    });
+    };
+    try {
+      await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, requestOptions);
+    } catch (error) {
+      if (error.code !== 'SUPABASE_PERSISTENCE_FAILED' || error.httpStatus) throw error;
+      // Upserts are idempotent on the declared conflict key, so a single retry is
+      // safe when the network outcome is unknown.
+      await new Promise(resolve => setTimeout(resolve, 250));
+      await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, requestOptions);
+    }
   }
 
   async mirrorNormalized(workspaceId, state) {
     const errors = [];
-    const deadline = Date.now() + 12000;
+    const deadline = Date.now() + this.mirrorDeadlineMs;
     const mirror = async (table, rows, conflict) => {
       if (!rows.length) return;
       try {
@@ -766,11 +779,37 @@ class SupabaseStore {
       let rows;
       try { rows = await this.request(path, options); }
       catch (error) {
-        if (error.databaseCode !== '57014') throw error;
-        // PostgreSQL cancelled this statement. Retry the same revision-guarded
-        // write once; do not repeat any provider operation or business callback.
-        await new Promise(resolve => setTimeout(resolve, 250));
-        rows = await this.request(path, options);
+        if (error.databaseCode === '57014') {
+          // PostgreSQL cancelled this statement. Retry the same revision-guarded
+          // write once; do not repeat any provider operation or business callback.
+          await new Promise(resolve => setTimeout(resolve, 250));
+          rows = await this.request(path, options);
+        } else if (error.code === 'SUPABASE_PERSISTENCE_FAILED' && !error.httpStatus) {
+          // A network timeout can happen after Postgres has already committed.
+          // Resolve the uncertainty by reading the authoritative revision before
+          // deciding whether to retry, accept success, or surface a conflict.
+          let currentRevision = null;
+          try { currentRevision = await this.schedulerRevision(workspaceId); } catch {}
+          if (currentRevision === state._revision) {
+            rows = [{ workspace_id: workspaceId }];
+          } else if (currentRevision === expectedRevision || (!expectedRevision && !currentRevision)) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+            try { rows = await this.request(path, options); }
+            catch (retryError) {
+              if (retryError.code !== 'SUPABASE_PERSISTENCE_FAILED' || retryError.httpStatus) throw retryError;
+              let retryRevision = null;
+              try { retryRevision = await this.schedulerRevision(workspaceId); } catch {}
+              if (retryRevision === state._revision) rows = [{ workspace_id: workspaceId }];
+              else throw retryError;
+            }
+          } else if (currentRevision) {
+            throw conflict();
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
       }
       if (!rows?.length) throw conflict();
       this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
