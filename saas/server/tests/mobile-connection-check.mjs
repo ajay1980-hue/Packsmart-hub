@@ -1,25 +1,55 @@
 import { chromium } from 'playwright';
-import fs from 'node:fs/promises';
+import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
-(async()=>{
- const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
- const page=await browser.newPage();const errors=[];page.on('pageerror',error=>errors.push(error.message));
- await page.goto(pathToFileURL(process.argv[2] || '/tmp/runvara-mobile-preview.html').href);
- const frame=page.frameLocator('#preview');
- for(const width of [320,390,768,1200]){
-  await page.setViewportSize({width:Math.max(width+40,600),height:1000});
-  await page.locator(`[data-width="${width}"]`).click();
-  await frame.locator('#connection-journey').waitFor();
-  if(await frame.locator('#connection-journey > details').getAttribute('open')===null) await frame.locator('#connection-journey > details > summary').click();
-  const layout=await frame.locator('body').evaluate(el=>({scroll:el.ownerDocument.documentElement.scrollWidth,width:el.ownerDocument.documentElement.clientWidth}));
-  if(layout.scroll>layout.width+1)throw new Error(`Page overflows at ${width}: ${JSON.stringify(layout)}`);
-  await frame.locator('[data-channel-card="tiktok_shop"] .connection-title').click();
-  const dialog=await frame.locator('#connection-dialog').evaluate(el=>({scroll:el.scrollWidth,width:el.clientWidth,left:el.getBoundingClientRect().left,right:el.getBoundingClientRect().right,viewport:el.ownerDocument.documentElement.clientWidth}));
-  if(dialog.scroll>dialog.width+1||dialog.left<0||dialog.right>dialog.viewport+1)throw new Error(`Dialog overflows at ${width}: ${JSON.stringify(dialog)}`);
-  await frame.locator('#connection-close').click();
-  console.log(JSON.stringify({viewport:width,page:layout,dialog}));
-  if(width===390){await frame.locator('body').evaluate(el=>el.getBoundingClientRect().width);await page.locator('#preview').screenshot({path:'/tmp/runvara-onboarding-mobile.png'});}
- }
- if(errors.length)throw new Error(errors.join('\n'));
- await browser.close();
-})().catch(e=>{console.error(e);process.exit(1)});
+
+const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+let page;
+try {
+  const fixture = await browser.newPage();
+  await fixture.goto(pathToFileURL(process.argv[2] || '/tmp/runvara-mobile-preview.html').href);
+  const document = await fixture.locator('#preview').getAttribute('srcdoc');
+  assert.ok(document, 'Responsive fixture must contain the release document');
+  await fixture.close();
+  for (const width of [320, 390, 768, 1200]) {
+    // Exercise the actual viewport, without an outer iframe clipping scroll targets.
+    page = await browser.newPage({ viewport: { width, height: 900 } });
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.setContent(document);
+    await page.locator('#connection-journey').waitFor();
+    if (await page.locator('#connection-journey > details').getAttribute('open') === null) {
+      await page.locator('#connection-journey > details > summary').click();
+    }
+    const layout = await page.locator('body').evaluate(el => ({
+      scroll: el.ownerDocument.documentElement.scrollWidth,
+      width: el.ownerDocument.documentElement.clientWidth,
+    }));
+    assert.equal(layout.width, width, 'Test must use the requested customer viewport');
+    assert.ok(layout.scroll <= layout.width + 1, `Page overflows at ${width}: ${JSON.stringify(layout)}`);
+    const title = page.locator('[data-channel-card="tiktok_shop"] .connection-title');
+    await title.click();
+    assert.ok(await page.locator('#connection-dialog').isVisible(), 'Channel details must open');
+    const dialog = await page.locator('#connection-dialog').evaluate(el => ({
+      scroll: el.scrollWidth, width: el.clientWidth,
+      left: el.getBoundingClientRect().left, right: el.getBoundingClientRect().right,
+      viewport: el.ownerDocument.documentElement.clientWidth,
+    }));
+    assert.ok(dialog.scroll <= dialog.width + 1 && dialog.left >= 0 && dialog.right <= dialog.viewport + 1,
+      `Dialog overflows at ${width}: ${JSON.stringify(dialog)}`);
+    await page.locator('#connection-close').click();
+    assert.equal(await page.locator('#connection-dialog').isVisible(), false, 'Dialog must close');
+    assert.deepEqual(errors, [], 'Customer connection UI must not throw browser errors');
+    if (width === 390) {
+      await page.locator('#connection-journey').scrollIntoViewIfNeeded();
+      await page.screenshot({ path: '/tmp/runvara-onboarding-mobile.png', fullPage: true });
+    }
+    console.log(JSON.stringify({ viewport: width, page: layout, dialog }));
+    await page.close();
+    page = undefined;
+  }
+} catch (error) {
+  if (page) await page.screenshot({ path: '/tmp/runvara-onboarding-mobile.png', fullPage: true }).catch(() => {});
+  throw error;
+} finally {
+  await browser.close();
+}
