@@ -219,7 +219,7 @@
 
   function renderWorkspaceSearch() {
     const query = $('#workspace-search-input').value.trim().toLowerCase();
-    const results = Array.from($('#main-nav').querySelectorAll('[data-view]')).map(button => ({
+    const results = Array.from($('#main-nav').querySelectorAll('[data-view]')).filter(button => !button.classList.contains('hidden')).map(button => ({
       view: button.dataset.view,
       title: Array.from(button.childNodes).filter(node => node.nodeType === 3).map(node => node.textContent).join('').trim(),
       hint: navigationHints[button.dataset.view] || '', icon: button.querySelector('svg')?.outerHTML || ''
