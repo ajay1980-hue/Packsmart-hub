@@ -53,9 +53,17 @@ begin
   if p_worker_id is null or length(trim(p_worker_id)) < 8 then
     raise exception using errcode = '22023', message = 'Invalid worker id';
   end if;
+  -- Expired leases are safe to retry because every job type in this queue is
+  -- read-only/preparatory and uses existing idempotent business operations.
+  update public.runvara_agent_jobs
+  set status = 'queued', worker_id = null, lease_until = null,
+      available_at = now(), updated_at = now(), error_code = 'WORKER_LEASE_EXPIRED'
+  where status = 'running' and lease_until <= now();
+
   return query
-  with candidates as (
-    select j.id
+  with ranked as (
+    select j.id, j.workspace_id,
+      row_number() over (partition by j.workspace_id order by j.priority desc, j.available_at, j.created_at) as workspace_rank
     from public.runvara_agent_jobs j
     where j.status = 'queued'
       and j.available_at <= now()
@@ -74,8 +82,13 @@ begin
             and p.lease_until > now()
         )
       )
+  ),
+  candidates as (
+    select j.id
+    from public.runvara_agent_jobs j
+    join ranked r on r.id = j.id and r.workspace_rank = 1
     order by j.priority desc, j.available_at, j.created_at
-    for update skip locked
+    for update of j skip locked
     limit greatest(1, least(coalesce(p_limit,8), 50))
   )
   update public.runvara_agent_jobs j
