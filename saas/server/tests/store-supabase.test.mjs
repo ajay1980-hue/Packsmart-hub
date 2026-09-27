@@ -233,7 +233,7 @@ test('existing Supabase workspaces archive growing operational histories before 
 });
 
 
-test('scheduler cache avoids repeated full workspace-state egress and refreshes after saves', async () => {
+test('scheduler cache uses tiny revision probes, avoids repeated full-state egress and notices remote changes', async () => {
   const state = seedWorkspaceState();
   const fake = fakeSupabase({ initialStates:[state] });
   const store = createStore({
@@ -247,6 +247,11 @@ test('scheduler cache avoids repeated full workspace-state egress and refreshes 
     call.url.pathname.endsWith('/saas_workspace_state') &&
     call.url.searchParams.get('select') === 'state'
   ).length;
+  const revisionReads = () => fake.calls.filter(call =>
+    call.method === 'GET' &&
+    call.url.pathname.endsWith('/saas_workspace_state') &&
+    call.url.searchParams.get('select') === 'revision:state->>_revision'
+  ).length;
 
   const first = await store.getForScheduler(state.workspace.id);
   assert.equal(first.workspace.id, state.workspace.id);
@@ -255,7 +260,8 @@ test('scheduler cache avoids repeated full workspace-state egress and refreshes 
 
   const second = await store.getForScheduler(state.workspace.id);
   assert.equal(second.workspace.id, state.workspace.id);
-  assert.equal(fullReads(), afterFirst, 'repeat scheduler polling must use memory instead of downloading the full state again');
+  assert.equal(fullReads(), afterFirst, 'repeat scheduler polling must not download the full state again');
+  assert.equal(revisionReads(), 1, 'repeat scheduler polling should use only a tiny revision heartbeat');
 
   second.settings = { ...second.settings, marginFloor:31 };
   await store.save(state.workspace.id, second);
@@ -264,7 +270,15 @@ test('scheduler cache avoids repeated full workspace-state egress and refreshes 
   assert.equal(third.settings.marginFloor, 31);
   assert.equal(fullReads(), afterSaveReads, 'a successful save must refresh the scheduler cache without another full read');
 
+  const remote = structuredClone(fake.states.get(state.workspace.id));
+  remote.settings = { ...remote.settings, marginFloor:42 };
+  remote._revision = 'remote-revision-change';
+  fake.states.set(state.workspace.id, remote);
+  const fourth = await store.getForScheduler(state.workspace.id);
+  assert.equal(fourth.settings.marginFloor, 42, 'a changed revision must force an authoritative full refresh');
+  assert.equal(fullReads(), afterSaveReads + 1);
+
   const diagnostics = store.diagnostics();
   assert.ok(diagnostics.schedulerCacheHits >= 2);
-  assert.ok(diagnostics.schedulerCacheMisses >= 1);
+  assert.ok(diagnostics.schedulerCacheMisses >= 2);
 });
