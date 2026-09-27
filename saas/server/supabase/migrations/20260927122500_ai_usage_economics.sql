@@ -31,9 +31,12 @@ create index if not exists runvara_ai_usage_workspace_time_idx
   on public.runvara_ai_usage (workspace_id, occurred_at desc);
 create index if not exists runvara_ai_usage_model_time_idx
   on public.runvara_ai_usage (model, occurred_at desc);
+create index if not exists runvara_ai_usage_job_idx
+  on public.runvara_ai_usage (job_id)
+  where job_id is not null;
 
 alter table public.runvara_ai_usage enable row level security;
-revoke all on table public.runvara_ai_usage from public, anon, authenticated;
+revoke all on table public.runvara_ai_usage from public, anon, authenticated, service_role;
 grant select, insert on table public.runvara_ai_usage to service_role;
 
 comment on table public.runvara_ai_usage is 'Server-only measured AI token and estimated provider-cost ledger. No customer prompt or response content is stored.';
