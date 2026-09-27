@@ -52,6 +52,7 @@ import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 import { intelligentConnections, providerReadiness, doctorNotifications, recommendations } from './lib/connection-intelligence.mjs';
 import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
+import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.12.1';
@@ -515,6 +516,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       automations: state.automations || {},
       automationDefinitions: AUTOMATION_DEFINITIONS,
       marketing: marketingSnapshot(state, env),
+      webIntelligence: webIntelligenceSnapshot(state, env),
       approvals: state.approvals || [],
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
@@ -1282,6 +1284,29 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           });
           send(res, 201, { record });
           return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/web-intelligence') { send(res, 200, webIntelligenceSnapshot(auth.state, env)); return; }
+        if (req.method === 'PUT' && pathname === '/api/web-intelligence/settings') {
+          requireOwner(auth); const body = await jsonBody(req, 32768);
+          const settings = await mutate(auth, async state => { const next = updateWebIntelligenceSettings(state, body); addAudit(state, { type: 'web_intelligence_settings_updated', actor: auth.user.id, detail: next }); return next; });
+          send(res, 200, { settings }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/web-intelligence/targets') {
+          requireOwner(auth); const body = await jsonBody(req, 32768);
+          const target = await mutate(auth, async state => { const next = addWebIntelligenceTarget(state, body); addAudit(state, { type: 'web_intelligence_target_saved', actor: auth.user.id, detail: { targetId: next.id, kind: next.kind, url: next.url } }); return next; });
+          send(res, 201, { target }); return;
+        }
+        const webTargetMatch = pathname.match(/^\/api\/web-intelligence\/targets\/([^/]+)$/);
+        if (req.method === 'PUT' && webTargetMatch) {
+          requireOwner(auth); const body = await jsonBody(req, 32768);
+          const target = await mutate(auth, async state => { const next = setWebIntelligenceTargetActive(state, decodeURIComponent(webTargetMatch[1]), body.active); addAudit(state, { type: 'web_intelligence_target_status_changed', actor: auth.user.id, detail: { targetId: next.id, active: next.active } }); return next; });
+          send(res, 200, { target }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/web-intelligence/scan') {
+          requireOwner(auth); const body = await jsonBody(req, 32768);
+          const result = await mutate(auth, async state => { ensureWebIntelligence(state); const next = await runWebIntelligence(state, { env, fetchImpl: options.fetchImpl || fetch, actor: auth.user.id, targetId: body.targetId ? text(body.targetId, 120) : null }); addAudit(state, { type: 'web_intelligence_scan_completed', actor: auth.user.id, detail: next }); return next; });
+          send(res, 200, { result }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/marketing') {
