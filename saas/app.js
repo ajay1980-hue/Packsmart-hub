@@ -43,6 +43,11 @@
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value));
   }
 
+  function usd(value) {
+    if (value === '' || value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: Number(value) < 1 ? 4 : 2, maximumFractionDigits: Number(value) < 1 ? 6 : 2 }).format(Number(value));
+  }
+
   function percent(value) {
     return value === '' || value === null || value === undefined || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(1) + '%';
   }
@@ -641,14 +646,16 @@
     const workerHealthy = !worker.lastError && Boolean(worker.lastTickAt);
     $('#fleet-worker-status').textContent = workerHealthy ? 'Worker healthy' : worker.lastError ? 'Worker needs attention' : 'Worker starting';
     $('#fleet-worker-status').className = 'tag ' + (workerHealthy ? 'good' : worker.lastError ? 'bad' : 'warn');
+
     $('#fleet-kpis').innerHTML = [
       ['Workspaces', totals.workspaces || 0, 'independent tenants'],
       ['Running', totals.running || 0, 'jobs now'],
       ['Queued', totals.queued || 0, 'waiting safely'],
       ['Blocked', totals.blocked || 0, 'needs attention'],
-      ['Dead letter', totals.dead_letter || 0, 'manual retry'],
-      ['AI today', totals.aiUnitsToday || 0, 'of ' + (totals.dailyAiUnitLimit || 0) + ' units']
+      ['AI cost · month', usd(totals.aiEstimatedCostUsdMonth || 0), (totals.aiRequestsMonth || 0) + ' metered requests'],
+      ['Plan value · month', money(totals.planMonthlyValueGbp || 0), 'GBP list/billing value']
     ].map(item => '<article class="card kpi"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong><small>' + escapeHtml(item[2]) + '</small></article>').join('');
+
     $('#fleet-worker-detail').innerHTML = [
       ['Worker ID', worker.workerId || '—'],
       ['Last tick', worker.lastTickAt ? date(worker.lastTickAt) : 'Not yet'],
@@ -657,20 +664,40 @@
       ['Dead-lettered', worker.deadLettered || 0],
       ['Last error', worker.lastError || 'None']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
+
     const used = Number(totals.aiUnitsToday || 0), limit = Number(totals.dailyAiUnitLimit || 0), pct = limit ? Math.min(100, used / limit * 100) : 0;
-    $('#fleet-ai-capacity').innerHTML = '<div class="fleet-meter"><span style="width:' + pct.toFixed(1) + '%"></span></div><div class="section-head"><b>' + escapeHtml(used) + ' AI units reserved today</b><span class="tag ' + (pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : 'good') + '">' + escapeHtml(limit ? Math.round(pct) + '%' : 'No limit') + '</span></div><p class="muted tiny">Allowance is reserved when a job is queued, preventing burst traffic from oversubscribing customer limits.</p>';
+    $('#fleet-ai-capacity').innerHTML = '<div class="fleet-meter"><span style="width:' + pct.toFixed(1) + '%"></span></div><div class="section-head"><b>' + escapeHtml(used) + ' AI units reserved today</b><span class="tag ' + (pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : 'good') + '">' + escapeHtml(limit ? Math.round(pct) + '%' : 'No limit') + '</span></div><p class="muted tiny">Units reserve workload capacity. Provider token cost is metered separately from real response usage.</p>';
+
+    $('#fleet-ai-provider-status').textContent = fleet.aiProviderConfigured ? 'Provider metering ready' : 'Deterministic fallback';
+    $('#fleet-ai-provider-status').className = 'tag ' + (fleet.aiProviderConfigured ? 'good' : 'neutral');
+    $('#fleet-economics-summary').innerHTML = [
+      ['Metered AI requests this month', totals.aiRequestsMonth || 0],
+      ['Estimated provider cost', usd(totals.aiEstimatedCostUsdMonth || 0) + ' USD'],
+      ['Monthly plan value', money(totals.planMonthlyValueGbp || 0) + ' GBP'],
+      ['Cost accounting', 'Measured tokens only'],
+      ['Currency treatment', 'USD cost and GBP value kept separate']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
+
+    const models = fleet.modelCatalog || [];
+    $('#fleet-model-catalog').innerHTML = models.length ? models.map(model => {
+      const deterministic = model.model === 'deterministic';
+      const pricing = deterministic ? 'No provider charge' : '$' + Number(model.inputPerMillionUsd || 0).toFixed(2) + ' in · $' + Number(model.cachedInputPerMillionUsd || 0).toFixed(2) + ' cached · $' + Number(model.outputPerMillionUsd || 0).toFixed(2) + ' out / 1M';
+      return '<div class="model-row"><div><span class="tag ' + (deterministic ? 'neutral' : model.tier === 'quality' ? 'warn' : 'good') + '">' + escapeHtml(statusLabel(model.tier)) + '</span><b>' + escapeHtml(model.model) + '</b><small>' + escapeHtml(model.provider) + ' · pricing checked ' + escapeHtml(model.pricingUpdatedAt || '—') + '</small></div><span>' + escapeHtml(pricing) + '</span></div>';
+    }).join('') : '<div class="empty-state">No model routing catalogue is available.</div>';
 
     const query = String(state.fleetQuery || '').trim().toLowerCase();
-    const workspaces = (fleet.workspaces || []).filter(item => !query || [item.name,item.workspaceId,item.plan,item.subscriptionStatus].join(' ').toLowerCase().includes(query));
+    const workspaces = (fleet.workspaces || []).filter(item => !query || [item.name,item.workspaceId,item.plan,item.subscriptionStatus,item.aiRoutingMode].join(' ').toLowerCase().includes(query));
     $('#fleet-workspaces').innerHTML = workspaces.length ? workspaces.map(workspace => {
       const counts = workspace.counts || {}, risk = fleetRisk(workspace), tone = fleetTone(workspace);
       const aiPct = workspace.dailyAiUnitLimit ? Math.min(100, Number(workspace.aiUnitsToday || 0) / Number(workspace.dailyAiUnitLimit) * 100) : 0;
+      const aiMonth = workspace.aiUsageMonth?.totals || {};
       const jobs = (workspace.jobs || []).filter(job => ['running','queued','blocked','dead_letter'].includes(job.status));
-      const jobHtml = jobs.length ? jobs.map(job => '<div class="fleet-job"><div><b>' + escapeHtml(statusLabel(job.type)) + '</b><small>' + escapeHtml(job.provider ? statusLabel(job.provider) + ' · ' : '') + escapeHtml(statusLabel(job.status)) + ' · attempt ' + escapeHtml(job.attempts || 0) + '/' + escapeHtml(job.maxAttempts || '—') + '</small>' + (job.errorCode ? '<small class="bad-text">' + escapeHtml(job.errorCode) + '</small>' : '') + '</div>' + (['blocked','dead_letter'].includes(job.status) ? '<button class="secondary" data-fleet-retry="' + escapeHtml(job.id) + '" data-workspace="' + escapeHtml(workspace.workspaceId) + '">Retry safely</button>' : '') + '</div>').join('') : '<div class="empty-state compact">No active or failed jobs.</div>';
+      const jobHtml = jobs.length ? jobs.map(job => '<div class="fleet-job"><div><b>' + escapeHtml(statusLabel(job.type)) + '</b><small>' + escapeHtml(job.provider ? statusLabel(job.provider) + ' · ' : '') + escapeHtml(statusLabel(job.status)) + ' · attempt ' + escapeHtml(job.attempts || 0) + '/' + escapeHtml(job.maxAttempts || '—') + '</small>' + (job.aiModel ? '<small>AI route: ' + escapeHtml(job.aiModel) + ' · ' + escapeHtml(statusLabel(job.aiTier || '')) + '</small>' : '') + (job.errorCode ? '<small class="bad-text">' + escapeHtml(job.errorCode) + '</small>' : '') + '</div>' + (['blocked','dead_letter'].includes(job.status) ? '<button class="secondary" data-fleet-retry="' + escapeHtml(job.id) + '" data-workspace="' + escapeHtml(workspace.workspaceId) + '">Retry safely</button>' : '') + '</div>').join('') : '<div class="empty-state compact">No active or failed jobs.</div>';
+      const sourceLabel = workspace.planValueSource === 'billing' ? 'billing value' : workspace.planValueSource === 'indicative_list_price' ? 'list price' : workspace.planValueSource === 'internal' ? 'internal' : 'unknown';
       return '<article class="fleet-workspace" data-fleet-workspace="' + escapeHtml(workspace.workspaceId) + '"><div class="fleet-workspace-head"><div><span class="tag ' + tone + '">' + escapeHtml(risk ? 'Attention ' + risk : 'Healthy') + '</span><h3>' + escapeHtml(workspace.name) + '</h3><small>' + escapeHtml(workspace.workspaceId) + ' · ' + escapeHtml(statusLabel(workspace.plan)) + ' · ' + escapeHtml(statusLabel(workspace.subscriptionStatus)) + '</small></div><div class="fleet-workspace-actions"><button class="secondary" data-fleet-pause="' + escapeHtml(workspace.workspaceId) + '" data-paused="' + (workspace.paused ? 'true' : 'false') + '">' + (workspace.paused ? 'Resume Agent Ops' : 'Pause Agent Ops') + '</button></div></div>' +
-        '<div class="fleet-signal-grid"><div><span>Running</span><b>' + escapeHtml(counts.running || 0) + '</b></div><div><span>Queued</span><b>' + escapeHtml(counts.queued || 0) + '</b></div><div><span>Blocked</span><b>' + escapeHtml(counts.blocked || 0) + '</b></div><div><span>Dead letter</span><b>' + escapeHtml(counts.dead_letter || 0) + '</b></div><div><span>Connection issues</span><b>' + escapeHtml(workspace.unhealthyConnections || 0) + '</b></div><div><span>Exceptions</span><b>' + escapeHtml(workspace.openExceptions || 0) + '</b></div></div>' +
-        '<div class="fleet-meter small"><span style="width:' + aiPct.toFixed(1) + '%"></span></div><div class="fleet-ai-line"><span>AI units ' + escapeHtml(workspace.aiUnitsToday || 0) + ' / ' + escapeHtml(workspace.dailyAiUnitLimit || 0) + '</span><span>' + escapeHtml(workspace.pendingApprovals || 0) + ' pending approvals</span></div>' +
-        '<form class="fleet-settings" data-fleet-settings="' + escapeHtml(workspace.workspaceId) + '"><label>Concurrent jobs<input name="maxConcurrentJobs" type="number" min="1" max="10" value="' + escapeHtml(workspace.maxConcurrentJobs || 1) + '" required></label><label>Daily AI units<input name="dailyAiUnitLimit" type="number" min="0" max="100000" value="' + escapeHtml(workspace.dailyAiUnitLimit || 0) + '" required></label><button class="secondary" type="submit">Save limits</button></form><details class="fleet-jobs"><summary>Recent queue activity</summary>' + jobHtml + '</details></article>';
+        '<div class="fleet-signal-grid"><div><span>Running</span><b>' + escapeHtml(counts.running || 0) + '</b></div><div><span>Queued</span><b>' + escapeHtml(counts.queued || 0) + '</b></div><div><span>Blocked</span><b>' + escapeHtml(counts.blocked || 0) + '</b></div><div><span>AI cost · month</span><b>' + escapeHtml(usd(aiMonth.estimatedCostUsd || 0)) + '</b></div><div><span>Plan value · month</span><b>' + escapeHtml(money(workspace.planMonthlyValueGbp || 0)) + '</b></div><div><span>Connection issues</span><b>' + escapeHtml(workspace.unhealthyConnections || 0) + '</b></div></div>' +
+        '<div class="fleet-meter small"><span style="width:' + aiPct.toFixed(1) + '%"></span></div><div class="fleet-ai-line"><span>AI units ' + escapeHtml(workspace.aiUnitsToday || 0) + ' / ' + escapeHtml(workspace.dailyAiUnitLimit || 0) + '</span><span>' + escapeHtml(aiMonth.requests || 0) + ' model calls · ' + escapeHtml(sourceLabel) + '</span><span>' + escapeHtml(workspace.pendingApprovals || 0) + ' pending approvals</span></div>' +
+        '<form class="fleet-settings fleet-settings-economics" data-fleet-settings="' + escapeHtml(workspace.workspaceId) + '"><label>Concurrent jobs<input name="maxConcurrentJobs" type="number" min="1" max="10" value="' + escapeHtml(workspace.maxConcurrentJobs || 1) + '" required></label><label>Daily AI units<input name="dailyAiUnitLimit" type="number" min="0" max="100000" value="' + escapeHtml(workspace.dailyAiUnitLimit || 0) + '" required></label><label>AI routing<select name="routingMode"><option value="economy"' + (workspace.aiRoutingMode==='economy'?' selected':'') + '>Economy</option><option value="balanced"' + (workspace.aiRoutingMode==='balanced'?' selected':'') + '>Balanced</option><option value="quality"' + (workspace.aiRoutingMode==='quality'?' selected':'') + '>Quality</option></select></label><label>Monthly AI cap (USD)<input name="monthlyCostLimitUsd" type="number" min="0" max="1000000" step="0.01" placeholder="No cap" value="' + escapeHtml(workspace.monthlyAiCostLimitUsd ?? '') + '"></label><button class="secondary" type="submit">Save AI policy</button></form><details class="fleet-jobs"><summary>Recent queue activity</summary>' + jobHtml + '</details></article>';
     }).join('') : '<div class="empty-state">No workspaces match this filter.</div>';
   }
 
@@ -780,7 +807,13 @@
   $('#fleet-workspaces').addEventListener('submit', async event => {
     const form=event.target.closest('[data-fleet-settings]'); if(!form)return; event.preventDefault();
     const button=form.querySelector('button[type="submit"]'); setBusy(button,true,'Saving…');
-    try { await request('/api/operator/agent-ops/workspaces/'+encodeURIComponent(form.dataset.fleetSettings),{method:'PUT',body:JSON.stringify({maxConcurrentJobs:Number(form.elements.maxConcurrentJobs.value),dailyAiUnitLimit:Number(form.elements.dailyAiUnitLimit.value)})}); await loadFleet(); showMessage('Fleet limits saved.'); }
+    const monthlyRaw=form.elements.monthlyCostLimitUsd.value.trim();
+    try { await request('/api/operator/agent-ops/workspaces/'+encodeURIComponent(form.dataset.fleetSettings),{method:'PUT',body:JSON.stringify({
+      maxConcurrentJobs:Number(form.elements.maxConcurrentJobs.value),
+      dailyAiUnitLimit:Number(form.elements.dailyAiUnitLimit.value),
+      routingMode:form.elements.routingMode.value,
+      monthlyCostLimitUsd:monthlyRaw===''?null:Number(monthlyRaw)
+    })}); await loadFleet(); showMessage('Fleet AI routing and limits saved.'); }
     catch(error){showMessage(error.message,'error');} finally{setBusy(button,false);}
   });
 

@@ -41,7 +41,9 @@ import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, 
 import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
 import { recordWork } from './lib/events.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
-import { createAgentOperations, configureAgentOps } from './lib/agent-ops.mjs';
+import { createAgentOperations } from './lib/agent-ops.mjs';
+import { createAiProvider } from './lib/ai-provider.mjs';
+import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
 
@@ -52,7 +54,7 @@ import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.11.0';
+const VERSION = '6.12.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -291,6 +293,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const env = { ...customEnv };
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
+  const aiProvider = options.aiProvider || createAiProvider({ env, store, fetchImpl: options.fetchImpl || fetch });
   const isProduction = env.NODE_ENV === 'production';
   const secureCookies = isProduction || String(env.APP_PUBLIC_URL || '').startsWith('https://');
   const publicUrl = env.APP_PUBLIC_URL || (secureCookies ? 'https://packsmart-ops.onrender.com' : 'http://localhost:8787');
@@ -1481,7 +1484,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'PUT' && pathname === '/api/agent-ops') {
           requireOwner(auth);
           const body = await jsonBody(req, 8192);
-          const settings = await mutate(auth, async state => configureAgentOps(state, body, auth.user.id));
+          const settings = await agentOps.configureWorkspace(auth.session.workspaceId, body, auth.user.id);
           send(res, 200, { settings }); return;
         }
         if (req.method === 'POST' && pathname === '/api/agent-ops/jobs') {
@@ -1498,7 +1501,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
         if (req.method === 'GET' && pathname === '/api/operator/agent-ops') {
           requireLaunchAdmin(auth, env);
-          send(res, 200, await agentOps.fleetSnapshot()); return;
+          send(res, 200, { ...(await agentOps.fleetSnapshot()), modelCatalog:publicModelCatalog(), aiProviderConfigured:Boolean(aiProvider.enabled) }); return;
         }
         const operatorAgentOpsWorkspace = pathname.match(/^\/api\/operator\/agent-ops\/workspaces\/([^/]+)$/);
         if (req.method === 'PUT' && operatorAgentOpsWorkspace) {
@@ -1853,7 +1856,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
     enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
-  const agentOps = createAgentOperations({ store, integrations, withWorkspaceLock, env,
+  const agentOps = createAgentOperations({ store, integrations, withWorkspaceLock, aiProvider, env,
     enabled: options.agentOpsEnabled ?? isProduction, intervalMs: clamp(env.AGENT_OPS_TICK_MS, 1000, 60000, 2500) });
   let integrityTimer = null;
   const runIntegrityCheck = async () => {
@@ -1887,7 +1890,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   server.headersTimeout = 15000;
   server.requestTimeout = 120000;
-  server.packsmart = { store, integrations, env, scheduler, agentOps, drain:async()=>{scheduler.stop();agentOps.stop();await Promise.all([...locks.values()]);} };
+  server.packsmart = { store, integrations, aiProvider, env, scheduler, agentOps, drain:async()=>{scheduler.stop();agentOps.stop();await Promise.all([...locks.values()]);} };
   return server;
 }
 

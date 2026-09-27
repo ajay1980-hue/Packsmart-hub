@@ -7,6 +7,7 @@ import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
+import { ensureAiEconomics } from './ai-economics.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
@@ -30,7 +31,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
   const seeded = {
-    schemaVersion: 6,
+    schemaVersion: 7,
     workspace: {
       id: workspaceId,
       name: options.name || (workspaceId === 'packsmart-solutions' ? 'Packsmart Solutions Ltd' : 'New business'),
@@ -104,6 +105,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   };
   ensureControl(seeded);
   ensureMarketing(seeded);
+  ensureAiEconomics(seeded);
   return seeded;
 }
 
@@ -122,7 +124,7 @@ export function upgradeState(state, env = process.env) {
   const upgraded = {
     ...seeded,
     ...(state || {}),
-    schemaVersion: 6,
+    schemaVersion: 7,
     workspace: { ...seeded.workspace, ...(state?.workspace || {}), updatedAt: state?.workspace?.updatedAt || new Date().toISOString() },
     users: Array.isArray(state?.users) && state.users.length ? state.users.map(user => {
       const upgradedUser = { active: true, sessionVersion: 1, passwordHash: null, ...user };
@@ -155,6 +157,7 @@ export function upgradeState(state, env = process.env) {
   };
   ensureControl(upgraded);
   ensureMarketing(upgraded);
+  ensureAiEconomics(upgraded);
   return upgraded;
 }
 
@@ -163,6 +166,7 @@ class FileStore {
     const defaultPath = fileURLToPath(new URL('../data/state.json', import.meta.url));
     this.filePath = env.SAAS_STATE_FILE || defaultPath;
     this.agentJobs = [];
+    this.aiUsage = [];
   }
 
   get provider() { return 'file'; }
@@ -227,7 +231,8 @@ class FileStore {
       id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
       result: null, status: 'queued', priority: job.priority, attempts: 0, max_attempts: job.maxAttempts,
       ai_units: job.aiUnits, concurrency_limit: job.concurrencyLimit, idempotency_key: job.idempotencyKey,
-      actor: job.actor, available_at: job.availableAt, lease_until: null, worker_id: null, error_code: null,
+      actor: job.actor, ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
+      available_at: job.availableAt, lease_until: null, worker_id: null, error_code: null,
       created_at: job.createdAt, updated_at: job.updatedAt, completed_at: null
     };
     this.agentJobs.push(row);
@@ -286,6 +291,39 @@ class FileStore {
   async agentOpsUsage(workspaceId, day) {
     return this.agentJobs.filter(item => item.workspace_id === workspaceId && String(item.created_at).slice(0,10) === day)
       .reduce((sum,item)=>sum + Number(item.ai_units || 0), 0);
+  }
+
+  async recordAiUsage(workspaceId, usage) {
+    const existing = usage.requestId ? this.aiUsage.find(item => item.workspace_id === workspaceId && item.provider === usage.provider && item.request_id === usage.requestId) : null;
+    if (existing) return structuredClone(existing);
+    const row = {
+      id:usage.id, workspace_id:workspaceId, job_id:usage.jobId, task_type:usage.taskType,
+      provider:usage.provider, model:usage.model, input_tokens:usage.inputTokens,
+      cached_input_tokens:usage.cachedInputTokens, cache_write_tokens:usage.cacheWriteTokens,
+      output_tokens:usage.outputTokens, estimated_cost_usd:usage.estimatedCostUsd,
+      request_id:usage.requestId, occurred_at:usage.occurredAt, recorded_at:new Date().toISOString()
+    };
+    this.aiUsage.push(row);
+    return structuredClone(row);
+  }
+
+  async aiUsageSummary(workspaceId, startAt, endAt) {
+    const rows=this.aiUsage.filter(item => item.workspace_id === workspaceId && Date.parse(item.occurred_at) >= Date.parse(startAt) && Date.parse(item.occurred_at) < Date.parse(endAt));
+    const byModel={};
+    for(const row of rows) {
+      const model=row.model || 'unknown';
+      const current=byModel[model] ||= {model,requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0};
+      current.requests++; current.inputTokens+=Number(row.input_tokens||0); current.cachedInputTokens+=Number(row.cached_input_tokens||0);
+      current.cacheWriteTokens+=Number(row.cache_write_tokens||0); current.outputTokens+=Number(row.output_tokens||0);
+      current.estimatedCostUsd+=Number(row.estimated_cost_usd||0);
+    }
+    const totals=Object.values(byModel).reduce((out,item)=>({
+      requests:out.requests+item.requests,inputTokens:out.inputTokens+item.inputTokens,cachedInputTokens:out.cachedInputTokens+item.cachedInputTokens,
+      cacheWriteTokens:out.cacheWriteTokens+item.cacheWriteTokens,outputTokens:out.outputTokens+item.outputTokens,estimatedCostUsd:out.estimatedCostUsd+item.estimatedCostUsd
+    }),{requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0});
+    totals.estimatedCostUsd=Number(totals.estimatedCostUsd.toFixed(8));
+    for(const item of Object.values(byModel)) item.estimatedCostUsd=Number(item.estimatedCostUsd.toFixed(8));
+    return {totals,byModel:Object.values(byModel).sort((a,b)=>b.estimatedCostUsd-a.estimatedCostUsd)};
   }
 
   async ping() { return true; }
@@ -872,6 +910,7 @@ class SupabaseStore {
       id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
       status:'queued', priority:job.priority, attempts:0, max_attempts:job.maxAttempts, ai_units:job.aiUnits,
       concurrency_limit:job.concurrencyLimit, idempotency_key:job.idempotencyKey, actor:job.actor,
+      ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
       available_at:job.availableAt, created_at:job.createdAt, updated_at:job.updatedAt
     };
     try {
@@ -930,6 +969,45 @@ class SupabaseStore {
     const next = new Date(`${day}T00:00:00.000Z`); next.setUTCDate(next.getUTCDate()+1);
     const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&select=ai_units`);
     return (rows || []).reduce((sum,row)=>sum + Number(row.ai_units || 0),0);
+  }
+
+  async recordAiUsage(workspaceId, usage) {
+    const row={
+      id:usage.id, workspace_id:workspaceId, job_id:usage.jobId, task_type:usage.taskType,
+      provider:usage.provider, model:usage.model, input_tokens:usage.inputTokens,
+      cached_input_tokens:usage.cachedInputTokens, cache_write_tokens:usage.cacheWriteTokens,
+      output_tokens:usage.outputTokens, estimated_cost_usd:usage.estimatedCostUsd,
+      request_id:usage.requestId, occurred_at:usage.occurredAt
+    };
+    try {
+      const rows=await this.request('runvara_ai_usage?select=*',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify(row)});
+      return rows?.[0]||row;
+    } catch(error) {
+      if ((error.httpStatus===409 || error.databaseCode==='23505') && usage.requestId) {
+        const rows=await this.request(`runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(usage.provider)}&request_id=eq.${encodeURIComponent(usage.requestId)}&select=*&limit=1`);
+        if(rows?.[0]) return rows[0];
+      }
+      throw error;
+    }
+  }
+
+  async aiUsageSummary(workspaceId, startAt, endAt) {
+    const rows=await this.request(`runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&occurred_at=gte.${encodeURIComponent(startAt)}&occurred_at=lt.${encodeURIComponent(endAt)}&select=model,input_tokens,cached_input_tokens,cache_write_tokens,output_tokens,estimated_cost_usd`)||[];
+    const byModel={};
+    for(const row of rows) {
+      const model=row.model||'unknown';
+      const current=byModel[model] ||= {model,requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0};
+      current.requests++; current.inputTokens+=Number(row.input_tokens||0); current.cachedInputTokens+=Number(row.cached_input_tokens||0);
+      current.cacheWriteTokens+=Number(row.cache_write_tokens||0); current.outputTokens+=Number(row.output_tokens||0);
+      current.estimatedCostUsd+=Number(row.estimated_cost_usd||0);
+    }
+    const totals=Object.values(byModel).reduce((out,item)=>({
+      requests:out.requests+item.requests,inputTokens:out.inputTokens+item.inputTokens,cachedInputTokens:out.cachedInputTokens+item.cachedInputTokens,
+      cacheWriteTokens:out.cacheWriteTokens+item.cacheWriteTokens,outputTokens:out.outputTokens+item.outputTokens,estimatedCostUsd:out.estimatedCostUsd+item.estimatedCostUsd
+    }),{requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0});
+    totals.estimatedCostUsd=Number(totals.estimatedCostUsd.toFixed(8));
+    for(const item of Object.values(byModel)) item.estimatedCostUsd=Number(item.estimatedCostUsd.toFixed(8));
+    return {totals,byModel:Object.values(byModel).sort((a,b)=>b.estimatedCostUsd-a.estimatedCostUsd)};
   }
 
   async listWorkspaceIds() {
