@@ -29,6 +29,7 @@ export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
         return Response.json([...states].filter(([, state]) => state.users.some(user => user.email === wanted)).map(([key, state]) => ({ workspace_id: key, users: state.users })));
       }
       if (url.searchParams.get('select') === 'state->workspace,state->users') return Response.json(states.has(id) ? [{ workspace: states.get(id).workspace, users: states.get(id).users }] : []);
+      if (url.searchParams.get('select') === 'revision:state->>_revision') return Response.json(states.has(id) ? [{ revision: states.get(id)._revision || null }] : []);
       if (url.searchParams.get('select') === 'state') return Response.json(states.has(id) ? [{ state: states.get(id) }] : []);
       return Response.json([...states.keys()].slice(Number(url.searchParams.get('offset') || 0), Number(url.searchParams.get('offset') || 0) + Number(url.searchParams.get('limit') || 200)).map(key => ({ workspace_id: key })));
     }
