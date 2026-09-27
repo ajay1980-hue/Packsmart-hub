@@ -231,7 +231,8 @@ class FileStore {
       id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
       result: null, status: 'queued', priority: job.priority, attempts: 0, max_attempts: job.maxAttempts,
       ai_units: job.aiUnits, concurrency_limit: job.concurrencyLimit, idempotency_key: job.idempotencyKey,
-      actor: job.actor, available_at: job.availableAt, lease_until: null, worker_id: null, error_code: null,
+      actor: job.actor, ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
+      available_at: job.availableAt, lease_until: null, worker_id: null, error_code: null,
       created_at: job.createdAt, updated_at: job.updatedAt, completed_at: null
     };
     this.agentJobs.push(row);
@@ -909,6 +910,7 @@ class SupabaseStore {
       id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
       status:'queued', priority:job.priority, attempts:0, max_attempts:job.maxAttempts, ai_units:job.aiUnits,
       concurrency_limit:job.concurrencyLimit, idempotency_key:job.idempotencyKey, actor:job.actor,
+      ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
       available_at:job.availableAt, created_at:job.createdAt, updated_at:job.updatedAt
     };
     try {
