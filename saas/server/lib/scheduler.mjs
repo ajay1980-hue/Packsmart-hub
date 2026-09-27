@@ -48,7 +48,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
 
   async function runWorkspace(workspaceId, { manual = false, now = new Date() } = {}) {
     return withWorkspaceLock(workspaceId, async () => {
-      const state = await store.get(workspaceId);
+      const state = await (store.getForScheduler ? store.getForScheduler(workspaceId) : store.get(workspaceId));
       if (!state) return { skipped: true, reason: 'WORKSPACE_NOT_FOUND' };
       ensureControl(state);
       await runConnectionDoctor(state, { integrations, readSync: monitoredSync, save: () => store.save(workspaceId, state), now });

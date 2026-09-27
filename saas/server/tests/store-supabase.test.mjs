@@ -231,3 +231,40 @@ test('existing Supabase workspaces archive growing operational histories before 
   assert.equal(persisted.agentRuns.length, 1);
   assert.ok((fake.tables.get('runvara_history') || []).length >= 72);
 });
+
+
+test('scheduler cache avoids repeated full workspace-state egress and refreshes after saves', async () => {
+  const state = seedWorkspaceState();
+  const fake = fakeSupabase({ initialStates:[state] });
+  const store = createStore({
+    SUPABASE_URL:'https://test.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY:'test-only',
+    SCHEDULER_STATE_CACHE_MS:'3600000'
+  }, { fetchImpl:fake.fetchImpl });
+
+  const fullReads = () => fake.calls.filter(call =>
+    call.method === 'GET' &&
+    call.url.pathname.endsWith('/saas_workspace_state') &&
+    call.url.searchParams.get('select') === 'state'
+  ).length;
+
+  const first = await store.getForScheduler(state.workspace.id);
+  assert.equal(first.workspace.id, state.workspace.id);
+  const afterFirst = fullReads();
+  assert.equal(afterFirst, 1);
+
+  const second = await store.getForScheduler(state.workspace.id);
+  assert.equal(second.workspace.id, state.workspace.id);
+  assert.equal(fullReads(), afterFirst, 'repeat scheduler polling must use memory instead of downloading the full state again');
+
+  second.settings = { ...second.settings, marginFloor:31 };
+  await store.save(state.workspace.id, second);
+  const afterSaveReads = fullReads();
+  const third = await store.getForScheduler(state.workspace.id);
+  assert.equal(third.settings.marginFloor, 31);
+  assert.equal(fullReads(), afterSaveReads, 'a successful save must refresh the scheduler cache without another full read');
+
+  const diagnostics = store.diagnostics();
+  assert.ok(diagnostics.schedulerCacheHits >= 2);
+  assert.ok(diagnostics.schedulerCacheMisses >= 1);
+});
