@@ -5,6 +5,7 @@ import { runConnectionDoctor } from './connection-doctor.mjs';
 import { addAudit, recordWork } from './events.mjs';
 import { marketingPlannerCycle } from './marketing.mjs';
 import { monitoredSync } from './scheduler.mjs';
+import { configureAiEconomics, ensureAiEconomics, planMonthlyValueGbp, routeAiWork } from './ai-economics.mjs';
 
 export const AGENT_JOB_TYPES = Object.freeze({
   agent_command: { priority: 70, maxAttempts: 3, aiUnits: 1 },
@@ -80,15 +81,17 @@ function normalizeJob(input, workspaceId, actor, state) {
   const maxAttempts = Math.max(1, Math.min(10, Number(input?.maxAttempts ?? definition.maxAttempts)));
   const idempotencyKey = safeText(input?.idempotencyKey, 180) || `${type}:${provider || 'none'}:${crypto.randomUUID()}`;
   const settings = ensureAgentOps(state);
+  const route = routeAiWork(state,{jobType:type,payload});
   return {
     id:`job_${crypto.randomUUID()}`, workspaceId, type, provider, payload, status:'queued',
     priority, attempts:0, maxAttempts, aiUnits:Math.max(0, Number(input?.aiUnits ?? definition.aiUnits) || 0),
     concurrencyLimit:settings.maxConcurrentJobs, idempotencyKey, actor:safeText(actor,120) || 'system',
+    aiProvider:route.provider, aiModel:route.model, aiTier:route.tier,
     availableAt:nowIso(), createdAt:nowIso(), updatedAt:nowIso()
   };
 }
 
-export function createAgentOperations({ store, integrations, withWorkspaceLock, env = process.env, enabled = true, intervalMs = 2500 }) {
+export function createAgentOperations({ store, integrations, withWorkspaceLock, aiProvider = null, env = process.env, enabled = true, intervalMs = 2500 }) {
   const workerId = `agent_worker_${process.pid}_${crypto.randomUUID()}`;
   let timer = null, running = false, stopped = false;
   const status = { workerId, running:false, lastTickAt:null, lastError:null, processed:0, failed:0, deadLettered:0 };
@@ -132,10 +135,26 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
           lowStockThreshold:state.settings?.lowStockThreshold ?? 20,
           marginFloor:state.settings?.marginFloor ?? 20
         });
+        const route={provider:job.ai_provider || job.aiProvider || 'runvara',model:job.ai_model || job.aiModel || 'deterministic',tier:job.ai_tier || job.aiTier || 'deterministic'};
+        let aiEnhancement={used:false,reason:'PROVIDER_NOT_CONFIGURED',route};
+        if (aiProvider) {
+          try {
+            aiEnhancement=await aiProvider.enhanceCommander({workspaceId,jobId:job.id,route,command:safeText(payload.command,1000),run,state});
+          } catch(error) {
+            aiEnhancement={used:false,reason:safeCode(error),route};
+            console.warn(JSON.stringify({event:'agent_ai_enhancement_failed',jobId:job.id,workspaceId,code:safeCode(error)}));
+          }
+        }
+        if (aiEnhancement.used) {
+          run.ai={provider:route.provider,model:route.model,tier:route.tier,summary:aiEnhancement.summary,usage:aiEnhancement.usage};
+          run.modelCalls=1;
+        } else {
+          run.ai={provider:route.provider,model:route.model,tier:route.tier,used:false,reason:aiEnhancement.reason};
+        }
         recordAgentRun(state, run, job.actor || 'agent-ops');
         recordWork(state, { id:runId, title:safeText(payload.command,1000), source:'agent-ops', status:'COMPLETED',
           evidence:[{ type:'agent_run', id:run.id, detail:`Routed to ${run.routedAgents?.length || 0} specialist agents.` }] });
-        result = { runId:run.id, status:run.status, routedAgents:run.routedAgents || [], externalWrites:false };
+        result = { runId:run.id, status:run.status, routedAgents:run.routedAgents || [], ai:run.ai, externalWrites:false };
       } else if (job.type === 'connection_sync') {
         const provider = job.provider || payload.provider;
         const sync = await monitoredSync(state, integrations, provider, { automatic:true, retry:false, areas:Array.isArray(payload.areas) ? payload.areas : undefined });
@@ -193,10 +212,13 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   async function workspaceSnapshot(workspaceId, state) {
     state ||= await store.get(workspaceId);
     const settings = state ? ensureAgentOps(state) : null;
+    const aiSettings = state ? ensureAiEconomics(state) : null;
     const jobs = await store.listAgentJobs(workspaceId, 100);
     const usage = await store.agentOpsUsage(workspaceId, new Date().toISOString().slice(0,10));
+    const now=new Date(), monthStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)).toISOString(), monthEnd=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1)).toISOString();
+    const aiUsageMonth=await store.aiUsageSummary(workspaceId,monthStart,monthEnd);
     const counts = Object.fromEntries(['queued','running','succeeded','blocked','dead_letter'].map(name => [name, jobs.filter(j=>j.status===name).length]));
-    return { settings, usage:{ aiUnitsToday:usage, dailyAiUnitLimit:settings?.dailyAiUnitLimit ?? 0 }, counts, jobs, worker:{ running:status.running, lastTickAt:status.lastTickAt } };
+    return { settings, aiSettings, usage:{ aiUnitsToday:usage, dailyAiUnitLimit:settings?.dailyAiUnitLimit ?? 0 }, aiUsageMonth, counts, jobs, worker:{ running:status.running, lastTickAt:status.lastTickAt } };
   }
 
   async function retry(workspaceId, jobId, actor) {
@@ -217,9 +239,10 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       const state = await store.get(workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status:404, code:'WORKSPACE_NOT_FOUND' });
       const settings = configureAgentOps(state, input, actor);
-      addAudit(state, { type:'agent_ops_operator_updated', actor, detail:{ workspaceId, paused:settings.paused, enabled:settings.enabled, maxConcurrentJobs:settings.maxConcurrentJobs, dailyAiUnitLimit:settings.dailyAiUnitLimit } });
+      const aiSettings = configureAiEconomics(state, input, actor);
+      addAudit(state, { type:'agent_ops_operator_updated', actor, detail:{ workspaceId, paused:settings.paused, enabled:settings.enabled, maxConcurrentJobs:settings.maxConcurrentJobs, dailyAiUnitLimit:settings.dailyAiUnitLimit, routingMode:aiSettings.routingMode, monthlyCostLimitUsd:aiSettings.monthlyCostLimitUsd } });
       await store.save(workspaceId, state);
-      return settings;
+      return { ...settings, aiEconomics:aiSettings };
     });
   }
 
@@ -232,6 +255,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       const snapshot = await workspaceSnapshot(workspaceId, state);
       const connectionStates = Object.values(state.integrationStatus || {});
       const unhealthyConnections = connectionStates.filter(item => ['degraded','error','auth_expired'].includes(item?.status)).length;
+      const planValue=planMonthlyValueGbp(state);
       workspaces.push({
         workspaceId,
         name:state.workspace?.name || workspaceId,
@@ -243,6 +267,11 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         counts:snapshot.counts,
         aiUnitsToday:snapshot.usage.aiUnitsToday,
         dailyAiUnitLimit:snapshot.usage.dailyAiUnitLimit,
+        aiRoutingMode:snapshot.aiSettings?.routingMode || 'balanced',
+        monthlyAiCostLimitUsd:snapshot.aiSettings?.monthlyCostLimitUsd ?? null,
+        aiUsageMonth:snapshot.aiUsageMonth,
+        planMonthlyValueGbp:planValue.amount,
+        planValueSource:planValue.source,
         unhealthyConnections,
         pendingApprovals:(state.approvals || []).filter(item => item.status === 'pending').length,
         openExceptions:(state.exceptions || []).filter(item => ['open','acknowledged'].includes(item.status)).length,
@@ -250,7 +279,9 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         jobs:snapshot.jobs.slice(0,10).map(job => ({
           id:job.id, type:job.type, provider:job.provider || null, status:job.status,
           priority:job.priority, attempts:job.attempts, maxAttempts:job.max_attempts ?? job.maxAttempts,
-          aiUnits:Number(job.ai_units ?? job.aiUnits ?? 0), errorCode:job.error_code ?? job.errorCode ?? null,
+          aiUnits:Number(job.ai_units ?? job.aiUnits ?? 0), aiProvider:job.ai_provider ?? job.aiProvider ?? null,
+          aiModel:job.ai_model ?? job.aiModel ?? null, aiTier:job.ai_tier ?? job.aiTier ?? null,
+          errorCode:job.error_code ?? job.errorCode ?? null,
           createdAt:job.created_at ?? job.createdAt ?? null, completedAt:job.completed_at ?? job.completedAt ?? null
         }))
       });
@@ -262,6 +293,9 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         for (const [key,value] of Object.entries(item.counts)) out[key]=(out[key]||0)+value;
         out.aiUnitsToday=(out.aiUnitsToday||0)+item.aiUnitsToday;
         out.dailyAiUnitLimit=(out.dailyAiUnitLimit||0)+item.dailyAiUnitLimit;
+        out.aiEstimatedCostUsdMonth=(out.aiEstimatedCostUsdMonth||0)+Number(item.aiUsageMonth?.totals?.estimatedCostUsd||0);
+        out.aiRequestsMonth=(out.aiRequestsMonth||0)+Number(item.aiUsageMonth?.totals?.requests||0);
+        out.planMonthlyValueGbp=(out.planMonthlyValueGbp||0)+Number(item.planMonthlyValueGbp||0);
         out.unhealthyConnections=(out.unhealthyConnections||0)+item.unhealthyConnections;
         out.pendingApprovals=(out.pendingApprovals||0)+item.pendingApprovals;
         out.openExceptions=(out.openExceptions||0)+item.openExceptions;
