@@ -165,7 +165,8 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       if (blocked(error)) {
         await store.finishAgentJob(job, { status:'blocked', errorCode:code, completedAt:nowIso() });
       } else if (transient(error) && attempts < Number(job.max_attempts || job.maxAttempts || 3)) {
-        const delay = Math.min(3600000, 15000 * 2 ** Math.max(0, attempts - 1), Number(error.retryAfterMs) || 3600000);
+        const backoff = 15000 * 2 ** Math.max(0, attempts - 1);
+        const delay = Math.min(3600000, Math.max(backoff, Number(error.retryAfterMs) || 0));
         await store.rescheduleAgentJob(job, { errorCode:code, availableAt:new Date(Date.now()+delay).toISOString() });
       } else {
         await store.finishAgentJob(job, { status:'dead_letter', errorCode:code, completedAt:nowIso() });
