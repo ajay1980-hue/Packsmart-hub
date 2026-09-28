@@ -218,9 +218,44 @@ export function marketingProviderStatus(env = process.env) {
   };
 }
 
+export function marketingPublishingReadiness(state) {
+  const marketing = ensureMarketing(state);
+  const connections = Array.isArray(state.connections) ? state.connections : [];
+  const active = new Map(connections.filter(item => item?.status === 'connected').map(item => [item.provider, item]));
+  const channels = {
+    meta: {
+      connected: active.has('meta'),
+      publisherImplemented: false,
+      reason: active.has('meta') ? 'Connection is healthy; organic publishing adapter still needs explicit implementation and test.' : 'Connect Meta first.'
+    },
+    google_youtube: {
+      connected: active.has('google_youtube'),
+      publisherImplemented: false,
+      reason: active.has('google_youtube') ? 'Read access is connected; upload/publishing scope and adapter are not enabled.' : 'Connect Google/YouTube first.'
+    },
+    pinterest: {
+      connected: active.has('pinterest'),
+      publisherImplemented: false,
+      reason: active.has('pinterest') ? 'Read access is connected; pin publishing scope and adapter are not enabled.' : 'Connect Pinterest first.'
+    },
+    tiktok_shop: {
+      connected: active.has('tiktok_shop'),
+      publisherImplemented: false,
+      reason: active.has('tiktok_shop') ? 'Shop connection is healthy; social publishing is a separate TikTok capability.' : 'Connect TikTok Shop first.'
+    }
+  };
+  const implemented = Object.entries(channels).filter(([channel, item]) => marketing.settings.channels[channel] && item.publisherImplemented);
+  return {
+    ready: marketing.settings.mode === 'automatic' && marketing.settings.autoPublishOrganic && implemented.length > 0,
+    enabledChannels: Object.keys(channels).filter(channel => marketing.settings.channels[channel]),
+    channels
+  };
+}
+
 export function marketingSnapshot(state, env = process.env) {
   const marketing = ensureMarketing(state);
   const providers = marketingProviderStatus(env);
+  const publishing = marketingPublishingReadiness(state);
   const pending = marketing.campaigns.filter(item => ['draft', 'prepared', 'awaiting_approval', 'scheduled'].includes(item.status));
   return {
     settings: marketing.settings,
@@ -230,7 +265,10 @@ export function marketingSnapshot(state, env = process.env) {
     pendingCampaigns: pending.length,
     lastPlannerRunAt: marketing.lastPlannerRunAt,
     lastCreativeRunAt: marketing.lastCreativeRunAt,
-    automaticPublishingReady: marketing.settings.mode === 'automatic' && marketing.settings.autoPublishOrganic && false,
-    automaticPublishingNote: 'Channel publishing remains approval-gated until a supported publisher is connected, tested and explicitly authorised.'
+    publishing,
+    automaticPublishingReady: publishing.ready,
+    automaticPublishingNote: publishing.ready
+      ? 'Automatic organic publishing is enabled only on explicitly implemented and authorised publishers.'
+      : 'Channel publishing remains approval-gated until a supported publisher is connected, tested and explicitly authorised.'
   };
 }
