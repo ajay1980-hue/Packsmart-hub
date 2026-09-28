@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seedWorkspaceState } from '../lib/store.mjs';
-import { draftMarketingCampaign, ensureMarketing, marketingPlannerCycle, marketingProviderStatus, updateMarketingSettings } from '../lib/marketing.mjs';
+import { draftMarketingCampaign, ensureMarketing, marketingPlannerCycle, marketingProviderStatus, marketingPublishingReadiness, updateMarketingSettings } from '../lib/marketing.mjs';
 
 function stateWithProduct() {
   const state = seedWorkspaceState({}, { workspaceId: 'packsmart-solutions', email: 'owner@example.com' });
@@ -81,4 +81,23 @@ test('provider readiness is based on Runvara server credentials, not ChatGPT con
   const status = marketingProviderStatus({ CANVA_ACCESS_TOKEN: 'x', CANVA_BRAND_TEMPLATE_ID: 'y', RUNWAY_API_KEY: 'z' });
   assert.equal(status.canva.configured, true);
   assert.equal(status.runway.configured, true);
+});
+
+
+test('publisher readiness reports connection separately from implemented write capability', () => {
+  const state = stateWithProduct();
+  state.connections = [{ provider: 'meta', status: 'connected' }];
+  const readiness = marketingPublishingReadiness(state);
+  assert.equal(readiness.channels.meta.connected, true);
+  assert.equal(readiness.channels.meta.publisherImplemented, false);
+  assert.equal(readiness.ready, false);
+});
+
+test('TikTok Shop connection is not misrepresented as social publishing capability', () => {
+  const state = stateWithProduct();
+  state.connections = [{ provider: 'tiktok_shop', status: 'connected' }];
+  const readiness = marketingPublishingReadiness(state);
+  assert.equal(readiness.channels.tiktok_shop.connected, true);
+  assert.equal(readiness.channels.tiktok_shop.publisherImplemented, false);
+  assert.match(readiness.channels.tiktok_shop.reason, /separate TikTok capability/);
 });
