@@ -326,7 +326,10 @@
     const top = dashboard.recommendations?.[0];
     $('#command-headline').textContent = dashboard.pendingApprovals ? `${dashboard.pendingApprovals} decisions await your judgement.` : dashboard.integrationIssues ? 'Your channels need attention.' : dashboard.stockRisks ? 'Keep your inventory in view.' : dashboard.products ? 'Your business, in perspective.' : 'Your command centre starts here.';
     $('#command-direction').textContent = top ? top.title + '. ' + top.detail : 'Connect your chosen channels to build a reliable operational picture.';
-    $('#command-posture').innerHTML = window.RunvaraUI.badge(state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') + window.RunvaraUI.badge('Owner approval protected','warn') + '<small>Based on recorded workspace data</small>';
+    const pendingApprovals = Number(dashboard.pendingApprovals || 0);
+    $('#command-posture').innerHTML = window.RunvaraUI.badge(state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') +
+      window.RunvaraUI.badge(pendingApprovals ? pendingApprovals + (pendingApprovals === 1 ? ' approval waiting' : ' approvals waiting') : 'No approvals waiting', pendingApprovals ? 'warn' : 'good') +
+      '<small>Protected actions still require owner approval before execution</small>';
     renderTrajectory(); renderOperationsStream();
     $('#brief-summary').textContent = brief.summary || 'No daily brief is available.';
     $('#brief-generated').textContent = brief.generatedAt ? 'Generated ' + date(brief.generatedAt) + ' · rules-based assessment' : '';
