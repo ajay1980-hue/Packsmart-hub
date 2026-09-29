@@ -72,3 +72,4 @@ export function buildSupportReply(state,input={}){
   if(intent==='escalate')return {intent,reply:"I can help get this sorted, but I won't change an order, payment or address without a human check. Send your order number and a short summary and Packsmart will pick it up.",needsHuman:true,needsOrderDetails:false};
   return {intent,reply:"I can help with orders, delivery, returns, stock, VAT and pack sizes. Tell me what you need and I'll answer straight away or pass it to Packsmart if a human decision is needed.",needsHuman:false,needsOrderDetails:false};
 }
+
