@@ -53,9 +53,10 @@ import { intelligentConnections, providerReadiness, doctorNotifications, recomme
 import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
+import { buildSupportReply } from './lib/customer-support.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.12.1';
+const VERSION = '6.13.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -313,6 +314,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
   let healthPending;
   let healthSnapshot;
   const startedAt = new Date().toISOString();
@@ -982,6 +984,30 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (isProduction && pathname.startsWith('/api/') && store.provider !== 'supabase') throw Object.assign(new Error('Durable persistence must be configured before using production'), { status: 503, code: 'PERSISTENCE_REQUIRED' });
+
+      if (req.method === 'OPTIONS' && pathname === '/api/public/support') {
+        res.writeHead(204, {
+          ...headers(),
+          'Access-Control-Allow-Origin': 'https://packsmartsolutions.com',
+          'Access-Control-Allow-Methods': 'POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type',
+          'Access-Control-Max-Age': '600'
+        });
+        res.end();
+        return;
+      }
+      if (req.method === 'POST' && pathname === '/api/public/support') {
+        const origin = String(req.headers.origin || '');
+        if (origin && origin !== 'https://packsmartsolutions.com') throw Object.assign(new Error('Origin not allowed'), { status: 403, code: 'ORIGIN_DENIED' });
+        const rate = supportLimiter.check(requestIp(req));
+        if (!rate.allowed) throw Object.assign(new Error('Too many support requests; try again shortly'), { status: 429, code: 'SUPPORT_RATE_LIMITED' });
+        const body = await jsonBody(req, 8192);
+        const state = await store.get(CUSTOMER_ZERO_WORKSPACE);
+        if (!state) throw Object.assign(new Error('Support is temporarily unavailable'), { status: 503, code: 'SUPPORT_UNAVAILABLE' });
+        const result = buildSupportReply(state, body);
+        send(res, 200, result, { 'Access-Control-Allow-Origin': 'https://packsmartsolutions.com', Vary: 'Origin' });
+        return;
+      }
 
       if (req.method === 'POST' && pathname === '/api/webhooks/stripe') {
         await stripeWebhook(req, res);

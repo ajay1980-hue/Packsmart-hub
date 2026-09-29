@@ -354,3 +354,58 @@ function packsmartPackagingAssistant(){
   root.querySelectorAll('[data-assistant-example]').forEach(button=>button.addEventListener('click',()=>{if(input)input.value=button.dataset.assistantExample||'';render(choose(button.dataset.assistantExample));}));
 }
 document.addEventListener('DOMContentLoaded',packsmartPackagingAssistant);
+
+
+/* Packsmart automated customer support */
+function packsmartSupport(){
+  const root=document.querySelector('[data-ps-assistant]');
+  if(!root||root.dataset.ready==='true')return;
+  root.dataset.ready='true';
+  const open=root.querySelector('[data-ps-open]');
+  const close=root.querySelector('[data-ps-close]');
+  const panel=root.querySelector('[data-ps-panel]');
+  const form=root.querySelector('[data-ps-support-form]');
+  const messages=root.querySelector('[data-ps-messages]');
+  const orderFields=root.querySelector('[data-ps-order-fields]');
+  const message=form?.elements?.message;
+  const endpoint='https://packsmart-ops.onrender.com/api/public/support';
+
+  function setOpen(value){
+    panel.hidden=!value;
+    open.setAttribute('aria-expanded',String(value));
+    if(value)message?.focus();
+  }
+  function addMessage(value,who){
+    const p=document.createElement('p');
+    p.className='ps-support__message '+(who==='user'?'is-user':'is-assistant');
+    const parts=String(value||'').split(/(https:\/\/[^\s]+)/g);
+    parts.forEach(part=>{
+      if(/^https:\/\//.test(part)){
+        const a=document.createElement('a');a.href=part;a.target='_blank';a.rel='noopener';a.textContent='Track order';p.append(a);
+      }else p.append(document.createTextNode(part.replace(/\*\*/g,'')));
+    });
+    messages.append(p);
+    messages.scrollTop=messages.scrollHeight;
+  }
+  open?.addEventListener('click',()=>setOpen(panel.hidden));
+  close?.addEventListener('click',()=>setOpen(false));
+  form?.addEventListener('submit',async event=>{
+    event.preventDefault();
+    const value=message.value.trim();
+    if(!value)return;
+    const payload={message:value,orderNumber:form.elements.orderNumber?.value||'',email:form.elements.email?.value||''};
+    addMessage(value,'user');message.value='';
+    const submit=form.querySelector('button[type="submit"]');submit.disabled=true;
+    try{
+      const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+      if(!response.ok)throw new Error('Support unavailable');
+      const result=await response.json();
+      orderFields.hidden=!result.needsOrderDetails;
+      addMessage(result.reply,'assistant');
+      if(result.needsHuman)addMessage('I’ve flagged that this needs a human decision. You can also email sales@packsmartsolutions.com if it is urgent.','assistant');
+    }catch(error){
+      addMessage('Sorry — instant support is temporarily unavailable. Please email sales@packsmartsolutions.com and we’ll pick it up.','assistant');
+    }finally{submit.disabled=false;message.focus();}
+  });
+}
+document.addEventListener('DOMContentLoaded',packsmartSupport);
