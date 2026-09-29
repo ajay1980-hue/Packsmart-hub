@@ -1001,7 +1001,6 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (origin && origin !== 'https://packsmartsolutions.com') throw Object.assign(new Error('Origin not allowed'), { status: 403, code: 'ORIGIN_DENIED' });
         const rate = supportLimiter.check(requestIp(req));
         if (!rate.allowed) throw Object.assign(new Error('Too many support requests; try again shortly'), { status: 429, code: 'SUPPORT_RATE_LIMITED' });
-        supportLimiter.fail(requestIp(req));
         const body = await jsonBody(req, 8192);
         const state = await store.get(CUSTOMER_ZERO_WORKSPACE);
         if (!state) throw Object.assign(new Error('Support is temporarily unavailable'), { status: 503, code: 'SUPPORT_UNAVAILABLE' });
