@@ -18,7 +18,7 @@ test('requires both order reference and checkout email',()=>{
 });
 
 test('returns a verified order status link without exposing email',()=>{
-  const state={orders:[{provider:'shopify',name:'#1001',customerEmailHash:hash('buyer@example.com'),financialStatus:'PAID',fulfillmentStatus:'FULFILLED',statusPageUrl:'https://example.com/status/secure'}]};
+  const state={orders:[{provider:'shopify',name:'#1001',customerEmailHash:hash('buyer@example.com'),financialStatus:'PAID',fulfillmentStatus:'SHIPPED',statusPageUrl:'https://example.com/status/secure'}]};
   const result=buildSupportReply(state,{message:'track my order',orderNumber:'#1001',email:'buyer@example.com'});
   assert.equal(result.matchedOrder,true);
   assert.match(result.reply,/dispatched|fulfilled/i);
