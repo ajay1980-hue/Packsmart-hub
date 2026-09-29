@@ -1,27 +1,25 @@
-<section class="ps-assistant-section" aria-labelledby="PackagingAssistantTitle" data-packaging-assistant>
-  <div class="wrap ps-assistant-card">
-    <div class="ps-assistant-copy">
-      <p class="ps-assistant-eyebrow">Smart Packaging Assistant</p>
-      <h2 id="PackagingAssistantTitle">Describe what you need to pack</h2>
-      <p>Type what you are sending and, if you know them, the approximate dimensions or monthly quantity. The assistant only recommends products that exist in the current Packsmart catalogue.</p>
-      <form class="ps-assistant-form" data-packaging-assistant-form>
-        <label for="PackagingAssistantInput">What are you packing?</label>
-        <div class="ps-assistant-input-row">
-          <input id="PackagingAssistantInput" type="text" maxlength="240" placeholder="Example: I send 400 hoodies a month" autocomplete="off" data-packaging-assistant-input>
-          <button class="btn primary" type="submit">Recommend packaging</button>
-        </div>
-      </form>
-      <div class="ps-assistant-suggestions" aria-label="Example questions">
-        <button type="button" data-assistant-example="I send hoodies and jumpers">Hoodies &amp; clothing</button>
-        <button type="button" data-assistant-example="I post small jewellery and accessories">Jewellery &amp; accessories</button>
-        <button type="button" data-assistant-example="I send books and small boxed items">Books &amp; boxed items</button>
-        <button type="button" data-assistant-example="I ship delicate electronic components">Delicate components</button>
+<aside class="ps-support" data-ps-assistant aria-label="Packsmart customer support">
+  <button class="ps-support__launcher" type="button" data-ps-open aria-expanded="false">
+    <span aria-hidden="true">✦</span> Ask Packsmart
+  </button>
+  <section class="ps-support__panel" data-ps-panel hidden>
+    <header class="ps-support__header">
+      <div><strong>Packsmart Assistant</strong><span>Instant help with orders &amp; packaging</span></div>
+      <button type="button" data-ps-close aria-label="Close support">×</button>
+    </header>
+    <div class="ps-support__messages" data-ps-messages aria-live="polite">
+      <p class="ps-support__message is-assistant">Hi! I can help with order tracking, delivery, returns, stock, VAT and pack sizes.</p>
+    </div>
+    <form class="ps-support__form" data-ps-support-form>
+      <div class="ps-support__verify" data-ps-order-fields hidden>
+        <label>Order number<input name="orderNumber" autocomplete="off" maxlength="48" placeholder="#1001"></label>
+        <label>Checkout email<input name="email" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com"></label>
       </div>
-    </div>
-    <div class="ps-assistant-result" data-packaging-assistant-result aria-live="polite">
-      <span class="ps-assistant-result__eyebrow">Catalogue-grounded</span>
-      <h3>Ask Packsmart for a starting point</h3>
-      <p>Recommendations are based on current product types and dimensions. Always check your packed-item dimensions before ordering.</p>
-    </div>
-  </div>
-</section>
+      <label class="visually-hidden" for="PacksmartSupportMessage">Message</label>
+      <div class="ps-support__composer">
+        <input id="PacksmartSupportMessage" name="message" maxlength="1200" autocomplete="off" placeholder="Where is my order?" required>
+        <button type="submit">Send</button>
+      </div>
+    </form>
+  </section>
+</aside>
