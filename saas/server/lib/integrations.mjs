@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { decryptCredentials } from './security.mjs';
@@ -63,6 +64,8 @@ export const SHOPIFY_ORDERS_QUERY = `
         cancelledAt
         displayFinancialStatus
         displayFulfillmentStatus
+        email
+        statusPageUrl
         totalPriceSet { shopMoney { amount currencyCode } }
         currentTotalPriceSet { shopMoney { amount currencyCode } }
         currentTotalTaxSet { shopMoney { amount currencyCode } }
@@ -202,6 +205,11 @@ function mapPublicProduct(product) {
   };
 }
 
+function customerEmailHash(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized ? crypto.createHash('sha256').update(normalized).digest('hex') : null;
+}
+
 function mapOrder(order) {
   const originalTotal = order.totalPriceSet?.shopMoney || order.currentTotalPriceSet?.shopMoney || {};
   const currentTotal = order.currentTotalPriceSet?.shopMoney || originalTotal;
@@ -217,6 +225,8 @@ function mapOrder(order) {
     cancelledAt: order.cancelledAt || null,
     financialStatus: String(order.displayFinancialStatus || 'UNKNOWN'),
     fulfillmentStatus: String(order.displayFulfillmentStatus || 'UNFULFILLED'),
+    customerEmailHash: customerEmailHash(order.email),
+    statusPageUrl: order.statusPageUrl ? String(order.statusPageUrl) : null,
     total: gross,
     currentTotal: current,
     currency: String(currentTotal.currencyCode || originalTotal.currencyCode || 'GBP'),
