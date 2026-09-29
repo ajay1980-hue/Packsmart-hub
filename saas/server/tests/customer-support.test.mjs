@@ -31,3 +31,4 @@ test('escalates sensitive changes rather than claiming execution',()=>{
   assert.equal(result.needsHuman,true);
   assert.match(result.reply,/human check/i);
 });
+
