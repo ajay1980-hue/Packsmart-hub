@@ -985,27 +985,34 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
       if (isProduction && pathname.startsWith('/api/') && store.provider !== 'supabase') throw Object.assign(new Error('Durable persistence must be configured before using production'), { status: 503, code: 'PERSISTENCE_REQUIRED' });
 
-      if (req.method === 'OPTIONS' && pathname === '/api/public/support') {
-        res.writeHead(204, {
-          ...headers(),
-          'Access-Control-Allow-Origin': 'https://packsmartsolutions.com',
-          'Access-Control-Allow-Methods': 'POST, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type',
-          'Access-Control-Max-Age': '600'
-        });
-        res.end();
-        return;
-      }
-      if (req.method === 'POST' && pathname === '/api/public/support') {
+      if ((req.method === 'OPTIONS' || req.method === 'POST') && pathname === '/api/public/support') {
         const origin = String(req.headers.origin || '');
-        if (origin && origin !== 'https://packsmartsolutions.com') throw Object.assign(new Error('Origin not allowed'), { status: 403, code: 'ORIGIN_DENIED' });
+        const allowedOrigins = new Set([
+          'https://packsmartsolutions.com',
+          'https://www.packsmartsolutions.com',
+          'https://packsmartsolutionscom.myshopify.com'
+        ]);
+        if (origin && !allowedOrigins.has(origin)) throw Object.assign(new Error('Origin not allowed'), { status: 403, code: 'ORIGIN_DENIED' });
+        const corsOrigin = origin || 'https://packsmartsolutions.com';
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, {
+            ...headers(),
+            'Access-Control-Allow-Origin': corsOrigin,
+            'Access-Control-Allow-Methods': 'POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type',
+            'Access-Control-Max-Age': '600',
+            Vary: 'Origin'
+          });
+          res.end();
+          return;
+        }
         const rate = supportLimiter.check(requestIp(req));
         if (!rate.allowed) throw Object.assign(new Error('Too many support requests; try again shortly'), { status: 429, code: 'SUPPORT_RATE_LIMITED' });
         const body = await jsonBody(req, 8192);
         const state = await store.get(CUSTOMER_ZERO_WORKSPACE);
         if (!state) throw Object.assign(new Error('Support is temporarily unavailable'), { status: 503, code: 'SUPPORT_UNAVAILABLE' });
         const result = buildSupportReply(state, body);
-        send(res, 200, result, { 'Access-Control-Allow-Origin': 'https://packsmartsolutions.com', Vary: 'Origin' });
+        send(res, 200, result, { 'Access-Control-Allow-Origin': corsOrigin, Vary: 'Origin' });
         return;
       }
 
