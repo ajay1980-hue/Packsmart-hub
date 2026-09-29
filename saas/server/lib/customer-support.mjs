@@ -10,13 +10,13 @@ export function normalizeOrderRef(value){
 export function classifySupportIntent(message){
   const value=clean(message,1200).toLowerCase();
   if(!value)return 'empty';
+  if(/change.*address|cancel.*order|complaint|damaged|missing|wrong item|chargeback/.test(value))return 'escalate';
   if(/where.*order|track.*order|order.*track|delivery.*order|has.*shipped|dispatch/.test(value))return 'order_status';
   if(/return|refund|send.*back/.test(value))return 'returns';
   if(/deliver|shipping|postage|courier|how long/.test(value))return 'delivery';
   if(/stock|available|availability|sold out|in stock/.test(value))return 'stock';
   if(/vat|invoice|receipt|business account|trade/.test(value))return 'business';
   if(/pack size|quantity|how many|size|dimensions/.test(value))return 'product';
-  if(/change.*address|cancel.*order|complaint|damaged|missing|wrong item|chargeback/.test(value))return 'escalate';
   return 'general';
 }
 
