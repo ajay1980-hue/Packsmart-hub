@@ -8,7 +8,7 @@ const hash=value=>crypto.createHash('sha256').update(value.toLowerCase()).digest
 test('classifies common support intents',()=>{
   assert.equal(classifySupportIntent('Where is my order?'),'order_status');
   assert.equal(classifySupportIntent('Can I get a VAT invoice?'),'business');
-  assert.equal(classifySupportIntent('My parcel is damaged'),'escalate');
+  assert.equal(classifySupportIntent('Please change my delivery address'),'escalate');
 });
 
 test('requires both order reference and checkout email',()=>{
