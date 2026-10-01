@@ -54,9 +54,10 @@ import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
+import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch } from './lib/revenue-engine.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.14.0';
+const VERSION = '6.15.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -465,6 +466,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       orders: state.orders || [],
       economics: state.economics || {},
       advertisingCosts: state.advertisingCosts || [],
+      revenueEngine: revenueEngineSnapshot(state),
       approvals: state.approvals || [],
       integrationStatus: Object.fromEntries(Object.entries(state.integrationStatus || {}).map(([key, value]) => [key, { status: value.status, source: value.source, lastError: value.lastError, lastSyncAt: ['supabase', 'reporting', 'render'].includes(key) ? null : value.lastSyncAt }])),
       automations: state.automations || {},
@@ -1643,6 +1645,45 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           });
           send(res, 200, { agentId, setting });
           return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/revenue-engine') {
+          send(res, 200, revenueEngineSnapshot(auth.state)); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/revenue-engine/leads') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const lead = await mutate(auth, async state => {
+            const item = createLead(state, body, auth.user.id);
+            addAudit(state, { type: 'revenue_lead_created', actor: auth.user.id, detail: { leadId: item.id } });
+            return item;
+          });
+          send(res, 201, { lead }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/revenue-engine/quotes') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 65536);
+          const quote = await mutate(auth, async state => {
+            const item = createQuote(state, body, auth.user.id);
+            addAudit(state, { type: 'revenue_quote_drafted', actor: auth.user.id, detail: { quoteId: item.id, customerFacing: false } });
+            return item;
+          });
+          send(res, 201, { quote, executedExternally: false }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/revenue-engine/intent') {
+          const body = await jsonBody(req, 32768);
+          const event = await mutate(auth, async state => recordIntentEvent(state, body, auth.user.id));
+          send(res, 201, { event, executedExternally: false }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/revenue-engine/attribution') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const touch = await mutate(auth, async state => {
+            const item = recordAttributionTouch(state, body, auth.user.id);
+            addAudit(state, { type: 'attribution_evidence_recorded', actor: auth.user.id, detail: { orderId: item.orderId, kind: item.kind } });
+            return item;
+          });
+          send(res, 201, { touch }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/reports/accounting.csv') {
