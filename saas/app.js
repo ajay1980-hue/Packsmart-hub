@@ -189,7 +189,7 @@
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
+    const titles = { overview: 'Command Centre', analytics: 'Analytics', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -204,7 +204,7 @@
   }
 
   const navigationHints = {
-    overview: 'Dashboard, daily brief and business performance', issues: 'Exceptions, alerts and problems to review',
+    overview: 'Dashboard, daily brief and business performance', analytics: 'Revenue, profit, channel performance, attribution and marketing efficiency', issues: 'Exceptions, alerts and problems to review',
     'ai-team': 'Commander and specialist agents', marketing: 'Campaign planning, creatives and channel publishing controls', 'market-radar': 'Competitor, supplier and market web intelligence', profit: 'Products, inventory, stock and margins',
     orders: 'Sales, refunds and order profitability', suppliers: 'Supplier records and product costs',
     channels: 'Connection Centre, onboarding, Shopify, eBay and Meta', approvals: 'Review proposed actions and approval history',
@@ -317,6 +317,84 @@
     const running = (data.connectionCentre || []).filter(channel=>channel.progress);
     const records = [...(data.workRecords || [])].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0,4);
     $('#operations-stream').innerHTML = `<p class="stream-state">${ui.badge(running.length ? 'Sync in progress' : data.autopilot?.enabled ? 'Monitoring scheduled' : 'Monitoring paused',running.length ? 'good':'neutral')}<span>${escapeHtml(running.length ? running.map(channel=>channel.name).join(', ') : data.autopilot?.lastRunAt ? 'Last cycle '+date(data.autopilot.lastRunAt) : 'No monitoring cycle recorded')}</span></p><ol class="operation-timeline">${records.map(item=>{const status=ui.workState(item);return `<li><div class="section-head"><b>${escapeHtml(ui.workName(item,data))}</b>${ui.badge(status.text,status.tone)}</div><small>${escapeHtml(date(item.updatedAt))} · ${escapeHtml(statusLabel(item.source))}</small><p>${escapeHtml(ui.issueCopy(item.evidence?.find(entry=>entry.type==='monitor_failure')?.detail) || `${(item.evidence || []).length} supporting records`)}</p></li>`;}).join('') || '<li class="empty-state">Work appears here when a check or command records a result.</li>'}</ol><button class="text-button" data-view-link="ai-team">Give the Commander a task ↗</button>`;
+  }
+
+  function renderAnalytics() {
+    const dashboard = state.data.dashboard || {};
+    const month = dashboard.last30d || {};
+    const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    const salesChannels = (state.data.integrations || []).filter(item =>
+      ['commerce', 'marketplace', 'social-commerce'].includes(item.kind) &&
+      (item.metrics30d || item.status === 'connected' || item.lastSyncAt)
+    );
+    const adCosts = (state.data.advertisingCosts || []).filter(item => {
+      const when = Date.parse(item.date || item.createdAt || '');
+      return Number.isFinite(when) && when >= cutoff;
+    });
+    const adSpend = adCosts.reduce((sum, item) => sum + (Number(item.spend) || 0), 0);
+    const attributableRecords = adCosts.filter(item => item.attributableRevenue !== null && item.attributableRevenue !== undefined && Number.isFinite(Number(item.attributableRevenue)));
+    const attributableRevenue = attributableRecords.reduce((sum, item) => sum + Number(item.attributableRevenue || 0), 0);
+    const roas = adSpend > 0 && attributableRecords.length ? attributableRevenue / adSpend : null;
+
+    $('#analytics-revenue').textContent = money(month.revenue);
+    $('#analytics-orders').textContent = String(month.orders || 0);
+    $('#analytics-profit').textContent = money(month.operatingProfit);
+    $('#analytics-margin').textContent = percent(month.margin);
+    $('#analytics-ad-spend').textContent = money(adSpend);
+    $('#analytics-roas').textContent = roas === null ? '—' : roas.toFixed(2) + '×';
+    $('#analytics-roas-note').textContent = roas === null ? (adSpend ? 'add attributable revenue to calculate' : 'no ad spend recorded') : money(attributableRevenue) + ' attributed revenue';
+
+    const ranked = [...salesChannels].sort((a,b) => Number(b.metrics30d?.revenue || 0) - Number(a.metrics30d?.revenue || 0));
+    const top = ranked.find(item => Number(item.metrics30d?.revenue || 0) !== 0);
+    $('#analytics-summary').textContent = top
+      ? top.name + ' is currently the largest recorded sales channel at ' + money(top.metrics30d?.revenue) + ' over the last 30 days. Runvara keeps source gaps visible rather than guessing.'
+      : 'Connect and sync your sales channels to build a reliable cross-channel performance picture. Runvara will not invent attribution where source data is missing.';
+
+    $('#analytics-channel-table').innerHTML = ranked.length ? '<div class="analytics-table-head"><span>Channel</span><span>Orders</span><span>Revenue</span><span>Contribution</span><span>Ads</span></div>' + ranked.map(channel => {
+      const m = channel.metrics30d || {};
+      return '<button class="analytics-table-row" data-view-link="channels"><span><b>' + escapeHtml(channel.name) + '</b><small>' + escapeHtml(statusLabel(channel.status || 'unknown')) + '</small></span><span>' + escapeHtml(String(m.orders || 0)) + '</span><span>' + escapeHtml(money(m.revenue)) + '</span><span>' + escapeHtml(money(m.operatingProfit)) + '</span><span>' + escapeHtml(money(m.advertisingSpend)) + '</span></button>';
+    }).join('') : '<div class="empty-state">No connected sales-channel metrics are available yet.</div>';
+
+    const totalChannelOrders = ranked.reduce((sum, channel) => sum + Number(channel.metrics30d?.orders || 0), 0);
+    $('#analytics-source-mix').innerHTML = totalChannelOrders ? ranked.filter(channel => Number(channel.metrics30d?.orders || 0) > 0).map(channel => {
+      const orders = Number(channel.metrics30d?.orders || 0);
+      const share = totalChannelOrders ? (orders / totalChannelOrders * 100) : 0;
+      return '<div class="source-row"><div><span>' + escapeHtml(channel.name) + '</span><strong>' + escapeHtml(String(orders)) + ' orders · ' + share.toFixed(1) + '%</strong></div><div class="source-track"><span style="width:' + Math.max(2, Math.min(100, share)).toFixed(1) + '%"></span></div></div>';
+    }).join('') : '<div class="empty-state">Order-source mix will appear after connected channels import recent orders.</div>';
+
+    const marketingByChannel = {};
+    adCosts.forEach(item => {
+      const key = String(item.channel || 'other');
+      const row = marketingByChannel[key] || { spend: 0, revenue: 0, attributed: false };
+      row.spend += Number(item.spend || 0);
+      if (item.attributableRevenue !== null && item.attributableRevenue !== undefined && Number.isFinite(Number(item.attributableRevenue))) {
+        row.revenue += Number(item.attributableRevenue); row.attributed = true;
+      }
+      marketingByChannel[key] = row;
+    });
+    const marketingRows = Object.entries(marketingByChannel).sort((a,b) => b[1].spend - a[1].spend);
+    $('#analytics-marketing').innerHTML = marketingRows.length ? '<div class="analytics-table-head analytics-marketing-head"><span>Channel</span><span>Spend</span><span>Attributed revenue</span><span>ROAS</span></div>' + marketingRows.map(([channel, row]) => {
+      const channelRoas = row.attributed && row.spend > 0 ? row.revenue / row.spend : null;
+      return '<div class="analytics-table-row analytics-marketing-row"><span><b>' + escapeHtml(statusLabel(channel)) + '</b><small>recorded marketing cost</small></span><span>' + escapeHtml(money(row.spend)) + '</span><span>' + escapeHtml(row.attributed ? money(row.revenue) : '—') + '</span><span>' + escapeHtml(channelRoas === null ? '—' : channelRoas.toFixed(2) + '×') + '</span></div>';
+    }).join('') : '<div class="empty-state">No marketing spend has been recorded in the last 30 days. Add costs as campaigns begin so Runvara can calculate return.</div>';
+
+    const connected = salesChannels.filter(item => item.status === 'connected').length;
+    const profitCoverage = Number(month.profitCoverage || 0);
+    const attributionCoverage = adCosts.length ? Math.round(attributableRecords.length / adCosts.length * 100) : 0;
+    $('#analytics-coverage').innerHTML = [
+      ['Sales-channel coverage', connected + ' connected', connected ? 'good' : 'warn', 'Live/synced commerce sources available to the workspace'],
+      ['Profit coverage', profitCoverage + '%', profitCoverage >= 90 ? 'good' : 'warn', 'Orders with enough cost data for contribution analysis'],
+      ['Marketing attribution', adCosts.length ? attributionCoverage + '%' : 'Not started', adCosts.length && attributionCoverage >= 80 ? 'good' : 'warn', 'Recorded ad-cost rows that include attributable revenue'],
+      ['Traffic-source attribution', 'Needs source data', 'neutral', 'GA4/UTM or equivalent visitor-source data is not inferred from order channels']
+    ].map(item => '<div class="coverage-item"><div><span>' + escapeHtml(item[0]) + '</span><strong class="' + item[2] + '">' + escapeHtml(item[1]) + '</strong></div><small>' + escapeHtml(item[3]) + '</small></div>').join('');
+
+    const insights = [];
+    if (top) insights.push({ tone: 'good', title: top.name + ' leads recorded channel revenue', detail: money(top.metrics30d?.revenue) + ' in the last 30 days across imported source data.' });
+    if (profitCoverage < 100) insights.push({ tone: profitCoverage < 70 ? 'warn' : 'neutral', title: 'Profit confidence can improve', detail: profitCoverage + '% of recent orders currently have sufficient cost coverage. Filling missing landed, fulfilment and fee inputs will make channel decisions stronger.' });
+    if (adSpend > 0 && !attributableRecords.length) insights.push({ tone: 'warn', title: 'Advertising spend is recorded without attributed revenue', detail: money(adSpend) + ' of spend is visible, but Runvara cannot responsibly calculate ROAS until attributable revenue is supplied by a connected source or recorded evidence.' });
+    if (!adSpend) insights.push({ tone: 'neutral', title: 'Marketing efficiency is ready for data', detail: 'As paid campaigns start, record or connect spend and attributable revenue so Runvara can compare growth with actual return.' });
+    if (!connected) insights.push({ tone: 'warn', title: 'Connect a commerce source to unlock channel intelligence', detail: 'Analytics stays evidence-based and will expand automatically as connected platforms supply orders, revenue and costs.' });
+    $('#analytics-insights').innerHTML = insights.length ? insights.slice(0,5).map(item => '<article class="analytics-insight"><span class="tag ' + item.tone + '">' + escapeHtml(item.tone === 'good' ? 'Signal' : item.tone === 'warn' ? 'Attention' : 'Next') + '</span><div><b>' + escapeHtml(item.title) + '</b><p>' + escapeHtml(item.detail) + '</p></div></article>').join('') : '<div class="empty-state">No analytics insight is available yet.</div>';
   }
 
   function renderOverview() {
@@ -735,7 +813,7 @@
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
-    renderOverview(); renderAiTeam(); renderMarketing(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    renderOverview(); renderAnalytics(); renderAiTeam(); renderMarketing(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
     window.RunvaraControl.render(state.data);
   }
 
