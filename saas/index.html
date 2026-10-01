@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#020814">
   <meta name="color-scheme" content="dark">
   <title>Runvara — Business Command Centre</title>
-  <link rel="icon" href="/favicon.svg?v=6.12.1" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=6.12.1">
+  <link rel="icon" href="/favicon.svg?v=6.14.0" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=6.14.0">
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to main content</a>
@@ -15,7 +15,7 @@
   <section id="login-screen" class="auth-screen hidden">
     <div class="auth-glow"></div>
     <div class="auth-card">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.12.1" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small>Business intelligence. Under your control.</small></div></div>
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.14.0" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small>Business intelligence. Under your control.</small></div></div>
       <p class="eyebrow">YOUR BUSINESS · CONNECTED</p>
       <h1>Clarity for your business. Control for you.</h1>
       <p class="muted">Sales, orders, stock, true product economics, channel health, automations and human approval controls.</p>
@@ -43,7 +43,7 @@
 
   <section id="password-screen" class="auth-screen hidden">
     <div class="auth-card">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.12.1" width="40" height="40" alt=""></span><div><strong>Secure your owner account</strong><small>One-time production setup</small></div></div>
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.14.0" width="40" height="40" alt=""></span><div><strong>Secure your owner account</strong><small>One-time production setup</small></div></div>
       <h1>Choose your private workspace password.</h1>
       <p class="muted">Use at least 14 characters with upper-case, lower-case, a number and a symbol.</p>
       <form id="password-form" class="auth-form">
@@ -57,10 +57,11 @@
 
   <div id="app-shell" class="app-shell hidden">
     <aside class="sidebar">
-      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.12.1" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small id="workspace-label">Business command centre</small></div></div>
+      <div class="brand-lockup"><span class="brand-mark" aria-hidden="true"><img src="/favicon.svg?v=6.14.0" width="40" height="40" alt=""></span><div><strong>Runvara</strong><small id="workspace-label">Business command centre</small></div></div>
       <nav id="main-nav" aria-label="Primary">
         <p class="nav-group-label">Workspace</p>
         <button class="nav-item active" data-view="overview"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg></span> Command Centre</button>
+        <button class="nav-item" data-view="analytics"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 20V11m5 9V6m5 14v-8m5 8V3"/><path d="m3 9 5-4 5 5 7-7"/></svg></span> Analytics</button>
         <button class="nav-item" data-view="issues"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m12 3 10 18H2z"/><path d="M12 9v5m0 3v.1"/></svg></span> Exceptions</button>
         <button class="nav-item" data-view="ai-team"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg></span> AI Team</button>
         <button class="nav-item" data-view="marketing"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 15V9l11-4v14L4 15zm11-5 5-2v8l-5-2M7 15l1 5h4l-2-4"/></svg></span> Marketing Autopilot</button>
@@ -144,11 +145,55 @@
         </div>
       </section>
 
+      <section id="view-analytics" class="view">
+        <article class="card analytics-hero">
+          <div><p class="eyebrow">RUNVARA / GROWTH INTELLIGENCE</p><h2>Know what is driving revenue, profit and demand.</h2><p id="analytics-summary" class="hero-copy">Building a joined-up view from your connected commerce and marketing data.</p></div>
+          <div class="analytics-period"><span class="tag neutral">Last 30 days</span><small>Imported and recorded source data</small></div>
+        </article>
+
+        <div class="kpis kpis-six analytics-kpis">
+          <article class="card kpi"><span>Revenue</span><strong id="analytics-revenue">—</strong><small>net collected revenue</small></article>
+          <article class="card kpi"><span>Orders</span><strong id="analytics-orders">—</strong><small>across connected sales channels</small></article>
+          <article class="card kpi"><span>Operating contribution</span><strong id="analytics-profit">—</strong><small>where costs are covered</small></article>
+          <article class="card kpi"><span>Margin</span><strong id="analytics-margin">—</strong><small>profit-covered orders</small></article>
+          <article class="card kpi"><span>Recorded ad spend</span><strong id="analytics-ad-spend">—</strong><small>last 30 days</small></article>
+          <article class="card kpi"><span>Attributed ROAS</span><strong id="analytics-roas">—</strong><small id="analytics-roas-note">requires attributable revenue</small></article>
+        </div>
+
+        <div class="analytics-grid analytics-page-grid">
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">CHANNEL PERFORMANCE</p><h2>Revenue and profit by channel</h2></div><button class="text-button" data-view-link="channels">Manage connections ↗</button></div>
+            <div id="analytics-channel-table" class="analytics-table"></div>
+          </article>
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">ORDER SOURCE MIX</p><h2>Where sales are being captured</h2></div><span class="tag neutral">30 days</span></div>
+            <div id="analytics-source-mix" class="source-mix"></div>
+            <p class="muted tiny">This shows the order source recorded by connected sales channels. Website traffic attribution (for example Google, Instagram, TikTok, email or referral) is shown only when that source data is actually connected.</p>
+          </article>
+        </div>
+
+        <div class="analytics-grid analytics-page-grid">
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">MARKETING EFFICIENCY</p><h2>Spend and attributable return</h2></div><button class="text-button" data-view-link="marketing">Open Marketing Autopilot ↗</button></div>
+            <div id="analytics-marketing" class="analytics-table"></div>
+          </article>
+          <article class="card">
+            <div class="section-head"><div><p class="eyebrow">DATA CONFIDENCE</p><h2>What Runvara can prove</h2></div></div>
+            <div id="analytics-coverage" class="coverage-grid"></div>
+          </article>
+        </div>
+
+        <article class="card analytics-insights-card">
+          <div class="section-head"><div><p class="eyebrow">RUNVARA / AI-READY INSIGHTS</p><h2>What deserves attention next</h2></div><span class="tag neutral">Evidence first</span></div>
+          <div id="analytics-insights" class="analytics-insights"></div>
+        </article>
+      </section>
+
       <section id="view-ai-team" class="view">
         <article class="card command-card" aria-busy="false">
           <div class="commander-heading">
             <div class="commander-intro"><p class="eyebrow">RUNVARA COMMANDER <span class="label-divider" aria-hidden="true"></span> CENTRAL INTELLIGENCE</p><h2>One command.<br><span>Clear direction.</span></h2><p class="commander-description">The Commander routes each request to the relevant specialists. Read-only analysis can run immediately; money, refunds, live publishing and risky changes remain approval-gated.</p></div>
-            <div class="commander-presence"><div class="commander-core" aria-hidden="true"><svg viewBox="0 0 160 160" focusable="false"><circle class="core-orbit" cx="80" cy="80" r="73"/><circle class="core-arc" cx="80" cy="80" r="63" pathLength="100" stroke-dasharray="30 9 12 9 30 10"/><circle class="core-inner" cx="80" cy="80" r="51"/><path class="core-guides" d="M80 2v12m0 132v12M2 80h12m132 0h12"/><circle class="core-node" cx="80" cy="7" r="3"/></svg><img src="/favicon.svg?v=6.12.1" width="58" height="58" alt=""></div><span id="commander-status" class="tag neutral">Loading status</span></div>
+            <div class="commander-presence"><div class="commander-core" aria-hidden="true"><svg viewBox="0 0 160 160" focusable="false"><circle class="core-orbit" cx="80" cy="80" r="73"/><circle class="core-arc" cx="80" cy="80" r="63" pathLength="100" stroke-dasharray="30 9 12 9 30 10"/><circle class="core-inner" cx="80" cy="80" r="51"/><path class="core-guides" d="M80 2v12m0 132v12M2 80h12m132 0h12"/><circle class="core-node" cx="80" cy="7" r="3"/></svg><img src="/favicon.svg?v=6.14.0" width="58" height="58" alt=""></div><span id="commander-status" class="tag neutral">Loading status</span></div>
           </div>
           <dl class="command-signals"><div><dt>Specialist team</dt><dd id="commander-team-size">—</dd></div><div><dt>Autonomy</dt><dd id="commander-autonomy">—</dd></div><div><dt>Last run</dt><dd id="commander-last-run">—</dd></div></dl>
           <form id="commander-form" class="command-form"><label for="commander-input">Command input</label><div class="command-console"><div class="command-field"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 6 6 6-6 6m9 0h5"/></svg><input id="commander-input" name="command" maxlength="1000" placeholder="Ask Runvara what needs attention…" required aria-describedby="commander-input-help"></div><button class="primary" type="submit">Send to team</button></div><p id="commander-input-help" class="console-help">Your command is analysed using this workspace’s recorded data and policies.</p><p id="commander-error" class="form-error" role="alert"></p></form>
@@ -338,9 +383,9 @@
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
   <dialog id="workspace-search-dialog" class="workspace-search-dialog" aria-labelledby="workspace-search-title"><div class="search-heading"><div><p class="eyebrow">WORKSPACE NAVIGATION</p><h2 id="workspace-search-title">Where would you like to go?</h2></div><button id="close-workspace-search" class="secondary" type="button">Close</button></div><label for="workspace-search-input" class="muted tiny">Find a page by name or task</label><input id="workspace-search-input" type="search" placeholder="Try approvals, products or billing" autocomplete="off" maxlength="100" autofocus><p id="workspace-search-count" class="muted tiny" role="status"></p><div id="workspace-search-results" class="search-results"></div><p class="search-help muted tiny">↑ ↓ to move · Enter to open · Esc to close</p></dialog>
   <dialog id="connection-dialog" aria-labelledby="connection-dialog-title"><div class="connection-dialog-shell"><button id="connection-close" class="secondary connection-close" type="button" aria-label="Close connection details">Close</button><div id="connection-detail"></div></div></dialog>
-  <script src="/presentation.js?v=6.12.1"></script>
-  <script src="/connections-ui.js?v=6.12.1"></script>
-  <script src="/control-ui.js?v=6.12.1"></script>
-  <script src="/app.js?v=6.12.1"></script>
+  <script src="/presentation.js?v=6.14.0"></script>
+  <script src="/connections-ui.js?v=6.14.0"></script>
+  <script src="/control-ui.js?v=6.14.0"></script>
+  <script src="/app.js?v=6.14.0"></script>
 </body>
 </html>
