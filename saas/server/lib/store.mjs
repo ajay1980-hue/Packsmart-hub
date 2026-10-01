@@ -102,6 +102,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     connections: [],
     oauthChallenges: [],
     integrationStatus: {},
+    revenueEngine: { intentEvents: [], leads: [], quotes: [], experiments: [], referrals: [], loyaltyRules: [], attributionTouches: [], updatedAt: null },
     migrations: {},
     storageReady: false
   };
@@ -157,6 +158,7 @@ export function upgradeState(state, env = process.env) {
     connections: Array.isArray(state?.connections) ? state.connections : [],
     oauthChallenges: Array.isArray(state?.oauthChallenges) ? state.oauthChallenges : [],
     integrationStatus: state?.integrationStatus && typeof state.integrationStatus === 'object' ? state.integrationStatus : {},
+    revenueEngine: state?.revenueEngine && typeof state.revenueEngine === 'object' ? state.revenueEngine : seeded.revenueEngine,
     migrations: state?.migrations && typeof state.migrations === 'object' ? state.migrations : {}
   };
   ensureControl(upgraded);
