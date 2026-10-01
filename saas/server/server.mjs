@@ -56,7 +56,7 @@ import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, se
 import { buildSupportReply } from './lib/customer-support.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.13.0';
+const VERSION = '6.14.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
