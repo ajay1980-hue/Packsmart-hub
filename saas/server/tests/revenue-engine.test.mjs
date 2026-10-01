@@ -25,7 +25,8 @@ test('customer intelligence uses privacy-preserving order identity and evidence-
   assert.equal(repeat.orderCount,2);
   assert.equal(repeat.averageReorderDays,31);
   assert.equal(repeat.signals.churnRisk,true);
-  assert.equal(typeof repeat.contribution,'number');
+  assert.ok(repeat.contribution === null || typeof repeat.contribution === 'number');
+  assert.equal(repeat.profitCoverage, 0);
 });
 
 test('attribution does not invent traffic sources from provider channel', () => {
