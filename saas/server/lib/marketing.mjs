@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { deriveOperations } from './operations.mjs';
-import { advanceCampaignCreatives } from './marketing-providers.mjs';
+import { advanceCampaignCreatives, testMarketingProvider } from './marketing-providers.mjs';
+import { decryptCredentials, encryptCredentials } from './security.mjs';
 
 export const MARKETING_MODES = Object.freeze({
   draft: { id: 'draft', name: 'Draft only', description: 'Prepare campaigns and creatives without publishing.' },
@@ -32,7 +33,8 @@ export function ensureMarketing(state) {
     },
     campaigns: Array.isArray(previous.campaigns) ? previous.campaigns : [],
     lastPlannerRunAt: previous.lastPlannerRunAt || null,
-    lastCreativeRunAt: previous.lastCreativeRunAt || null
+    lastCreativeRunAt: previous.lastCreativeRunAt || null,
+    providers: previous.providers && typeof previous.providers === 'object' ? previous.providers : {}
   };
   if (state.marketing.settings.mode !== 'automatic') state.marketing.settings.autoPublishOrganic = false;
   return state.marketing;
@@ -182,10 +184,77 @@ export function marketingPlannerCycle(state, options = {}) {
   return { created: 1, campaign, reason: null };
 }
 
+function storedProviderCredentials(state, provider, env = process.env) {
+  const record = ensureMarketing(state).providers?.[provider];
+  if (!record?.encryptedCredentials) return {};
+  try { return decryptCredentials(record.encryptedCredentials, env.CREDENTIALS_KEY); }
+  catch { return {}; }
+}
+
+export function marketingRuntimeEnv(state, env = process.env) {
+  const canva = storedProviderCredentials(state, 'canva', env);
+  const runway = storedProviderCredentials(state, 'runway', env);
+  return {
+    ...env,
+    CANVA_ACCESS_TOKEN: canva.accessToken || env.CANVA_ACCESS_TOKEN,
+    CANVA_BRAND_TEMPLATE_ID: canva.brandTemplateId || env.CANVA_BRAND_TEMPLATE_ID,
+    RUNWAY_API_KEY: runway.apiKey || env.RUNWAY_API_KEY
+  };
+}
+
+export function saveMarketingProvider(state, provider, credentials, env = process.env, actor = 'system') {
+  const marketing = ensureMarketing(state);
+  if (!['canva','runway'].includes(provider)) throw Object.assign(new Error('Unsupported marketing provider'), { status: 404, code: 'MARKETING_PROVIDER_UNKNOWN' });
+  if (!env.CREDENTIALS_KEY || String(env.CREDENTIALS_KEY).length < 32) throw Object.assign(new Error('Credential encryption is unavailable'), { status: 503, code: 'CREDENTIAL_ENCRYPTION_REQUIRED' });
+  let cleanCredentials;
+  if (provider === 'canva') {
+    const accessToken = String(credentials?.accessToken || '').trim();
+    const brandTemplateId = clean(credentials?.brandTemplateId, 200);
+    if (accessToken.length < 20 || accessToken.length > 8192 || /[\r\n]/.test(accessToken)) throw Object.assign(new Error('Enter a valid Canva access token'), { status: 400, code: 'CANVA_TOKEN_INVALID' });
+    if (!brandTemplateId) throw Object.assign(new Error('Choose a Canva Brand Template before connecting'), { status: 400, code: 'CANVA_TEMPLATE_REQUIRED' });
+    cleanCredentials = { accessToken, brandTemplateId };
+  } else {
+    const apiKey = String(credentials?.apiKey || '').trim();
+    if (apiKey.length < 20 || apiKey.length > 8192 || /[\r\n]/.test(apiKey)) throw Object.assign(new Error('Enter a valid Runway API key'), { status: 400, code: 'RUNWAY_KEY_INVALID' });
+    cleanCredentials = { apiKey };
+  }
+  const previous = marketing.providers?.[provider] || {};
+  marketing.providers[provider] = {
+    ...previous,
+    encryptedCredentials: encryptCredentials(cleanCredentials, env.CREDENTIALS_KEY),
+    status: 'configured',
+    configuredAt: previous.configuredAt || nowIso(),
+    updatedAt: nowIso(),
+    updatedBy: actor,
+    lastTestAt: previous.lastTestAt || null,
+    lastTestStatus: previous.lastTestStatus || null,
+    lastError: null
+  };
+  return marketing.providers[provider];
+}
+
+export function disconnectMarketingProvider(state, provider, actor = 'system') {
+  const marketing = ensureMarketing(state);
+  if (!['canva','runway'].includes(provider)) throw Object.assign(new Error('Unsupported marketing provider'), { status: 404, code: 'MARKETING_PROVIDER_UNKNOWN' });
+  const previous = marketing.providers?.[provider] || {};
+  marketing.providers[provider] = { status: 'disconnected', configuredAt: previous.configuredAt || null, updatedAt: nowIso(), updatedBy: actor, lastTestAt: previous.lastTestAt || null, lastTestStatus: 'disconnected', lastError: null };
+  return marketing.providers[provider];
+}
+
+export async function testStoredMarketingProvider(state, provider, env = process.env) {
+  const runtime = marketingRuntimeEnv(state, env);
+  const result = await testMarketingProvider(provider, runtime);
+  const record = ensureMarketing(state).providers?.[provider] || {};
+  Object.assign(record, { status: result.ok ? 'connected' : 'action_required', lastTestAt: nowIso(), lastTestStatus: result.ok ? 'passed' : 'failed', lastError: result.ok ? null : result.code || 'PROVIDER_TEST_FAILED' });
+  ensureMarketing(state).providers[provider] = record;
+  return result;
+}
+
 export async function marketingCreativeCycle(state, { env = process.env } = {}) {
   const marketing = ensureMarketing(state);
   if (!marketing.settings.enabled || !marketing.settings.autoCreative) return { advanced: 0, campaign: null, reason: 'AUTO_CREATIVE_OFF' };
-  const providers = marketingProviderStatus(env);
+  const runtimeEnv = marketingRuntimeEnv(state, env);
+  const providers = marketingProviderStatus(state, env);
   const campaign = marketing.campaigns.find(item =>
     ['draft', 'creative_generation', 'creative_attention'].includes(item.status) &&
     (item.creativeRequests || []).some(request =>
@@ -194,26 +263,30 @@ export async function marketingCreativeCycle(state, { env = process.env } = {}) 
     )
   );
   if (!campaign) return { advanced: 0, campaign: null, reason: 'NO_CREATIVE_WORK' };
-  await advanceCampaignCreatives(campaign, env);
+  await advanceCampaignCreatives(campaign, runtimeEnv);
   marketing.lastCreativeRunAt = nowIso();
   return { advanced: 1, campaign, reason: null };
 }
 
-export function marketingProviderStatus(env = process.env) {
+export function marketingProviderStatus(state = {}, env = process.env) {
+  const runtime = marketingRuntimeEnv(state, env);
+  const records = ensureMarketing(state).providers || {};
+  const canvaConfigured = Boolean(runtime.CANVA_ACCESS_TOKEN && runtime.CANVA_BRAND_TEMPLATE_ID);
+  const runwayConfigured = Boolean(runtime.RUNWAY_API_KEY);
   return {
     canva: {
-      name: 'Canva',
-      planTarget: 'Pro',
-      configured: Boolean(env.CANVA_ACCESS_TOKEN && env.CANVA_BRAND_TEMPLATE_ID),
-      needs: ['CANVA_ACCESS_TOKEN', 'CANVA_BRAND_TEMPLATE_ID'].filter(key => !env[key]),
-      capability: 'Brand-template creative generation'
+      id: 'canva', name: 'Canva', planTarget: 'Pro', configured: canvaConfigured,
+      status: canvaConfigured ? (records.canva?.lastTestStatus === 'failed' ? 'action_required' : records.canva?.lastTestStatus === 'passed' ? 'connected' : 'configured') : 'not_configured',
+      source: records.canva?.encryptedCredentials ? 'workspace' : canvaConfigured ? 'environment' : null,
+      needs: ['accessToken', 'brandTemplateId'].filter(key => key === 'accessToken' ? !runtime.CANVA_ACCESS_TOKEN : !runtime.CANVA_BRAND_TEMPLATE_ID),
+      capability: 'Brand-template creative generation', lastTestAt: records.canva?.lastTestAt || null, lastError: records.canva?.lastError || null
     },
     runway: {
-      name: 'Runway',
-      planTarget: 'Pro',
-      configured: Boolean(env.RUNWAY_API_KEY),
-      needs: env.RUNWAY_API_KEY ? [] : ['RUNWAY_API_KEY'],
-      capability: 'Product video generation'
+      id: 'runway', name: 'Runway', planTarget: 'Pro', configured: runwayConfigured,
+      status: runwayConfigured ? (records.runway?.lastTestStatus === 'failed' ? 'action_required' : records.runway?.lastTestStatus === 'passed' ? 'connected' : 'configured') : 'not_configured',
+      source: records.runway?.encryptedCredentials ? 'workspace' : runwayConfigured ? 'environment' : null,
+      needs: runtime.RUNWAY_API_KEY ? [] : ['apiKey'],
+      capability: 'Product video generation', lastTestAt: records.runway?.lastTestAt || null, lastError: records.runway?.lastError || null
     }
   };
 }
@@ -254,7 +327,7 @@ export function marketingPublishingReadiness(state) {
 
 export function marketingSnapshot(state, env = process.env) {
   const marketing = ensureMarketing(state);
-  const providers = marketingProviderStatus(env);
+  const providers = marketingProviderStatus(state, env);
   const publishing = marketingPublishingReadiness(state);
   const pending = marketing.campaigns.filter(item => ['draft', 'prepared', 'awaiting_approval', 'scheduled'].includes(item.status));
   return {
