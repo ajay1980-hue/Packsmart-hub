@@ -2,7 +2,6 @@ const CANVA_BASE = 'https://api.canva.com/rest/v1';
 const RUNWAY_BASE = 'https://api.dev.runwayml.com/v1';
 const RUNWAY_VERSION = '2024-11-06';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const clean = (value, max = 1200) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 
 function providerError(provider, message, code = 'PROVIDER_REQUEST_FAILED', status = 502) {
@@ -17,8 +16,8 @@ async function jsonRequest(url, options = {}, { provider, timeoutMs = 20000 } = 
     let payload = {};
     try { payload = await response.json(); } catch {}
     if (!response.ok) {
-      const detail = clean(payload?.message || payload?.error?.message || payload?.error || response.statusText, 400);
-      throw providerError(provider, detail || `${provider} request failed`, `${provider.toUpperCase()}_HTTP_${response.status}`, response.status >= 500 ? 502 : 422);
+      const detail = [401, 403].includes(response.status) ? `${provider} access requires reconnecting or additional scopes.` : response.status === 429 ? `${provider} is limiting requests. Try again later.` : `${provider} request failed (HTTP ${response.status}).`;
+      throw providerError(provider, detail, `${provider.toUpperCase()}_HTTP_${response.status}`, response.status >= 500 ? 502 : 422);
     }
     return payload;
   } catch (error) {
@@ -56,7 +55,7 @@ async function fetchProductImage(url, env) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(url, { signal: controller.signal, redirect: 'follow' });
+    const response = await fetch(url, { signal: controller.signal, redirect: 'error' });
     if (!response.ok) throw providerError('canva', 'Could not retrieve the product image for Canva.', 'CANVA_PRODUCT_IMAGE_UNAVAILABLE', 422);
     const type = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
     if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(type)) throw providerError('canva', 'Product image is not a supported Canva image type.', 'CANVA_PRODUCT_IMAGE_TYPE', 422);
@@ -117,18 +116,18 @@ export async function testMarketingProvider(provider, env = process.env) {
   if (provider === 'canva') {
     if (!env.CANVA_ACCESS_TOKEN || !env.CANVA_BRAND_TEMPLATE_ID) throw providerError('canva', 'Canva access token and Brand Template are required.', 'CANVA_NOT_CONFIGURED', 409);
     const payload = await jsonRequest(`${CANVA_BASE}/brand-templates/${encodeURIComponent(env.CANVA_BRAND_TEMPLATE_ID)}/dataset`, { headers: canvaHeaders(env) }, { provider: 'canva' });
-    return { ok: true, provider: 'canva', capability: 'brand_template_autofill', fieldCount: Object.keys(payload.dataset || {}).length };
+    const fields = Object.keys(payload.dataset || {});
+    if (!fields.length || !Object.values(payload.dataset || {}).some(field => ['text', 'image'].includes(field?.type))) throw providerError('canva', 'Choose a Brand Template with text or image autofill fields.', 'CANVA_TEMPLATE_FIELDS_REQUIRED', 422);
+    return { ok: true, provider: 'canva', capability: 'brand_template_autofill', fieldCount: fields.length, fields };
   }
   if (provider === 'runway') {
     if (!env.RUNWAY_API_KEY) throw providerError('runway', 'Runway developer API key is required.', 'RUNWAY_NOT_CONFIGURED', 409);
-    // A deliberately nonexistent task verifies API-key authentication without spending credits or creating media.
-    try {
-      await jsonRequest(`${RUNWAY_BASE}/tasks/00000000-0000-0000-0000-000000000000`, { headers: runwayHeaders(env) }, { provider: 'runway', timeoutMs: 15000 });
-      return { ok: true, provider: 'runway', capability: 'video_generation' };
-    } catch (error) {
-      if (['RUNWAY_HTTP_400','RUNWAY_HTTP_404','RUNWAY_HTTP_422'].includes(error.code)) return { ok: true, provider: 'runway', capability: 'video_generation' };
-      throw error;
-    }
+    const payload = await jsonRequest(`${RUNWAY_BASE}/organization`, { headers: runwayHeaders(env) }, { provider: 'runway', timeoutMs: 15000 });
+    if (!Number.isFinite(payload.creditBalance) || !payload.tier?.models) throw providerError('runway', 'Runway did not confirm the API project.', 'RUNWAY_RESPONSE_INVALID', 502);
+    const limits = payload.tier.models.product_ad;
+    const canSubmit = Boolean(limits && limits.maxConcurrentGenerations !== 0 && limits.maxDailyGenerations !== 0 && payload.creditBalance > 0);
+    return { ok: true, provider: 'runway', capability: 'video_generation', creditBalance: payload.creditBalance, canSubmit, limitation: !limits || limits.maxConcurrentGenerations === 0 || limits.maxDailyGenerations === 0 ? 'RUNWAY_PRODUCT_AD_UNAVAILABLE' : payload.creditBalance <= 0 ? 'RUNWAY_API_CREDITS_REQUIRED' : null };
+
   }
   throw providerError(provider, 'Unsupported marketing provider.', 'MARKETING_PROVIDER_UNKNOWN', 404);
 }
@@ -153,7 +152,7 @@ export async function refreshCanvaCreative(campaign, request, env = process.env)
   if (!request?.jobId) throw providerError('canva', 'Canva creative job is missing its job id.', 'CANVA_JOB_INVALID', 409);
   if (request.stage === 'asset_upload') {
     const payload = await jsonRequest(`${CANVA_BASE}/asset-uploads/${encodeURIComponent(request.jobId)}`, { headers: canvaHeaders(env) }, { provider: 'canva' });
-    if (payload.job?.status === 'failed') throw providerError('canva', payload.job?.error?.message || 'Canva image upload failed.', 'CANVA_ASSET_UPLOAD_FAILED', 422);
+    if (payload.job?.status === 'failed') throw providerError('canva', 'Canva image upload failed.', 'CANVA_ASSET_UPLOAD_FAILED', 422);
     if (payload.job?.status !== 'success') return request;
     const assetId = payload.job?.asset?.id;
     if (!assetId) throw providerError('canva', 'Canva did not return an uploaded asset id.', 'CANVA_ASSET_ID_MISSING', 502);
@@ -169,7 +168,7 @@ export async function refreshCanvaCreative(campaign, request, env = process.env)
   }
   if (request.stage === 'autofill') {
     const payload = await jsonRequest(`${CANVA_BASE}/autofills/${encodeURIComponent(request.jobId)}`, { headers: canvaHeaders(env) }, { provider: 'canva' });
-    if (payload.job?.status === 'failed') throw providerError('canva', payload.job?.error?.message || 'Canva autofill failed.', 'CANVA_AUTOFILL_FAILED', 422);
+    if (payload.job?.status === 'failed') throw providerError('canva', 'Canva autofill failed.', 'CANVA_AUTOFILL_FAILED', 422);
     if (payload.job?.status !== 'success') return request;
     const result = payload.job?.result || {};
     const designId = designIdFromResult(result);
@@ -183,7 +182,7 @@ export async function refreshCanvaCreative(campaign, request, env = process.env)
   }
   if (request.stage === 'export') {
     const payload = await jsonRequest(`${CANVA_BASE}/exports/${encodeURIComponent(request.jobId)}`, { headers: canvaHeaders(env) }, { provider: 'canva' });
-    if (payload.job?.status === 'failed') throw providerError('canva', payload.job?.error?.message || 'Canva export failed.', 'CANVA_EXPORT_FAILED', 422);
+    if (payload.job?.status === 'failed') throw providerError('canva', 'Canva export failed.', 'CANVA_EXPORT_FAILED', 422);
     if (payload.job?.status !== 'success') return request;
     return { ...request, status: 'complete', stage: 'complete', assetUrls: payload.job?.urls || [], completedAt: new Date().toISOString() };
   }
@@ -214,7 +213,7 @@ export async function refreshRunwayCreative(campaign, request, env = process.env
   if (!request?.taskId) throw providerError('runway', 'Runway creative task is missing its task id.', 'RUNWAY_TASK_INVALID', 409);
   const payload = await jsonRequest(`${RUNWAY_BASE}/tasks/${encodeURIComponent(request.taskId)}`, { headers: runwayHeaders(env) }, { provider: 'runway' });
   const status = String(payload.status || '').toUpperCase();
-  if (['FAILED', 'CANCELED', 'CANCELLED'].includes(status)) throw providerError('runway', clean(payload.failure || payload.failureCode || payload.error || 'Runway video generation failed.', 500), 'RUNWAY_GENERATION_FAILED', 422);
+  if (['FAILED', 'CANCELED', 'CANCELLED'].includes(status)) throw providerError('runway', 'Runway video generation failed. Check the provider task and try again.', 'RUNWAY_GENERATION_FAILED', 422);
   if (status !== 'SUCCEEDED') return { ...request, progress: payload.progress ?? request.progress, updatedAt: new Date().toISOString() };
   const output = Array.isArray(payload.output) ? payload.output : payload.output ? [payload.output] : [];
   return { ...request, status: 'complete', stage: 'complete', assetUrls: output.filter(Boolean), completedAt: new Date().toISOString() };
@@ -244,4 +243,13 @@ export async function advanceCampaignCreatives(campaign, env = process.env) {
   else if (statuses.some(status => status === 'failed') && !statuses.some(status => status === 'in_progress')) campaign.status = 'creative_attention';
   campaign.updatedAt = new Date().toISOString();
   return campaign;
+}
+
+export async function listCanvaBrandTemplates(env = process.env, continuation = '') {
+  if (!env.CANVA_ACCESS_TOKEN) throw providerError('canva', 'Sign into Canva first.', 'CANVA_AUTH_REQUIRED', 409);
+  const url = new URL(`${CANVA_BASE}/brand-templates`);
+  url.searchParams.set('dataset', 'non_empty');
+  if (continuation) url.searchParams.set('continuation', String(continuation).slice(0, 2000));
+  const payload = await jsonRequest(url.toString(), { headers: canvaHeaders(env) }, { provider: 'canva' });
+  return { items: (payload.items || []).map(item => ({ id: item.id, title: item.title || item.name || item.id })), continuation: payload.continuation || null };
 }

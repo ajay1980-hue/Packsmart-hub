@@ -97,7 +97,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
             const result = marketingPlannerCycle(state, { now, source: 'autopilot' });
             evidence = [{ type: 'marketing_campaign', id: result.campaign?.id || run.id, detail: result.created ? `Prepared campaign for ${result.campaign.product.title}; publishing remains approval-gated.` : result.reason }];
           } else if (run.ruleId === 'marketingCreativeWorker') {
-            const result = await marketingCreativeCycle(state, { env });
+            const result = await marketingCreativeCycle(state, { env, persist: () => store.save(workspaceId, state) });
             evidence = [{ type: 'marketing_creative', id: result.campaign?.id || run.id, detail: result.advanced ? `Advanced Canva/Runway creative jobs for ${result.campaign.product.title}. No publishing or credit purchase was attempted.` : result.reason }];
           } else if (run.ruleId === 'marketRadar') {
             const result = await runWebIntelligence(state, { env, actor: 'autopilot' });

@@ -51,12 +51,14 @@ import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdm
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 import { intelligentConnections, providerReadiness, doctorNotifications, recommendations } from './lib/connection-intelligence.mjs';
 import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
-import { disconnectMarketingProvider, draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, saveMarketingProvider, testStoredMarketingProvider, updateMarketingSettings } from './lib/marketing.mjs';
+import { disconnectMarketingProvider, draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, marketingRuntimeEnv, saveCanvaTemplate, saveMarketingProvider, testStoredMarketingProvider, updateMarketingSettings } from './lib/marketing.mjs';
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
+import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
+import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.15.0';
+const VERSION = '6.15.1';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -795,6 +797,60 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return `runvara_oauth_${provider}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${clear ? 0 : 600}${secureCookies ? '; Secure' : ''}`;
   }
 
+  async function startCanvaOAuth(auth, res) {
+    requireApprover(auth);
+    const nonce = crypto.randomBytes(32).toString('base64url'), browserNonce = crypto.randomBytes(32).toString('base64url');
+    const verifier = crypto.randomBytes(48).toString('base64url');
+    const challenge = { provider: 'marketing_canva', nonce, userId: auth.user.id, sessionVersion: auth.user.sessionVersion || 1, cookieHash: crypto.createHash('sha256').update(browserNonce).digest('hex'), verifier, expiresAt: new Date(Date.now() + 600000).toISOString() };
+    const token = createConnectorOAuthState({ workspaceId: auth.session.workspaceId, userId: auth.user.id, provider: 'marketing_canva', nonce }, env.SESSION_SECRET);
+    const authorizationUrl = await mutate(auth, async state => {
+      const authorizationUrl = canvaAuthorizationUrl(state, env, token, verifier);
+      state.oauthChallenges = [challenge, ...(state.oauthChallenges || []).filter(item => item.provider !== challenge.provider && Date.parse(item.expiresAt) > Date.now())].slice(0, 10);
+      addAudit(state, { type: 'marketing_canva_authorisation_started', actor: auth.user.id, detail: { provider: 'canva' } });
+      return authorizationUrl;
+    });
+    send(res, 200, { authorizationUrl }, { 'Set-Cookie': oauthCookie('marketing_canva', browserNonce) });
+  }
+
+  async function canvaOAuthCallback(url, req, res) {
+    const token = verifyConnectorOAuthState(url.searchParams.get('state'), env.SESSION_SECRET);
+    // The Strict session cookie is absent on cross-site OAuth returns; the
+    // Lax nonce cookie binds this callback to the initiating browser instead.
+    const session = sessionFrom(req);
+    if (!token || token.provider !== 'marketing_canva' || (session && (session.workspaceId !== token.workspaceId || session.sub !== token.userId))) throw connectionError('Return to Runvara and reconnect Canva from the same browser.', 'OAUTH_STATE_INVALID');
+    const browserNonce = parseCookies(req.headers.cookie).runvara_oauth_marketing_canva || '';
+    await withWorkspaceLock(token.workspaceId, async () => {
+      const state = await store.get(token.workspaceId);
+      const user = state?.users?.find(item => item.id === token.userId && item.active !== false);
+      const challenge = state?.oauthChallenges?.find(item => item.provider === token.provider && item.nonce === token.nonce && item.userId === token.userId);
+      if (!user || user.role !== 'owner' || !challenge || Date.parse(challenge.expiresAt) <= Date.now() || Number(user.sessionVersion || 1) !== Number(challenge.sessionVersion) || (session && Number(session.sessionVersion || 1) !== Number(challenge.sessionVersion)) || !browserNonce || !safeEqual(challenge.cookieHash, crypto.createHash('sha256').update(browserNonce).digest('hex'))) throw connectionError('This Canva sign-in has expired or cannot be verified. Reconnect.', 'OAUTH_STATE_INVALID');
+      state.oauthChallenges = state.oauthChallenges.filter(item => item.nonce !== token.nonce);
+      // Commit single-use challenge consumption before exchanging the code.
+      await store.save(token.workspaceId, state);
+      let result = 'authorised';
+      try {
+        if (url.searchParams.get('error')) throw connectionError('Canva sign-in was cancelled.', 'OAUTH_DECLINED');
+        const code = url.searchParams.get('code');
+        if (!code || code.length > 8192) throw connectionError('Canva returned an invalid code.', 'OAUTH_CODE_INVALID');
+        ensureMarketing(state);
+        state.marketing.providers.canva ||= {};
+        const tokens = await requestCanvaTokens(state, env, { grant_type: 'authorization_code', code, code_verifier: challenge.verifier, redirect_uri: canvaRedirect(env) }, options.fetchImpl || fetch);
+        storeCanvaTokens(state, env, tokens);
+        // Commit the encrypted grant before any subsequent provider operation.
+        await store.save(token.workspaceId, state);
+        addAudit(state, { type: 'marketing_canva_authorised', actor: user.id, detail: { provider: 'canva', tokenRefreshSupported: true } });
+      } catch (error) {
+        result = 'action_required';
+        ensureMarketing(state);
+        const record = state.marketing.providers.canva ||= {};
+        Object.assign(record, { status: 'action_required', lastError: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'CANVA_AUTH_REQUIRED', lastTestStatus: 'failed' });
+        addAudit(state, { type: 'marketing_canva_authorisation_failed', actor: user.id, detail: { code: record.lastError } });
+      }
+      await store.save(token.workspaceId, state);
+      res.writeHead(303, { ...headers(), Location: `/?canva=${result}#marketing`, 'Set-Cookie': oauthCookie('marketing_canva', '', true) }); res.end();
+    });
+  }
+
   async function startConnectorOAuth(provider, auth, body, res) {
     connector(provider);
     if (!integrations.oauthReady(provider, auth.state)) throw connectionError('Secure sign-in for this channel is not available yet. Request access or skip this channel for now.', 'OAUTH_NOT_CONFIGURED', 409);
@@ -1034,6 +1090,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if (req.method === 'POST' && pathname === '/api/auth/signup') {
         await signup(req, res);
         return;
+      }
+      if (req.method === 'GET' && pathname === '/api/marketing/providers/canva/oauth/callback') {
+        await canvaOAuthCallback(url, req, res); return;
       }
       const connectorCallback = pathname.match(/^\/api\/integrations\/([a-z_]+)\/oauth\/callback$/);
       if (req.method === 'GET' && connectorCallback && (connectorCallback[1] !== 'ebay' || verifyConnectorOAuthState(url.searchParams.get('state'), env.SESSION_SECRET))) {
@@ -1359,6 +1418,40 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        if (req.method === 'PUT' && pathname === '/api/marketing/providers/canva/application') {
+          requireApprover(auth); const body = await jsonBody(req, 32768);
+          await mutate(auth, async state => { ensureMarketing(state); saveCanvaApplication(state, body, env, auth.user.id); addAudit(state, { type: 'marketing_canva_application_saved', actor: auth.user.id, detail: { provider: 'canva' } }); });
+          send(res, 200, { ok: true }); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/marketing/providers/canva/oauth/start') {
+          await startCanvaOAuth(auth, res); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/marketing/providers/canva/refresh') {
+          requireApprover(auth);
+          const result = await mutate(auth, async state => {
+            const result = await testStoredMarketingProvider(state, 'canva', env, { force: true, persist: () => store.save(auth.session.workspaceId, state), fetchImpl: options.fetchImpl || fetch });
+            addAudit(state, { type: 'marketing_canva_token_refresh_tested', actor: auth.user.id, detail: { ok: result.ok, code: result.code || null } }); return result;
+          });
+          send(res, result.ok ? 200 : 422, result.ok ? { result } : result); return;
+        }
+        if (req.method === 'GET' && pathname === '/api/marketing/providers/canva/templates') {
+          requireOwner(auth);
+          const result = await mutate(auth, async state => {
+            ensureMarketing(state);
+            await refreshCanvaCredentials(state, env, { persist: () => store.save(auth.session.workspaceId, state), fetchImpl: options.fetchImpl || fetch });
+            return listCanvaBrandTemplates(marketingRuntimeEnv(state, env), url.searchParams.get('continuation') || '');
+          });
+          send(res, 200, result); return;
+        }
+        if (req.method === 'PUT' && pathname === '/api/marketing/providers/canva/template') {
+          requireOwner(auth); const body = await jsonBody(req, 32768);
+          const result = await mutate(auth, async state => {
+            const result = await saveCanvaTemplate(state, body.brandTemplateId, env, { persist: () => store.save(auth.session.workspaceId, state), fetchImpl: options.fetchImpl || fetch });
+            addAudit(state, { type: 'marketing_canva_template_selected', actor: auth.user.id, detail: { fieldCount: result.fieldCount } }); return result;
+          });
+          send(res, 200, { result }); return;
+        }
+
         const marketingProviderMatch = pathname.match(/^\/api\/marketing\/providers\/(canva|runway)$/);
         if (marketingProviderMatch && req.method === 'PUT') {
           requireOwner(auth);
@@ -1366,11 +1459,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const provider = marketingProviderMatch[1];
           const result = await mutate(auth, async state => {
             saveMarketingProvider(state, provider, body, env, auth.user.id);
-            const tested = await testStoredMarketingProvider(state, provider, env);
+            const tested = await testStoredMarketingProvider(state, provider, env, { persist: () => store.save(auth.session.workspaceId, state), fetchImpl: options.fetchImpl || fetch });
             addAudit(state, { type: 'marketing_provider_connected', actor: auth.user.id, detail: { provider, status: tested.ok ? 'connected' : 'action_required' } });
             return tested;
           });
-          send(res, 200, { result }); return;
+          send(res, result.ok ? 200 : 422, result.ok ? { result } : result); return;
         }
 
         const marketingProviderTestMatch = pathname.match(/^\/api\/marketing\/providers\/(canva|runway)\/test$/);
@@ -1378,18 +1471,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireOwner(auth);
           const provider = marketingProviderTestMatch[1];
           const result = await mutate(auth, async state => {
-            const tested = await testStoredMarketingProvider(state, provider, env);
+            const tested = await testStoredMarketingProvider(state, provider, env, { persist: () => store.save(auth.session.workspaceId, state), fetchImpl: options.fetchImpl || fetch });
             addAudit(state, { type: 'marketing_provider_tested', actor: auth.user.id, detail: { provider, status: tested.ok ? 'connected' : 'action_required' } });
             return tested;
           });
-          send(res, 200, { result }); return;
+          send(res, result.ok ? 200 : 422, result.ok ? { result } : result); return;
         }
 
         if (marketingProviderMatch && req.method === 'DELETE') {
           requireOwner(auth);
           const provider = marketingProviderMatch[1];
           await mutate(auth, async state => {
-            disconnectMarketingProvider(state, provider, auth.user.id);
+            disconnectMarketingProvider(state, provider, auth.user.id, env);
+            if (provider === 'canva') state.oauthChallenges = (state.oauthChallenges || []).filter(item => item.provider !== 'marketing_canva');
             addAudit(state, { type: 'marketing_provider_disconnected', actor: auth.user.id, detail: { provider } });
           });
           send(res, 200, { ok: true }); return;
@@ -1415,7 +1509,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             if (!campaign) throw Object.assign(new Error('Marketing campaign not found'), { status: 404, code: 'MARKETING_CAMPAIGN_NOT_FOUND' });
             const snapshot = state.marketing.campaigns;
             state.marketing.campaigns = [campaign, ...snapshot.filter(item => item.id !== campaign.id)];
-            const advanced = await marketingCreativeCycle(state, { env });
+            const advanced = await marketingCreativeCycle(state, { env, persist: () => store.save(auth.session.workspaceId, state) });
             addAudit(state, { type: 'marketing_creatives_advanced', actor: auth.user.id, detail: { campaignId: campaign.id, advanced: advanced.advanced, statuses: campaign.creativeRequests?.map(item => [item.provider, item.status]) || [] } });
             return campaign;
           });

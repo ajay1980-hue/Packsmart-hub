@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { deriveOperations } from './operations.mjs';
 import { advanceCampaignCreatives, testMarketingProvider } from './marketing-providers.mjs';
+import { canvaOAuthReady, readCanvaCredentials, refreshCanvaCredentials } from './marketing-oauth.mjs';
 import { decryptCredentials, encryptCredentials } from './security.mjs';
 
 export const MARKETING_MODES = Object.freeze({
@@ -186,6 +187,7 @@ export function marketingPlannerCycle(state, options = {}) {
 
 function storedProviderCredentials(state, provider, env = process.env) {
   const record = ensureMarketing(state).providers?.[provider];
+  if (record?.status === 'disconnected') return {};
   if (!record?.encryptedCredentials) return {};
   try { return decryptCredentials(record.encryptedCredentials, env.CREDENTIALS_KEY); }
   catch { return {}; }
@@ -194,11 +196,13 @@ function storedProviderCredentials(state, provider, env = process.env) {
 export function marketingRuntimeEnv(state, env = process.env) {
   const canva = storedProviderCredentials(state, 'canva', env);
   const runway = storedProviderCredentials(state, 'runway', env);
+  const fallback = state.workspace?.id === String(env.MARKETING_ENV_WORKSPACE_ID || 'packsmart-solutions');
+  const records = state.marketing.providers;
   return {
     ...env,
-    CANVA_ACCESS_TOKEN: canva.accessToken || env.CANVA_ACCESS_TOKEN,
-    CANVA_BRAND_TEMPLATE_ID: canva.brandTemplateId || env.CANVA_BRAND_TEMPLATE_ID,
-    RUNWAY_API_KEY: runway.apiKey || env.RUNWAY_API_KEY
+    CANVA_ACCESS_TOKEN: records.canva?.status === 'disconnected' ? undefined : canva.accessToken || (fallback ? env.CANVA_ACCESS_TOKEN : undefined),
+    CANVA_BRAND_TEMPLATE_ID: records.canva?.status === 'disconnected' ? undefined : canva.brandTemplateId || (fallback ? env.CANVA_BRAND_TEMPLATE_ID : undefined),
+    RUNWAY_API_KEY: records.runway?.status === 'disconnected' ? undefined : runway.apiKey || (fallback ? env.RUNWAY_API_KEY : undefined)
   };
 }
 
@@ -212,7 +216,7 @@ export function saveMarketingProvider(state, provider, credentials, env = proces
     const brandTemplateId = clean(credentials?.brandTemplateId, 200);
     if (accessToken.length < 20 || accessToken.length > 8192 || /[\r\n]/.test(accessToken)) throw Object.assign(new Error('Enter a valid Canva access token'), { status: 400, code: 'CANVA_TOKEN_INVALID' });
     if (!brandTemplateId) throw Object.assign(new Error('Choose a Canva Brand Template before connecting'), { status: 400, code: 'CANVA_TEMPLATE_REQUIRED' });
-    cleanCredentials = { accessToken, brandTemplateId };
+    cleanCredentials = { ...storedProviderCredentials(state, 'canva', env), accessToken, brandTemplateId, mode: 'manual', refreshToken: null, expiresAt: null };
   } else {
     const apiKey = String(credentials?.apiKey || '').trim();
     if (apiKey.length < 20 || apiKey.length > 8192 || /[\r\n]/.test(apiKey)) throw Object.assign(new Error('Enter a valid Runway API key'), { status: 400, code: 'RUNWAY_KEY_INVALID' });
@@ -226,44 +230,86 @@ export function saveMarketingProvider(state, provider, credentials, env = proces
     configuredAt: previous.configuredAt || nowIso(),
     updatedAt: nowIso(),
     updatedBy: actor,
-    lastTestAt: previous.lastTestAt || null,
-    lastTestStatus: previous.lastTestStatus || null,
+    lastTestAt: null,
+    lastTestStatus: null,
     lastError: null
   };
   return marketing.providers[provider];
 }
 
-export function disconnectMarketingProvider(state, provider, actor = 'system') {
+export function disconnectMarketingProvider(state, provider, actor = 'system', env = process.env) {
   const marketing = ensureMarketing(state);
   if (!['canva','runway'].includes(provider)) throw Object.assign(new Error('Unsupported marketing provider'), { status: 404, code: 'MARKETING_PROVIDER_UNKNOWN' });
   const previous = marketing.providers?.[provider] || {};
-  marketing.providers[provider] = { status: 'disconnected', configuredAt: previous.configuredAt || null, updatedAt: nowIso(), updatedBy: actor, lastTestAt: previous.lastTestAt || null, lastTestStatus: 'disconnected', lastError: null };
+  const old = provider === 'canva' ? storedProviderCredentials(state, 'canva', env) : {};
+  const application = old.clientId && old.clientSecret ? encryptCredentials({ clientId: old.clientId, clientSecret: old.clientSecret, brandTemplateId: old.brandTemplateId }, env.CREDENTIALS_KEY) : null;
+  marketing.providers[provider] = { encryptedCredentials: application, status: 'disconnected', configuredAt: previous.configuredAt || null, updatedAt: nowIso(), updatedBy: actor, lastTestAt: previous.lastTestAt || null, lastTestStatus: 'disconnected', lastError: null };
   return marketing.providers[provider];
 }
 
-export async function testStoredMarketingProvider(state, provider, env = process.env) {
+export async function testStoredMarketingProvider(state, provider, env = process.env, options = {}) {
+  const marketing = ensureMarketing(state);
+  const record = marketing.providers[provider] ||= {};
+  try {
+    if (record.status === 'disconnected') throw Object.assign(new Error('Reconnect this provider first.'), { code: 'PROVIDER_DISCONNECTED' });
+    if (provider === 'canva') await refreshCanvaCredentials(state, env, options);
+    const result = await testMarketingProvider(provider, marketingRuntimeEnv(state, env));
+    Object.assign(record, { status: result.limitation ? 'degraded' : 'connected', lastTestAt: nowIso(), lastTestStatus: 'passed', lastError: null, health: result });
+    return result;
+  } catch (error) {
+    const code = /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'PROVIDER_REQUEST_FAILED';
+    const status = /HTTP_5|HTTP_429|TIMEOUT|UNAVAILABLE|REQUEST_FAILED/.test(code) ? 'degraded' : 'action_required';
+    Object.assign(record, { status, lastTestAt: nowIso(), lastTestStatus: 'failed', lastError: code });
+    return { ok: false, provider, code, error: status === 'degraded' ? 'Provider is temporarily unavailable. Test again later.' : 'Provider setup requires attention. Reconnect or check the template and API permissions.' };
+  }
+}
+
+export async function saveCanvaTemplate(state, brandTemplateId, env, options = {}) {
+  ensureMarketing(state);
+  await refreshCanvaCredentials(state, env, options);
+  const old = readCanvaCredentials(state, env);
+  const template = clean(brandTemplateId, 200);
+  if (!template) throw Object.assign(new Error('Choose a Brand Template.'), { code: 'CANVA_TEMPLATE_REQUIRED', status: 400 });
   const runtime = marketingRuntimeEnv(state, env);
-  const result = await testMarketingProvider(provider, runtime);
-  const record = ensureMarketing(state).providers?.[provider] || {};
-  Object.assign(record, { status: result.ok ? 'connected' : 'action_required', lastTestAt: nowIso(), lastTestStatus: result.ok ? 'passed' : 'failed', lastError: result.ok ? null : result.code || 'PROVIDER_TEST_FAILED' });
-  ensureMarketing(state).providers[provider] = record;
+  const result = await testMarketingProvider('canva', { ...runtime, CANVA_BRAND_TEMPLATE_ID: template });
+  const record = state.marketing.providers.canva ||= {};
+  record.encryptedCredentials = encryptCredentials({ ...old, brandTemplateId: template }, env.CREDENTIALS_KEY);
+  Object.assign(record, { status: 'connected', health: result, lastTestAt: nowIso(), lastTestStatus: 'passed', lastError: null });
   return result;
 }
 
-export async function marketingCreativeCycle(state, { env = process.env } = {}) {
+export async function marketingCreativeCycle(state, { env = process.env, persist = async () => {} } = {}) {
   const marketing = ensureMarketing(state);
   if (!marketing.settings.enabled || !marketing.settings.autoCreative) return { advanced: 0, campaign: null, reason: 'AUTO_CREATIVE_OFF' };
+  try {
+    if (marketing.providers.canva?.encryptedCredentials && marketing.providers.canva.status !== 'disconnected') await refreshCanvaCredentials(state, env, { persist });
+  } catch (error) {
+    Object.assign(marketing.providers.canva, { status: /UNAVAILABLE/.test(error.code || '') ? 'degraded' : 'action_required', lastError: error.code || 'CANVA_AUTH_REQUIRED', lastTestStatus: 'failed' });
+  }
   const runtimeEnv = marketingRuntimeEnv(state, env);
+  for (const provider of ['canva', 'runway']) {
+    const configured = provider === 'canva' ? runtimeEnv.CANVA_ACCESS_TOKEN && runtimeEnv.CANVA_BRAND_TEMPLATE_ID : runtimeEnv.RUNWAY_API_KEY;
+    const record = marketing.providers[provider];
+    if (configured && record?.status !== 'disconnected' && (!record?.lastTestAt || Date.parse(record.lastTestAt) < Date.now() - 3600000)) await testStoredMarketingProvider(state, provider, env, { persist });
+  }
   const providers = marketingProviderStatus(state, env);
+  const available = request => providers[request.provider]?.configured && !['action_required', 'disconnected'].includes(providers[request.provider]?.status) && !(request.provider === 'runway' && request.status === 'pending' && marketing.providers.runway?.health?.canSubmit === false);
   const campaign = marketing.campaigns.find(item =>
     ['draft', 'creative_generation', 'creative_attention'].includes(item.status) &&
     (item.creativeRequests || []).some(request =>
-      request.status === 'in_progress' ||
-      (request.status === 'pending' && providers[request.provider]?.configured)
+      (request.status === 'in_progress' || request.status === 'pending') && available(request)
     )
   );
   if (!campaign) return { advanced: 0, campaign: null, reason: 'NO_CREATIVE_WORK' };
+  const deferred = (campaign.creativeRequests || []).filter(request => !available(request));
+  campaign.creativeRequests = campaign.creativeRequests.filter(request => !deferred.includes(request));
   await advanceCampaignCreatives(campaign, runtimeEnv);
+  campaign.creativeRequests.push(...deferred);
+  if (campaign.creativeRequests.some(request => request.status !== 'complete') && campaign.status === 'prepared') campaign.status = 'draft';
+  for (const request of campaign.creativeRequests.filter(item => item.status === 'failed')) {
+    const record = marketing.providers[request.provider];
+    if (record) Object.assign(record, { status: /HTTP_401|HTTP_403|AUTH|TOKEN/.test(request.errorCode || '') ? 'action_required' : 'degraded', lastError: request.errorCode || 'CREATIVE_FAILED' });
+  }
   marketing.lastCreativeRunAt = nowIso();
   return { advanced: 1, campaign, reason: null };
 }
@@ -273,20 +319,32 @@ export function marketingProviderStatus(state = {}, env = process.env) {
   const records = ensureMarketing(state).providers || {};
   const canvaConfigured = Boolean(runtime.CANVA_ACCESS_TOKEN && runtime.CANVA_BRAND_TEMPLATE_ID);
   const runwayConfigured = Boolean(runtime.RUNWAY_API_KEY);
+  const statusFor = (provider, configured) => {
+    const record = records[provider] || {};
+    if (record.status === 'disconnected') return 'disconnected';
+    if (['action_required', 'degraded'].includes(record.status)) return record.status;
+    if (!configured) return 'not_configured';
+    if (record.lastTestStatus !== 'passed') return 'configured';
+    return Date.parse(record.lastTestAt) < Date.now() - 24 * 60 * 60 * 1000 ? 'degraded' : 'connected';
+  };
+  const credentials = storedProviderCredentials(state, 'canva', env);
+  const canvaStatus = credentials.expiresAt && credentials.expiresAt <= Date.now() && !credentials.refreshToken ? 'action_required' : statusFor('canva', canvaConfigured);
   return {
     canva: {
-      id: 'canva', name: 'Canva', planTarget: 'Pro', configured: canvaConfigured,
-      status: canvaConfigured ? (records.canva?.lastTestStatus === 'failed' ? 'action_required' : records.canva?.lastTestStatus === 'passed' ? 'connected' : 'configured') : 'not_configured',
+      id: 'canva', name: 'Canva', planTarget: 'Pro', configured: canvaConfigured, status: canvaStatus,
       source: records.canva?.encryptedCredentials ? 'workspace' : canvaConfigured ? 'environment' : null,
       needs: ['accessToken', 'brandTemplateId'].filter(key => key === 'accessToken' ? !runtime.CANVA_ACCESS_TOKEN : !runtime.CANVA_BRAND_TEMPLATE_ID),
-      capability: 'Brand-template creative generation', lastTestAt: records.canva?.lastTestAt || null, lastError: records.canva?.lastError || null
+      capability: 'Brand-template creative generation', lastTestAt: records.canva?.lastTestAt || null, lastError: records.canva?.lastError || null,
+      oauthReady: canvaOAuthReady(state, env), tokenMode: credentials.mode || 'manual', refreshSupported: Boolean(credentials.refreshToken), expiresAt: credentials.expiresAt || null, lastRefreshAt: records.canva?.lastRefreshAt || null,
+      brandTemplateId: runtime.CANVA_BRAND_TEMPLATE_ID || null,
+      recovery: canvaStatus === 'connected' ? null : 'Sign into Canva, choose an autofill Brand Template, then test the connection.'
     },
     runway: {
-      id: 'runway', name: 'Runway', planTarget: 'Pro', configured: runwayConfigured,
-      status: runwayConfigured ? (records.runway?.lastTestStatus === 'failed' ? 'action_required' : records.runway?.lastTestStatus === 'passed' ? 'connected' : 'configured') : 'not_configured',
+      id: 'runway', name: 'Runway', planTarget: 'Developer API', configured: runwayConfigured, status: statusFor('runway', runwayConfigured),
       source: records.runway?.encryptedCredentials ? 'workspace' : runwayConfigured ? 'environment' : null,
-      needs: runtime.RUNWAY_API_KEY ? [] : ['apiKey'],
-      capability: 'Product video generation', lastTestAt: records.runway?.lastTestAt || null, lastError: records.runway?.lastError || null
+      needs: runwayConfigured ? [] : ['apiKey'], capability: 'Product video generation', lastTestAt: records.runway?.lastTestAt || null, lastError: records.runway?.lastError || null,
+      creditBalance: records.runway?.health?.creditBalance ?? null, canSubmit: records.runway?.health?.canSubmit ?? false,
+      recovery: records.runway?.health?.limitation === 'RUNWAY_API_CREDITS_REQUIRED' ? 'The API project needs credits. Runway Pro credits are separate. Runvara will not buy credits.' : records.runway?.health?.limitation === 'RUNWAY_PRODUCT_AD_UNAVAILABLE' ? 'Enable product-ad generation in the Runway API project.' : null
     }
   };
 }
