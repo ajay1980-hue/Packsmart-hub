@@ -51,12 +51,12 @@ import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdm
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 import { intelligentConnections, providerReadiness, doctorNotifications, recommendations } from './lib/connection-intelligence.mjs';
 import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
-import { draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, updateMarketingSettings } from './lib/marketing.mjs';
+import { disconnectMarketingProvider, draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, saveMarketingProvider, testStoredMarketingProvider, updateMarketingSettings } from './lib/marketing.mjs';
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
-const VERSION = '6.14.0';
+const VERSION = '6.15.0';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
@@ -1357,6 +1357,42 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           });
           send(res, 200, { settings });
           return;
+        }
+
+        const marketingProviderMatch = pathname.match(/^\/api\/marketing\/providers\/(canva|runway)$/);
+        if (marketingProviderMatch && req.method === 'PUT') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const provider = marketingProviderMatch[1];
+          const result = await mutate(auth, async state => {
+            saveMarketingProvider(state, provider, body, env, auth.user.id);
+            const tested = await testStoredMarketingProvider(state, provider, env);
+            addAudit(state, { type: 'marketing_provider_connected', actor: auth.user.id, detail: { provider, status: tested.ok ? 'connected' : 'action_required' } });
+            return tested;
+          });
+          send(res, 200, { result }); return;
+        }
+
+        const marketingProviderTestMatch = pathname.match(/^\/api\/marketing\/providers\/(canva|runway)\/test$/);
+        if (marketingProviderTestMatch && req.method === 'POST') {
+          requireOwner(auth);
+          const provider = marketingProviderTestMatch[1];
+          const result = await mutate(auth, async state => {
+            const tested = await testStoredMarketingProvider(state, provider, env);
+            addAudit(state, { type: 'marketing_provider_tested', actor: auth.user.id, detail: { provider, status: tested.ok ? 'connected' : 'action_required' } });
+            return tested;
+          });
+          send(res, 200, { result }); return;
+        }
+
+        if (marketingProviderMatch && req.method === 'DELETE') {
+          requireOwner(auth);
+          const provider = marketingProviderMatch[1];
+          await mutate(auth, async state => {
+            disconnectMarketingProvider(state, provider, auth.user.id);
+            addAudit(state, { type: 'marketing_provider_disconnected', actor: auth.user.id, detail: { provider } });
+          });
+          send(res, 200, { ok: true }); return;
         }
 
         if (req.method === 'POST' && pathname === '/api/marketing/campaigns') {
