@@ -113,6 +113,26 @@ function designIdFromResult(result = {}) {
   return match ? match[1] : null;
 }
 
+export async function testMarketingProvider(provider, env = process.env) {
+  if (provider === 'canva') {
+    if (!env.CANVA_ACCESS_TOKEN || !env.CANVA_BRAND_TEMPLATE_ID) throw providerError('canva', 'Canva access token and Brand Template are required.', 'CANVA_NOT_CONFIGURED', 409);
+    const payload = await jsonRequest(`${CANVA_BASE}/brand-templates/${encodeURIComponent(env.CANVA_BRAND_TEMPLATE_ID)}/dataset`, { headers: canvaHeaders(env) }, { provider: 'canva' });
+    return { ok: true, provider: 'canva', capability: 'brand_template_autofill', fieldCount: Object.keys(payload.dataset || {}).length };
+  }
+  if (provider === 'runway') {
+    if (!env.RUNWAY_API_KEY) throw providerError('runway', 'Runway developer API key is required.', 'RUNWAY_NOT_CONFIGURED', 409);
+    // A deliberately nonexistent task verifies API-key authentication without spending credits or creating media.
+    try {
+      await jsonRequest(`${RUNWAY_BASE}/tasks/00000000-0000-0000-0000-000000000000`, { headers: runwayHeaders(env) }, { provider: 'runway', timeoutMs: 15000 });
+      return { ok: true, provider: 'runway', capability: 'video_generation' };
+    } catch (error) {
+      if (['RUNWAY_HTTP_400','RUNWAY_HTTP_404','RUNWAY_HTTP_422'].includes(error.code)) return { ok: true, provider: 'runway', capability: 'video_generation' };
+      throw error;
+    }
+  }
+  throw providerError(provider, 'Unsupported marketing provider.', 'MARKETING_PROVIDER_UNKNOWN', 404);
+}
+
 export async function startCanvaCreative(campaign, env = process.env) {
   if (!env.CANVA_ACCESS_TOKEN || !env.CANVA_BRAND_TEMPLATE_ID) throw providerError('canva', 'Canva API credentials or brand template are not configured.', 'CANVA_NOT_CONFIGURED', 409);
   if (!campaign.product?.image) throw providerError('canva', 'Campaign has no product image.', 'CANVA_PRODUCT_IMAGE_REQUIRED', 422);
