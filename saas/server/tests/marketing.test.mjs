@@ -78,7 +78,7 @@ test('paid advertising cannot be enabled by Marketing Autopilot', () => {
 });
 
 test('provider readiness is based on Runvara server credentials, not ChatGPT connections', () => {
-  const status = marketingProviderStatus({ CANVA_ACCESS_TOKEN: 'x', CANVA_BRAND_TEMPLATE_ID: 'y', RUNWAY_API_KEY: 'z' });
+  const status = marketingProviderStatus(stateWithProduct(), { CANVA_ACCESS_TOKEN: 'x', CANVA_BRAND_TEMPLATE_ID: 'y', RUNWAY_API_KEY: 'z' });
   assert.equal(status.canva.configured, true);
   assert.equal(status.runway.configured, true);
 });
