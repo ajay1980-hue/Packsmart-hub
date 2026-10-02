@@ -559,8 +559,16 @@
     const campaigns = marketing.campaigns || [];
     $('#marketing-pending-count').textContent = String(marketing.pendingCampaigns || 0);
     $('#marketing-last-run').textContent = marketing.lastPlannerRunAt ? 'Planner last ran ' + date(marketing.lastPlannerRunAt) : 'Planner has not run yet';
-    $('#marketing-provider-chips').innerHTML = Object.values(providers).map(provider => '<span class="tag ' + (provider.configured ? 'good' : 'warn') + '">' + escapeHtml(provider.name) + ' · ' + (provider.configured ? 'Runvara ready' : 'API setup required') + '</span>').join('');
-    $('#marketing-provider-list').innerHTML = Object.values(providers).map(provider => '<div class="control-row"><div><b>' + escapeHtml(provider.name + ' ' + provider.planTarget) + '</b><small>' + escapeHtml(provider.capability) + '</small></div><div><span class="tag ' + (provider.configured ? 'good' : 'warn') + '">' + (provider.configured ? 'Configured' : 'Needs API setup') + '</span>' + (!provider.configured && provider.needs?.length ? '<small>' + escapeHtml(provider.needs.join(' · ')) + '</small>' : '') + '</div></div>').join('');
+    $('#marketing-provider-chips').innerHTML = Object.values(providers).map(provider => '<span class="tag ' + (provider.status === 'connected' ? 'good' : 'warn') + '">' + escapeHtml(provider.name) + ' · ' + escapeHtml(provider.status === 'connected' ? 'Connected' : provider.configured ? 'Configured · test required' : 'API setup required') + '</span>').join('');
+    $('#marketing-provider-list').innerHTML = Object.values(providers).map(provider => {
+      const ready = provider.status === 'connected';
+      const stateLabel = ready ? 'Connected' : provider.status === 'action_required' ? 'Action required' : provider.configured ? 'Configured' : 'Not configured';
+      const actions = provider.configured ? '<div class="button-row"><button class="secondary small-button" data-marketing-provider-test="' + escapeHtml(provider.id) + '">Test</button>' + (provider.source === 'workspace' ? '<button class="secondary small-button danger" data-marketing-provider-disconnect="' + escapeHtml(provider.id) + '">Disconnect</button>' : '') + '</div>' : '<button class="secondary small-button" data-marketing-provider-open="' + escapeHtml(provider.id) + '">Connect</button>';
+      const detail = provider.lastTestAt ? 'Last tested ' + date(provider.lastTestAt) : provider.source === 'environment' ? 'Server configuration' : 'No connection test recorded';
+      return '<div class="control-row"><div><b>' + escapeHtml(provider.name + ' ' + provider.planTarget) + '</b><small>' + escapeHtml(provider.capability) + '</small><small>' + escapeHtml(detail) + '</small></div><div><span class="tag ' + (ready ? 'good' : 'warn') + '">' + escapeHtml(stateLabel) + '</span>' + actions + '</div></div>';
+    }).join('');
+    $('#marketing-canva-setup')?.classList.toggle('hidden', providers.canva?.status === 'connected');
+    $('#marketing-runway-setup')?.classList.toggle('hidden', providers.runway?.status === 'connected');
     const form = $('#marketing-settings-form');
     $('#marketing-mode').innerHTML = modes.map(mode => '<option value="' + escapeHtml(mode.id) + '"' + (mode.id === settings.mode ? ' selected' : '') + '>' + escapeHtml(mode.name) + '</option>').join('');
     form.elements.dailyOrganicLimit.value = settings.dailyOrganicLimit ?? 2;
@@ -942,6 +950,43 @@
     const save = event.target.closest('.save-economics'); if (save) saveEconomics(save);
   });
   $('#order-list').addEventListener('click', event => { const save = event.target.closest('.save-order-costs'); if (save) { event.preventDefault(); saveOrderCosts(save); } });
+
+  $('#marketing-provider-list').addEventListener('click', async event => {
+    const open = event.target.closest('[data-marketing-provider-open]');
+    if (open) {
+      const details = $('#marketing-' + open.dataset.marketingProviderOpen + '-setup');
+      details?.classList.remove('hidden'); if (details) details.open = true;
+      details?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); return;
+    }
+    const test = event.target.closest('[data-marketing-provider-test]');
+    if (test) {
+      setBusy(test, true, 'Testing…');
+      try { await request('/api/marketing/providers/' + encodeURIComponent(test.dataset.marketingProviderTest) + '/test', { method:'POST', body:'{}' }); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage('Provider connection verified.'); }
+      catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(test, false); }
+      return;
+    }
+    const disconnect = event.target.closest('[data-marketing-provider-disconnect]');
+    if (disconnect) {
+      if (!window.confirm('Disconnect this creative provider from Runvara? Existing campaign history will be kept.')) return;
+      setBusy(disconnect, true, 'Disconnecting…');
+      try { await request('/api/marketing/providers/' + encodeURIComponent(disconnect.dataset.marketingProviderDisconnect), { method:'DELETE' }); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage('Creative provider disconnected.'); }
+      catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(disconnect, false); }
+    }
+  });
+
+  $('[data-marketing-provider-form]').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const provider = form.dataset.marketingProviderForm, button = form.querySelector('button[type="submit"]');
+    const payload = Object.fromEntries(new FormData(form));
+    setBusy(button, true, 'Connecting…');
+    try {
+      await request('/api/marketing/providers/' + encodeURIComponent(provider), { method:'PUT', body:JSON.stringify(payload) });
+      form.reset(); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage((provider === 'canva' ? 'Canva' : 'Runway') + ' connected to Runvara.');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }));
 
   $('#marketing-settings-form').addEventListener('submit', async event => {
     event.preventDefault();
