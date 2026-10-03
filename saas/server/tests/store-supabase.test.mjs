@@ -108,6 +108,16 @@ test('Supabase persistence mirrors every production table and restores lossless 
     executionStatus: 'not_connected'
   }];
   state.dailyBriefs = [{ id: 'brief_test', summary: 'Test brief', logic: 'deterministic-v1', generatedAt: now }];
+  state.revenueEngine = {
+    intentEvents: [{ id: 'intent_test', type: 'checkout_started', sessionId: 'session_test', createdAt: now }],
+    leads: [{ id: 'lead_test', company: 'Test trade customer', stage: 'quote' }],
+    quotes: [{ id: 'quote_test', leadId: 'lead_test', status: 'draft', customerFacing: false, lines: [{ sku: 'PS-TEST-11', quantity: 10, unitPrice: 12.5 }] }],
+    experiments: [{ id: 'experiment_test', status: 'draft' }],
+    referrals: [{ id: 'referral_test', customerId: 'hashed_test' }],
+    loyaltyRules: [{ id: 'loyalty_test', approvalRequired: true }],
+    attributionTouches: [{ id: 'touch_test', orderId: 'gid://shopify/Order/22', kind: 'utm_source', value: 'google' }],
+    updatedAt: now
+  };
 
   await store.save(state.workspace.id, state);
   const writtenTables = new Set(calls.filter(call => call.method === 'POST').map(call => call.url.pathname.split('/').pop()));
@@ -125,6 +135,7 @@ test('Supabase persistence mirrors every production table and restores lossless 
   assert.equal(restored.storageReady, true);
   assert.equal(restored.economics['PS-TEST-11'].landed, 4);
   assert.equal(restored.approvals[0].executedExternally, false);
+  assert.deepEqual(restored.revenueEngine, state.revenueEngine, 'Revenue Engine evidence is retained losslessly in authoritative Supabase workspace state');
   const found = await store.findUserByEmail('SALES@PACKSMARTSOLUTIONS.COM');
   assert.equal(found.workspaceId, 'packsmart-solutions');
   assert.equal(await store.ping(), true);

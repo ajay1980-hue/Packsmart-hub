@@ -606,8 +606,16 @@
     const campaigns = marketing.campaigns || [];
     $('#marketing-pending-count').textContent = String(marketing.pendingCampaigns || 0);
     $('#marketing-last-run').textContent = marketing.lastPlannerRunAt ? 'Planner last ran ' + date(marketing.lastPlannerRunAt) : 'Planner has not run yet';
-    $('#marketing-provider-chips').innerHTML = Object.values(providers).map(provider => '<span class="tag ' + (provider.configured ? 'good' : 'warn') + '">' + escapeHtml(provider.name) + ' · ' + (provider.configured ? 'Runvara ready' : 'API setup required') + '</span>').join('');
-    $('#marketing-provider-list').innerHTML = Object.values(providers).map(provider => '<div class="control-row"><div><b>' + escapeHtml(provider.name + ' ' + provider.planTarget) + '</b><small>' + escapeHtml(provider.capability) + '</small></div><div><span class="tag ' + (provider.configured ? 'good' : 'warn') + '">' + (provider.configured ? 'Configured' : 'Needs API setup') + '</span>' + (!provider.configured && provider.needs?.length ? '<small>' + escapeHtml(provider.needs.join(' · ')) + '</small>' : '') + '</div></div>').join('');
+    $('#marketing-provider-chips').innerHTML = Object.values(providers).map(provider => '<span class="tag ' + (provider.status === 'connected' ? 'good' : 'warn') + '">' + escapeHtml(provider.name) + ' · ' + escapeHtml(({connected:'Connected',degraded:'Degraded',action_required:'Action required',disconnected:'Disconnected',configured:'Test required'})[provider.status] || 'API setup required') + '</span>').join('');
+    $('#marketing-provider-list').innerHTML = Object.values(providers).map(provider => {
+      const ready = provider.status === 'connected';
+      const stateLabel = ready ? 'Connected' : ({action_required:'Action required',degraded:'Degraded',disconnected:'Disconnected',configured:'Configured'})[provider.status] || 'Not configured';
+      const actions = '<div class="button-row">' + (provider.configured ? '<button class="secondary small-button" data-marketing-provider-test="' + escapeHtml(provider.id) + '">Test</button>' : '') + '<button class="secondary small-button" data-marketing-provider-open="' + escapeHtml(provider.id) + '">' + (provider.id === 'canva' ? 'Setup / reconnect' : 'Update key') + '</button>' + (provider.id === 'canva' && provider.refreshSupported ? '<button class="secondary small-button" data-marketing-provider-refresh="canva">Refresh access</button>' : '') + (provider.source ? '<button class="secondary small-button danger" data-marketing-provider-disconnect="' + escapeHtml(provider.id) + '">Disconnect</button>' : '') + '</div>';
+      const detail = provider.lastTestAt ? 'Last tested ' + date(provider.lastTestAt) : provider.source === 'environment' ? 'Server configuration' : 'No connection test recorded';
+      return '<div class="control-row"><div><b>' + escapeHtml(provider.name + ' ' + provider.planTarget) + '</b><small>' + escapeHtml(provider.capability) + '</small><small>' + escapeHtml(detail) + '</small>' + (provider.recovery ? '<small>' + escapeHtml(provider.recovery) + '</small>' : '') + (provider.id === 'canva' && provider.refreshSupported ? '<small>Automatic token refresh enabled</small>' : '') + '</div><div><span class="tag ' + (ready ? 'good' : 'warn') + '">' + escapeHtml(stateLabel) + '</span>' + actions + '</div></div>';
+    }).join('');
+    $('#marketing-canva-setup')?.classList.toggle('hidden', providers.canva?.status === 'connected');
+    $('#marketing-runway-setup')?.classList.toggle('hidden', providers.runway?.status === 'connected');
     const form = $('#marketing-settings-form');
     $('#marketing-mode').innerHTML = modes.map(mode => '<option value="' + escapeHtml(mode.id) + '"' + (mode.id === settings.mode ? ' selected' : '') + '>' + escapeHtml(mode.name) + '</option>').join('');
     form.elements.dailyOrganicLimit.value = settings.dailyOrganicLimit ?? 2;
@@ -990,6 +998,85 @@
   });
   $('#order-list').addEventListener('click', event => { const save = event.target.closest('.save-order-costs'); if (save) { event.preventDefault(); saveOrderCosts(save); } });
 
+  $('#marketing-provider-list').addEventListener('click', async event => {
+    const open = event.target.closest('[data-marketing-provider-open]');
+    if (open) {
+      const details = $('#marketing-' + open.dataset.marketingProviderOpen + '-setup');
+      details?.classList.remove('hidden'); if (details) details.open = true;
+      details?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); return;
+    }
+    const test = event.target.closest('[data-marketing-provider-test]');
+    if (test) {
+      setBusy(test, true, 'Testing…');
+      try { const payload = await request('/api/marketing/providers/' + encodeURIComponent(test.dataset.marketingProviderTest) + '/test', { method:'POST', body:'{}' }); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage(payload.result?.limitation ? 'Authentication verified. The API project requires attention before generation.' : 'Provider connection verified.'); }
+      catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(test, false); }
+      return;
+    }
+    const refresh = event.target.closest('[data-marketing-provider-refresh]');
+    if (refresh) {
+      setBusy(refresh, true, 'Refreshing…');
+      try { await request('/api/marketing/providers/canva/refresh', { method:'POST', body:'{}' }); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage('Canva access renewed and tested.'); }
+      catch (error) { await loadBootstrap({ migrate:false }); showMessage(error.message, 'error'); }
+      finally { setBusy(refresh, false); }
+      return;
+    }
+    const disconnect = event.target.closest('[data-marketing-provider-disconnect]');
+    if (disconnect) {
+      if (!window.confirm('Disconnect this creative provider from Runvara? Existing campaign history will be kept.')) return;
+      setBusy(disconnect, true, 'Disconnecting…');
+      try { await request('/api/marketing/providers/' + encodeURIComponent(disconnect.dataset.marketingProviderDisconnect), { method:'DELETE' }); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage('Creative provider disconnected.'); }
+      catch (error) { showMessage(error.message, 'error'); }
+      finally { setBusy(disconnect, false); }
+    }
+  });
+
+  $('#marketing-canva-oauth').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    setBusy(button, true, 'Opening Canva…');
+    try { const payload = await request('/api/marketing/providers/canva/oauth/start', { method:'POST', body:'{}' }); window.location.assign(payload.authorizationUrl); }
+    catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
+  });
+  $('#marketing-canva-application').addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget, button = form.querySelector('button[type="submit"]');
+    setBusy(button, true, 'Saving…');
+    try { await request('/api/marketing/providers/canva/application', { method:'PUT', body:JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); await loadBootstrap({ migrate:false }); showMessage('Application saved securely. Sign in with Canva next.'); }
+    catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
+  let canvaContinuation = '';
+  $('#marketing-canva-discover').addEventListener('click', async event => {
+    const button = event.currentTarget; setBusy(button, true, 'Loading…');
+    try {
+      const payload = await request('/api/marketing/providers/canva/templates' + (canvaContinuation ? '?continuation=' + encodeURIComponent(canvaContinuation) : ''));
+      const select = $('#marketing-canva-templates');
+      if (!canvaContinuation) select.innerHTML = '<option value="">Choose an autofill Brand Template</option>';
+      select.insertAdjacentHTML('beforeend', (payload.items || []).map(item => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title) + '</option>').join(''));
+      canvaContinuation = payload.continuation || '';
+      showMessage(payload.items?.length ? 'Choose your Packsmart template and use & test it.' : 'No autofill Brand Templates were found. Create and tag a template in Canva first.');
+    } catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); button.textContent = canvaContinuation ? 'Load more Brand Templates' : 'Load Brand Templates'; }
+  });
+  $('#marketing-canva-template').addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget, button = form.querySelector('button[type="submit"]');
+    setBusy(button, true, 'Testing…');
+    try { await request('/api/marketing/providers/canva/template', { method:'PUT', body:JSON.stringify(Object.fromEntries(new FormData(form))) }); await loadBootstrap({ migrate:false }); showMessage('Canva Brand Template verified and connected.'); }
+    catch (error) { showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  });
+
+  $$('[data-marketing-provider-form]').forEach(form => form.addEventListener('submit', async event => {
+    event.preventDefault();
+    const provider = form.dataset.marketingProviderForm, button = form.querySelector('button[type="submit"]');
+    const payload = Object.fromEntries(new FormData(form));
+    setBusy(button, true, 'Connecting…');
+    try {
+      await request('/api/marketing/providers/' + encodeURIComponent(provider), { method:'PUT', body:JSON.stringify(payload) });
+      form.reset(); await loadBootstrap({ migrate:false }); setView('marketing'); showMessage(state.data.marketing?.providers?.[provider]?.status === 'connected' ? 'Creative provider connected.' : 'API credentials verified. Review the provider recovery message.');
+    } catch (error) { form.reset(); await loadBootstrap({ migrate:false }); showMessage(error.message, 'error'); }
+    finally { setBusy(button, false); }
+  }));
+
   $('#marketing-settings-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -1250,6 +1337,11 @@
           if (state.data.connectionCentre?.some(item => item.id === channel)) window.RunvaraConnections?.open(channel);
           showMessage(outcome === 'connected' ? 'Connected successfully. Choose what to sync. Write permissions remain read-only.' : outcome === 'cancelled' ? 'Connection cancelled. Your existing connection was preserved.' : outcome === 'account-mismatch' ? 'A different account was selected. Your existing connection was preserved.' : 'Sign-in could not be completed. Open the channel and try reconnecting.', outcome === 'connected' ? undefined : 'error');
           connectionReturn.searchParams.delete('connection'); connectionReturn.searchParams.delete('channel'); window.history.replaceState(null, '', connectionReturn.pathname + connectionReturn.search);
+        }
+        if (connectionReturn.searchParams.has('canva')) {
+          setView('marketing');
+          showMessage(connectionReturn.searchParams.get('canva') === 'authorised' ? 'Canva sign-in complete. Load Brand Templates and choose the Packsmart template.' : 'Canva requires attention. Open setup and reconnect.', connectionReturn.searchParams.get('canva') === 'authorised' ? undefined : 'error');
+          connectionReturn.searchParams.delete('canva'); window.history.replaceState(null, '', connectionReturn.pathname + connectionReturn.search);
         }
         if (ebayReturnResult) setView('channels');
         if (ebayReturnResult === 'connected') showMessage('eBay connected read-only. Live writes remain disabled and the existing Manager was not changed.');
