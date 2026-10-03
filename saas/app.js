@@ -189,7 +189,7 @@
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', analytics: 'Analytics', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
+    const titles = { overview: 'Command Centre', 'revenue-engine': 'Revenue Engine', analytics: 'Analytics', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -204,7 +204,7 @@
   }
 
   const navigationHints = {
-    overview: 'Dashboard, daily brief and business performance', analytics: 'Revenue, profit, channel performance, attribution and marketing efficiency', issues: 'Exceptions, alerts and problems to review',
+    overview: 'Dashboard, daily brief and business performance', 'revenue-engine': 'Customers, retention, attribution, B2B sales, basket intelligence and growth plans', analytics: 'Revenue, profit, channel performance, attribution and marketing efficiency', issues: 'Exceptions, alerts and problems to review',
     'ai-team': 'Commander and specialist agents', marketing: 'Campaign planning, creatives and channel publishing controls', 'market-radar': 'Competitor, supplier and market web intelligence', profit: 'Products, inventory, stock and margins',
     orders: 'Sales, refunds and order profitability', suppliers: 'Supplier records and product costs',
     channels: 'Connection Centre, onboarding, Shopify, eBay and Meta', approvals: 'Review proposed actions and approval history',
@@ -317,6 +317,53 @@
     const running = (data.connectionCentre || []).filter(channel=>channel.progress);
     const records = [...(data.workRecords || [])].sort((a,b)=>String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0,4);
     $('#operations-stream').innerHTML = `<p class="stream-state">${ui.badge(running.length ? 'Sync in progress' : data.autopilot?.enabled ? 'Monitoring scheduled' : 'Monitoring paused',running.length ? 'good':'neutral')}<span>${escapeHtml(running.length ? running.map(channel=>channel.name).join(', ') : data.autopilot?.lastRunAt ? 'Last cycle '+date(data.autopilot.lastRunAt) : 'No monitoring cycle recorded')}</span></p><ol class="operation-timeline">${records.map(item=>{const status=ui.workState(item);return `<li><div class="section-head"><b>${escapeHtml(ui.workName(item,data))}</b>${ui.badge(status.text,status.tone)}</div><small>${escapeHtml(date(item.updatedAt))} · ${escapeHtml(statusLabel(item.source))}</small><p>${escapeHtml(ui.issueCopy(item.evidence?.find(entry=>entry.type==='monitor_failure')?.detail) || `${(item.evidence || []).length} supporting records`)}</p></li>`;}).join('') || '<li class="empty-state">Work appears here when a check or command records a result.</li>'}</ol><button class="text-button" data-view-link="ai-team">Give the Commander a task ↗</button>`;
+  }
+
+  function renderRevenueEngine() {
+    const re = state.data.revenueEngine || {};
+    const customers = re.customers || { summary:{}, customers:[], recommendations:[] };
+    const attribution = re.attribution || { coverage:{}, bySource:[] };
+    const sales = re.sales || { summary:{}, quotes:[] };
+    const intent = re.intent || { recoveries:[] };
+    const baskets = re.baskets || { pairs:[] };
+    const advertising = re.advertising || { summary:{} };
+    const growth = re.growthPlan || { opportunities:[] };
+    $('#re-customers').textContent = String(customers.summary.customers || 0);
+    $('#re-repeat').textContent = percent(customers.summary.repeatRate) + ' repeat rate';
+    $('#re-reorder').textContent = String(customers.summary.reorderDue || 0);
+    $('#re-churn').textContent = String(customers.summary.churnRisk || 0);
+    $('#re-pipeline').textContent = money(sales.summary.openPipeline);
+    $('#re-followups').textContent = String(sales.summary.overdueFollowUps || 0) + ' follow-ups due';
+    $('#re-attribution').textContent = percent(attribution.coverage.sourceCoveragePercent);
+    $('#re-intent').textContent = String(intent.recoveries?.length || 0);
+    $('#re-customer-summary').innerHTML = [
+      ['Known customer revenue', money(customers.summary.totalRevenue)],
+      ['Known contribution', money(customers.summary.knownContribution)],
+      ['Dormant customers', String(customers.summary.dormant || 0)],
+      ['Identity model', 'Hashed / channel-scoped']
+    ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
+    $('#re-customers-list').innerHTML = (customers.customers || []).slice(0,8).map(customer =>
+      '<div class="ranking-row"><div><b>'+escapeHtml(customer.privacyLabel)+'</b><small>'+escapeHtml(statusLabel(customer.segment))+' · '+customer.orderCount+' orders · last '+escapeHtml(String(customer.daysSinceLastOrder))+' days ago</small></div><strong>'+escapeHtml(money(customer.revenue))+'</strong></div>'
+    ).join('') || '<div class="empty-state">Customer intelligence appears when settled orders contain a privacy-safe customer identity.</div>';
+    $('#re-growth-plan').innerHTML = (growth.opportunities || []).map(item =>
+      '<div class="priority-item"><div><b>'+escapeHtml(item.title)+'</b><p>'+escapeHtml(item.evidence)+'</p><small>'+escapeHtml(statusLabel(item.confidence))+' confidence · '+(item.approvalRequired?'approval required':'read-only action')+'</small></div></div>'
+    ).join('') || '<div class="empty-state">No evidence-backed growth action is strong enough to recommend yet.</div>';
+    $('#re-attribution-list').innerHTML = [
+      ['Confirmed source coverage', percent(attribution.coverage.sourceCoveragePercent)],
+      ['Orders assessed', String(attribution.coverage.orders || 0)],
+      ['Source-attributed orders', String(attribution.coverage.sourceAttributedOrders || 0)]
+    ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('') + '<p class="muted tiny">'+escapeHtml(attribution.coverage.note || '')+'</p>';
+    $('#re-baskets').innerHTML = (baskets.pairs || []).slice(0,8).map(pair =>
+      '<div class="ranking-row"><div><b>'+escapeHtml(pair.a)+' + '+escapeHtml(pair.b)+'</b><small>'+pair.ordersTogether+' orders together</small></div><strong>'+escapeHtml(percent(pair.affinity))+'</strong></div>'
+    ).join('') || '<div class="empty-state">Repeated product pairs will appear as order history grows.</div>';
+    $('#re-sales').innerHTML = [
+      ['Leads', String(sales.summary.leads || 0)], ['Open quotes', String(sales.summary.openQuotes || 0)],
+      ['Open pipeline', money(sales.summary.openPipeline)], ['Quote conversion', percent(sales.summary.conversionPercent)]
+    ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
+    $('#re-advertising').innerHTML = [
+      ['Recorded spend', money(advertising.summary.spend)], ['Attributed revenue', money(advertising.summary.attributedRevenue)],
+      ['ROAS', advertising.summary.roas == null ? '—' : Number(advertising.summary.roas).toFixed(2)+'×'], ['Attribution coverage', percent(advertising.summary.attributionCoverage)]
+    ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
   }
 
   function renderAnalytics() {
@@ -821,7 +868,7 @@
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
-    renderOverview(); renderAnalytics(); renderAiTeam(); renderMarketing(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    renderOverview(); renderRevenueEngine(); renderAnalytics(); renderAiTeam(); renderMarketing(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
     window.RunvaraControl.render(state.data);
   }
 

@@ -9,6 +9,7 @@ import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
 import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
+import { ensureRevenueEngine } from './revenue-engine.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
@@ -32,7 +33,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   const ownerEmail = normalizeEmail(options.email || env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
   const ownerId = options.userId || (workspaceId === 'packsmart-solutions' ? 'packsmart-admin' : `user_${crypto.randomUUID()}`);
   const seeded = {
-    schemaVersion: 7,
+    schemaVersion: 8,
     workspace: {
       id: workspaceId,
       name: options.name || (workspaceId === 'packsmart-solutions' ? 'Packsmart Solutions Ltd' : 'New business'),
@@ -101,6 +102,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
     connections: [],
     oauthChallenges: [],
     integrationStatus: {},
+    revenueEngine: { intentEvents: [], leads: [], quotes: [], experiments: [], referrals: [], loyaltyRules: [], attributionTouches: [], updatedAt: null },
     migrations: {},
     storageReady: false
   };
@@ -108,6 +110,7 @@ export function seedWorkspaceState(env = process.env, options = {}) {
   ensureMarketing(seeded);
   ensureAiEconomics(seeded);
   ensureWebIntelligence(seeded);
+  ensureRevenueEngine(seeded);
   return seeded;
 }
 
@@ -126,7 +129,7 @@ export function upgradeState(state, env = process.env) {
   const upgraded = {
     ...seeded,
     ...(state || {}),
-    schemaVersion: 7,
+    schemaVersion: 8,
     workspace: { ...seeded.workspace, ...(state?.workspace || {}), updatedAt: state?.workspace?.updatedAt || new Date().toISOString() },
     users: Array.isArray(state?.users) && state.users.length ? state.users.map(user => {
       const upgradedUser = { active: true, sessionVersion: 1, passwordHash: null, ...user };
@@ -155,12 +158,14 @@ export function upgradeState(state, env = process.env) {
     connections: Array.isArray(state?.connections) ? state.connections : [],
     oauthChallenges: Array.isArray(state?.oauthChallenges) ? state.oauthChallenges : [],
     integrationStatus: state?.integrationStatus && typeof state.integrationStatus === 'object' ? state.integrationStatus : {},
+    revenueEngine: state?.revenueEngine && typeof state.revenueEngine === 'object' ? state.revenueEngine : seeded.revenueEngine,
     migrations: state?.migrations && typeof state.migrations === 'object' ? state.migrations : {}
   };
   ensureControl(upgraded);
   ensureMarketing(upgraded);
   ensureAiEconomics(upgraded);
   ensureWebIntelligence(upgraded);
+  ensureRevenueEngine(upgraded);
   return upgraded;
 }
 

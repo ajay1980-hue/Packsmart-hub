@@ -15,6 +15,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: 'ui-test-only-credential-key-more-than-32-characters', SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
   const state = seedWorkspaceState({}, { workspaceId: 'ui-test', email: 'ui@example.test', passwordHash: 'test-only' });
   state.products = [{ id: 'p1', title: '<img src=x onerror=alert(1)>', status: 'active', variants: [{ id: 'v1', sku: 'SKU-1', price: 10, inventory: 1, available: true }] }];
+  state.revenueEngine.quotes = [{ id: 'q1', status: 'draft', lines: [{ sku: 'SKU-1', quantity: 20, unitPrice: 12 }] }];
   await server.packsmart.store.save('ui-test', state);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -38,6 +39,10 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
+  document.querySelector('[data-view="revenue-engine"]').click();
+  assert.equal(document.querySelector('.view.active').id, 'view-revenue-engine');
+  assert.equal(document.getElementById('re-pipeline').textContent, '£240.00', 'Revenue Engine renders retained tenant data from bootstrap');
+  assert.equal(document.getElementById('re-attribution').textContent, '0.0%');
   assert.equal(document.querySelector('[onerror]'), null, 'source text is escaped');
   assert.ok(document.querySelector('#attention-queue .attention-item'));
   assert.ok(!document.getElementById('attention-queue').textContent.includes('No recorded exceptions or approvals need attention.'), 'active exceptions never show an all-clear message');
@@ -46,7 +51,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   document.getElementById('open-workspace-search').click();
   assert.equal(search.open, true);
   assert.equal(document.activeElement, searchInput);
-  assert.equal(document.querySelectorAll('.search-result').length, 16);
+  assert.equal(document.querySelectorAll('.search-result').length, 17);
   searchInput.value = 'billing'; searchInput.dispatchEvent(new window.Event('input'));
   assert.equal(document.querySelectorAll('.search-result').length, 1);
   assert.equal(document.querySelector('.search-result').dataset.viewLink, 'audit');
