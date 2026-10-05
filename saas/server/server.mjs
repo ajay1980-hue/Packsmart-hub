@@ -62,6 +62,7 @@ import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
 import { runGrowthCouncil } from './lib/growth-council.mjs';
 import { deriveImpact } from './lib/impact-engine.mjs';
 import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
+import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
@@ -518,6 +519,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     const growthCouncil = runGrowthCouncil(businessState, opportunityQueue);
     const impact = deriveImpact(state);
     const portfolio = derivePortfolioAllocation(state);
+    const executionPlan = deriveExecutionPlan(portfolio);
     return {
       version: VERSION,
       workspace: state.workspace,
@@ -531,7 +533,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       costHistory: state.costHistory || [],
       advertisingCosts: state.advertisingCosts || [],
       revenueEngine: revenueEngineSnapshot(state),
-      hypergrowth: { businessState, opportunityQueue, growthCouncil, impact, learning, portfolio },
+      hypergrowth: { businessState, opportunityQueue, growthCouncil, impact, learning, portfolio, executionPlan },
       shippingProviders: state.shippingProviders || [],
       settings: state.settings || {},
       automations: state.automations || {},
