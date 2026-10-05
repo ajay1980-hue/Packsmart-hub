@@ -453,6 +453,7 @@
     const learning = hg.learning || { priors:[], summary:{} };
     const experiments = state.data.revenueEngine?.experiments || [];
     const portfolio = hg.portfolio || { portfolio:[], allocation:{}, coverage:{} };
+    const executionPlan = hg.executionPlan || { sequence:[], blocked:[], summary:{} };
     const verified = impact.verified || {};
     $('#hg-value').textContent = money(verified.verifiedValue);
     $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
@@ -544,6 +545,19 @@
         note:nextExecutable ? 'Fits current capacity and needs no owner-gated external action.' : (portfolio.capacity?.availableGrowthHours == null ? 'Set growth capacity hours to make execution-fit recommendations stricter.' : 'Current approval, experiment or capacity constraints block the remaining portfolio.')
       }
     ].map(item => '<div class="allocation-card"><span class="eyebrow">' + escapeHtml(item.label) + '</span><b>' + escapeHtml(item.title) + '</b><strong>' + escapeHtml(item.value) + '</strong><small>' + escapeHtml(item.note) + '</small></div>').join('');
+    const sequence = executionPlan.sequence || [];
+    const blocked = executionPlan.blocked || [];
+    $('#hg-execution-badge').textContent = sequence.length ? sequence.length + ' safe step' + (sequence.length === 1 ? '' : 's') : 'No safe step';
+    $('#hg-execution-badge').className = 'tag ' + (sequence.length ? 'good' : 'neutral');
+    $('#hg-execution').innerHTML = sequence.slice(0,6).map(item =>
+      '<li><span class="priority-number">' + escapeHtml(item.step) + '</span><div><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.nextAction || '') + (Number.isFinite(Number(item.verifiedContribution)) ? ' · verified contribution ' + escapeHtml(money(item.verifiedContribution)) : '') + '</small></div></li>'
+    ).join('') || '<li class="empty-state">No safe internal step is ready under the current evidence, approval and capacity constraints.</li>';
+    $('#hg-blocked-badge').textContent = blocked.length + ' blocked';
+    $('#hg-blocked-badge').className = 'tag ' + (blocked.length ? 'warn' : 'good');
+    $('#hg-blocked').innerHTML = blocked.slice(0,6).map(item =>
+      '<div class="blocked-row"><div><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.blockers || []).join(' · ')) + '</small></div><small class="unlock-note">Unlock: ' + escapeHtml((item.unlocks || []).join(' · ') || 'No unlock action recorded') + '</small></div>'
+    ).join('') || '<div class="empty-state">Nothing is blocked right now.</div>';
+
   }
 
   function renderOverview() {
