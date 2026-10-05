@@ -181,11 +181,19 @@ export function requestOpportunityApproval(state, id, actor) {
   if (!item) throw Object.assign(new Error('Opportunity not found'), { status: 404, code: 'OPPORTUNITY_NOT_FOUND' });
   const existing = state.approvals.find(record => record.payload?.opportunityId === id && record.status === 'pending');
   if (existing) return existing;
-  const approval = normalizeApprovalRequest({ type: item.requiredAction, action: item.title, reason: item.recommendedNextStep, financialImpact: null,
-    expectedBenefit: item.estimatedImpact ? `${item.estimatedImpact.amount} ${item.estimatedImpact.unit}; ${item.estimatedImpact.assumptions}` : 'Impact unquantified until source data is confirmed.',
-    risk: item.risk, evidence: item.evidence, agentId: item.owner, source: 'opportunity-engine', payload: { opportunityId: id } }, actor);
+  const experiment = item.experimentId ? state.revenueEngine?.experiments?.find(record => record.id === item.experimentId) : null;
+  const verifiedImpact = experiment?.impact?.verified === true && experiment.status === 'completed' ? experiment.impact : null;
+  const measuredContribution = Number.isFinite(Number(verifiedImpact?.incrementalContribution)) ? Number(verifiedImpact.incrementalContribution) : null;
+  const measuredEvidence = verifiedImpact ? [{
+    type:'verified_experiment',
+    id:experiment.id,
+    detail:`Verified ${experiment.kind || 'experiment'} result using ${verifiedImpact.method || 'recorded method'}; incremental contribution ${measuredContribution === null ? 'not supplied' : '£' + measuredContribution.toFixed(2)}.`
+  }] : [];
+  const approval = normalizeApprovalRequest({ type: item.requiredAction, action: item.title, reason: item.recommendedNextStep, financialImpact: measuredContribution,
+    expectedBenefit: verifiedImpact ? 'Verified experiment evidence is attached for owner review; historical results do not guarantee future performance.' : item.estimatedImpact ? `${item.estimatedImpact.amount} ${item.estimatedImpact.unit}; ${item.estimatedImpact.assumptions}` : 'Impact unquantified until source data is confirmed.',
+    risk: item.risk, evidence: [...(item.evidence || []), ...measuredEvidence], agentId: item.owner, source: 'opportunity-engine', payload: { opportunityId: id, experimentId: experiment?.id || null, verifiedExperiment: Boolean(verifiedImpact) } }, actor);
   state.approvals.unshift(approval); item.status = 'requires_approval'; item.approvalId = approval.id;
-  addAudit(state, { type: 'opportunity_approval_requested', actor, detail: { opportunityId: id, approvalId: approval.id } });
+  addAudit(state, { type: 'opportunity_approval_requested', actor, detail: { opportunityId: id, approvalId: approval.id, experimentId: experiment?.id || null, verifiedExperiment: Boolean(verifiedImpact) } });
   return approval;
 }
 

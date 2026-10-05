@@ -183,3 +183,24 @@ test('scheduler persists its claim before reading, limits duplicate work, and re
   await scheduler.runWorkspace(state.workspace.id, { now: new Date(future.getTime() + 11 * 60000) });
   assert.equal((await store.get(state.workspace.id)).automationRuns[0].status, 'BLOCKED');
 });
+
+
+test('verified experiment evidence enriches approval without bypassing owner review', () => {
+  const state=business();
+  detectOpportunities(state);
+  const opportunity=state.opportunities.find(item=>item.kind==='pricing');
+  state.revenueEngine.experiments=[{
+    id:'experiment-verified',
+    opportunityId:opportunity.id,
+    kind:'pricing',
+    status:'completed',
+    impact:{verified:true,status:'verified',method:'holdout',incrementalContribution:42}
+  }];
+  opportunity.experimentId='experiment-verified';
+  const approval=requestOpportunityApproval(state,opportunity.id,'owner');
+  assert.equal(approval.financialImpact,42);
+  assert.equal(approval.payload.experimentId,'experiment-verified');
+  assert.equal(approval.payload.verifiedExperiment,true);
+  assert.ok(approval.evidence.some(item=>item.type==='verified_experiment'));
+  assert.equal(approval.status,'pending');
+});

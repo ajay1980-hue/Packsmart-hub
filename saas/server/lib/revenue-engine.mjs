@@ -269,6 +269,113 @@ export function deriveGrowthPlan(state, { targetProfit = null } = {}) {
   return {targetProfit: Number.isFinite(Number(targetProfit))?Number(targetProfit):null, opportunities, generatedAt:nowIso(), note:'Estimated impact remains null where Runvara lacks defensible uplift evidence. The plan prioritises measurable actions without inventing financial certainty.'};
 }
 
+
+export function createOpportunityExperiment(state, opportunity, body = {}, actor = 'system') {
+  if (!opportunity?.id) throw Object.assign(new Error('Opportunity is required'), { status:400, code:'VALIDATION_FAILED' });
+  const experiment = createExperiment(state, {
+    kind: body.kind || opportunity.kind,
+    title: body.title || ('Test: ' + opportunity.title),
+    hypothesis: body.hypothesis || opportunity.recommendedNextStep || opportunity.title,
+    opportunityId: opportunity.id,
+    metric: body.metric || 'incremental_contribution',
+    baseline: body.baseline,
+    target: body.target
+  }, actor);
+  opportunity.experimentId = experiment.id;
+  opportunity.experimentStatus = 'draft';
+  opportunity.updatedAt = nowIso();
+  return experiment;
+}
+
+export function createExperiment(state, body = {}, actor = 'system') {
+  const engine=ensureRevenueEngine(state), now=nowIso();
+  const kind=clean(body.kind || body.type,80).toLowerCase();
+  const title=clean(body.title,180);
+  if(!kind || !title) throw Object.assign(new Error('Experiment kind and title are required'),{status:400,code:'VALIDATION_FAILED'});
+  const experiment={
+    id:'experiment_'+crypto.randomUUID(),
+    kind,
+    title,
+    hypothesis:clean(body.hypothesis,600),
+    status:'draft',
+    opportunityId:clean(body.opportunityId,180)||null,
+    approvalId:clean(body.approvalId,180)||null,
+    metric:clean(body.metric || 'incremental_contribution',120),
+    baseline:body.baseline && typeof body.baseline==='object' ? body.baseline : null,
+    target:body.target && typeof body.target==='object' ? body.target : null,
+    impact:null,
+    createdAt:now,
+    updatedAt:now,
+    createdBy:actor,
+    externalWrites:false
+  };
+  engine.experiments.unshift(experiment);
+  engine.updatedAt=now;
+  return experiment;
+}
+
+export function recordExperimentMeasurement(state, experimentId, body = {}, actor = 'system') {
+  const engine=ensureRevenueEngine(state);
+  const experiment=engine.experiments.find(item=>item.id===experimentId);
+  if(!experiment) throw Object.assign(new Error('Experiment not found'),{status:404,code:'EXPERIMENT_NOT_FOUND'});
+  if(!['draft','running','completed','measured'].includes(String(experiment.status||'').toLowerCase())) throw Object.assign(new Error('Experiment cannot be measured in its current state'),{status:409,code:'EXPERIMENT_STATE_INVALID'});
+  const method=clean(body.method,160);
+  if(!method) throw Object.assign(new Error('Measurement method is required'),{status:400,code:'VALIDATION_FAILED'});
+  const numbers=['incrementalRevenue','incrementalContribution','contributionProtected','costAvoided','minutesSaved'];
+  const impact={verified:false,status:'measured',method,measuredAt:nowIso(),recordedBy:actor};
+  let hasMetric=false;
+  for(const field of numbers) {
+    if(body[field]===null || body[field]===undefined || body[field]==='') continue;
+    const value=Number(body[field]);
+    if(!Number.isFinite(value)) throw Object.assign(new Error('Measurement values must be numeric'),{status:400,code:'VALIDATION_FAILED'});
+    impact[field]=rounded(value);
+    hasMetric=true;
+  }
+  if(!hasMetric) throw Object.assign(new Error('At least one measured impact value is required'),{status:400,code:'VALIDATION_FAILED'});
+  experiment.impact=impact;
+  experiment.status='measured';
+  experiment.updatedAt=impact.measuredAt;
+  engine.updatedAt=impact.measuredAt;
+  return experiment;
+}
+
+function experimentDecisionPosture(impact = {}) {
+  const contribution = ['incrementalContribution','contributionProtected','costAvoided']
+    .reduce((sum, field) => sum + (Number.isFinite(Number(impact[field])) ? Number(impact[field]) : 0), 0);
+  if (contribution > 0) return { status:'ready-for-owner-review', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is positive.' };
+  if (contribution < 0) return { status:'deprioritise', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is negative.' };
+  return { status:'needs-more-evidence', verifiedContributionValue:0, reason:'No positive verified contribution evidence has been established.' };
+}
+
+export function verifyExperimentMeasurement(state, experimentId, body = {}, actor = 'system') {
+  const engine=ensureRevenueEngine(state);
+  const experiment=engine.experiments.find(item=>item.id===experimentId);
+  if(!experiment) throw Object.assign(new Error('Experiment not found'),{status:404,code:'EXPERIMENT_NOT_FOUND'});
+  if(!experiment.impact || String(experiment.status).toLowerCase()!=='measured') throw Object.assign(new Error('Experiment must have a measured result before verification'),{status:409,code:'EXPERIMENT_NOT_MEASURED'});
+  const note=clean(body.note,500);
+  if(!note) throw Object.assign(new Error('Verification note is required'),{status:400,code:'VALIDATION_FAILED'});
+  const now=nowIso();
+  experiment.impact={...experiment.impact,verified:true,status:'verified',verifiedAt:now,verifiedBy:actor,verificationNote:note};
+  experiment.status='completed';
+  experiment.completedAt=now;
+  experiment.updatedAt=now;
+  const posture=experimentDecisionPosture(experiment.impact);
+  experiment.decisionPosture=posture;
+  if (experiment.opportunityId) {
+    const opportunity=(state.opportunities || []).find(item=>item.id===experiment.opportunityId);
+    if (opportunity) {
+      opportunity.experimentId=experiment.id;
+      opportunity.experimentStatus='completed';
+      opportunity.evidenceDecision=posture.status;
+      opportunity.verifiedContributionValue=posture.verifiedContributionValue;
+      opportunity.evidenceDecisionReason=posture.reason;
+      opportunity.evidenceUpdatedAt=now;
+    }
+  }
+  engine.updatedAt=now;
+  return experiment;
+}
+
 export function revenueEngineSnapshot(state) {
   ensureRevenueEngine(state);
   return {

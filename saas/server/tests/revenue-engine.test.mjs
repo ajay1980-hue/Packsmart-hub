@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence, deriveIntentRecovery, deriveSalesPipeline, deriveGrowthPlan, ensureRevenueEngine } from '../lib/revenue-engine.mjs';
+import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence, deriveIntentRecovery, deriveSalesPipeline, deriveGrowthPlan, ensureRevenueEngine, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from '../lib/revenue-engine.mjs';
 
 const now = new Date('2026-10-01T12:00:00.000Z');
 function order(id, customer, createdAt, lines, total=120) {
@@ -67,4 +67,78 @@ test('intent recovery, B2B pipeline and commander keep outbound actions approval
   const plan=deriveGrowthPlan(state);
   assert.ok(plan.opportunities.some(item=>item.kind==='b2b'&&item.approvalRequired));
   assert.ok(plan.opportunities.every(item=>item.estimatedImpact===null));
+});
+
+
+test('experiment lifecycle separates measurement from verification before learning or impact can trust it', () => {
+  const state={workspace:{id:'tenant-loop'},economics:{},orders:[],revenueEngine:{}};
+  const experiment=createExperiment(state,{kind:'retention',title:'Win-back test',hypothesis:'A targeted reminder improves contribution.'},'owner-1');
+  assert.equal(experiment.status,'draft');
+  assert.equal(experiment.externalWrites,false);
+
+  const measured=recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalRevenue:300,incrementalContribution:90},'analyst-1');
+  assert.equal(measured.status,'measured');
+  assert.equal(measured.impact.verified,false);
+  assert.equal(measured.impact.incrementalContribution,90);
+
+  const verified=verifyExperimentMeasurement(state,experiment.id,{note:'Matched holdout reviewed against settled orders.'},'owner-1');
+  assert.equal(verified.status,'completed');
+  assert.equal(verified.impact.verified,true);
+  assert.equal(verified.impact.status,'verified');
+  assert.equal(verified.impact.verifiedBy,'owner-1');
+});
+
+test('experiment verification requires a measured result and an explicit verification note', () => {
+  const state={workspace:{id:'tenant-guard'},economics:{},orders:[],revenueEngine:{}};
+  const experiment=createExperiment(state,{kind:'conversion',title:'Checkout recovery test'},'owner-1');
+  assert.throws(()=>verifyExperimentMeasurement(state,experiment.id,{note:'too early'},'owner-1'),error=>error.code==='EXPERIMENT_NOT_MEASURED');
+  recordExperimentMeasurement(state,experiment.id,{method:'before-after',incrementalContribution:15},'analyst-1');
+  assert.throws(()=>verifyExperimentMeasurement(state,experiment.id,{},'owner-1'),error=>error.code==='VALIDATION_FAILED');
+});
+
+
+test('opportunity experiment links the existing opportunity without authorising a write', () => {
+  const state={workspace:{id:'tenant-link'},economics:{},orders:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-1',kind:'retention',title:'Recover lapsed buyers',recommendedNextStep:'Test a controlled reminder',status:'open'};
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  assert.equal(experiment.opportunityId,'opportunity-1');
+  assert.equal(opportunity.experimentId,experiment.id);
+  assert.equal(opportunity.experimentStatus,'draft');
+  assert.equal(experiment.externalWrites,false);
+});
+
+
+test('verified experiment refreshes linked opportunity decision posture using contribution, not revenue', () => {
+  const state={workspace:{id:'tenant-posture'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-1',kind:'retention',title:'Retention test',status:'open'};
+  state.opportunities.push(opportunity);
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalRevenue:500,incrementalContribution:75},'analyst-1');
+  const verified=verifyExperimentMeasurement(state,experiment.id,{note:'Settled order contribution checked.'},'owner-1');
+  assert.equal(verified.decisionPosture.status,'ready-for-owner-review');
+  assert.equal(verified.decisionPosture.verifiedContributionValue,75);
+  assert.equal(opportunity.evidenceDecision,'ready-for-owner-review');
+  assert.equal(opportunity.verifiedContributionValue,75);
+});
+
+test('revenue-only verification cannot make an opportunity approval-ready', () => {
+  const state={workspace:{id:'tenant-revenue-only'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-2',kind:'conversion',title:'Conversion test',status:'open'};
+  state.opportunities.push(opportunity);
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'before-after',incrementalRevenue:1000},'analyst-1');
+  verifyExperimentMeasurement(state,experiment.id,{note:'Revenue confirmed; contribution not established.'},'owner-1');
+  assert.equal(opportunity.evidenceDecision,'needs-more-evidence');
+  assert.equal(opportunity.verifiedContributionValue,0);
+});
+
+test('negative verified contribution deprioritises the linked opportunity', () => {
+  const state={workspace:{id:'tenant-negative'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-3',kind:'pricing',title:'Pricing test',status:'open'};
+  state.opportunities.push(opportunity);
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalContribution:-20},'analyst-1');
+  verifyExperimentMeasurement(state,experiment.id,{note:'Contribution loss confirmed.'},'owner-1');
+  assert.equal(opportunity.evidenceDecision,'deprioritise');
+  assert.equal(opportunity.verifiedContributionValue,-20);
 });

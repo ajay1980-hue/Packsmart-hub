@@ -364,6 +364,32 @@
       ['Recorded spend', money(advertising.summary.spend)], ['Attributed revenue', money(advertising.summary.attributedRevenue)],
       ['ROAS', advertising.summary.roas == null ? '—' : Number(advertising.summary.roas).toFixed(2)+'×'], ['Attribution coverage', percent(advertising.summary.attributionCoverage)]
     ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
+
+    const experiments = Array.isArray(re.experiments) ? re.experiments : [];
+    const durableOpportunities = (state.data.opportunities || []).filter(item => item.present !== false && !['resolved','dismissed'].includes(item.status));
+    const createSelect = $('#re-experiment-opportunity');
+    createSelect.innerHTML = '<option value="">Choose an opportunity</option>' + durableOpportunities.map(item =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title || item.id) + '</option>'
+    ).join('');
+    const measurable = experiments.filter(item => ['draft','running','completed','measured'].includes(String(item.status || '').toLowerCase()) && item.status !== 'completed');
+    $('#re-experiment-measure').innerHTML = '<option value="">Choose an active experiment</option>' + measurable.map(item =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title || item.id) + ' · ' + escapeHtml(statusLabel(item.status || 'draft')) + '</option>'
+    ).join('');
+    const measured = experiments.filter(item => String(item.status || '').toLowerCase() === 'measured' && item.impact?.verified !== true);
+    $('#re-experiment-verify').innerHTML = '<option value="">Choose a measured experiment</option>' + measured.map(item =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title || item.id) + '</option>'
+    ).join('');
+    $('#re-experiment-count').textContent = experiments.length + ' experiment' + (experiments.length === 1 ? '' : 's');
+    $('#re-experiment-list').innerHTML = experiments.slice(0,20).map(item => {
+      const verified = item.impact?.verified === true;
+      const contribution = Number.isFinite(Number(item.impact?.incrementalContribution)) ? money(item.impact.incrementalContribution) + ' contribution' : 'contribution not verified';
+      return '<div class="control-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown')) + ' · ' + escapeHtml(item.metric || 'incremental_contribution') + '</small><small>' + escapeHtml(verified ? 'Verified · ' + contribution : statusLabel(item.status || 'draft')) + '</small></div><span class="tag ' + (verified ? 'good' : item.status === 'measured' ? 'warn' : 'neutral') + '">' + escapeHtml(verified ? 'Verified' : statusLabel(item.status || 'draft')) + '</span></div>';
+    }).join('') || '<div class="empty-state">No experiments yet. Start from a recorded opportunity above.</div>';
+    const capacityForm = $('#re-growth-capacity-form');
+    if (capacityForm) {
+      capacityForm.elements.growthCapacityHours.value = state.data.settings?.growthCapacityHours ?? '';
+      capacityForm.elements.maxConcurrentGrowthExperiments.value = state.data.settings?.maxConcurrentGrowthExperiments ?? '';
+    }
   }
 
   function renderAnalytics() {
@@ -444,6 +470,122 @@
     $('#analytics-insights').innerHTML = insights.length ? insights.slice(0,5).map(item => '<article class="analytics-insight"><span class="tag ' + item.tone + '">' + escapeHtml(item.tone === 'good' ? 'Signal' : item.tone === 'warn' ? 'Attention' : 'Next') + '</span><div><b>' + escapeHtml(item.title) + '</b><p>' + escapeHtml(item.detail) + '</p></div></article>').join('') : '<div class="empty-state">No analytics insight is available yet.</div>';
   }
 
+  function renderHypergrowthCommand() {
+    const hg = state.data.hypergrowth || {};
+    const business = hg.businessState || {};
+    const queue = hg.opportunityQueue || { opportunities:[], summary:{} };
+    const council = hg.growthCouncil || { deliberations:[], commander:{} };
+    const impact = hg.impact || { verified:{}, activity:{}, coverage:{} };
+    const learning = hg.learning || { priors:[], summary:{} };
+    const experiments = state.data.revenueEngine?.experiments || [];
+    const portfolio = hg.portfolio || { portfolio:[], allocation:{}, coverage:{} };
+    const executionPlan = hg.executionPlan || { sequence:[], blocked:[], summary:{} };
+    const verified = impact.verified || {};
+    $('#hg-value').textContent = money(verified.verifiedValue);
+    $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
+    $('#hg-coverage').textContent = String(business.profitability?.profitCoveragePercent ?? 0) + '%';
+    $('#hg-coverage-note').textContent = String(business.profitability?.profitCoveredOrders ?? 0) + ' profit-covered orders';
+    const recommended = council.commander?.recommended?.length || 0;
+    const approvals = council.commander?.prepareForApproval?.length || 0;
+    const evidence = council.commander?.needsEvidence?.length || 0;
+    $('#hg-council').textContent = String(recommended + approvals + evidence);
+    $('#hg-council-note').textContent = recommended + ' ready · ' + approvals + ' approval · ' + evidence + ' evidence';
+    $('#hg-opportunity-count').textContent = String(queue.summary?.total || 0) + ' detected';
+    $('#hypergrowth-evidence-badge').textContent = (impact.activity?.verifiedImpactEvents || 0) + ' verified impact events';
+    $('#hypergrowth-evidence-badge').className = 'tag ' + ((impact.activity?.verifiedImpactEvents || 0) ? 'good' : 'neutral');
+    $('#hg-opportunities').innerHTML = (queue.opportunities || []).slice(0,5).map((item,index) => {
+      const learned = item.learning ? ' · learned from ' + item.learning.samples + ' verified result' + (item.learning.samples === 1 ? '' : 's') + ' · ' + item.learning.positiveRatePercent + '% positive' : '';
+      const posture = item.evidenceDecision === 'ready-for-owner-review' ? 'Ready for owner review' : item.evidenceDecision === 'deprioritise' ? 'Deprioritise' : item.evidenceDecision === 'needs-more-evidence' ? 'Needs more evidence' : item.score !== null ? money(item.score) : item.learning ? 'Learned signal' : 'Needs evidence';
+      const tone = item.evidenceDecision === 'deprioritise' ? 'bad' : item.evidenceDecision === 'ready-for-owner-review' ? 'good' : item.evidenceDecision === 'needs-more-evidence' ? 'warn' : item.score !== null ? 'good' : 'neutral';
+      const verifiedOutcome = item.evidenceDecision ? ' · ' + (item.evidenceDecisionReason || 'verified experiment updated decision posture') + (Number.isFinite(Number(item.verifiedContributionValue)) ? ' · verified contribution ' + money(item.verifiedContributionValue) : '') : '';
+      return '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.evidence || '') + learned + verifiedOutcome) + '</small></span><span class="tag ' + tone + '">' + escapeHtml(posture) + '</span></li>';
+    }).join('') || '<li class="empty-state">No Hypergrowth opportunities detected yet.</li>';
+    $('#hg-council-list').innerHTML = [
+      ['Recommended now', recommended, recommended ? 'good':'neutral'],
+      ['Prepare for approval', approvals, approvals ? 'warn':'good'],
+      ['Needs economic evidence', evidence, evidence ? 'warn':'good'],
+      ['External writes authorised', council.commander?.externalWrites ? 'Yes':'No', council.commander?.externalWrites ? 'bad':'good']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+    $('#hg-impact').innerHTML = [
+      ['Incremental revenue', money(verified.incrementalRevenue), 'neutral'],
+      ['Incremental contribution', money(verified.incrementalContribution), 'good'],
+      ['Contribution protected', money(verified.contributionProtected), 'good'],
+      ['Costs avoided', money(verified.costAvoided), 'good'],
+      ['Verified ROI', impact.roi?.multiple == null ? '—' : Number(impact.roi.multiple).toFixed(2) + '×', impact.roi?.multiple > 1 ? 'good':'neutral']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+    const connectionIssues = (business.connections || []).filter(item => !item.healthy).length;
+    $('#hg-controls').innerHTML = [
+      ['Pending approvals', business.controls?.pendingApprovals || 0, business.controls?.pendingApprovals ? 'warn':'good'],
+      ['Connection issues', connectionIssues, connectionIssues ? 'warn':'good'],
+      ['Stock risks', business.inventory?.stockRisks || 0, business.inventory?.stockRisks ? 'warn':'good'],
+      ['Missing cost variants', business.profitability?.missingCostVariants || 0, business.profitability?.missingCostVariants ? 'warn':'good'],
+      ['Profit truth policy', 'Unknown stays unknown', 'good']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+
+    const usable = Number(learning.summary?.domainsUsableForGuidance || 0);
+    const learningEvents = Number(learning.summary?.verifiedLearningEvents || 0);
+    $('#hg-learning-badge').textContent = usable ? usable + ' learned domain' + (usable === 1 ? '' : 's') : 'Learning safely';
+    $('#hg-learning-badge').className = 'tag ' + (usable ? 'good' : 'neutral');
+    $('#hg-learning').innerHTML = (learning.priors || []).slice(0,5).map(item =>
+      '<div class="learning-row"><div><b>' + escapeHtml(statusLabel(item.kind)) + '</b><small>' + escapeHtml(item.samples + ' verified outcomes · ' + (item.positiveRatePercent == null ? 'positive rate unknown' : item.positiveRatePercent + '% positive')) + '</small></div><span class="tag ' + (item.usableForGuidance ? 'good' : 'neutral') + '">' + escapeHtml(item.usableForGuidance ? statusLabel(item.confidence) + ' guidance' : 'More evidence') + '</span></div>'
+    ).join('') || '<div class="empty-state">Runvara will learn here after repeated verified experiment or work outcomes. Forecasts and unverified results never count.</div>';
+    if (!learningEvents && learning.priors?.length) $('#hg-learning').insertAdjacentHTML('beforeend','<p class="muted tiny">No verified learning events are currently counted.</p>');
+
+    const statusTone = status => status === 'completed' ? 'good' : status === 'measured' ? 'warn' : status === 'running' ? 'neutral' : 'neutral';
+    $('#hg-experiments').innerHTML = experiments.slice(0,6).map(item => {
+      const impactState = item.impact?.verified ? 'Verified result' : item.status === 'measured' ? 'Awaiting verification' : 'No verified result yet';
+      const contribution = item.impact?.incrementalContribution;
+      return '<div class="experiment-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown') + ' · ' + impactState + (Number.isFinite(Number(contribution)) ? ' · ' + money(contribution) + ' contribution' : '')) + '</small></div><span class="tag ' + statusTone(String(item.status || '').toLowerCase()) + '">' + escapeHtml(statusLabel(item.status || 'draft')) + '</span></div>';
+    }).join('') || '<div class="empty-state">No experiments yet. Create one from the Revenue Engine when there is a measurable hypothesis worth testing.</div>';
+
+    const nextPound = portfolio.allocation?.nextPound;
+    const nextHour = portfolio.allocation?.nextHour;
+    const topPriority = portfolio.allocation?.topEvidencePriority;
+    const nextExecutable = portfolio.allocation?.nextExecutable;
+    const allocationReady = Boolean(nextPound || nextHour);
+    $('#hg-allocation-badge').textContent = allocationReady ? 'Efficiency evidence ready' : 'Needs cost/time evidence';
+    $('#hg-allocation-badge').className = 'tag ' + (allocationReady ? 'good' : 'neutral');
+    $('#hg-allocation').innerHTML = [
+      {
+        label:'Next £1',
+        title:nextPound?.title || 'Not enough cost evidence',
+        value:nextPound ? Number(nextPound.verifiedContributionPerPound).toFixed(2) + '× verified contribution / £' : '—',
+        note:nextPound ? 'Uses explicit execution cost only.' : 'Add execution cost to a verified opportunity before Runvara recommends capital efficiency.'
+      },
+      {
+        label:'Next hour',
+        title:nextHour?.title || 'Not enough effort evidence',
+        value:nextHour ? money(nextHour.verifiedContributionPerHour) + ' / hour' : '—',
+        note:nextHour ? 'Uses explicit effort hours only.' : 'Add effort hours to a verified opportunity before Runvara recommends time efficiency.'
+      },
+      {
+        label:'Top evidence priority',
+        title:topPriority?.title || 'No portfolio evidence yet',
+        value:topPriority ? 'Priority ' + Number(topPriority.priorityIndex || 0).toFixed(3) : '—',
+        note:topPriority ? (topPriority.verifiedContribution == null ? 'Evidence-weighted priority; no verified contribution value yet.' : 'Verified contribution ' + money(topPriority.verifiedContribution) + '.') : 'Runvara will rank opportunities as verified evidence accumulates.'
+      },
+      {
+        label:'Executable now',
+        title:nextExecutable?.title || 'No safe work fits current constraints',
+        value:nextExecutable ? 'Priority ' + Number(nextExecutable.priorityIndex || 0).toFixed(3) : '—',
+        note:nextExecutable ? 'Fits current capacity and needs no owner-gated external action.' : (portfolio.capacity?.availableGrowthHours == null ? 'Set growth capacity hours to make execution-fit recommendations stricter.' : 'Current approval, experiment or capacity constraints block the remaining portfolio.')
+      }
+    ].map(item => '<div class="allocation-card"><span class="eyebrow">' + escapeHtml(item.label) + '</span><b>' + escapeHtml(item.title) + '</b><strong>' + escapeHtml(item.value) + '</strong><small>' + escapeHtml(item.note) + '</small></div>').join('');
+    const sequence = executionPlan.sequence || [];
+    const blocked = executionPlan.blocked || [];
+    $('#hg-execution-badge').textContent = sequence.length ? sequence.length + ' safe step' + (sequence.length === 1 ? '' : 's') : 'No safe step';
+    $('#hg-execution-badge').className = 'tag ' + (sequence.length ? 'good' : 'neutral');
+    $('#hg-execution').innerHTML = sequence.slice(0,6).map(item =>
+      '<li><span class="priority-number">' + escapeHtml(item.step) + '</span><div><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.nextAction || '') + (Number.isFinite(Number(item.verifiedContribution)) ? ' · verified contribution ' + escapeHtml(money(item.verifiedContribution)) : '') + '</small></div></li>'
+    ).join('') || '<li class="empty-state">No safe internal step is ready under the current evidence, approval and capacity constraints.</li>';
+    $('#hg-blocked-badge').textContent = blocked.length + ' blocked';
+    $('#hg-blocked-badge').className = 'tag ' + (blocked.length ? 'warn' : 'good');
+    $('#hg-blocked').innerHTML = blocked.slice(0,6).map(item =>
+      '<div class="blocked-row"><div><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.blockers || []).join(' · ')) + '</small></div><small class="unlock-note">Unlock: ' + escapeHtml((item.unlocks || []).join(' · ') || 'No unlock action recorded') + '</small></div>'
+    ).join('') || '<div class="empty-state">Nothing is blocked right now.</div>';
+
+  }
+
   function renderOverview() {
     const dashboard = state.data.dashboard || {};
     const brief = state.data.brief || {};
@@ -455,7 +597,7 @@
     $('#command-posture').innerHTML = window.RunvaraUI.badge(state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') +
       window.RunvaraUI.badge(pendingApprovals ? pendingApprovals + (pendingApprovals === 1 ? ' approval waiting' : ' approvals waiting') : 'No approvals waiting', pendingApprovals ? 'warn' : 'good') +
       '<small>Protected actions still require owner approval before execution</small>';
-    renderTrajectory(); renderOperationsStream();
+    renderHypergrowthCommand(); renderTrajectory(); renderOperationsStream();
     $('#brief-summary').textContent = brief.summary || 'No daily brief is available.';
     $('#brief-generated').textContent = brief.generatedAt ? 'Generated ' + date(brief.generatedAt) + ' · rules-based assessment' : '';
     $('#readiness-score').textContent = String(dashboard.readiness || 0) + '%';
@@ -1096,6 +1238,66 @@
       showMessage('Marketing Autopilot controls saved.');
     } catch (error) { showMessage(error.message, 'error'); }
     finally { setBusy(button, false); }
+  });
+
+  $('#re-experiment-create-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]');
+    const opportunityId=form.elements.opportunityId.value;
+    if(!opportunityId) return;
+    setBusy(button,true,'Creating…');
+    try {
+      await request('/api/opportunities/'+encodeURIComponent(opportunityId)+'/experiment',{method:'POST',body:JSON.stringify({
+        metric:form.elements.metric.value,
+        hypothesis:form.elements.hypothesis.value
+      })});
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Draft experiment created from the selected opportunity.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
+  });
+
+  $('#re-experiment-measure-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]'), id=form.elements.experimentId.value;
+    if(!id) return;
+    const payload={method:form.elements.method.value};
+    for(const field of ['incrementalContribution','contributionProtected','costAvoided','incrementalRevenue','minutesSaved']){
+      const raw=form.elements[field].value.trim();
+      if(raw!=='') payload[field]=Number(raw);
+    }
+    setBusy(button,true,'Recording…');
+    try {
+      await request('/api/revenue-engine/experiments/'+encodeURIComponent(id)+'/measure',{method:'POST',body:JSON.stringify(payload)});
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Measurement recorded. It will not influence learning until explicitly verified.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
+  });
+
+  $('#re-experiment-verify-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]'), id=form.elements.experimentId.value;
+    if(!id) return;
+    setBusy(button,true,'Verifying…');
+    try {
+      await request('/api/revenue-engine/experiments/'+encodeURIComponent(id)+'/verify',{method:'POST',body:JSON.stringify({note:form.elements.note.value})});
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Experiment verified. Runvara can now use the realised result as learning evidence.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
+  });
+
+  $('#re-growth-capacity-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]');
+    const hours=form.elements.growthCapacityHours.value.trim(), concurrent=form.elements.maxConcurrentGrowthExperiments.value.trim();
+    setBusy(button,true,'Saving…');
+    try {
+      await request('/api/hypergrowth/settings',{method:'PUT',body:JSON.stringify({
+        growthCapacityHours:hours===''?null:Number(hours),
+        maxConcurrentGrowthExperiments:concurrent===''?null:Number(concurrent)
+      })});
+      await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Growth capacity saved. Runvara execution priorities have been refreshed.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
   });
 
   $('#marketing-new-campaign').addEventListener('click', async event => {

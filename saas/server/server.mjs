@@ -56,7 +56,14 @@ import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, se
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
 import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
-import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch } from './lib/revenue-engine.mjs';
+import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
+import { deriveBusinessState } from './lib/business-state.mjs';
+import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
+import { runGrowthCouncil } from './lib/growth-council.mjs';
+import { deriveImpact } from './lib/impact-engine.mjs';
+import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
+import { deriveExecutionPlan } from './lib/execution-plan.mjs';
+import { deriveLearning } from './lib/learning-engine.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.15.2';
@@ -506,6 +513,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   function bootstrapPayload(state, user, csrf) {
     const brief = currentBrief(state);
+    const businessState = deriveBusinessState(state);
+    const learning = deriveLearning(state);
+    const opportunityQueue = deriveOpportunityQueue(businessState, { learning });
+    const growthCouncil = runGrowthCouncil(businessState, opportunityQueue);
+    const impact = deriveImpact(state);
+    const portfolio = derivePortfolioAllocation(state);
+    const executionPlan = deriveExecutionPlan(portfolio);
     return {
       version: VERSION,
       workspace: state.workspace,
@@ -519,6 +533,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       costHistory: state.costHistory || [],
       advertisingCosts: state.advertisingCosts || [],
       revenueEngine: revenueEngineSnapshot(state),
+      hypergrowth: { businessState, opportunityQueue, growthCouncil, impact, learning, portfolio, executionPlan },
       shippingProviders: state.shippingProviders || [],
       settings: state.settings || {},
       automations: state.automations || {},
@@ -1751,6 +1766,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const approval = await mutate(auth, async state => requestOpportunityApproval(state, opportunityMatch[1], auth.user.id));
           send(res, 202, { approval, executedExternally: false }); return;
         }
+        const opportunityExperimentMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/experiment$/);
+        if (req.method === 'POST' && opportunityExperimentMatch) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const opportunity = (state.opportunities || []).find(item => item.id === opportunityExperimentMatch[1]);
+            if (!opportunity) throw Object.assign(new Error('Opportunity not found'), { status:404, code:'OPPORTUNITY_NOT_FOUND' });
+            const existing = opportunity.experimentId ? state.revenueEngine?.experiments?.find(item => item.id === opportunity.experimentId) : null;
+            if (existing && !['completed','closed'].includes(String(existing.status || '').toLowerCase())) return existing;
+            const item = createOpportunityExperiment(state, opportunity, body, auth.user.id);
+            addAudit(state, { type:'opportunity_experiment_created', actor:auth.user.id, detail:{ opportunityId:opportunity.id, experimentId:item.id, externalWrites:false } });
+            return item;
+          });
+          send(res, 201, { experiment, executedExternally:false }); return;
+        }
         const modifyMatch = pathname.match(/^\/api\/approvals\/([^/]+)$/);
         if (req.method === 'PATCH' && modifyMatch) {
           requireApprover(auth);
@@ -1781,6 +1811,36 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
         if (req.method === 'GET' && pathname === '/api/revenue-engine') {
           send(res, 200, revenueEngineSnapshot(auth.state)); return;
+        }
+        if (req.method === 'PUT' && pathname === '/api/hypergrowth/settings') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 16384);
+          const settings = await mutate(auth, async state => {
+            const next = { ...(state.settings || {}) };
+            if (Object.hasOwn(body, 'growthCapacityHours')) {
+              if (body.growthCapacityHours === null || body.growthCapacityHours === '') delete next.growthCapacityHours;
+              else {
+                const value = Number(body.growthCapacityHours);
+                if (!Number.isFinite(value) || value < 0 || value > 168) throw Object.assign(new Error('Growth capacity hours must be between 0 and 168'), { status:400, code:'VALIDATION_FAILED' });
+                next.growthCapacityHours = Math.round(value * 2) / 2;
+              }
+            }
+            if (Object.hasOwn(body, 'maxConcurrentGrowthExperiments')) {
+              if (body.maxConcurrentGrowthExperiments === null || body.maxConcurrentGrowthExperiments === '') delete next.maxConcurrentGrowthExperiments;
+              else {
+                const value = Number(body.maxConcurrentGrowthExperiments);
+                if (!Number.isInteger(value) || value < 1 || value > 20) throw Object.assign(new Error('Max concurrent growth experiments must be between 1 and 20'), { status:400, code:'VALIDATION_FAILED' });
+                next.maxConcurrentGrowthExperiments = value;
+              }
+            }
+            state.settings = next;
+            addAudit(state, { type:'hypergrowth_capacity_updated', actor:auth.user.id, detail:{
+              growthCapacityHours:next.growthCapacityHours ?? null,
+              maxConcurrentGrowthExperiments:next.maxConcurrentGrowthExperiments ?? null
+            }});
+            return { growthCapacityHours:next.growthCapacityHours ?? null, maxConcurrentGrowthExperiments:next.maxConcurrentGrowthExperiments ?? null };
+          });
+          send(res, 200, { settings }); return;
         }
         if (req.method === 'POST' && pathname === '/api/revenue-engine/leads') {
           requireOwner(auth);
@@ -1816,6 +1876,41 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             return item;
           });
           send(res, 201, { touch }); return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/revenue-engine/experiments') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const item = createExperiment(state, body, auth.user.id);
+            addAudit(state, { type: 'revenue_experiment_created', actor: auth.user.id, detail: { experimentId: item.id, kind: item.kind, externalWrites: false } });
+            return item;
+          });
+          send(res, 201, { experiment, executedExternally:false }); return;
+        }
+
+        const experimentMeasure = pathname.match(/^\/api\/revenue-engine\/experiments\/([^/]+)\/measure$/);
+        if (req.method === 'POST' && experimentMeasure) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const item = recordExperimentMeasurement(state, text(experimentMeasure[1], 180), body, auth.user.id);
+            addAudit(state, { type: 'revenue_experiment_measured', actor: auth.user.id, detail: { experimentId:item.id, method:item.impact?.method || null, verified:false } });
+            return item;
+          });
+          send(res, 200, { experiment, verified:false, executedExternally:false }); return;
+        }
+
+        const experimentVerify = pathname.match(/^\/api\/revenue-engine\/experiments\/([^/]+)\/verify$/);
+        if (req.method === 'POST' && experimentVerify) {
+          requireApprover(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const item = verifyExperimentMeasurement(state, text(experimentVerify[1], 180), body, auth.user.id);
+            addAudit(state, { type: 'revenue_experiment_verified', actor: auth.user.id, detail: { experimentId:item.id, method:item.impact?.method || null, verified:true } });
+            return item;
+          });
+          send(res, 200, { experiment, verified:true, executedExternally:false }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/reports/accounting.csv') {
