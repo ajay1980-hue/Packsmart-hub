@@ -514,6 +514,7 @@
     const nextPound = portfolio.allocation?.nextPound;
     const nextHour = portfolio.allocation?.nextHour;
     const topPriority = portfolio.allocation?.topEvidencePriority;
+    const nextExecutable = portfolio.allocation?.nextExecutable;
     const allocationReady = Boolean(nextPound || nextHour);
     $('#hg-allocation-badge').textContent = allocationReady ? 'Efficiency evidence ready' : 'Needs cost/time evidence';
     $('#hg-allocation-badge').className = 'tag ' + (allocationReady ? 'good' : 'neutral');
@@ -535,6 +536,12 @@
         title:topPriority?.title || 'No portfolio evidence yet',
         value:topPriority ? 'Priority ' + Number(topPriority.priorityIndex || 0).toFixed(3) : '—',
         note:topPriority ? (topPriority.verifiedContribution == null ? 'Evidence-weighted priority; no verified contribution value yet.' : 'Verified contribution ' + money(topPriority.verifiedContribution) + '.') : 'Runvara will rank opportunities as verified evidence accumulates.'
+      },
+      {
+        label:'Executable now',
+        title:nextExecutable?.title || 'No safe work fits current constraints',
+        value:nextExecutable ? 'Priority ' + Number(nextExecutable.priorityIndex || 0).toFixed(3) : '—',
+        note:nextExecutable ? 'Fits current capacity and needs no owner-gated external action.' : (portfolio.capacity?.availableGrowthHours == null ? 'Set growth capacity hours to make execution-fit recommendations stricter.' : 'Current approval, experiment or capacity constraints block the remaining portfolio.')
       }
     ].map(item => '<div class="allocation-card"><span class="eyebrow">' + escapeHtml(item.label) + '</span><b>' + escapeHtml(item.title) + '</b><strong>' + escapeHtml(item.value) + '</strong><small>' + escapeHtml(item.note) + '</small></div>').join('');
   }
