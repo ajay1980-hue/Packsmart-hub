@@ -15,6 +15,31 @@ function riskPenalty(opportunity = {}) {
   return RISK[String(opportunity.risk || '').toLowerCase()] ?? RISK.medium;
 }
 
+function learningPrior(kind, learning) {
+  const prior = (learning?.priors || []).find(item => item.kind === String(kind || '').toLowerCase());
+  if (!prior || !prior.usableForGuidance) return null;
+  return {
+    samples:Number(prior.samples || 0),
+    confidence:clean(prior.confidence,40),
+    averageIncrementalContribution:round(prior.averageIncrementalContribution),
+    medianIncrementalContribution:round(prior.medianIncrementalContribution),
+    positiveRatePercent:round(prior.positiveRatePercent,1)
+  };
+}
+
+function applyLearning(opportunity, learning) {
+  const prior = learningPrior(opportunity.kind, learning);
+  if (!prior) return { ...opportunity, learning:null, learningPriority:0 };
+  const rate = Math.max(0, Math.min(100, Number(prior.positiveRatePercent) || 0));
+  const sampleWeight = Math.min(1, prior.samples / 8);
+  const learningPriority = round((rate / 100) * sampleWeight, 3);
+  return {
+    ...opportunity,
+    learning:prior,
+    learningPriority
+  };
+}
+
 export function scoreOpportunity(opportunity = {}) {
   const rawExpectedProfit = opportunity.expectedContributionProfit;
   const expectedProfit = rawExpectedProfit === null || rawExpectedProfit === undefined || rawExpectedProfit === '' ? null : Number(rawExpectedProfit);
@@ -119,18 +144,19 @@ function recommendationOpportunities(businessState) {
     }));
 }
 
-export function deriveOpportunityQueue(businessState = {}, { limit = 50 } = {}) {
+export function deriveOpportunityQueue(businessState = {}, { limit = 50, learning = null } = {}) {
   const candidates = [
     missingCostOpportunity(businessState),
     lossMakingOpportunity(businessState),
     stockOpportunity(businessState),
     ...recommendationOpportunities(businessState)
-  ].filter(Boolean);
+  ].filter(Boolean).map(item => applyLearning(item, learning));
 
   const ranked = candidates.sort((a,b) => {
     const aKnown = a.score !== null ? 1 : 0, bKnown = b.score !== null ? 1 : 0;
     if (aKnown !== bKnown) return bKnown - aKnown;
     if (a.score !== b.score) return (b.score || 0) - (a.score || 0);
+    if (a.learningPriority !== b.learningPriority) return (b.learningPriority || 0) - (a.learningPriority || 0);
     if (a.confidence !== b.confidence) return b.confidence - a.confidence;
     return a.title.localeCompare(b.title);
   }).slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
@@ -145,10 +171,12 @@ export function deriveOpportunityQueue(businessState = {}, { limit = 50 } = {}) 
       total:ranked.length,
       economicallyScored:ranked.filter(item => item.score !== null).length,
       awaitingEconomicEvidence:ranked.filter(item => item.score === null).length,
-      approvalRequired:ranked.filter(item => item.approvalRequired).length
+      approvalRequired:ranked.filter(item => item.approvalRequired).length,
+      withVerifiedLearning:ranked.filter(item => item.learning).length
     },
     safeguards:{
       unknownProfitRanksAsMoney:false,
+      historicalResultsNeverBecomeExpectedProfit:true,
       approvalsPreserved:true,
       tenantScope:clean(businessState.workspaceId,120)
     }
