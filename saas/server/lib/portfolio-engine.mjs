@@ -1,5 +1,5 @@
 const clean = (value, max = 180) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
-const round = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
+const round = (value, digits = 2) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
 const RISK = Object.freeze({ low:0.1, medium:0.3, high:0.6, critical:0.9 });
 const EFFORT = Object.freeze({ low:0.2, medium:0.5, high:0.8 });
 
