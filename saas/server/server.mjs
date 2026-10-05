@@ -57,6 +57,10 @@ import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTok
 import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
 import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch } from './lib/revenue-engine.mjs';
+import { deriveBusinessState } from './lib/business-state.mjs';
+import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
+import { runGrowthCouncil } from './lib/growth-council.mjs';
+import { deriveImpact } from './lib/impact-engine.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.15.2';
@@ -506,6 +510,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   function bootstrapPayload(state, user, csrf) {
     const brief = currentBrief(state);
+    const businessState = deriveBusinessState(state);
+    const opportunityQueue = deriveOpportunityQueue(businessState);
+    const growthCouncil = runGrowthCouncil(businessState, opportunityQueue);
+    const impact = deriveImpact(state);
     return {
       version: VERSION,
       workspace: state.workspace,
@@ -519,6 +527,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       costHistory: state.costHistory || [],
       advertisingCosts: state.advertisingCosts || [],
       revenueEngine: revenueEngineSnapshot(state),
+      hypergrowth: { businessState, opportunityQueue, growthCouncil, impact },
       shippingProviders: state.shippingProviders || [],
       settings: state.settings || {},
       automations: state.automations || {},
