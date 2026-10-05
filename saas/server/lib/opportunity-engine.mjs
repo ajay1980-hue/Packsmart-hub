@@ -1,4 +1,4 @@
-const round = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
+const round = (value, digits = 2) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 const clean = (value, max = 240) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 
@@ -16,12 +16,13 @@ function riskPenalty(opportunity = {}) {
 }
 
 export function scoreOpportunity(opportunity = {}) {
-  const expectedProfit = Number(opportunity.expectedContributionProfit);
+  const rawExpectedProfit = opportunity.expectedContributionProfit;
+  const expectedProfit = rawExpectedProfit === null || rawExpectedProfit === undefined || rawExpectedProfit === '' ? null : Number(rawExpectedProfit);
   const confidence = evidenceConfidence(opportunity);
   const probability = clamp01(opportunity.probability ?? confidence);
   const executionCost = Math.max(0, Number(opportunity.executionCost) || 0);
   const risk = riskPenalty(opportunity);
-  const hasProfitEvidence = Number.isFinite(expectedProfit);
+  const hasProfitEvidence = expectedProfit !== null && Number.isFinite(expectedProfit);
 
   // Unknown economics must never be converted into invented pounds.
   const score = hasProfitEvidence
