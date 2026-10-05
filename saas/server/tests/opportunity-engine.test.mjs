@@ -49,3 +49,28 @@ test('verified opportunities outrank unpriced ideas without crossing tenant scop
   assert.equal(queue.safeguards.tenantScope,'tenant-b');
   assert.equal(JSON.stringify(queue).includes('tenant-a'),false);
 });
+
+
+test('verified learning can break ties without inventing expected profit', () => {
+  const businessState={
+    workspaceId:'tenant-learning',
+    generatedAt:'2026-10-05T16:00:00.000Z',
+    profitability:{missingCostVariants:0,lossMaking:[]},
+    inventory:{risks:[]},
+    recommendations:[
+      {id:'retention-idea',title:'Retention idea',detail:'Observed retention opportunity.',actionType:'safe',view:'retention'},
+      {id:'conversion-idea',title:'Conversion idea',detail:'Observed conversion opportunity.',actionType:'safe',view:'conversion'}
+    ]
+  };
+  const learning={priors:[
+    {kind:'retention',samples:8,usableForGuidance:true,confidence:'high',averageIncrementalContribution:100,medianIncrementalContribution:90,positiveRatePercent:75},
+    {kind:'conversion',samples:2,usableForGuidance:true,confidence:'low',averageIncrementalContribution:80,medianIncrementalContribution:80,positiveRatePercent:50}
+  ]};
+  const queue=deriveOpportunityQueue(businessState,{learning});
+  assert.equal(queue.opportunities[0].kind,'retention');
+  assert.equal(queue.opportunities[0].expectedContributionProfit,null);
+  assert.equal(queue.opportunities[0].score,null);
+  assert.equal(queue.opportunities[0].learning.samples,8);
+  assert.equal(queue.summary.withVerifiedLearning,2);
+  assert.equal(queue.safeguards.historicalResultsNeverBecomeExpectedProfit,true);
+});
