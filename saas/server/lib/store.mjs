@@ -345,7 +345,10 @@ class SupabaseStore {
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
     this.mirrorDigests = new Map();
     this.schedulerCache = new Map();
+    this.schedulerWorkspaceIdsCache = null;
     this.schedulerCacheMaxAgeMs = Math.max(300000, Math.min(21600000, Number(env.SCHEDULER_STATE_CACHE_MS) || 3600000));
+    this.schedulerRevisionCheckMs = Math.max(60000, Math.min(this.schedulerCacheMaxAgeMs, Number(env.SCHEDULER_REVISION_CHECK_MS) || 900000));
+    this.schedulerWorkspaceIdsCacheMs = Math.max(60000, Math.min(3600000, Number(env.SCHEDULER_WORKSPACE_IDS_CACHE_MS) || 300000));
     this.fetch = fetchImpl;
     this.requestTimeoutMs = Math.max(20000, Math.min(60000, Number(env.SUPABASE_REQUEST_TIMEOUT_MS) || 30000));
     this.mirrorDeadlineMs = Math.max(12000, Math.min(60000, Number(env.SUPABASE_MIRROR_DEADLINE_MS) || 30000));
@@ -367,6 +370,8 @@ class SupabaseStore {
       lastIntegrityCheckAt: null,
       schedulerCacheHits: 0,
       schedulerCacheMisses: 0,
+      schedulerRevisionCheckMs: this.schedulerRevisionCheckMs,
+      schedulerWorkspaceIdsCacheMs: this.schedulerWorkspaceIdsCacheMs,
       requestTimeoutMs: this.requestTimeoutMs,
       mirrorDeadlineMs: this.mirrorDeadlineMs
     };
@@ -448,7 +453,12 @@ class SupabaseStore {
 
   rememberSchedulerState(workspaceId, state) {
     if (!state) { this.schedulerCache.delete(workspaceId); return; }
-    this.schedulerCache.set(workspaceId, { at:Date.now(), state:structuredClone(state) });
+    const now = Date.now();
+    this.schedulerCache.set(workspaceId, { at:now, checkedAt:now, state:structuredClone(state) });
+    if (this.schedulerWorkspaceIdsCache && !this.schedulerWorkspaceIdsCache.ids.includes(workspaceId)) {
+      this.schedulerWorkspaceIdsCache.ids.push(workspaceId);
+      this.schedulerWorkspaceIdsCache.ids.sort();
+    }
   }
 
   invalidateSchedulerCache(workspaceId) {
@@ -473,9 +483,17 @@ class SupabaseStore {
 
   async getForScheduler(workspaceId) {
     const cached = this.schedulerCache.get(workspaceId);
-    if (cached && Date.now() - cached.at < this.schedulerCacheMaxAgeMs) {
+    const now = Date.now();
+    if (cached && now - cached.at < this.schedulerCacheMaxAgeMs) {
+      if (now - (cached.checkedAt || cached.at) < this.schedulerRevisionCheckMs) {
+        this.telemetry.schedulerCacheHits++;
+        const state = upgradeState(structuredClone(cached.state));
+        state.storageReady = true;
+        return markPersisted(state);
+      }
       const revision = await this.schedulerRevision(workspaceId);
       if (revision && revision === cached.state?._revision) {
+        cached.checkedAt = now;
         this.telemetry.schedulerCacheHits++;
         const state = upgradeState(structuredClone(cached.state));
         state.storageReady = true;
@@ -1098,11 +1116,18 @@ class SupabaseStore {
   }
 
   async listWorkspaceIds() {
+    const now = Date.now();
+    if (this.schedulerWorkspaceIdsCache && now - this.schedulerWorkspaceIdsCache.at < this.schedulerWorkspaceIdsCacheMs) {
+      return [...this.schedulerWorkspaceIdsCache.ids];
+    }
     const ids = [];
     for (let offset = 0; ; offset += 200) {
       const rows = await this.request(`saas_workspace_state?select=workspace_id&order=workspace_id&limit=200&offset=${offset}`);
       ids.push(...(rows || []).map(row => row.workspace_id));
-      if ((rows || []).length < 200) return ids;
+      if ((rows || []).length < 200) {
+        this.schedulerWorkspaceIdsCache = { at:now, ids:[...ids] };
+        return ids;
+      }
     }
   }
 
