@@ -244,53 +244,76 @@ test('existing Supabase workspaces archive growing operational histories before 
 });
 
 
-test('scheduler cache uses tiny revision probes, avoids repeated full-state egress and notices remote changes', async () => {
+test('scheduler cache avoids per-minute Supabase traffic while retaining bounded remote-change detection', async () => {
   const state = seedWorkspaceState();
   state._revision = 'seed-revision';
   const fake = fakeSupabase({ initialStates:[state] });
-  const store = createStore({
-    SUPABASE_URL:'https://test.supabase.co',
-    SUPABASE_SERVICE_ROLE_KEY:'test-only',
-    SCHEDULER_STATE_CACHE_MS:'3600000'
-  }, { fetchImpl:fake.fetchImpl });
+  let now = 1_000_000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    const store = createStore({
+      SUPABASE_URL:'https://test.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY:'test-only',
+      SCHEDULER_STATE_CACHE_MS:'3600000',
+      SCHEDULER_REVISION_CHECK_MS:'900000',
+      SCHEDULER_WORKSPACE_IDS_CACHE_MS:'300000'
+    }, { fetchImpl:fake.fetchImpl });
 
-  const fullReads = () => fake.calls.filter(call =>
-    call.method === 'GET' &&
-    call.url.pathname.endsWith('/saas_workspace_state') &&
-    call.url.searchParams.get('select') === 'state'
-  ).length;
-  const revisionReads = () => fake.calls.filter(call =>
-    call.method === 'GET' &&
-    call.url.pathname.endsWith('/saas_workspace_state') &&
-    call.url.searchParams.get('select') === 'revision:state->>_revision'
-  ).length;
+    const fullReads = () => fake.calls.filter(call =>
+      call.method === 'GET' &&
+      call.url.pathname.endsWith('/saas_workspace_state') &&
+      call.url.searchParams.get('select') === 'state'
+    ).length;
+    const revisionReads = () => fake.calls.filter(call =>
+      call.method === 'GET' &&
+      call.url.pathname.endsWith('/saas_workspace_state') &&
+      call.url.searchParams.get('select') === 'revision:state->>_revision'
+    ).length;
+    const rosterReads = () => fake.calls.filter(call =>
+      call.method === 'GET' &&
+      call.url.pathname.endsWith('/saas_workspace_state') &&
+      call.url.searchParams.get('select') === 'workspace_id'
+    ).length;
 
-  const first = await store.getForScheduler(state.workspace.id);
-  assert.equal(first.workspace.id, state.workspace.id);
-  const afterFirst = fullReads();
-  assert.equal(afterFirst, 1);
+    await store.getForScheduler(state.workspace.id);
+    const afterFirst = fullReads();
+    assert.equal(afterFirst, 1);
 
-  const second = await store.getForScheduler(state.workspace.id);
-  assert.equal(second.workspace.id, state.workspace.id);
-  assert.equal(fullReads(), afterFirst, 'repeat scheduler polling must not download the full state again');
-  assert.equal(revisionReads(), 1, 'repeat scheduler polling should use only a tiny revision heartbeat');
+    now += 60_000;
+    await store.getForScheduler(state.workspace.id);
+    assert.equal(fullReads(), afterFirst);
+    assert.equal(revisionReads(), 0, 'hot scheduler ticks must stay in memory');
 
-  second.settings = { ...second.settings, marginFloor:31 };
-  await store.save(state.workspace.id, second);
-  const afterSaveReads = fullReads();
-  const third = await store.getForScheduler(state.workspace.id);
-  assert.equal(third.settings.marginFloor, 31);
-  assert.equal(fullReads(), afterSaveReads, 'a successful save must refresh the scheduler cache without another full read');
+    const ids1 = await store.listWorkspaceIds();
+    const rosterBaseline = rosterReads();
+    now += 60_000;
+    const ids2 = await store.listWorkspaceIds();
+    assert.deepEqual(ids2, ids1);
+    assert.equal(rosterReads(), rosterBaseline, 'workspace roster should not be re-downloaded every minute');
 
-  const remote = structuredClone(fake.states.get(state.workspace.id));
-  remote.settings = { ...remote.settings, marginFloor:42 };
-  remote._revision = 'remote-revision-change';
-  fake.states.set(state.workspace.id, remote);
-  const fourth = await store.getForScheduler(state.workspace.id);
-  assert.equal(fourth.settings.marginFloor, 42, 'a changed revision must force an authoritative full refresh');
-  assert.equal(fullReads(), afterSaveReads + 1);
+    const remote = structuredClone(fake.states.get(state.workspace.id));
+    remote.settings = { ...remote.settings, marginFloor:42 };
+    remote._revision = 'remote-revision-change';
+    fake.states.set(state.workspace.id, remote);
 
-  const diagnostics = store.diagnostics();
-  assert.ok(diagnostics.schedulerCacheHits >= 2);
-  assert.ok(diagnostics.schedulerCacheMisses >= 2);
+    now += 14 * 60_000;
+    const beforeWindow = await store.getForScheduler(state.workspace.id);
+    assert.notEqual(beforeWindow.settings.marginFloor, 42);
+    assert.equal(revisionReads(), 0);
+
+    now += 60_001;
+    const refreshed = await store.getForScheduler(state.workspace.id);
+    assert.equal(refreshed.settings.marginFloor, 42, 'remote changes must be detected at the bounded revision-check interval');
+    assert.equal(revisionReads(), 1);
+    assert.equal(fullReads(), afterFirst + 1);
+
+    const diagnostics = store.diagnostics();
+    assert.ok(diagnostics.schedulerCacheHits >= 2);
+    assert.ok(diagnostics.schedulerCacheMisses >= 2);
+    assert.equal(diagnostics.schedulerRevisionCheckMs, 900000);
+    assert.equal(diagnostics.schedulerWorkspaceIdsCacheMs, 300000);
+  } finally {
+    Date.now = realNow;
+  }
 });
