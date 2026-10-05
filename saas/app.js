@@ -444,6 +444,51 @@
     $('#analytics-insights').innerHTML = insights.length ? insights.slice(0,5).map(item => '<article class="analytics-insight"><span class="tag ' + item.tone + '">' + escapeHtml(item.tone === 'good' ? 'Signal' : item.tone === 'warn' ? 'Attention' : 'Next') + '</span><div><b>' + escapeHtml(item.title) + '</b><p>' + escapeHtml(item.detail) + '</p></div></article>').join('') : '<div class="empty-state">No analytics insight is available yet.</div>';
   }
 
+  function renderHypergrowthCommand() {
+    const hg = state.data.hypergrowth || {};
+    const business = hg.businessState || {};
+    const queue = hg.opportunityQueue || { opportunities:[], summary:{} };
+    const council = hg.growthCouncil || { deliberations:[], commander:{} };
+    const impact = hg.impact || { verified:{}, activity:{}, coverage:{} };
+    const verified = impact.verified || {};
+    $('#hg-value').textContent = money(verified.verifiedValue);
+    $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
+    $('#hg-coverage').textContent = String(business.profitability?.profitCoveragePercent ?? 0) + '%';
+    $('#hg-coverage-note').textContent = String(business.profitability?.profitCoveredOrders ?? 0) + ' profit-covered orders';
+    const recommended = council.commander?.recommended?.length || 0;
+    const approvals = council.commander?.prepareForApproval?.length || 0;
+    const evidence = council.commander?.needsEvidence?.length || 0;
+    $('#hg-council').textContent = String(recommended + approvals + evidence);
+    $('#hg-council-note').textContent = recommended + ' ready · ' + approvals + ' approval · ' + evidence + ' evidence';
+    $('#hg-opportunity-count').textContent = String(queue.summary?.total || 0) + ' detected';
+    $('#hypergrowth-evidence-badge').textContent = (impact.activity?.verifiedImpactEvents || 0) + ' verified impact events';
+    $('#hypergrowth-evidence-badge').className = 'tag ' + ((impact.activity?.verifiedImpactEvents || 0) ? 'good' : 'neutral');
+    $('#hg-opportunities').innerHTML = (queue.opportunities || []).slice(0,5).map((item,index) =>
+      '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.evidence || '') + '</small></span><span class="tag ' + (item.score !== null ? 'good' : 'neutral') + '">' + escapeHtml(item.score !== null ? money(item.score) : 'Needs evidence') + '</span></li>'
+    ).join('') || '<li class="empty-state">No Hypergrowth opportunities detected yet.</li>';
+    $('#hg-council-list').innerHTML = [
+      ['Recommended now', recommended, recommended ? 'good':'neutral'],
+      ['Prepare for approval', approvals, approvals ? 'warn':'good'],
+      ['Needs economic evidence', evidence, evidence ? 'warn':'good'],
+      ['External writes authorised', council.commander?.externalWrites ? 'Yes':'No', council.commander?.externalWrites ? 'bad':'good']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+    $('#hg-impact').innerHTML = [
+      ['Incremental revenue', money(verified.incrementalRevenue), 'neutral'],
+      ['Incremental contribution', money(verified.incrementalContribution), 'good'],
+      ['Contribution protected', money(verified.contributionProtected), 'good'],
+      ['Costs avoided', money(verified.costAvoided), 'good'],
+      ['Verified ROI', impact.roi?.multiple == null ? '—' : Number(impact.roi.multiple).toFixed(2) + '×', impact.roi?.multiple > 1 ? 'good':'neutral']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+    const connectionIssues = (business.connections || []).filter(item => !item.healthy).length;
+    $('#hg-controls').innerHTML = [
+      ['Pending approvals', business.controls?.pendingApprovals || 0, business.controls?.pendingApprovals ? 'warn':'good'],
+      ['Connection issues', connectionIssues, connectionIssues ? 'warn':'good'],
+      ['Stock risks', business.inventory?.stockRisks || 0, business.inventory?.stockRisks ? 'warn':'good'],
+      ['Missing cost variants', business.profitability?.missingCostVariants || 0, business.profitability?.missingCostVariants ? 'warn':'good'],
+      ['Profit truth policy', 'Unknown stays unknown', 'good']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+  }
+
   function renderOverview() {
     const dashboard = state.data.dashboard || {};
     const brief = state.data.brief || {};
@@ -455,7 +500,7 @@
     $('#command-posture').innerHTML = window.RunvaraUI.badge(state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') +
       window.RunvaraUI.badge(pendingApprovals ? pendingApprovals + (pendingApprovals === 1 ? ' approval waiting' : ' approvals waiting') : 'No approvals waiting', pendingApprovals ? 'warn' : 'good') +
       '<small>Protected actions still require owner approval before execution</small>';
-    renderTrajectory(); renderOperationsStream();
+    renderHypergrowthCommand(); renderTrajectory(); renderOperationsStream();
     $('#brief-summary').textContent = brief.summary || 'No daily brief is available.';
     $('#brief-generated').textContent = brief.generatedAt ? 'Generated ' + date(brief.generatedAt) + ' · rules-based assessment' : '';
     $('#readiness-score').textContent = String(dashboard.readiness || 0) + '%';
