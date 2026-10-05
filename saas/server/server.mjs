@@ -1812,6 +1812,36 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'GET' && pathname === '/api/revenue-engine') {
           send(res, 200, revenueEngineSnapshot(auth.state)); return;
         }
+        if (req.method === 'PUT' && pathname === '/api/hypergrowth/settings') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 16384);
+          const settings = await mutate(auth, async state => {
+            const next = { ...(state.settings || {}) };
+            if (Object.hasOwn(body, 'growthCapacityHours')) {
+              if (body.growthCapacityHours === null || body.growthCapacityHours === '') delete next.growthCapacityHours;
+              else {
+                const value = Number(body.growthCapacityHours);
+                if (!Number.isFinite(value) || value < 0 || value > 168) throw Object.assign(new Error('Growth capacity hours must be between 0 and 168'), { status:400, code:'VALIDATION_FAILED' });
+                next.growthCapacityHours = Math.round(value * 2) / 2;
+              }
+            }
+            if (Object.hasOwn(body, 'maxConcurrentGrowthExperiments')) {
+              if (body.maxConcurrentGrowthExperiments === null || body.maxConcurrentGrowthExperiments === '') delete next.maxConcurrentGrowthExperiments;
+              else {
+                const value = Number(body.maxConcurrentGrowthExperiments);
+                if (!Number.isInteger(value) || value < 1 || value > 20) throw Object.assign(new Error('Max concurrent growth experiments must be between 1 and 20'), { status:400, code:'VALIDATION_FAILED' });
+                next.maxConcurrentGrowthExperiments = value;
+              }
+            }
+            state.settings = next;
+            addAudit(state, { type:'hypergrowth_capacity_updated', actor:auth.user.id, detail:{
+              growthCapacityHours:next.growthCapacityHours ?? null,
+              maxConcurrentGrowthExperiments:next.maxConcurrentGrowthExperiments ?? null
+            }});
+            return { growthCapacityHours:next.growthCapacityHours ?? null, maxConcurrentGrowthExperiments:next.maxConcurrentGrowthExperiments ?? null };
+          });
+          send(res, 200, { settings }); return;
+        }
         if (req.method === 'POST' && pathname === '/api/revenue-engine/leads') {
           requireOwner(auth);
           const body = await jsonBody(req, 32768);
