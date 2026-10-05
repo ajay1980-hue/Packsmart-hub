@@ -1617,3 +1617,17 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .allocation-card strong{font-size:1.15rem;color:#f5d37e}
 .allocation-card small{color:var(--muted);line-height:1.45}
 @media(max-width:860px){.allocation-grid{grid-template-columns:1fr}}
+
+.command-execution,.command-blockers{border-color:rgba(71,137,245,.2);background:linear-gradient(160deg,rgba(14,24,43,.94),rgba(8,14,26,.96))}
+.command-execution{box-shadow:inset 3px 0 0 rgba(87,157,255,.52)}
+.command-blockers{box-shadow:inset 3px 0 0 rgba(218,172,74,.42)}
+.execution-list{display:grid;gap:8px;list-style:none;padding:0;margin:0}
+.execution-list li{display:flex;gap:12px;align-items:flex-start;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+.execution-list li:last-child{border-bottom:0}
+.execution-list li>div{display:grid;gap:4px}
+.execution-list small,.blocked-row small{color:var(--muted);line-height:1.45}
+.blocked-list{display:grid;gap:10px}
+.blocked-row{display:grid;gap:6px;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+.blocked-row:last-child{border-bottom:0}
+.blocked-row>div{display:grid;gap:4px}
+.unlock-note{color:#f0c66b!important}
