@@ -297,7 +297,7 @@ test('scheduler cache avoids per-minute Supabase traffic while retaining bounded
     remote._revision = 'remote-revision-change';
     fake.states.set(state.workspace.id, remote);
 
-    now += 13 * 60_000;
+    now += 12 * 60_000;
     const beforeWindow = await store.getForScheduler(state.workspace.id);
     assert.notEqual(beforeWindow.settings.marginFloor, 42);
     assert.equal(revisionReads(), 0);
