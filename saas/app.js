@@ -467,7 +467,10 @@
     $('#hypergrowth-evidence-badge').className = 'tag ' + ((impact.activity?.verifiedImpactEvents || 0) ? 'good' : 'neutral');
     $('#hg-opportunities').innerHTML = (queue.opportunities || []).slice(0,5).map((item,index) => {
       const learned = item.learning ? ' · learned from ' + item.learning.samples + ' verified result' + (item.learning.samples === 1 ? '' : 's') + ' · ' + item.learning.positiveRatePercent + '% positive' : '';
-      return '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.evidence || '') + learned) + '</small></span><span class="tag ' + (item.score !== null ? 'good' : item.learning ? 'neutral' : 'neutral') + '">' + escapeHtml(item.score !== null ? money(item.score) : item.learning ? 'Learned signal' : 'Needs evidence') + '</span></li>';
+      const posture = item.evidenceDecision === 'ready-for-owner-review' ? 'Ready for owner review' : item.evidenceDecision === 'deprioritise' ? 'Deprioritise' : item.evidenceDecision === 'needs-more-evidence' ? 'Needs more evidence' : item.score !== null ? money(item.score) : item.learning ? 'Learned signal' : 'Needs evidence';
+      const tone = item.evidenceDecision === 'deprioritise' ? 'bad' : item.evidenceDecision === 'ready-for-owner-review' ? 'good' : item.evidenceDecision === 'needs-more-evidence' ? 'warn' : item.score !== null ? 'good' : 'neutral';
+      const verifiedOutcome = item.evidenceDecision ? ' · ' + (item.evidenceDecisionReason || 'verified experiment updated decision posture') + (Number.isFinite(Number(item.verifiedContributionValue)) ? ' · verified contribution ' + money(item.verifiedContributionValue) : '') : '';
+      return '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.evidence || '') + learned + verifiedOutcome) + '</small></span><span class="tag ' + tone + '">' + escapeHtml(posture) + '</span></li>';
     }).join('') || '<li class="empty-state">No Hypergrowth opportunities detected yet.</li>';
     $('#hg-council-list').innerHTML = [
       ['Recommended now', recommended, recommended ? 'good':'neutral'],
