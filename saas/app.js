@@ -450,6 +450,8 @@
     const queue = hg.opportunityQueue || { opportunities:[], summary:{} };
     const council = hg.growthCouncil || { deliberations:[], commander:{} };
     const impact = hg.impact || { verified:{}, activity:{}, coverage:{} };
+    const learning = hg.learning || { priors:[], summary:{} };
+    const experiments = state.data.revenueEngine?.experiments || [];
     const verified = impact.verified || {};
     $('#hg-value').textContent = money(verified.verifiedValue);
     $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
@@ -463,9 +465,10 @@
     $('#hg-opportunity-count').textContent = String(queue.summary?.total || 0) + ' detected';
     $('#hypergrowth-evidence-badge').textContent = (impact.activity?.verifiedImpactEvents || 0) + ' verified impact events';
     $('#hypergrowth-evidence-badge').className = 'tag ' + ((impact.activity?.verifiedImpactEvents || 0) ? 'good' : 'neutral');
-    $('#hg-opportunities').innerHTML = (queue.opportunities || []).slice(0,5).map((item,index) =>
-      '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.evidence || '') + '</small></span><span class="tag ' + (item.score !== null ? 'good' : 'neutral') + '">' + escapeHtml(item.score !== null ? money(item.score) : 'Needs evidence') + '</span></li>'
-    ).join('') || '<li class="empty-state">No Hypergrowth opportunities detected yet.</li>';
+    $('#hg-opportunities').innerHTML = (queue.opportunities || []).slice(0,5).map((item,index) => {
+      const learned = item.learning ? ' · learned from ' + item.learning.samples + ' verified result' + (item.learning.samples === 1 ? '' : 's') + ' · ' + item.learning.positiveRatePercent + '% positive' : '';
+      return '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.evidence || '') + learned) + '</small></span><span class="tag ' + (item.score !== null ? 'good' : item.learning ? 'neutral' : 'neutral') + '">' + escapeHtml(item.score !== null ? money(item.score) : item.learning ? 'Learned signal' : 'Needs evidence') + '</span></li>';
+    }).join('') || '<li class="empty-state">No Hypergrowth opportunities detected yet.</li>';
     $('#hg-council-list').innerHTML = [
       ['Recommended now', recommended, recommended ? 'good':'neutral'],
       ['Prepare for approval', approvals, approvals ? 'warn':'good'],
@@ -487,6 +490,22 @@
       ['Missing cost variants', business.profitability?.missingCostVariants || 0, business.profitability?.missingCostVariants ? 'warn':'good'],
       ['Profit truth policy', 'Unknown stays unknown', 'good']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
+
+    const usable = Number(learning.summary?.domainsUsableForGuidance || 0);
+    const learningEvents = Number(learning.summary?.verifiedLearningEvents || 0);
+    $('#hg-learning-badge').textContent = usable ? usable + ' learned domain' + (usable === 1 ? '' : 's') : 'Learning safely';
+    $('#hg-learning-badge').className = 'tag ' + (usable ? 'good' : 'neutral');
+    $('#hg-learning').innerHTML = (learning.priors || []).slice(0,5).map(item =>
+      '<div class="learning-row"><div><b>' + escapeHtml(statusLabel(item.kind)) + '</b><small>' + escapeHtml(item.samples + ' verified outcomes · ' + (item.positiveRatePercent == null ? 'positive rate unknown' : item.positiveRatePercent + '% positive')) + '</small></div><span class="tag ' + (item.usableForGuidance ? 'good' : 'neutral') + '">' + escapeHtml(item.usableForGuidance ? statusLabel(item.confidence) + ' guidance' : 'More evidence') + '</span></div>'
+    ).join('') || '<div class="empty-state">Runvara will learn here after repeated verified experiment or work outcomes. Forecasts and unverified results never count.</div>';
+    if (!learningEvents && learning.priors?.length) $('#hg-learning').insertAdjacentHTML('beforeend','<p class="muted tiny">No verified learning events are currently counted.</p>');
+
+    const statusTone = status => status === 'completed' ? 'good' : status === 'measured' ? 'warn' : status === 'running' ? 'neutral' : 'neutral';
+    $('#hg-experiments').innerHTML = experiments.slice(0,6).map(item => {
+      const impactState = item.impact?.verified ? 'Verified result' : item.status === 'measured' ? 'Awaiting verification' : 'No verified result yet';
+      const contribution = item.impact?.incrementalContribution;
+      return '<div class="experiment-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown') + ' · ' + impactState + (Number.isFinite(Number(contribution)) ? ' · ' + money(contribution) + ' contribution' : '')) + '</small></div><span class="tag ' + statusTone(String(item.status || '').toLowerCase()) + '">' + escapeHtml(statusLabel(item.status || 'draft')) + '</span></div>';
+    }).join('') || '<div class="empty-state">No experiments yet. Create one from the Revenue Engine when there is a measurable hypothesis worth testing.</div>';
   }
 
   function renderOverview() {
