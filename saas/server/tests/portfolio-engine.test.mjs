@@ -53,3 +53,51 @@ test('revenue alone never becomes contribution evidence', () => {
   assert.equal(result.safeguards.revenueNotUsedAsContribution,true);
   assert.equal(result.allocation.nextPound,null);
 });
+
+
+test('capacity-aware portfolio excludes approval-gated and already-active work from next executable', () => {
+  const state={
+    workspace:{id:'tenant-capacity'},
+    settings:{growthCapacityHours:4,maxConcurrentGrowthExperiments:2},
+    approvals:[{id:'a1',status:'pending',payload:{opportunityId:'o1'}}],
+    exceptions:[],
+    opportunities:[
+      {id:'o1',title:'Approval-bound',kind:'pricing',present:true,status:'open',confidence:.9,risk:'low',effort:'low',effortHours:1,approvalRequired:true},
+      {id:'o2',title:'Already testing',kind:'retention',present:true,status:'open',confidence:.8,risk:'low',effort:'low',effortHours:1,experimentId:'e2'},
+      {id:'o3',title:'Executable analysis',kind:'operations',present:true,status:'open',confidence:.7,risk:'low',effort:'low',effortHours:2,approvalRequired:false}
+    ],
+    revenueEngine:{experiments:[{id:'e2',opportunityId:'o2',status:'running'}]}
+  };
+  const result=derivePortfolioAllocation(state);
+  assert.equal(result.allocation.nextExecutable.opportunityId,'o3');
+  assert.equal(result.capacity.activeGrowthExperiments,1);
+  assert.equal(result.capacity.experimentCapacityAvailable,true);
+  assert.equal(result.safeguards.approvalRequiredWorkNotMarkedExecutable,true);
+});
+
+test('explicit growth-hour capacity blocks work that does not fit', () => {
+  const state={
+    workspace:{id:'tenant-hours'},
+    settings:{growthCapacityHours:1,maxConcurrentGrowthExperiments:3},
+    approvals:[],exceptions:[],
+    opportunities:[{id:'o1',title:'Two-hour task',kind:'operations',present:true,status:'open',confidence:.8,risk:'low',effort:'low',effortHours:2,approvalRequired:false}],
+    revenueEngine:{experiments:[]}
+  };
+  const result=derivePortfolioAllocation(state);
+  assert.equal(result.allocation.nextExecutable,null);
+  assert.equal(result.capacity.availableGrowthHours,1);
+});
+
+test('unknown hour capacity is surfaced as unknown instead of invented', () => {
+  const state={
+    workspace:{id:'tenant-unknown'},
+    settings:{},
+    approvals:[],exceptions:[],
+    opportunities:[{id:'o1',title:'Read-only analysis',kind:'operations',present:true,status:'open',confidence:.8,risk:'low',effort:'low',effortHours:1,approvalRequired:false}],
+    revenueEngine:{experiments:[]}
+  };
+  const result=derivePortfolioAllocation(state);
+  assert.equal(result.capacity.availableGrowthHours,null);
+  assert.match(result.capacity.note,/unknown/i);
+  assert.equal(result.safeguards.unknownCapacityDoesNotBecomeUnlimited,true);
+});
