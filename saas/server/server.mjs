@@ -56,7 +56,7 @@ import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, se
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
 import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
-import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
+import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
 import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
 import { runGrowthCouncil } from './lib/growth-council.mjs';
@@ -1761,6 +1761,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'POST' && opportunityMatch) {
           const approval = await mutate(auth, async state => requestOpportunityApproval(state, opportunityMatch[1], auth.user.id));
           send(res, 202, { approval, executedExternally: false }); return;
+        }
+        const opportunityExperimentMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/experiment$/);
+        if (req.method === 'POST' && opportunityExperimentMatch) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const opportunity = (state.opportunities || []).find(item => item.id === opportunityExperimentMatch[1]);
+            if (!opportunity) throw Object.assign(new Error('Opportunity not found'), { status:404, code:'OPPORTUNITY_NOT_FOUND' });
+            const existing = opportunity.experimentId ? state.revenueEngine?.experiments?.find(item => item.id === opportunity.experimentId) : null;
+            if (existing && !['completed','closed'].includes(String(existing.status || '').toLowerCase())) return existing;
+            const item = createOpportunityExperiment(state, opportunity, body, auth.user.id);
+            addAudit(state, { type:'opportunity_experiment_created', actor:auth.user.id, detail:{ opportunityId:opportunity.id, experimentId:item.id, externalWrites:false } });
+            return item;
+          });
+          send(res, 201, { experiment, executedExternally:false }); return;
         }
         const modifyMatch = pathname.match(/^\/api\/approvals\/([^/]+)$/);
         if (req.method === 'PATCH' && modifyMatch) {
