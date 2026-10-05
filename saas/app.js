@@ -364,6 +364,32 @@
       ['Recorded spend', money(advertising.summary.spend)], ['Attributed revenue', money(advertising.summary.attributedRevenue)],
       ['ROAS', advertising.summary.roas == null ? '—' : Number(advertising.summary.roas).toFixed(2)+'×'], ['Attribution coverage', percent(advertising.summary.attributionCoverage)]
     ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
+
+    const experiments = Array.isArray(re.experiments) ? re.experiments : [];
+    const durableOpportunities = (state.data.opportunities || []).filter(item => item.present !== false && !['resolved','dismissed'].includes(item.status));
+    const createSelect = $('#re-experiment-opportunity');
+    createSelect.innerHTML = '<option value="">Choose an opportunity</option>' + durableOpportunities.map(item =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title || item.id) + '</option>'
+    ).join('');
+    const measurable = experiments.filter(item => ['draft','running','completed','measured'].includes(String(item.status || '').toLowerCase()) && item.status !== 'completed');
+    $('#re-experiment-measure').innerHTML = '<option value="">Choose an active experiment</option>' + measurable.map(item =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title || item.id) + ' · ' + escapeHtml(statusLabel(item.status || 'draft')) + '</option>'
+    ).join('');
+    const measured = experiments.filter(item => String(item.status || '').toLowerCase() === 'measured' && item.impact?.verified !== true);
+    $('#re-experiment-verify').innerHTML = '<option value="">Choose a measured experiment</option>' + measured.map(item =>
+      '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.title || item.id) + '</option>'
+    ).join('');
+    $('#re-experiment-count').textContent = experiments.length + ' experiment' + (experiments.length === 1 ? '' : 's');
+    $('#re-experiment-list').innerHTML = experiments.slice(0,20).map(item => {
+      const verified = item.impact?.verified === true;
+      const contribution = Number.isFinite(Number(item.impact?.incrementalContribution)) ? money(item.impact.incrementalContribution) + ' contribution' : 'contribution not verified';
+      return '<div class="control-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown')) + ' · ' + escapeHtml(item.metric || 'incremental_contribution') + '</small><small>' + escapeHtml(verified ? 'Verified · ' + contribution : statusLabel(item.status || 'draft')) + '</small></div><span class="tag ' + (verified ? 'good' : item.status === 'measured' ? 'warn' : 'neutral') + '">' + escapeHtml(verified ? 'Verified' : statusLabel(item.status || 'draft')) + '</span></div>';
+    }).join('') || '<div class="empty-state">No experiments yet. Start from a recorded opportunity above.</div>';
+    const capacityForm = $('#re-growth-capacity-form');
+    if (capacityForm) {
+      capacityForm.elements.growthCapacityHours.value = state.data.settings?.growthCapacityHours ?? '';
+      capacityForm.elements.maxConcurrentGrowthExperiments.value = state.data.settings?.maxConcurrentGrowthExperiments ?? '';
+    }
   }
 
   function renderAnalytics() {
@@ -1212,6 +1238,66 @@
       showMessage('Marketing Autopilot controls saved.');
     } catch (error) { showMessage(error.message, 'error'); }
     finally { setBusy(button, false); }
+  });
+
+  $('#re-experiment-create-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]');
+    const opportunityId=form.elements.opportunityId.value;
+    if(!opportunityId) return;
+    setBusy(button,true,'Creating…');
+    try {
+      await request('/api/opportunities/'+encodeURIComponent(opportunityId)+'/experiment',{method:'POST',body:JSON.stringify({
+        metric:form.elements.metric.value,
+        hypothesis:form.elements.hypothesis.value
+      })});
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Draft experiment created from the selected opportunity.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
+  });
+
+  $('#re-experiment-measure-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]'), id=form.elements.experimentId.value;
+    if(!id) return;
+    const payload={method:form.elements.method.value};
+    for(const field of ['incrementalContribution','contributionProtected','costAvoided','incrementalRevenue','minutesSaved']){
+      const raw=form.elements[field].value.trim();
+      if(raw!=='') payload[field]=Number(raw);
+    }
+    setBusy(button,true,'Recording…');
+    try {
+      await request('/api/revenue-engine/experiments/'+encodeURIComponent(id)+'/measure',{method:'POST',body:JSON.stringify(payload)});
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Measurement recorded. It will not influence learning until explicitly verified.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
+  });
+
+  $('#re-experiment-verify-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]'), id=form.elements.experimentId.value;
+    if(!id) return;
+    setBusy(button,true,'Verifying…');
+    try {
+      await request('/api/revenue-engine/experiments/'+encodeURIComponent(id)+'/verify',{method:'POST',body:JSON.stringify({note:form.elements.note.value})});
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Experiment verified. Runvara can now use the realised result as learning evidence.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
+  });
+
+  $('#re-growth-capacity-form')?.addEventListener('submit', async event => {
+    event.preventDefault();
+    const form=event.currentTarget, button=form.querySelector('button[type="submit"]');
+    const hours=form.elements.growthCapacityHours.value.trim(), concurrent=form.elements.maxConcurrentGrowthExperiments.value.trim();
+    setBusy(button,true,'Saving…');
+    try {
+      await request('/api/hypergrowth/settings',{method:'PUT',body:JSON.stringify({
+        growthCapacityHours:hours===''?null:Number(hours),
+        maxConcurrentGrowthExperiments:concurrent===''?null:Number(concurrent)
+      })});
+      await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Growth capacity saved. Runvara execution priorities have been refreshed.');
+    } catch(error){ showMessage(error.message,'error'); }
+    finally{ setBusy(button,false); }
   });
 
   $('#marketing-new-campaign').addEventListener('click', async event => {
