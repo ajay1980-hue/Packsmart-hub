@@ -56,11 +56,12 @@ import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, se
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
 import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
-import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch } from './lib/revenue-engine.mjs';
+import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
 import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
 import { runGrowthCouncil } from './lib/growth-council.mjs';
 import { deriveImpact } from './lib/impact-engine.mjs';
+import { deriveLearning } from './lib/learning-engine.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.15.2';
@@ -511,7 +512,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   function bootstrapPayload(state, user, csrf) {
     const brief = currentBrief(state);
     const businessState = deriveBusinessState(state);
-    const opportunityQueue = deriveOpportunityQueue(businessState);
+    const learning = deriveLearning(state);
+    const opportunityQueue = deriveOpportunityQueue(businessState, { learning });
     const growthCouncil = runGrowthCouncil(businessState, opportunityQueue);
     const impact = deriveImpact(state);
     return {
@@ -527,7 +529,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       costHistory: state.costHistory || [],
       advertisingCosts: state.advertisingCosts || [],
       revenueEngine: revenueEngineSnapshot(state),
-      hypergrowth: { businessState, opportunityQueue, growthCouncil, impact },
+      hypergrowth: { businessState, opportunityQueue, growthCouncil, impact, learning },
       shippingProviders: state.shippingProviders || [],
       settings: state.settings || {},
       automations: state.automations || {},
@@ -1825,6 +1827,41 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             return item;
           });
           send(res, 201, { touch }); return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/revenue-engine/experiments') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const item = createExperiment(state, body, auth.user.id);
+            addAudit(state, { type: 'revenue_experiment_created', actor: auth.user.id, detail: { experimentId: item.id, kind: item.kind, externalWrites: false } });
+            return item;
+          });
+          send(res, 201, { experiment, executedExternally:false }); return;
+        }
+
+        const experimentMeasure = pathname.match(/^\/api\/revenue-engine\/experiments\/([^/]+)\/measure$/);
+        if (req.method === 'POST' && experimentMeasure) {
+          requireOwner(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const item = recordExperimentMeasurement(state, text(experimentMeasure[1], 180), body, auth.user.id);
+            addAudit(state, { type: 'revenue_experiment_measured', actor: auth.user.id, detail: { experimentId:item.id, method:item.impact?.method || null, verified:false } });
+            return item;
+          });
+          send(res, 200, { experiment, verified:false, executedExternally:false }); return;
+        }
+
+        const experimentVerify = pathname.match(/^\/api\/revenue-engine\/experiments\/([^/]+)\/verify$/);
+        if (req.method === 'POST' && experimentVerify) {
+          requireApprover(auth);
+          const body = await jsonBody(req, 32768);
+          const experiment = await mutate(auth, async state => {
+            const item = verifyExperimentMeasurement(state, text(experimentVerify[1], 180), body, auth.user.id);
+            addAudit(state, { type: 'revenue_experiment_verified', actor: auth.user.id, detail: { experimentId:item.id, method:item.impact?.method || null, verified:true } });
+            return item;
+          });
+          send(res, 200, { experiment, verified:true, executedExternally:false }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/reports/accounting.csv') {
