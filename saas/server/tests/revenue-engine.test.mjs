@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence, deriveIntentRecovery, deriveSalesPipeline, deriveGrowthPlan, ensureRevenueEngine, createExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from '../lib/revenue-engine.mjs';
+import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence, deriveIntentRecovery, deriveSalesPipeline, deriveGrowthPlan, ensureRevenueEngine, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from '../lib/revenue-engine.mjs';
 
 const now = new Date('2026-10-01T12:00:00.000Z');
 function order(id, customer, createdAt, lines, total=120) {
@@ -94,4 +94,15 @@ test('experiment verification requires a measured result and an explicit verific
   assert.throws(()=>verifyExperimentMeasurement(state,experiment.id,{note:'too early'},'owner-1'),error=>error.code==='EXPERIMENT_NOT_MEASURED');
   recordExperimentMeasurement(state,experiment.id,{method:'before-after',incrementalContribution:15},'analyst-1');
   assert.throws(()=>verifyExperimentMeasurement(state,experiment.id,{},'owner-1'),error=>error.code==='VALIDATION_FAILED');
+});
+
+
+test('opportunity experiment links the existing opportunity without authorising a write', () => {
+  const state={workspace:{id:'tenant-link'},economics:{},orders:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-1',kind:'retention',title:'Recover lapsed buyers',recommendedNextStep:'Test a controlled reminder',status:'open'};
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  assert.equal(experiment.opportunityId,'opportunity-1');
+  assert.equal(opportunity.experimentId,experiment.id);
+  assert.equal(opportunity.experimentStatus,'draft');
+  assert.equal(experiment.externalWrites,false);
 });

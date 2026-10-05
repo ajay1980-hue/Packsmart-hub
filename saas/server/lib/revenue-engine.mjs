@@ -270,6 +270,23 @@ export function deriveGrowthPlan(state, { targetProfit = null } = {}) {
 }
 
 
+export function createOpportunityExperiment(state, opportunity, body = {}, actor = 'system') {
+  if (!opportunity?.id) throw Object.assign(new Error('Opportunity is required'), { status:400, code:'VALIDATION_FAILED' });
+  const experiment = createExperiment(state, {
+    kind: body.kind || opportunity.kind,
+    title: body.title || ('Test: ' + opportunity.title),
+    hypothesis: body.hypothesis || opportunity.recommendedNextStep || opportunity.title,
+    opportunityId: opportunity.id,
+    metric: body.metric || 'incremental_contribution',
+    baseline: body.baseline,
+    target: body.target
+  }, actor);
+  opportunity.experimentId = experiment.id;
+  opportunity.experimentStatus = 'draft';
+  opportunity.updatedAt = nowIso();
+  return experiment;
+}
+
 export function createExperiment(state, body = {}, actor = 'system') {
   const engine=ensureRevenueEngine(state), now=nowIso();
   const kind=clean(body.kind || body.type,80).toLowerCase();
