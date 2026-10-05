@@ -1609,3 +1609,11 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .learning-row b,.experiment-row b{font-size:.95rem}
 .learning-row small,.experiment-row small{color:var(--muted);line-height:1.45}
 @media(max-width:720px){.learning-row,.experiment-row{align-items:flex-start;flex-direction:column}.learning-row>.tag,.experiment-row>.tag{align-self:flex-start}}
+
+.command-allocation{margin-top:16px;border-color:rgba(218,172,74,.28);background:linear-gradient(150deg,rgba(15,25,44,.95),rgba(8,14,26,.98));box-shadow:inset 3px 0 0 rgba(218,172,74,.5)}
+.allocation-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.allocation-card{display:grid;gap:7px;padding:15px;border:1px solid rgba(83,145,241,.17);border-radius:16px;background:rgba(9,17,31,.72)}
+.allocation-card b{font-size:.95rem}
+.allocation-card strong{font-size:1.15rem;color:#f5d37e}
+.allocation-card small{color:var(--muted);line-height:1.45}
+@media(max-width:860px){.allocation-grid{grid-template-columns:1fr}}
