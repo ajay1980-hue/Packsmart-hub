@@ -452,6 +452,7 @@
     const impact = hg.impact || { verified:{}, activity:{}, coverage:{} };
     const learning = hg.learning || { priors:[], summary:{} };
     const experiments = state.data.revenueEngine?.experiments || [];
+    const portfolio = hg.portfolio || { portfolio:[], allocation:{}, coverage:{} };
     const verified = impact.verified || {};
     $('#hg-value').textContent = money(verified.verifiedValue);
     $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
@@ -509,6 +510,33 @@
       const contribution = item.impact?.incrementalContribution;
       return '<div class="experiment-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown') + ' · ' + impactState + (Number.isFinite(Number(contribution)) ? ' · ' + money(contribution) + ' contribution' : '')) + '</small></div><span class="tag ' + statusTone(String(item.status || '').toLowerCase()) + '">' + escapeHtml(statusLabel(item.status || 'draft')) + '</span></div>';
     }).join('') || '<div class="empty-state">No experiments yet. Create one from the Revenue Engine when there is a measurable hypothesis worth testing.</div>';
+
+    const nextPound = portfolio.allocation?.nextPound;
+    const nextHour = portfolio.allocation?.nextHour;
+    const topPriority = portfolio.allocation?.topEvidencePriority;
+    const allocationReady = Boolean(nextPound || nextHour);
+    $('#hg-allocation-badge').textContent = allocationReady ? 'Efficiency evidence ready' : 'Needs cost/time evidence';
+    $('#hg-allocation-badge').className = 'tag ' + (allocationReady ? 'good' : 'neutral');
+    $('#hg-allocation').innerHTML = [
+      {
+        label:'Next £1',
+        title:nextPound?.title || 'Not enough cost evidence',
+        value:nextPound ? Number(nextPound.verifiedContributionPerPound).toFixed(2) + '× verified contribution / £' : '—',
+        note:nextPound ? 'Uses explicit execution cost only.' : 'Add execution cost to a verified opportunity before Runvara recommends capital efficiency.'
+      },
+      {
+        label:'Next hour',
+        title:nextHour?.title || 'Not enough effort evidence',
+        value:nextHour ? money(nextHour.verifiedContributionPerHour) + ' / hour' : '—',
+        note:nextHour ? 'Uses explicit effort hours only.' : 'Add effort hours to a verified opportunity before Runvara recommends time efficiency.'
+      },
+      {
+        label:'Top evidence priority',
+        title:topPriority?.title || 'No portfolio evidence yet',
+        value:topPriority ? 'Priority ' + Number(topPriority.priorityIndex || 0).toFixed(3) : '—',
+        note:topPriority ? (topPriority.verifiedContribution == null ? 'Evidence-weighted priority; no verified contribution value yet.' : 'Verified contribution ' + money(topPriority.verifiedContribution) + '.') : 'Runvara will rank opportunities as verified evidence accumulates.'
+      }
+    ].map(item => '<div class="allocation-card"><span class="eyebrow">' + escapeHtml(item.label) + '</span><b>' + escapeHtml(item.title) + '</b><strong>' + escapeHtml(item.value) + '</strong><small>' + escapeHtml(item.note) + '</small></div>').join('');
   }
 
   function renderOverview() {
