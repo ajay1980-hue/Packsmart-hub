@@ -1598,3 +1598,14 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .command-risks{box-shadow:inset 3px 0 0 rgba(55,130,255,.42)}
 .hypergrowth-command .priority-number{background:linear-gradient(135deg,rgba(218,172,74,.22),rgba(63,132,255,.16));border:1px solid rgba(218,172,74,.28)}
 @media(max-width:720px){.hypergrowth-command{padding:16px;border-radius:18px}.hypergrowth-head{gap:12px}.hypergrowth-head>.tag{align-self:flex-start}.hypergrowth-grid{grid-template-columns:1fr}.hypergrowth-command .priority-list li{align-items:flex-start}}
+
+.command-learning,.command-experiments{border-color:rgba(71,137,245,.2);background:linear-gradient(160deg,rgba(14,24,43,.94),rgba(8,14,26,.96))}
+.command-learning{box-shadow:inset 3px 0 0 rgba(91,158,255,.52)}
+.command-experiments{box-shadow:inset 3px 0 0 rgba(218,172,74,.46)}
+.learning-list,.experiment-list{display:grid;gap:10px}
+.learning-row,.experiment-row{display:flex;justify-content:space-between;gap:14px;align-items:center;padding:12px 0;border-bottom:1px solid rgba(255,255,255,.06)}
+.learning-row:last-child,.experiment-row:last-child{border-bottom:0}
+.learning-row>div,.experiment-row>div{display:grid;gap:4px;min-width:0}
+.learning-row b,.experiment-row b{font-size:.95rem}
+.learning-row small,.experiment-row small{color:var(--muted);line-height:1.45}
+@media(max-width:720px){.learning-row,.experiment-row{align-items:flex-start;flex-direction:column}.learning-row>.tag,.experiment-row>.tag{align-self:flex-start}}
