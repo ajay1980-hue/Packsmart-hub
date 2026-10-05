@@ -63,6 +63,13 @@ export function deliberateOpportunity(opportunity, businessState) {
     challengeCount:challenges.length,
     approvalRequired:Boolean(opportunity.approvalRequired),
     actionType:clean(opportunity.actionType || 'safe',80),
+    learning:opportunity.learning ? {
+      samples:Number(opportunity.learning.samples || 0),
+      confidence:clean(opportunity.learning.confidence,40),
+      positiveRatePercent:Number(opportunity.learning.positiveRatePercent || 0),
+      averageIncrementalContribution:opportunity.learning.averageIncrementalContribution ?? null,
+      medianIncrementalContribution:opportunity.learning.medianIncrementalContribution ?? null
+    } : null,
     rationale:challenges.length
       ? clean(challenges.map(item => `${item.agentId}: ${item.reason}`).join(' '),900)
       : guardrails.length
@@ -87,12 +94,19 @@ export function runGrowthCouncil(businessState, opportunityQueue, { limit = 10 }
       recommended:recommended.map(item => item.opportunityId),
       prepareForApproval:approval.map(item => item.opportunityId),
       needsEvidence:needsEvidence.map(item => item.opportunityId),
+      learnedGuidance:deliberations.filter(item => item.learning).map(item => ({
+        opportunityId:item.opportunityId,
+        samples:item.learning.samples,
+        confidence:item.learning.confidence,
+        positiveRatePercent:item.learning.positiveRatePercent
+      })),
       externalWrites:false
     },
     safeguards:{
       approvalCentrePreserved:true,
       externalWrites:false,
       unknownProfitCanBeRecommendedAsVerified:false,
+      historicalLearningCannotBypassCurrentEconomics:true,
       tenantScope:clean(businessState?.workspaceId,120)
     }
   };
