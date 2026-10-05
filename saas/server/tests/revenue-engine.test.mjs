@@ -106,3 +106,39 @@ test('opportunity experiment links the existing opportunity without authorising 
   assert.equal(opportunity.experimentStatus,'draft');
   assert.equal(experiment.externalWrites,false);
 });
+
+
+test('verified experiment refreshes linked opportunity decision posture using contribution, not revenue', () => {
+  const state={workspace:{id:'tenant-posture'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-1',kind:'retention',title:'Retention test',status:'open'};
+  state.opportunities.push(opportunity);
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalRevenue:500,incrementalContribution:75},'analyst-1');
+  const verified=verifyExperimentMeasurement(state,experiment.id,{note:'Settled order contribution checked.'},'owner-1');
+  assert.equal(verified.decisionPosture.status,'ready-for-owner-review');
+  assert.equal(verified.decisionPosture.verifiedContributionValue,75);
+  assert.equal(opportunity.evidenceDecision,'ready-for-owner-review');
+  assert.equal(opportunity.verifiedContributionValue,75);
+});
+
+test('revenue-only verification cannot make an opportunity approval-ready', () => {
+  const state={workspace:{id:'tenant-revenue-only'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-2',kind:'conversion',title:'Conversion test',status:'open'};
+  state.opportunities.push(opportunity);
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'before-after',incrementalRevenue:1000},'analyst-1');
+  verifyExperimentMeasurement(state,experiment.id,{note:'Revenue confirmed; contribution not established.'},'owner-1');
+  assert.equal(opportunity.evidenceDecision,'needs-more-evidence');
+  assert.equal(opportunity.verifiedContributionValue,0);
+});
+
+test('negative verified contribution deprioritises the linked opportunity', () => {
+  const state={workspace:{id:'tenant-negative'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
+  const opportunity={id:'opportunity-3',kind:'pricing',title:'Pricing test',status:'open'};
+  state.opportunities.push(opportunity);
+  const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalContribution:-20},'analyst-1');
+  verifyExperimentMeasurement(state,experiment.id,{note:'Contribution loss confirmed.'},'owner-1');
+  assert.equal(opportunity.evidenceDecision,'deprioritise');
+  assert.equal(opportunity.verifiedContributionValue,-20);
+});

@@ -339,6 +339,14 @@ export function recordExperimentMeasurement(state, experimentId, body = {}, acto
   return experiment;
 }
 
+function experimentDecisionPosture(impact = {}) {
+  const contribution = ['incrementalContribution','contributionProtected','costAvoided']
+    .reduce((sum, field) => sum + (Number.isFinite(Number(impact[field])) ? Number(impact[field]) : 0), 0);
+  if (contribution > 0) return { status:'ready-for-owner-review', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is positive.' };
+  if (contribution < 0) return { status:'deprioritise', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is negative.' };
+  return { status:'needs-more-evidence', verifiedContributionValue:0, reason:'No positive verified contribution evidence has been established.' };
+}
+
 export function verifyExperimentMeasurement(state, experimentId, body = {}, actor = 'system') {
   const engine=ensureRevenueEngine(state);
   const experiment=engine.experiments.find(item=>item.id===experimentId);
@@ -351,6 +359,19 @@ export function verifyExperimentMeasurement(state, experimentId, body = {}, acto
   experiment.status='completed';
   experiment.completedAt=now;
   experiment.updatedAt=now;
+  const posture=experimentDecisionPosture(experiment.impact);
+  experiment.decisionPosture=posture;
+  if (experiment.opportunityId) {
+    const opportunity=(state.opportunities || []).find(item=>item.id===experiment.opportunityId);
+    if (opportunity) {
+      opportunity.experimentId=experiment.id;
+      opportunity.experimentStatus='completed';
+      opportunity.evidenceDecision=posture.status;
+      opportunity.verifiedContributionValue=posture.verifiedContributionValue;
+      opportunity.evidenceDecisionReason=posture.reason;
+      opportunity.evidenceUpdatedAt=now;
+    }
+  }
   engine.updatedAt=now;
   return experiment;
 }
