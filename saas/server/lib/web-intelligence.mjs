@@ -4,6 +4,26 @@ import { isIP } from 'node:net';
 const nowIso = () => new Date().toISOString();
 const clean = (value, max = 1000) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 const invalid = message => Object.assign(new Error(message), { status: 400, code: 'VALIDATION_FAILED' });
+export const WEB_SCAN_BLOCK_REASON = 'WEB_SCAN_ALLOWANCE_REQUIRED';
+export const WEB_SCAN_OWNER_ACTION = 'Paid Firecrawl scans are paused until approved per-target request and credit accounting is available. Saved targets and findings remain available.';
+export const WEB_SCAN_MAX_MARKDOWN_BYTES = 1024 * 1024;
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value))
+  && Object.getOwnPropertySymbols(value).length === 0
+  && Object.values(Object.getOwnPropertyDescriptors(value)).every(field => field.enumerable && Object.hasOwn(field, 'value'));
+const responseInvalid = (code = 'WEB_SCAN_RESPONSE_UNVERIFIED') => Object.assign(
+  new Error('The Firecrawl response could not be verified. The saved snapshot and findings must be retained.'), { status: 502, code });
+
+// This release intentionally has NO live Firecrawl dispatcher, issuer, or bypass
+// flag. A key, owner request, setting, arbitrary callback or allowance-shaped
+// JSON cannot authorize a chargeable scrape. Do not reuse operator-brief keys.
+function scanEffects(blocked = 0, historicalExposureUnknown = false) {
+  return { providerReads: 0, submissionAttempts: 0, confirmedSubmissions: 0,
+    uncertainSubmissions: 0, blockedSubmissions: blocked, historicalExposureUnknown,
+    externalWrites: false, spend: historicalExposureUnknown ? null : 0,
+    costStatus: historicalExposureUnknown ? 'unknown' : 'not_incurred' };
+}
+
 
 function targetId(url) {
   return 'web_' + crypto.createHash('sha256').update(String(url)).digest('hex').slice(0, 20);
@@ -34,19 +54,15 @@ function fingerprint(markdown) {
   return crypto.createHash('sha256').update(String(markdown || '')).digest('hex');
 }
 
-function diffPrices(previous = [], current = []) {
-  const before = new Set(previous.map(Number));
-  const after = new Set(current.map(Number));
-  const added = current.filter(value => !before.has(Number(value))).slice(0, 20);
-  const removed = previous.filter(value => !after.has(Number(value))).slice(0, 20);
-  return { added, removed, changed: Boolean(added.length || removed.length) };
-}
-
 export function ensureWebIntelligence(state) {
   const previous = state.webIntelligence && typeof state.webIntelligence === 'object' ? state.webIntelligence : {};
   const settings = previous.settings && typeof previous.settings === 'object' ? previous.settings : {};
   state.webIntelligence = {
+    // Store.get also normalizes before guarded scans. Keep explicit tenant and
+    // workspace markers intact so normalization cannot launder foreign scope.
+    ...previous, // Preserve recorded success/provenance metadata, including older fields.
     settings: {
+      ...settings,
       enabled: settings.enabled !== false,
       scanIntervalMinutes: Number.isInteger(settings.scanIntervalMinutes) ? Math.max(60, Math.min(10080, settings.scanIntervalMinutes)) : 1440,
       maxTargetsPerRun: Number.isInteger(settings.maxTargetsPerRun) ? Math.max(1, Math.min(10, settings.maxTargetsPerRun)) : 5
@@ -71,13 +87,17 @@ export function webIntelligenceSnapshot(state, env = process.env) {
       id: 'firecrawl',
       name: 'Firecrawl',
       configured,
-      status: configured ? 'configured' : 'not_configured',
-      detail: configured ? 'Live public-web intelligence is available.' : 'Add FIRECRAWL_API_KEY on the Runvara server to enable live scans.'
+      status: configured ? 'allowance_required' : 'not_configured',
+      liveScanningAvailable: false,
+      blockedReason: WEB_SCAN_BLOCK_REASON,
+      readinessLabel: configured ? 'Configured · paid scans paused' : 'Not configured · paid scans paused',
+      detail: WEB_SCAN_OWNER_ACTION
     },
     settings: intel.settings,
     targets: intel.targets.map(item => ({
       id: item.id, kind: item.kind, name: item.name, url: item.url, active: item.active !== false,
       lastScannedAt: item.lastScannedAt || null, lastChangedAt: item.lastChangedAt || null,
+      lastSuccessfulScan: item.lastSuccessfulScan ?? null, lastSuccessfulScanAt: item.lastSuccessfulScanAt ?? null,
       lastStatus: item.lastStatus || 'not_scanned', lastError: item.lastError || null
     })),
     radar: {
@@ -143,124 +163,119 @@ export function setWebIntelligenceTargetActive(state, id, active) {
   return target;
 }
 
-async function firecrawlScrape(url, env, fetchImpl = fetch) {
-  if (!env.FIRECRAWL_API_KEY) throw Object.assign(new Error('Firecrawl is not configured'), { status: 503, code: 'FIRECRAWL_NOT_CONFIGURED' });
-  const response = await fetchImpl('https://api.firecrawl.dev/v2/scrape', {
-    method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + env.FIRECRAWL_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      url,
-      formats: ['markdown'],
-      onlyMainContent: true,
-      timeout: 30000,
-      blockAds: true,
-      removeBase64Images: true,
-      storeInCache: true
-    }),
-    signal: AbortSignal.timeout(45000)
-  });
-  let payload = {};
-  try { payload = await response.json(); } catch {}
-  if (!response.ok || payload.success === false) {
-    const detail = clean(payload.error || payload.message || ('HTTP ' + response.status), 500);
-    throw Object.assign(new Error('Firecrawl scan failed: ' + detail), { status: 502, code: 'FIRECRAWL_REQUEST_FAILED' });
+/**
+ * Pure structural parser for future, separately authorized observations.
+ * No network, state mutation, publication, billing settlement or scan authority.
+ * Callers must never treat a parsed mock/receipt as permission to publish it.
+ * A future transport must also bound raw response bytes BEFORE JSON parsing and
+ * use redirect:error; that transport is deliberately absent from this release.
+ */
+export function parseFirecrawlObservation(payload, { requestedUrl, httpStatus = 200 } = {}) {
+  let expected;
+  if (typeof requestedUrl !== 'string' || requestedUrl.length > 2048) throw responseInvalid('WEB_SCAN_SOURCE_UNVERIFIED');
+  try { expected = normalizeHttpsUrl(requestedUrl); } catch { throw responseInvalid('WEB_SCAN_SOURCE_UNVERIFIED'); }
+  if (!Number.isInteger(httpStatus) || httpStatus < 200 || httpStatus >= 300
+    || !record(payload) || payload.success !== true || !record(payload.data)
+    || typeof payload.data.markdown !== 'string' || !payload.data.markdown.trim()
+    || Buffer.byteLength(payload.data.markdown, 'utf8') > WEB_SCAN_MAX_MARKDOWN_BYTES) throw responseInvalid();
+  const data = payload.data;
+  const metadata = data.metadata === undefined ? {} : data.metadata;
+  if (!record(metadata) || (metadata.title !== undefined && typeof metadata.title !== 'string')
+    || (metadata.statusCode !== undefined && (!Number.isInteger(metadata.statusCode) || metadata.statusCode < 200 || metadata.statusCode >= 300))) throw responseInvalid();
+  // An unexpected/malformed source cannot replace an existing target baseline.
+  // Redirected-source support requires an explicit future verified-source contract.
+  for (const key of ['sourceURL', 'url']) if (metadata[key] !== undefined) {
+    if (typeof metadata[key] !== 'string' || metadata[key].length > 2048) throw responseInvalid('WEB_SCAN_SOURCE_UNVERIFIED');
+    let source;
+    try { source = normalizeHttpsUrl(metadata[key]); } catch { throw responseInvalid('WEB_SCAN_SOURCE_UNVERIFIED'); }
+    if (source !== expected) throw responseInvalid('WEB_SCAN_SOURCE_UNVERIFIED');
   }
-  const data = payload.data || payload;
-  return {
-    markdown: String(data.markdown || ''),
-    title: clean(data.metadata?.title || '', 200),
-    sourceUrl: clean(data.metadata?.sourceURL || data.metadata?.url || url, 2048)
-  };
+  const content = data.markdown.slice(0, 12000);
+  if (!content.trim()) throw responseInvalid();
+  return { fingerprint: fingerprint(content), title: clean(metadata.title || '', 200),
+    sourceUrl: expected, excerpt: clean(content, 6000), prices: priceSignals(content),
+    contentTruncated: data.markdown.length > content.length };
 }
 
-export async function scanWebIntelligenceTarget(state, target, { env = process.env, fetchImpl = fetch, actor = 'system' } = {}) {
-  const intel = ensureWebIntelligence(state);
-  const startedAt = nowIso();
-  try {
-    const result = await firecrawlScrape(target.url, env, fetchImpl);
-    const content = result.markdown.slice(0, 12000);
-    const prices = priceSignals(content);
-    const nextFingerprint = fingerprint(content);
-    const previous = target.snapshot;
-    const changed = Boolean(previous && previous.fingerprint !== nextFingerprint);
-    const priceDiff = diffPrices(previous?.prices || [], prices);
-    const snapshot = {
-      fingerprint: nextFingerprint,
-      title: result.title,
-      sourceUrl: result.sourceUrl,
-      excerpt: clean(content, 6000),
-      prices,
-      capturedAt: nowIso()
-    };
-    target.snapshot = snapshot;
-    target.lastScannedAt = snapshot.capturedAt;
-    target.lastStatus = 'connected';
-    target.lastError = null;
-    if (changed) {
-      target.lastChangedAt = snapshot.capturedAt;
-      const finding = {
-        id: 'finding_' + crypto.randomUUID(),
-        targetId: target.id,
-        targetName: target.name,
-        targetKind: target.kind,
-        type: priceDiff.changed ? 'price_change' : 'content_change',
-        title: priceDiff.changed ? target.name + ' price signals changed' : target.name + ' website changed',
-        detail: priceDiff.changed
-          ? ('Observed public price signals changed. Added: ' + (priceDiff.added.join(', ') || 'none') + '; removed: ' + (priceDiff.removed.join(', ') || 'none') + '.')
-          : 'The monitored public page content changed since the previous successful scan.',
-        sourceUrl: target.url,
-        detectedAt: snapshot.capturedAt,
-        evidence: { previousFingerprint: previous.fingerprint, currentFingerprint: nextFingerprint, priceDiff }
-      };
-      intel.findings.unshift(finding);
-      intel.findings = intel.findings.slice(0, 500);
+const scopeInvalid = () => Object.assign(new Error('Web intelligence target does not belong to this workspace'),
+  { status: 404, code: 'WEB_TARGET_NOT_FOUND' });
+const scopeKeys = ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id'];
+function scopeField(value, key) {
+  const field = Object.getOwnPropertyDescriptor(value, key);
+  // An inherited/accessor marker must never be evaluated or normalized away.
+  if ((!field && key in value) || (field && (!field.enumerable || !Object.hasOwn(field, 'value')))) throw scopeInvalid();
+  return field;
+}
+function assertScopeMarkers(value, workspaceId, depth = 0) {
+  if (depth > 4) throw scopeInvalid();
+  for (const key of scopeKeys) {
+    const field = scopeField(value, key);
+    if (field && field.value !== workspaceId) throw scopeInvalid();
+  }
+  for (const key of ['workspace', 'tenant']) {
+    const field = scopeField(value, key);
+    if (!field) continue;
+    const marker = field.value;
+    if (typeof marker === 'string') {
+      if (marker !== workspaceId) throw scopeInvalid();
+    } else {
+      if (!record(marker) || !Object.hasOwn(marker, 'id') || marker.id !== workspaceId) throw scopeInvalid();
+      // A matching .id does not override a conflicting nested/aliased marker.
+      assertScopeMarkers(marker, workspaceId, depth + 1);
     }
-    intel.scans.unshift({
-      id: 'scan_' + crypto.randomUUID(), targetId: target.id, targetName: target.name,
-      status: 'completed', changed, priceChanged: priceDiff.changed, startedAt, completedAt: snapshot.capturedAt, actor
-    });
-    intel.scans = intel.scans.slice(0, 500);
-    intel.lastRunAt = snapshot.capturedAt;
-    intel.lastError = null;
-    return { target, changed, priceChanged: priceDiff.changed };
-  } catch (error) {
-    const failedAt = nowIso();
-    target.lastScannedAt = failedAt;
-    target.lastStatus = 'error';
-    target.lastError = clean(error.message, 500);
-    intel.lastRunAt = failedAt;
-    intel.lastError = target.lastError;
-    intel.scans.unshift({
-      id: 'scan_' + crypto.randomUUID(), targetId: target.id, targetName: target.name,
-      status: 'failed', changed: false, priceChanged: false, startedAt, completedAt: failedAt,
-      actor, errorCode: error.code || 'WEB_SCAN_FAILED', error: target.lastError
-    });
-    intel.scans = intel.scans.slice(0, 500);
-    throw error;
   }
 }
+function assertWebIntelligenceScope(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(state))) throw scopeInvalid();
+  const workspace = scopeField(state, 'workspace')?.value;
+  if (!record(workspace) || typeof workspace.id !== 'string' || !workspace.id) throw scopeInvalid();
+  assertScopeMarkers(state, workspace.id);
+  const previous = scopeField(state, 'webIntelligence')?.value;
+  if (previous !== undefined && previous !== null) {
+    if (!record(previous)) throw scopeInvalid();
+    assertScopeMarkers(previous, workspace.id);
+  }
+}
+function assertTargetScope(state, intel, target) {
+  if (!record(target) || !intel.targets.includes(target)
+    || typeof target.id !== 'string' || intel.targets.filter(row => row?.id === target.id).length !== 1) throw scopeInvalid();
+  assertScopeMarkers(target, state.workspace.id);
+}
+function hasHistoricalExposure(intel, target) {
+  return Boolean((target.snapshot !== null && target.snapshot !== undefined) || target.lastScannedAt || target.lastSuccessfulScan || target.lastSuccessfulScanAt
+    || intel.scans.some(scan => scan?.targetId === target.id));
+}
+function blockedScan(intel, target) {
+  return { target, changed: false, priceChanged: false, scanned: false, blocked: true,
+    reason: WEB_SCAN_BLOCK_REASON, ownerAction: WEB_SCAN_OWNER_ACTION,
+    effects: scanEffects(1, hasHistoricalExposure(intel, target)) };
+}
 
-export async function runWebIntelligence(state, { env = process.env, fetchImpl = fetch, actor = 'system', targetId: onlyTargetId = null } = {}) {
+export async function scanWebIntelligenceTarget(state, target, _options = {}) {
+  assertWebIntelligenceScope(state);
   const intel = ensureWebIntelligence(state);
-  if (!intel.settings.enabled) return { scanned: 0, changed: 0, priceChanged: 0, skipped: 'disabled' };
-  const targets = intel.targets
-    .filter(item => item.active !== false && (!onlyTargetId || item.id === onlyTargetId))
+  assertTargetScope(state, intel, target);
+  // No attempt record, success timestamp, snapshot, finding, scan, or credential
+  // is rewritten merely because authority is missing. Options cannot bypass it.
+  return blockedScan(intel, target);
+}
+
+export async function runWebIntelligence(state, { targetId: onlyTargetId = null } = {}) {
+  assertWebIntelligenceScope(state);
+  const intel = ensureWebIntelligence(state);
+  const none = reason => ({ scanned: 0, changed: 0, priceChanged: 0, failed: 0, blocked: 0,
+    reason, skipped: reason, effects: scanEffects() });
+  if (!intel.settings.enabled) return none('WEB_SCANNING_DISABLED');
+  if (onlyTargetId !== null && (typeof onlyTargetId !== 'string' || !onlyTargetId || onlyTargetId.length > 120)) {
+    throw Object.assign(new Error('Web intelligence target not found'), { status: 404, code: 'WEB_TARGET_NOT_FOUND' });
+  }
+  const targets = intel.targets.filter(item => item.active !== false && (onlyTargetId === null || item.id === onlyTargetId))
     .slice(0, intel.settings.maxTargetsPerRun);
-  if (onlyTargetId && !targets.length) throw Object.assign(new Error('Web intelligence target not found'), { status: 404, code: 'WEB_TARGET_NOT_FOUND' });
-  const summary = { scanned: 0, changed: 0, priceChanged: 0, failed: 0 };
-  for (const target of targets) {
-    try {
-      const result = await scanWebIntelligenceTarget(state, target, { env, fetchImpl, actor });
-      summary.scanned += 1;
-      if (result.changed) summary.changed += 1;
-      if (result.priceChanged) summary.priceChanged += 1;
-    } catch {
-      summary.scanned += 1;
-      summary.failed += 1;
-    }
-  }
-  return summary;
+  if (onlyTargetId !== null && !targets.length) throw Object.assign(new Error('Web intelligence target not found'), { status: 404, code: 'WEB_TARGET_NOT_FOUND' });
+  if (!targets.length) return none('WEB_NO_ACTIVE_TARGETS');
+  for (const target of targets) assertTargetScope(state, intel, target);
+  return { scanned: 0, changed: 0, priceChanged: 0, failed: 0, blocked: targets.length,
+    reason: WEB_SCAN_BLOCK_REASON, ownerAction: WEB_SCAN_OWNER_ACTION,
+    effects: scanEffects(targets.length, targets.some(target => hasHistoricalExposure(intel, target))) };
 }
