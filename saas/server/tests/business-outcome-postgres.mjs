@@ -73,7 +73,7 @@ async function ledgerAcl() {
     has_table_privilege('service_role',c.oid,'INSERT') AS can_insert,has_table_privilege('service_role',c.oid,'UPDATE') AS can_update,
     has_table_privilege('service_role',c.oid,'DELETE') AS can_delete,has_table_privilege('anon',c.oid,'SELECT') AS anon_select,
     has_table_privilege('authenticated',c.oid,'SELECT') AS auth_select,
-    ARRAY(SELECT a.attname FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+    ARRAY(SELECT a.attname::text FROM pg_attribute a WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
       AND has_column_privilege('service_role',c.oid,a.attnum,'UPDATE') ORDER BY a.attname) AS update_columns
     FROM pg_class c WHERE c.oid IN ('public.runvara_ai_usage'::regclass,'public.runvara_provider_usage_windows'::regclass,'public.runvara_provider_usage_reservations'::regclass)
     ORDER BY c.relname`)).rows;

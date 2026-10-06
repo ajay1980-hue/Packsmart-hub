@@ -201,8 +201,10 @@ try {
       coverage: { status: 'complete', observedCount: 12, expectedCount: 12 }, method: { kind: 'reconciled_manual' },
       observedAt: '2026-10-05T12:00:00.000Z', report: { description: 'Synthetic retained evidence. ' + hostile + ' ' + 'long-recorded-source-detail'.repeat(12), costsComplete: true } };
     for (const [name, value] of Object.entries({ amount: input.amount, currency: input.currency,
-      startsAt: input.window.startsAt.slice(0, -1), endsAt: input.window.endsAt.slice(0, -1),
-      observedAt: input.observedAt.slice(0, -1), observedCount: '12', expectedCount: '12', description: input.report.description }))
+      // Native datetime-local controls canonicalize zero seconds/milliseconds to minutes.
+      // Fill that accepted form while retaining exact ISO UTC assertions on the request.
+      startsAt: input.window.startsAt.slice(0, 16), endsAt: input.window.endsAt.slice(0, 16),
+      observedAt: input.observedAt.slice(0, 16), observedCount: '12', expectedCount: '12', description: input.report.description }))
       await form.locator(`[name="${name}"]`).fill(value);
     for (const [name, value] of Object.entries({ coverageStatus: 'complete', method: 'reconciled_manual', costsComplete: 'true' }))
       await form.locator(`[name="${name}"]`).selectOption(value);
