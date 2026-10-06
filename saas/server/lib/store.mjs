@@ -10,6 +10,8 @@ import { ensureMarketing } from './marketing.mjs';
 import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
+import { planAutomationRetention, applyAutomationRetention, verifyAutomationArchivePayload,
+  AUTOMATION_ARCHIVE_BATCH_SIZE, AUTOMATION_ARCHIVE_BATCH_BYTES, AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES } from './automation-retention.mjs';
 import {
   providerUsageError, providerUsageMonth, providerUsageReservationParams, providerUsageReservationResult,
   providerUsageSettlementParams, providerUsageSettlementResult, providerUsageSummaryResult,
@@ -31,6 +33,32 @@ function assertWorkspace(workspaceId, state) {
   if (!workspaceId || state?.workspace?.id !== workspaceId) throw Object.assign(new Error('Workspace identity mismatch'), { status: 403, code: 'WORKSPACE_MISMATCH' });
 }
 const fileQueues = new Map();
+async function boundedResponseText(response, maxBytes) {
+  if (maxBytes === undefined) return response.text();
+  const tooLarge = () => Object.assign(new Error('Supabase response exceeds its byte limit'), { code:'SUPABASE_RESPONSE_TOO_LARGE' });
+  const declared = response.headers?.get?.('content-length');
+  if (declared && /^\d+$/.test(declared) && Number(declared) > maxBytes) {
+    try { await response.body?.cancel?.(); } catch { /* Never expose the raw body. */ }
+    throw tooLarge();
+  }
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text) > maxBytes) throw tooLarge();
+    return text;
+  }
+  const reader = response.body.getReader(), chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const {done,value} = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) { try { await reader.cancel(); } catch {} throw tooLarge(); }
+      chunks.push(Buffer.from(value));
+    }
+    return Buffer.concat(chunks,total).toString('utf8');
+  } finally { reader.releaseLock(); }
+}
 const JOB_FIELDS = 'id,workspace_id,type,provider,status,priority,attempts,max_attempts,ai_units,concurrency_limit,idempotency_key,actor,ai_provider,ai_model,ai_tier,available_at,lease_until,worker_id,error_code,created_at,updated_at,completed_at';
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
 const jobError = (code = 'AGENT_JOB_INPUT_INVALID') => Object.assign(new Error(code), { code, status: 400 });
@@ -86,6 +114,20 @@ function jobFence(job) {
 function sameLiveClaim(row, job) {
   return row && row.workspace_id === job.workspace_id && row.status === 'running' && row.worker_id === job.worker_id
     && row.attempts === job.attempts && Date.parse(row.lease_until) === Date.parse(job.lease_until) && Date.parse(row.lease_until) > Date.now();
+}
+function assertAutomationArchiveReference(workspaceId, runId, reference) {
+  const fields = ['schema', 'table', 'workspaceId', 'collection', 'runId', 'recordId', 'sha256'];
+  if (typeof workspaceId !== 'string' || !workspaceId || workspaceId.length > 256 || workspaceId !== workspaceId.trim() || /[\u0000-\u001f\u007f]/.test(workspaceId)
+    || !reference || typeof reference !== 'object' || Array.isArray(reference)
+    || Object.keys(reference).some(key => !fields.includes(key))
+    || reference.schema !== 'runvara-automation-run-archive/v1' || reference.table !== 'runvara_history'
+    || reference.workspaceId !== workspaceId || reference.collection !== 'automationRuns'
+    || reference.runId !== runId || typeof reference.runId !== 'string' || !reference.runId || reference.runId.length > 180
+    || reference.runId !== reference.runId.trim() || /[\u0000-\u001f\u007f]/.test(reference.runId)
+    || typeof reference.recordId !== 'string' || !/^automation-v1:[0-9a-f]{64}$/.test(reference.recordId)
+    || typeof reference.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(reference.sha256)) {
+    throw Object.assign(new Error('Automation archive reference is invalid'), { status:400, code:'AUTOMATION_ARCHIVE_REFERENCE_INVALID' });
+  }
 }
 
 export function seedWorkspaceState(env = process.env, options = {}) {
@@ -290,6 +332,11 @@ class FileStore {
 
   async getBrief(workspaceId, briefId) { return (await this.get(workspaceId))?.dailyBriefs?.find(item => item.id === briefId) || null; }
 
+  async getArchivedAutomationRun(workspaceId, runId, archiveRef) {
+    assertAutomationArchiveReference(workspaceId, runId, archiveRef);
+    throw Object.assign(new Error('Durable automation archives require Supabase'), { status:503, code:'AUTOMATION_ARCHIVE_UNAVAILABLE' });
+  }
+
   async findUserByEmail(email) {
     const normalized = normalizeEmail(email);
     const all = await this.readAll();
@@ -447,7 +494,9 @@ class SupabaseStore {
     this.fetch = fetchImpl;
     this.requestTimeoutMs = Math.max(20000, Math.min(60000, Number(env.SUPABASE_REQUEST_TIMEOUT_MS) || 30000));
     this.mirrorDeadlineMs = Math.max(12000, Math.min(60000, Number(env.SUPABASE_MIRROR_DEADLINE_MS) || 30000));
+    this.automationRetentionEnabled = String(env.AUTOMATION_RETENTION_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
     this.telemetry = {
+      automationRetentionEnabled: this.automationRetentionEnabled,
       lastSuccessfulReadAt: null,
       lastSuccessfulWriteAt: null,
       lastPrimaryWriteAt: null,
@@ -530,10 +579,11 @@ class SupabaseStore {
 
   async request(pathname, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
+    const { maxResponseBytes, ...fetchOptions } = options;
     let response;
     try {
       response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
-        ...options,
+        ...fetchOptions,
         headers: this.headers(options.headers),
         signal: options.signal || AbortSignal.timeout(this.requestTimeoutMs)
       });
@@ -558,7 +608,7 @@ class SupabaseStore {
       error.payloadBytes = Buffer.byteLength(options.body || '');
       // Never log PostgREST messages/details: they can contain row data.
       try {
-        const payload = await response.json();
+        const payload = maxResponseBytes === undefined ? await response.json() : JSON.parse(await boundedResponseText(response, maxResponseBytes));
         if (typeof payload?.code === 'string' && /^(?:[0-9A-Z]{5}|PGRST\d{3})$/.test(payload.code)) {
           error.databaseCode = payload.code;
         }
@@ -573,7 +623,7 @@ class SupabaseStore {
     if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
     else this.telemetry.lastSuccessfulWriteAt = succeededAt;
     if (response.status === 204 || method === 'HEAD') return null;
-    const text = await response.text();
+    const text = await boundedResponseText(response, maxResponseBytes);
     return text ? JSON.parse(text) : null;
   }
 
@@ -1001,6 +1051,9 @@ class SupabaseStore {
 
   async archiveHistory(workspaceId, collection, records) {
     if (!records.length) return;
+    // Automation run IDs are mutable identities, not immutable version keys.
+    // All automation snapshots must use the content-addressed retention writer.
+    if (collection === 'automationRuns') throw Object.assign(new Error('Immutable automation archive version required'), { code:'AUTOMATION_ARCHIVE_VERSION_REQUIRED' });
     const rows = records.map((record, index) => ({
       workspace_id: workspaceId,
       collection,
@@ -1014,7 +1067,37 @@ class SupabaseStore {
     }
   }
 
-  async archiveAndCompact(workspaceId, state) {
+  async archiveAutomationVersions(plan) {
+    const acknowledgedArchives = [];
+    for (const batch of plan.archiveBatches) {
+      // The pure planner bounds both row count and exact serialized body bytes.
+      // Do not add timestamps: initial archived_at uses the database default.
+      const rows = batch.map(candidate => {
+        if (candidate.archiveWrite !== 'insert-ignore-duplicates'
+          || candidate.row.workspace_id !== plan.workspaceId || candidate.row.collection !== 'automationRuns'
+          || candidate.row.record_id !== candidate.reference.recordId
+          || !['COMPLETED', 'FAILED', 'BLOCKED'].includes(candidate.row.payload?.status)
+          || !verifyAutomationArchivePayload(candidate.reference, candidate.row.payload, plan.workspaceId)) {
+          throw Object.assign(new Error('Automation archive candidate is invalid'), { code:'AUTOMATION_ARCHIVE_REFERENCE_INVALID' });
+        }
+        return candidate.row;
+      });
+      const bytes = Buffer.byteLength(JSON.stringify(rows));
+      if (rows.length > AUTOMATION_ARCHIVE_BATCH_SIZE || bytes > AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES
+        || (rows.length > 1 && bytes > AUTOMATION_ARCHIVE_BATCH_BYTES)) {
+        throw Object.assign(new Error('Automation archive batch exceeds its safety limit'), { code:'AUTOMATION_ARCHIVE_BATCH_TOO_LARGE' });
+      }
+      await this.upsert('runvara_history', rows, 'workspace_id,collection,record_id', {
+        headers: { Prefer:'resolution=ignore-duplicates,return=minimal' }
+      });
+      // A successful immutable insert/ignore confirms this exact content key.
+      // A thrown/uncertain batch never acknowledges any candidate in that batch.
+      acknowledgedArchives.push(...batch.map(candidate => ({ ...candidate.reference, confirmed:true })));
+    }
+    return acknowledgedArchives;
+  }
+
+  async archiveAndCompact(workspaceId, state, automationPlan) {
     const audit = state.audit || [];
     const archivedAudit = audit.slice(SUPABASE_EMBEDDED_AUDIT_LIMIT);
     if (archivedAudit.length) {
@@ -1047,19 +1130,7 @@ class SupabaseStore {
     await this.archiveHistory(workspaceId, 'agentRuns', agentRuns.slice(SUPABASE_AGENT_RUN_LIMIT));
     state.agentRuns = agentRuns.slice(0, SUPABASE_AGENT_RUN_LIMIT);
 
-    const today = new Date().toISOString().slice(0, 10);
-    const seenRules = new Set();
-    const keptAutomation = [], archivedAutomation = [];
-    for (const run of state.automationRuns || []) {
-      const ruleId = String(run.ruleId || 'unknown');
-      const isToday = String(run.startedAt || '').slice(0, 10) === today;
-      if (isToday || !seenRules.has(ruleId) || run.status === 'IN PROGRESS') {
-        keptAutomation.push(run);
-        seenRules.add(ruleId);
-      } else archivedAutomation.push(run);
-    }
-    await this.archiveHistory(workspaceId, 'automationRuns', archivedAutomation);
-    state.automationRuns = keptAutomation;
+    const acknowledgedArchives = automationPlan ? await this.archiveAutomationVersions(automationPlan) : [];
 
     const briefs = state.dailyBriefs || [];
     const keepBriefs = briefs.slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
@@ -1077,6 +1148,7 @@ class SupabaseStore {
     }
     state.dailyBriefs = keepBriefs;
     state.audit = audit.slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
+    return acknowledgedArchives;
   }
 
   async save(workspaceId, state) {
@@ -1087,10 +1159,15 @@ class SupabaseStore {
       for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
     }
     const existing = Boolean(state[PERSISTED] || state._revision);
+    const expectedRevision = state._revision;
+    // Plan against the predecessor and original run references, not the new
+    // revision or a deep clone. Scheduler claim handles survive save/finish.
+    const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(state) : null;
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
-    if (existing) await this.archiveAndCompact(workspaceId, upgraded);
+    let acknowledgedArchives = [];
+    if (existing) acknowledgedArchives = await this.archiveAndCompact(workspaceId, upgraded, automationPlan);
     else {
       upgraded.audit = (upgraded.audit || []).slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
       upgraded.workRecords = (upgraded.workRecords || []).slice(0, SUPABASE_WORK_RECORD_LIMIT);
@@ -1114,7 +1191,10 @@ class SupabaseStore {
     const now = new Date().toISOString();
     upgraded.integrationStatus.supabase = { status: 'connected', detail: 'Authoritative workspace state committed.', lastSyncAt: now, lastError: null };
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
-    await this.commit(workspaceId, upgraded, state._revision, existing);
+    // Revalidate the source after every archive await, just before serializing
+    // the CAS write. Caller state is changed only after that commit succeeds.
+    if (automationPlan) upgraded.automationRuns = applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns;
+    await this.commit(workspaceId, upgraded, expectedRevision, existing);
     state._revision = upgraded._revision;
     for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) state[key] = upgraded[key];
     markPersisted(state);
@@ -1167,6 +1247,27 @@ class SupabaseStore {
     const rows = await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=metrics&limit=1`);
     if (!rows?.[0]?.metrics) throw Object.assign(new Error('Historical brief is temporarily unavailable'), { status: 503, code: 'BRIEF_ARCHIVE_UNAVAILABLE' });
     return rows[0].metrics;
+  }
+
+  async getArchivedAutomationRun(workspaceId, runId, archiveRef) {
+    assertAutomationArchiveReference(workspaceId, runId, archiveRef);
+    let rows;
+    try {
+      rows = await this.request(`runvara_history?workspace_id=eq.${encodeURIComponent(workspaceId)}&collection=eq.automationRuns&record_id=eq.${encodeURIComponent(archiveRef.recordId)}&select=workspace_id,collection,record_id,payload&limit=1`,
+        { maxResponseBytes:AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES });
+      // JSONB/JSON number formatting can expand when parsed and re-serialized.
+      if (Buffer.byteLength(JSON.stringify(rows)) > AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES) throw new Error('Archive response too large');
+    } catch {
+      throw Object.assign(new Error('Archived automation is temporarily unavailable'), { status:503, code:'AUTOMATION_ARCHIVE_UNAVAILABLE' });
+    }
+    if (Array.isArray(rows) && rows.length === 0) return null;
+    const row = Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
+    if (!row || row.workspace_id !== workspaceId || row.collection !== 'automationRuns' || row.record_id !== archiveRef.recordId
+      || !['COMPLETED', 'FAILED', 'BLOCKED'].includes(row.payload?.status) || Object.hasOwn(row.payload || {}, 'archive') || Object.hasOwn(row.payload || {}, 'evidenceCount')
+      || !verifyAutomationArchivePayload(archiveRef, row.payload, workspaceId, runId)) {
+      throw Object.assign(new Error('Archived automation integrity could not be verified'), { status:503, code:'AUTOMATION_ARCHIVE_INTEGRITY_FAILED' });
+    }
+    return structuredClone(row.payload);
   }
 
   async enqueueAgentJob(workspaceId, job) {

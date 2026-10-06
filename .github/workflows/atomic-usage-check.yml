@@ -62,3 +62,5 @@ jobs:
         run: npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts --no-audit --no-fund
       - name: Run real PostgreSQL admission, settlement, and privilege tests
         run: npm --prefix saas/server/tests/atomic-usage test
+      - name: Verify automation archive PostgreSQL roundtrip bounds
+        run: node --test --test-concurrency=1 saas/server/tests/automation-retention-postgres.mjs

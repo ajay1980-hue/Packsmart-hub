@@ -326,6 +326,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
+  const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
   let healthPending;
@@ -1126,7 +1127,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { identityOnly: (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1236,6 +1237,28 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           }
           const result = await agentOps.objectiveReview(auth.session.workspaceId, objectiveReviewJob[1], {includeReport:url.searchParams.get('report') === 'true'}, {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
           send(res, 200, result); return;
+        }
+
+        const automationArchive = pathname.match(/^\/api\/automation-runs\/([^/]+)\/archive$/);
+        if (req.method === 'GET' && automationArchive) {
+          let runId;
+          try { runId = decodeURIComponent(automationArchive[1]); }
+          catch { throw Object.assign(new Error('Invalid automation record identifier'), {status:400,code:'VALIDATION_FAILED'}); }
+          const recordId = url.searchParams.get('recordId'), sha256 = url.searchParams.get('sha256');
+          if (!runId || runId.length > 180 || runId !== runId.trim() || /[\u0000-\u001f\u007f]/.test(runId)
+            || [...url.searchParams.keys()].some(key => !['recordId','sha256'].includes(key))
+            || url.searchParams.getAll('recordId').length !== 1 || url.searchParams.getAll('sha256').length !== 1
+            || !/^automation-v1:[0-9a-f]{64}$/.test(recordId || '') || !/^[0-9a-f]{64}$/.test(sha256 || '')) {
+            throw Object.assign(new Error('Invalid archived automation reference'), {status:400,code:'VALIDATION_FAILED'});
+          }
+          const archiveRate = automationArchiveLimiter.check(rateKey);
+          if (!archiveRate.allowed) throw Object.assign(new Error('Archived evidence read limit reached; try again shortly'), {status:429,code:'AUTOMATION_ARCHIVE_RATE_LIMITED'});
+          automationArchiveLimiter.fail(rateKey);
+          const workspaceId = auth.session.workspaceId;
+          const archiveRef = {schema:'runvara-automation-run-archive/v1',table:'runvara_history',workspaceId,collection:'automationRuns',runId,recordId,sha256};
+          const run = await store.getArchivedAutomationRun(workspaceId, runId, archiveRef);
+          if (!run) throw Object.assign(new Error('Archived automation evidence is unavailable'), {status:404,code:'AUTOMATION_ARCHIVE_NOT_FOUND'});
+          send(res, 200, {workspaceId,runId,run,source:'immutable_automation_archive'}); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/business-objectives') {

@@ -103,7 +103,7 @@
   }
 
   function showLogin() {
-    resetObjectiveReview();
+    resetObjectiveReview(); resetAutomationHistory();
     closeWorkspaceSearch();
     $('#commander-result').replaceChildren(); $('#commander-result').classList.add('hidden');
     $('#loading-screen')?.classList.add('hidden');
@@ -120,7 +120,7 @@
   }
 
   function showPasswordSetup() {
-    resetObjectiveReview();
+    resetObjectiveReview(); resetAutomationHistory();
     closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
@@ -167,7 +167,7 @@
     const data = await request('/api/bootstrap');
     if (state.data?.workspace?.id !== data.workspace.id) resetObjectiveForm();
     state.data = data; state.csrf = data.csrf || state.csrf;
-    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview();
+    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory();
     $('#business-graph-result').replaceChildren();
     $('#business-objectives-list').replaceChildren();
     $('#fleet-provider-usage-result').replaceChildren();
@@ -811,7 +811,99 @@
     ).join('') : '<div class="empty-state">No market changes recorded yet. The first successful scan establishes a baseline.</div>';
   }
 
+  const automationHistory = { cache: new Map(), pending: new Map(), errors: new Map(), epoch: 0 };
+  const historyRecord = value => value && typeof value === 'object' && !Array.isArray(value);
+  const historyId = (value, max = 180) => typeof value === 'string' && value.length > 0 && value.length <= max && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+  function historyScope(record, workspaceId) {
+    if (!historyRecord(record) || !historyId(workspaceId, 256)) return false;
+    const ids = ['workspaceId','workspace_id','tenantId','tenant_id'].filter(key => Object.hasOwn(record, key)).map(key => record[key]);
+    for (const key of ['workspace','tenant']) if (Object.hasOwn(record, key)) ids.push(historyRecord(record[key]) ? record[key].id : record[key]);
+    return ids.every(id => id === workspaceId);
+  }
+  function historyTimestamp(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)) return false;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && new Date(parsed).toISOString() === (value.includes('.') ? value : value.slice(0,-1) + '.000Z');
+  }
+  function automationArchiveReference(run) {
+    const workspaceId = state.data?.workspace?.id, ref = run?.archive;
+    if (!historyScope(run, workspaceId) || !historyId(run.id) || !historyId(run.ruleId) || run.status !== 'COMPLETED' || !historyTimestamp(run.startedAt) || !historyTimestamp(run.completedAt) || !Array.isArray(run.evidence) || run.evidence.length || !Number.isSafeInteger(run.evidenceCount) || run.evidenceCount < 0) return null;
+    if (!historyRecord(ref) || ref.schema !== 'runvara-automation-run-archive/v1' || ref.table !== 'runvara_history' || ref.collection !== 'automationRuns' || ref.workspaceId !== workspaceId || ref.runId !== run.id || typeof ref.recordId !== 'string' || !/^automation-v1:[0-9a-f]{64}$/.test(ref.recordId) || typeof ref.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(ref.sha256)) return null;
+    // The authenticated server reconstructs and verifies the immutable reference.
+    // Tenant/table fields are never submitted by the browser.
+    return { recordId: ref.recordId, sha256: ref.sha256 };
+  }
+  const automationArchiveKey = (run, ref) => JSON.stringify([run.id, ref.recordId, ref.sha256]);
+  const historyText = (value, max = 2000) => typeof value !== 'string' ? null : value.length > max ? value.slice(0, max) + '… [text shortened]' : value;
+  function resetAutomationHistory() {
+    automationHistory.epoch++;
+    for (const pending of automationHistory.pending.values()) pending.controller.abort();
+    automationHistory.pending.clear(); automationHistory.cache.clear(); automationHistory.errors.clear();
+    $('#automation-history-list').replaceChildren();
+  }
+  function automationHistoryEvidence(evidence, index, open) {
+    if (!Array.isArray(evidence)) return '<p class="muted">Supporting evidence is unavailable.</p>';
+    const shown = evidence.slice(0,100), omitted = evidence.length - shown.length;
+    const disclosure = omitted ? '<p class="muted tiny">Showing ' + shown.length + ' of ' + evidence.length + ' recorded evidence items. ' + omitted + ' additional items remain in the retained record and are not displayed here.</p>' : '';
+    return '<details class="automation-history-evidence" data-history-evidence="' + index + '"' + (open ? ' open' : '') + '><summary>Recorded evidence (' + evidence.length + ')</summary>' + disclosure + (shown.map(item => {
+      if (!historyRecord(item)) return '<p>' + escapeHtml(historyText(item) || 'This evidence item has no readable description.') + '</p>';
+      const detail = historyText(item.detail) || historyText(item.message) || 'No readable description recorded.';
+      const type = historyText(item.type, 80), id = historyText(item.id, 160);
+      return '<div><p>' + escapeHtml(detail) + '</p><small>' + escapeHtml(type ? statusLabel(type) : 'Recorded evidence') + (id ? ' · ' + escapeHtml(id) : '') + (historyTimestamp(item.at) ? ' · ' + escapeHtml(date(item.at)) : '') + '</small></div>';
+    }).join('') || '<p>No supporting evidence was recorded.</p>') + '</details>';
+  }
+  function renderAutomationHistory() {
+    const root = $('#automation-history-list'), workspaceId = state.data?.workspace?.id;
+    const open = new Set(Array.from(root.querySelectorAll('[data-history-evidence][open]')).map(item => item.dataset.historyEvidence));
+    const rows = (Array.isArray(state.data?.automationRuns) ? state.data.automationRuns : []).slice(0,100);
+    const definitions = Array.isArray(state.data?.automationDefinitions) ? state.data.automationDefinitions : [];
+    root.innerHTML = rows.map((run, index) => {
+      if (!historyScope(run, workspaceId)) return '';
+      const ref = automationArchiveReference(run), key = ref ? automationArchiveKey(run, ref) : null;
+      const cached = key ? automationHistory.cache.get(key) : null, pending = key ? automationHistory.pending.has(key) : false;
+      const title = historyText(definitions.find(rule => rule.id === run.ruleId)?.name, 160) || 'Recorded check';
+      const label = ['IN PROGRESS','COMPLETED','FAILED','BLOCKED'].includes(run.status) ? ({'IN PROGRESS':'In progress',COMPLETED:'Completed',FAILED:'Failed',BLOCKED:'Blocked'})[run.status] : 'Unknown status';
+      let evidence;
+      if (ref) {
+        evidence = '<p class="muted">' + run.evidenceCount + ' evidence ' + (run.evidenceCount === 1 ? 'item retained' : 'items retained') + '. ' + (cached ? 'Archived evidence was read for this view.' : 'Evidence has not been loaded in this view.') + '</p>' +
+          '<button class="secondary" type="button" data-read-automation-archive="' + index + '"' + (pending || cached ? ' disabled' : '') + '>' + (pending ? 'Reading archived evidence…' : cached ? 'Archived evidence loaded' : 'Read archived evidence') + '</button>' +
+          (automationHistory.errors.has(key) ? '<p class="form-error" role="status">' + escapeHtml(automationHistory.errors.get(key)) + '</p>' : '') +
+          (cached ? automationHistoryEvidence(cached.evidence, index, open.has(String(index)) || cached.openOnRead) : '');
+        if (cached) cached.openOnRead = false;
+      } else {
+        evidence = (Object.hasOwn(run, 'archive') || Object.hasOwn(run, 'evidenceCount') ? '<p class="muted">Archived evidence is unavailable because its reference could not be verified.</p>' : '') + automationHistoryEvidence(run.evidence, index, open.has(String(index)));
+      }
+      return '<article class="automation-history-record" aria-busy="' + pending + '"><div class="automation-history-heading"><h3>' + escapeHtml(title) + '</h3><span class="tag neutral">' + label + '</span></div><p class="muted tiny">Started ' + escapeHtml(historyTimestamp(run.startedAt) ? date(run.startedAt) : 'Unknown') + (run.completedAt ? ' · Finished ' + escapeHtml(historyTimestamp(run.completedAt) ? date(run.completedAt) : 'Unknown') : '') + '</p>' + evidence + '</article>';
+    }).join('') || '<p class="muted">No recent check history is available in this workspace snapshot.</p>';
+  }
+  $('#automation-history-list').addEventListener('click', async event => {
+    const button = event.target.closest('[data-read-automation-archive]');
+    if (!button || button.disabled || !state.session || !state.data?.workspace?.id) return;
+    const index = Number(button.dataset.readAutomationArchive);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= 100) return;
+    const run = state.data.automationRuns?.[index], ref = automationArchiveReference(run);
+    if (!ref) return;
+    const key = automationArchiveKey(run, ref);
+    if (automationHistory.cache.has(key) || automationHistory.pending.has(key)) return;
+    const snapshot = state.data, session = state.session, csrf = state.csrf, generation = state.graphGeneration, epoch = automationHistory.epoch;
+    const current = () => state.data === snapshot && state.session === session && state.csrf === csrf && state.graphGeneration === generation && automationHistory.epoch === epoch;
+    const pending = { controller: new AbortController() };
+    automationHistory.pending.set(key, pending); automationHistory.errors.delete(key); renderAutomationHistory();
+    try {
+      const payload = await request('/api/automation-runs/' + encodeURIComponent(run.id) + '/archive?recordId=' + encodeURIComponent(ref.recordId) + '&sha256=' + encodeURIComponent(ref.sha256), { signal: pending.controller.signal });
+      if (!current()) return;
+      const full = payload?.run;
+      if (payload?.workspaceId !== snapshot.workspace.id || payload?.runId !== run.id || payload?.source !== 'immutable_automation_archive' || !historyScope(full, snapshot.workspace.id) || full.id !== run.id || full.ruleId !== run.ruleId || full.status !== 'COMPLETED' || full.startedAt !== run.startedAt || full.completedAt !== run.completedAt || !Array.isArray(full.evidence) || full.evidence.length !== run.evidenceCount || Object.hasOwn(full, 'archive') || Object.hasOwn(full, 'evidenceCount')) throw new Error('Archive response binding failed');
+      automationHistory.cache.set(key, { evidence: full.evidence, openOnRead: true });
+    } catch (error) {
+      if (current()) automationHistory.errors.set(key, error.status === 404 ? 'Archived evidence is unavailable. The retained count is unchanged.' : 'Could not read archived evidence. Select Read archived evidence to try again.');
+    } finally {
+      if (current() && automationHistory.pending.get(key) === pending) { automationHistory.pending.delete(key); renderAutomationHistory(); }
+    }
+  });
+
   function renderAutomations() {
+    renderAutomationHistory();
     $('#automation-list').innerHTML = (state.data.automationDefinitions || []).map(rule => {
       const enabled = Boolean(state.data.automations && state.data.automations[rule.id]);
       return '<div class="rule"><div><b>' + escapeHtml(rule.name) + '</b><small>' + escapeHtml(rule.detail) + '</small></div><button class="toggle ' + (enabled ? 'on' : '') + '" data-automation="' + escapeHtml(rule.id) + '" aria-pressed="' + enabled + '" aria-label="Toggle ' + escapeHtml(rule.name) + '"><span></span></button></div>';
@@ -1772,7 +1864,7 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { pauseObjectiveReview('Signing out. Status checks paused.'); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
