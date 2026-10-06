@@ -15,7 +15,8 @@ import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary, aggre
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-outcomes-browser-'));
 const secret = 'business-outcomes-browser-fixture-more-than-thirty-two-characters';
 const password = 'Outcome-fixture-only-49!';
-const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+const port = 18874, base = `http://127.0.0.1:${port}`;
+const server = createPacksmartServer({ NODE_ENV: 'test', APP_PUBLIC_URL: base, SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
   SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
 const hostile = '<img src=x onerror="window.outcomeInjected=true">';
 const experiment = { id: 'experiment_browser_outcome', title: 'Synthetic contribution experiment ' + 'long recorded title '.repeat(8), status: 'measured' };
@@ -51,8 +52,7 @@ try {
   state.products = [];
   state.revenueEngine.experiments = [experiment];
   await server.packsmart.store.save(state.workspace.id, state);
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const base = `http://127.0.0.1:${server.address().port}`;
+  server.listen(port, '127.0.0.1'); await once(server, 'listening');
   browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH } : {}) });
   for (const width of [320, 390, 1200]) {
     const currentState = await server.packsmart.store.get(state.workspace.id);
