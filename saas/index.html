@@ -205,6 +205,32 @@
           <article class="card"><div class="section-head"><div><p class="eyebrow">MARKETING ECONOMICS</p><h2>Advertising performance</h2></div></div><div id="re-advertising" class="status-list"></div></article>
         </div>
         <article class="card"><div class="section-head"><div><p class="eyebrow">CONTROLLED GROWTH</p><h2>Recovery, experiments &amp; loyalty foundations</h2></div><span class="tag good">Approval protected</span></div><p class="muted">Cart and checkout recovery events, experiments, referrals, loyalty rules and customer-facing B2B actions are stored tenant-by-tenant. Significant outbound actions, discounts, pricing and spend remain behind approval controls.</p></article>
+        <details id="business-outcomes-panel" class="card business-outcomes-panel">
+          <summary><span class="eyebrow">MEASURED OUTCOMES</span><h2>Business results</h2><span class="muted">Owner-reviewed measurements, with exact currency and period</span></summary>
+          <p class="muted">These are recorded experiment measurements, not a claim of Runvara attribution. Different currencies and periods are kept separate. No ROI, forecast or automatic updates.</p>
+          <button id="business-outcomes-refresh" type="button" class="secondary">Refresh committed results</button>
+          <p id="business-outcomes-status" role="status" aria-live="polite" class="muted"></p>
+          <div id="business-outcomes-summary"></div>
+          <div class="outcome-selection"><label for="business-outcomes-experiment">Experiment</label><select id="business-outcomes-experiment"><option value="">Choose an experiment</option></select><button id="business-outcomes-load" type="button" class="secondary">Load experiment</button></div>
+          <div id="business-outcomes-detail"></div>
+          <form id="business-outcomes-form" class="record-form hidden">
+            <h3 class="wide">Prepare a typed measurement</h3>
+            <p class="muted tiny wide">Blank fields remain unknown. Dates below are UTC, regardless of your local timezone. Saving a draft does not publish or verify a result.</p>
+            <label>Exact incremental contribution<input name="amount" type="text" inputmode="decimal" maxlength="26" placeholder="Unknown; zero and negatives allowed" pattern="-?[0-9]{1,18}(\.[0-9]{1,6})?"></label>
+            <label>Currency code<input name="currency" type="text" maxlength="3" pattern="[A-Z]{3}" placeholder="Unknown, e.g. GBP" autocomplete="off"></label>
+            <label>Window starts (UTC)<input name="startsAt" type="datetime-local" step="0.001"></label>
+            <label>Window ends (UTC, exclusive)<input name="endsAt" type="datetime-local" step="0.001"></label>
+            <label>Observed at (UTC)<input name="observedAt" type="datetime-local" step="0.001"></label>
+            <label>Coverage<select name="coverageStatus"><option value="unknown">Unknown</option><option value="partial">Partial</option><option value="complete">Complete</option></select></label>
+            <label>Observed population<input name="observedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
+            <label>Expected population<input name="expectedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
+            <label>Measurement method<select name="method"><option value="unknown">Unknown</option><option value="holdout">Holdout</option><option value="before_after">Before / after</option><option value="reconciled_manual">Reconciled manual</option></select></label>
+            <label>All relevant costs included?<select name="costsComplete"><option value="">Unknown</option><option value="false">No, incomplete</option><option value="true">Yes, complete</option></select></label>
+            <label class="wide">Recorded measurement report<textarea name="description" maxlength="1000" required placeholder="Describe the measured facts and cost coverage. Do not include personal data or credentials."></textarea></label>
+            <button type="submit" class="primary">Save measurement draft</button>
+          </form>
+          <section id="business-outcomes-review" class="outcome-review hidden" aria-label="Review business result"></section>
+        </details>
         <div class="grid-2">
           <article class="card">
             <div class="section-head"><div><p class="eyebrow">EXPERIMENT CONTROL</p><h2>Start from a real opportunity</h2></div><span class="tag neutral">Owner controlled</span></div>
@@ -227,7 +253,7 @@
         </div>
         <div class="grid-2">
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">MEASURE RESULT</p><h2>Record observed experiment impact</h2></div><span class="tag warn">Unverified until reviewed</span></div>
+            <div class="section-head"><div><p class="eyebrow">MEASURE RESULT</p><h2>Record legacy experiment impact</h2></div><span class="tag warn">Recorded / unqualified</span></div>
             <form id="re-experiment-measure-form" class="record-form">
               <label class="wide">Experiment<select name="experimentId" id="re-experiment-measure" required><option value="">Choose an active experiment</option></select></label>
               <label>Method<input name="method" maxlength="160" required placeholder="Holdout, before/after, cohort…"></label>
@@ -240,16 +266,17 @@
             </form>
           </article>
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">VERIFY RESULT</p><h2>Promote measured evidence into learning</h2></div><span class="tag good">Approver required</span></div>
+            <div class="section-head"><div><p class="eyebrow">VERIFY RESULT</p><h2>Review a legacy measurement</h2></div><span class="tag good">Approver required</span></div>
+            <p class="muted tiny">Legacy review remains recorded history. It does not publish a qualified business result or establish comparable learning evidence.</p>
             <form id="re-experiment-verify-form" class="record-form">
               <label class="wide">Measured experiment<select name="experimentId" id="re-experiment-verify" required><option value="">Choose a measured experiment</option></select></label>
               <label class="wide">Verification note<textarea name="note" maxlength="500" required placeholder="What source evidence did you check?"></textarea></label>
-              <button class="primary" type="submit">Verify measurement</button>
+              <button class="primary" type="submit">Record legacy review</button>
             </form>
           </article>
         </div>
         <article class="card">
-          <div class="section-head"><div><p class="eyebrow">EXPERIMENT REGISTER</p><h2>Draft → measured → verified</h2></div><span id="re-experiment-count" class="tag neutral">0 experiments</span></div>
+          <div class="section-head"><div><p class="eyebrow">EXPERIMENT REGISTER</p><h2>Recorded experiment history</h2></div><span id="re-experiment-count" class="tag neutral">0 experiments</span></div>
           <div id="re-experiment-list" class="control-list"></div>
         </article>
       </section>
@@ -534,6 +561,7 @@
   <script src="/presentation.js?v=6.15.2"></script>
   <script src="/connections-ui.js?v=6.15.2"></script>
   <script src="/control-ui.js?v=6.15.2"></script>
+  <script src="/outcomes-ui.js?v=6.15.2"></script>
   <script src="/app.js?v=6.15.2"></script>
 </body>
 </html>

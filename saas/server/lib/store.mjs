@@ -10,6 +10,7 @@ import { ensureMarketing } from './marketing.mjs';
 import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
+import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
 import { planAutomationRetention, applyAutomationRetention, verifyAutomationArchivePayload,
   AUTOMATION_ARCHIVE_BATCH_SIZE, AUTOMATION_ARCHIVE_BATCH_BYTES, AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES } from './automation-retention.mjs';
 import {
@@ -440,6 +441,11 @@ class FileStore {
   async reserveProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
   async settleProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
   async getOperatorBriefContext() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
+  async businessOutcomeSummary() { throw Object.assign(new Error('Outcome publication storage is unavailable'), { code: 'OUTCOME_STORAGE_UNAVAILABLE', status: 503 }); }
+  async getBusinessOutcome() { return this.businessOutcomeSummary(); }
+  async getBusinessOutcomeReview() { return this.businessOutcomeSummary(); }
+  async getBusinessOutcomeEvidence() { return this.businessOutcomeSummary(); }
+  async publishBusinessOutcome() { return this.businessOutcomeSummary(); }
   async providerUsageSummary(workspaceId, admissionMonth) {
     providerUsageMonth(workspaceId, admissionMonth);
     return { available: false, reason: 'AI_USAGE_NOT_CONFIGURED' };
@@ -547,6 +553,18 @@ class SupabaseStore {
           leaseUntil: row.lease_until, createdAt: row.created_at, provider: row.ai_provider, model: row.ai_model } };
     } catch { throw providerUsageError('AI_USAGE_CONTEXT_UNAVAILABLE'); }
   }
+  businessOutcomePersistence() {
+    return createBusinessOutcomePersistence({ request: (pathname, options) => this.request(pathname, options),
+      invalidate: workspaceId => {
+        this.schedulerCache.delete(workspaceId);
+        this.mirrorRevisions.delete(workspaceId);
+      } });
+  }
+  async businessOutcomeSummary(workspaceId) { return this.businessOutcomePersistence().current(workspaceId); }
+  async getBusinessOutcome(workspaceId, experimentId) { return this.businessOutcomePersistence().one(workspaceId, experimentId); }
+  async getBusinessOutcomeReview(workspaceId, experimentId) { return this.businessOutcomePersistence().review(workspaceId, experimentId); }
+  async getBusinessOutcomeEvidence(workspaceId, versionId) { return this.businessOutcomePersistence().evidence(workspaceId, versionId); }
+  async publishBusinessOutcome(workspaceId, actor, input) { return this.businessOutcomePersistence().publish(workspaceId, actor, input); }
 
   // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
   // DTO validation rejects client overrides, prices, raw bodies and credentials.
@@ -601,7 +619,7 @@ class SupabaseStore {
 
   async request(pathname, options = {}) {
     const method = String(options.method || 'GET').toUpperCase();
-    const { maxResponseBytes, ...fetchOptions } = options;
+    const { maxResponseBytes, includeResponseMetadata = false, ...fetchOptions } = options;
     let response;
     try {
       response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
@@ -644,9 +662,12 @@ class SupabaseStore {
     const succeededAt = new Date().toISOString();
     if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
     else this.telemetry.lastSuccessfulWriteAt = succeededAt;
-    if (response.status === 204 || method === 'HEAD') return null;
+    if (response.status === 204 || method === 'HEAD') return includeResponseMetadata ? { data: null, contentRange: response.headers.get('content-range') } : null;
     const text = await boundedResponseText(response, maxResponseBytes);
-    return text ? JSON.parse(text) : null;
+    const data = text ? JSON.parse(text) : null;
+    // Only explicit bounded readers request cardinality metadata. No raw
+    // response headers or credentials are exposed to their callers.
+    return includeResponseMetadata ? { data, contentRange: response.headers.get('content-range') } : data;
   }
 
   async getIdentity(workspaceId) {

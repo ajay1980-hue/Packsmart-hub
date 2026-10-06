@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deriveLearning } from '../lib/learning-engine.mjs';
 
-test('learning engine uses only verified realised outcomes and requires repeated evidence', () => {
+test('legacy reviewed samples never confer comparable learning priors', () => {
   const state={
     workspace:{id:'tenant-a'},
     revenueEngine:{experiments:[
@@ -14,13 +14,14 @@ test('learning engine uses only verified realised outcomes and requires repeated
     workRecords:[]
   };
   const result=deriveLearning(state);
-  const retention=result.priors.find(item=>item.kind==='retention');
-  assert.equal(retention.samples,2);
-  assert.equal(retention.usableForGuidance,true);
-  assert.equal(retention.averageIncrementalContribution,100);
-  assert.equal(retention.medianIncrementalContribution,100);
-  assert.equal(retention.positiveRatePercent,100);
-  assert.equal(result.summary.verifiedLearningEvents,2);
+  assert.deepEqual(result.priors,[]);
+  assert.equal(result.summary.verifiedLearningEvents,0);
+  assert.equal(result.summary.legacyRecordedEvents,3);
+  assert.equal(result.summary.legacyReviewedEvents,2);
+  assert.equal(result.summary.domainsUsableForGuidance,0);
+  assert.equal(result.legacy.evidence.find(row=>row.sourceId==='e1').metrics.incrementalContribution,'80');
+  assert.equal(result.outcomeCoverage.publicationProofAvailable,false);
+  assert.equal(result.safeguards.immutableActionDomainEvidenceRequired,true);
   assert.equal(result.safeguards.forecastsExcluded,true);
   assert.equal(result.safeguards.externalWrites,false);
 });
@@ -34,10 +35,11 @@ test('one verified result remains descriptive and cannot set guidance', () => {
     workRecords:[]
   };
   const result=deriveLearning(state);
-  assert.equal(result.priors[0].samples,1);
-  assert.equal(result.priors[0].usableForGuidance,false);
-  assert.equal(result.priors[0].confidence,'insufficient');
-  assert.equal(result.priors[0].positiveRatePercent,0);
+  assert.deepEqual(result.priors,[]);
+  assert.equal(result.summary.verifiedLearningEvents,0);
+  assert.equal(result.legacy.recordedEvents,1);
+  assert.equal(result.legacy.evidence[0].metrics.incrementalContribution,'-15');
+  assert.equal(result.legacy.evidence[0].qualified,false);
   assert.equal(result.safeguards.singleObservationCannotSetGuidance,true);
 });
 
@@ -57,8 +59,9 @@ test('duplicate evidence IDs are not double counted and tenant identity stays lo
   };
   const result=deriveLearning(state);
   assert.equal(result.workspaceId,'tenant-c');
-  assert.equal(result.summary.verifiedLearningEvents,2);
-  assert.equal(result.priors[0].samples,2);
-  assert.equal(result.priors[0].averageIncrementalContribution,30);
+  assert.equal(result.summary.verifiedLearningEvents,0);
+  assert.deepEqual(result.priors,[]);
+  assert.equal(result.legacy.recordedEvents,2);
+  assert.deepEqual(result.evidence.map(row=>row.metrics.incrementalContribution),['25','35']);
   assert.equal(JSON.stringify(result).includes('tenant-a'),false);
 });
