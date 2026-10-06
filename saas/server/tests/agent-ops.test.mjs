@@ -409,3 +409,205 @@ test('agent execution preserves approval-required and blocked work records', asy
   assert.equal(completed.result.workStatus, 'REQUIRES APPROVAL');
   assert.equal(completed.result.externalWrites, false);
 });
+
+const noBriefDispatch = () => ({ submissionAttempts: 0, confirmedSubmissions: 0, uncertainSubmissions: 0,
+  reservationId: null, usageStatus: 'uncertain', costStatus: 'unknown', accountedCostMicros: null, currency: 'USD' });
+const unknownBriefEffects = () => ({ submissionAttempts: null, confirmedSubmissions: null, uncertainSubmissions: null,
+  reservationId: null, usageStatus: 'uncertain', costStatus: 'unknown', accountedCostMicros: null, currency: 'USD' });
+async function persistedBrief(store, jobId) {
+  const state = await store.get('alpha');
+  const job = await store.getAgentJob('alpha', jobId);
+  const run = state.agentRuns.find(item => item.id === job.result?.runId);
+  const completion = state.audit.find(item => item.type === 'agent_job_completed' && item.detail.jobId === jobId);
+  assert.equal(job.status, 'succeeded');
+  assert.ok(run);
+  assert.ok(completion);
+  assert.equal(job.result.externalWrites, false);
+  assert.equal(run.executedExternally, false);
+  assert.equal(completion.detail.externalWrites, false);
+  assert.deepEqual(job.result.ai, run.ai);
+  assert.deepEqual(completion.detail.providerEffects, run.ai.effects);
+  return { state, job, run, completion };
+}
+
+test('brief worker context comes from the actual claimed lease rather than spoofed input or payload fields', async t => {
+  let received, claimed;
+  const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async input => {
+    received = input;
+    return { used: false, reason: 'AI_GOVERNANCE_NOT_CONFIGURED', effects: noBriefDispatch() };
+  } } });
+  const forged = { workspaceId: 'beta', jobId: 'job_forged', type: 'connection_sync', status: 'succeeded',
+    workerId: 'worker_forged', attempt: 999, leaseUntil: '2099-01-01T00:00:00.000Z', createdAt: '2098-01-01T00:00:00.000Z' };
+  const job = await ops.enqueue('alpha', { ...forged, type: 'agent_command',
+    payload: { command: 'check business health', ...forged, worker_id: 'worker_forged', attempts: 999,
+      lease_until: forged.leaseUntil, created_at: forged.createdAt, jobContext: forged }, jobContext: forged }, 'owner');
+  store.agentJobs.find(row => row.id === job.id).attempts = 1;
+  const claim = store.claimAgentJobs.bind(store);
+  store.claimAgentJobs = async (...args) => {
+    const jobs = await claim(...args);
+    claimed = structuredClone(jobs[0]);
+    return jobs;
+  };
+  await ops.tick();
+  assert.ok(received);
+  assert.equal(received.workspaceId, 'alpha');
+  assert.equal(received.jobId, job.id);
+  assert.equal(Object.isFrozen(received.jobContext), true);
+  assert.deepEqual(received.jobContext, { workspaceId: 'alpha', jobId: job.id, type: 'agent_command', status: 'running',
+    workerId: ops.status.workerId, attempt: 2, leaseUntil: claimed.lease_until, createdAt: claimed.created_at });
+  assert.equal(received.jobContext.workerId, claimed.worker_id);
+  assert.equal(received.jobContext.attempt, claimed.attempts);
+  assert.equal(received.jobContext.status, claimed.status);
+  assert.equal(received.jobContext.createdAt, claimed.created_at);
+  assert.notEqual(received.jobContext.createdAt, forged.createdAt);
+  assert.ok(Date.parse(received.jobContext.leaseUntil) > Date.now());
+  const { run } = await persistedBrief(store, job.id);
+  assert.deepEqual(run.ai.effects, noBriefDispatch());
+});
+
+test('brief worker preserves deterministic findings with zero dispatch but unknown cost on policy denial', async t => {
+  let deterministic;
+  const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async ({ run }) => {
+    deterministic = structuredClone(run);
+    return { used: false, reason: 'AI_GOVERNANCE_NOT_CONFIGURED', effects: noBriefDispatch() };
+  } } });
+  const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+  await ops.tick();
+  const { run } = await persistedBrief(store, job.id);
+  assert.ok(deterministic.summary);
+  assert.equal(run.summary, deterministic.summary);
+  assert.deepEqual(run.results, deterministic.results);
+  assert.deepEqual(run.priorities, deterministic.priorities);
+  assert.equal(run.ai.used, false);
+  assert.equal(run.ai.reason, 'AI_GOVERNANCE_NOT_CONFIGURED');
+  assert.equal(run.ai.summary, undefined);
+  assert.equal(run.modelCalls, 0);
+  assert.deepEqual(run.ai.effects, noBriefDispatch());
+});
+
+test('missing-provider fallback reports zero dispatch but never proves zero historical same-job cost', async t => {
+  for (const withHistoricalCharge of [false, true]) {
+    const { store, ops } = await fixture(t);
+    const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+    if (withHistoricalCharge) {
+      // A recovered legacy job may already have incurred a charge before the
+      // provider became unavailable or the durable accounting cutover occurred.
+      store.agentJobs.find(row => row.id === job.id).attempts = 1;
+      await store.recordAiUsage('alpha', { id: 'usage_prior_attempt', jobId: job.id, taskType: 'agent_command',
+        provider: 'openai', model: 'test-model', inputTokens: 500, cachedInputTokens: 0, cacheWriteTokens: 0,
+        outputTokens: 80, estimatedCostUsd: 0.0074, requestId: 'req_prior_attempt', occurredAt: job.created_at });
+    }
+    const historicalUsage = structuredClone(store.aiUsage);
+    await ops.tick();
+    const { run, job: completed } = await persistedBrief(store, job.id);
+    assert.ok(run.summary);
+    assert.equal(run.ai.used, false);
+    assert.equal(run.ai.reason, 'PROVIDER_NOT_CONFIGURED');
+    assert.equal(run.modelCalls, 0);
+    assert.equal(completed.attempts, withHistoricalCharge ? 2 : 1);
+    assert.deepEqual(run.ai.effects, noBriefDispatch());
+    assert.equal(run.ai.effects.usageStatus, 'uncertain');
+    assert.equal(run.ai.effects.costStatus, 'unknown');
+    assert.equal(run.ai.effects.accountedCostMicros, null);
+    assert.deepEqual(store.aiUsage, historicalUsage, 'Skipped invocation must not overwrite historical charges');
+  }
+});
+
+test('brief worker persists held and uncertain accounting without turning an unused brief into zero cost', async t => {
+  for (const effects of [
+    { ...noBriefDispatch(), reservationId: 'provider_usage_held', usageStatus: 'held', costStatus: 'unknown', accountedCostMicros: null },
+    { ...noBriefDispatch(), submissionAttempts: 1, uncertainSubmissions: 1, reservationId: 'provider_usage_uncertain',
+      usageStatus: 'uncertain', costStatus: 'unknown', accountedCostMicros: null }
+  ]) {
+    let deterministic;
+    const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async ({ run }) => {
+      deterministic = run.summary;
+      return { used: false, reason: 'AI_PROVIDER_OUTCOME_UNCERTAIN', effects };
+    } } });
+    const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+    await ops.tick();
+    const { run } = await persistedBrief(store, job.id);
+    assert.equal(run.summary, deterministic);
+    assert.equal(run.ai.used, false);
+    assert.deepEqual(run.ai.effects, effects);
+    assert.equal(run.modelCalls, effects.submissionAttempts);
+    assert.equal(run.ai.effects.costStatus, 'unknown');
+    assert.equal(run.ai.effects.accountedCostMicros, null);
+  }
+});
+
+test('brief provider exceptions cannot erase deterministic results or look like zero-cost execution', async t => {
+  const privateFailure = 'raw-provider-body-and-credential-must-not-persist';
+  let deterministic;
+  const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async ({ run }) => {
+    deterministic = run.summary;
+    throw Object.assign(new Error(privateFailure), { code: 'AI_PROVIDER_TIMEOUT', body: privateFailure });
+  } } });
+  const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+  await ops.tick();
+  const { state, run, job: completed } = await persistedBrief(store, job.id);
+  assert.equal(run.summary, deterministic);
+  assert.equal(run.ai.used, false);
+  assert.equal(run.ai.reason, 'AI_PROVIDER_TIMEOUT');
+  assert.equal(run.modelCalls, null);
+  assert.deepEqual(run.ai.effects, unknownBriefEffects());
+  assert.ok(!JSON.stringify({ state, completed }).includes(privateFailure));
+});
+
+test('brief worker treats absent or malformed provider effect evidence as unknown accounting', async t => {
+  for (const effects of [undefined, {}, { ...noBriefDispatch(), submissionAttempts: '0' },
+    { ...noBriefDispatch(), confirmedSubmissions: -1 }, { ...noBriefDispatch(), uncertainSubmissions: NaN }]) {
+    const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async () => ({ used: false, reason: 'UNVERIFIED', effects }) } });
+    const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+    await ops.tick();
+    const { run } = await persistedBrief(store, job.id);
+    assert.equal(run.ai.effects.costStatus, 'unknown');
+    assert.equal(run.ai.effects.accountedCostMicros, null);
+    assert.equal(run.ai.effects.submissionAttempts, null);
+    assert.equal(run.modelCalls, null);
+  }
+});
+
+test('measured accounted usage persists when generated brief text is unavailable', async t => {
+  for (const [usageStatus, accountedCostMicros] of [['settled', 740], ['overrun', '9007199254740993']]) {
+    let deterministic;
+    const effects = { submissionAttempts: 1, confirmedSubmissions: 1, uncertainSubmissions: 0,
+      reservationId: 'provider_usage_measured', usageStatus, costStatus: 'accounted', accountedCostMicros, currency: 'USD' };
+    const usage = { providerRequestId: 'req_measured', inputTokens: 500, cachedInputTokens: 100, cacheWriteTokens: 50,
+      outputTokens: 80, totalTokens: 580, accountedCostMicros, currency: 'USD' };
+    const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async ({ run }) => {
+      deterministic = run.summary;
+      return { used: false, reason: 'AI_RESPONSE_TEXT_UNAVAILABLE', usage, effects };
+    } } });
+    const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+    await ops.tick();
+    const { run } = await persistedBrief(store, job.id);
+    assert.equal(run.summary, deterministic);
+    assert.equal(run.ai.used, false);
+    assert.equal(run.ai.reason, 'AI_RESPONSE_TEXT_UNAVAILABLE');
+    assert.equal(run.ai.summary, undefined);
+    assert.equal(run.modelCalls, 1);
+    assert.deepEqual(run.ai.usage, usage);
+    assert.deepEqual(run.ai.effects, effects);
+  }
+});
+
+
+test('zero-cost effects require explicit cancelled reservation evidence rather than a skipped invocation', async t => {
+  const proven = { ...noBriefDispatch(), reservationId: 'provider_usage_cancelled', usageStatus: 'cancelled_pre_dispatch',
+    costStatus: 'not_incurred', accountedCostMicros: 0 };
+  for (const [effects, zeroProven] of [[proven, true], [{ ...proven, reservationId: null }, false],
+    [{ ...proven, usageStatus: 'none' }, false], [{ ...proven, submissionAttempts: 1 }, false],
+    [{ ...proven, accountedCostMicros: null }, false]]) {
+    const { store, ops } = await fixture(t, { aiProvider: { enhanceCommander: async () => ({
+      used: false, reason: 'NO_BRIEF_GENERATED', effects
+    }) } });
+    const job = await ops.enqueue('alpha', { type: 'agent_command', payload: { command: 'check business health' } });
+    await ops.tick();
+    const { run } = await persistedBrief(store, job.id);
+    assert.equal(run.ai.effects.costStatus, zeroProven ? 'not_incurred' : 'unknown');
+    assert.equal(run.ai.effects.accountedCostMicros, zeroProven ? 0 : null);
+    assert.equal(run.ai.used, false);
+    assert.ok(run.summary);
+  }
+});

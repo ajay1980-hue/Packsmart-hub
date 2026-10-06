@@ -23,6 +23,23 @@ const transient = error => error?.upstreamStatus === 429 || error?.upstreamStatu
   ['AbortError','TimeoutError','TypeError'].includes(error?.name);
 const blocked = error => /AUTH|CREDENTIAL|OWNER_APPROVAL|PERMISSION|ACCOUNT_MISMATCH|APPROVAL_REQUIRED/.test(String(error?.code || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? String(error.code) : 'AGENT_JOB_FAILED';
+function aiEffects(value) {
+  const counts = ['submissionAttempts', 'confirmedSubmissions', 'uncertainSubmissions'];
+  const valid = counts.every(key => Number.isSafeInteger(value?.[key]) && value[key] >= 0 && value[key] <= 1);
+  const result = Object.fromEntries(counts.map(key => [key, valid ? value[key] : null]));
+  result.reservationId = typeof value?.reservationId === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value.reservationId) ? value.reservationId : null;
+  result.usageStatus = ['none', 'held', 'uncertain', 'settled', 'overrun', 'cancelled_pre_dispatch'].includes(value?.usageStatus) ? value.usageStatus : 'uncertain';
+  result.currency = 'USD';
+  const noCost = valid && counts.every(key => result[key] === 0) && result.usageStatus === 'cancelled_pre_dispatch' && result.reservationId
+    && value?.costStatus === 'not_incurred' && value.accountedCostMicros === 0;
+  const accounted = valid && result.reservationId && ['settled', 'overrun'].includes(result.usageStatus)
+    && value?.costStatus === 'accounted' && value.currency === 'USD'
+    && (Number.isSafeInteger(value.accountedCostMicros) && value.accountedCostMicros >= 0
+      || typeof value.accountedCostMicros === 'string' && /^(?:0|[1-9][0-9]{0,59})$/.test(value.accountedCostMicros));
+  result.costStatus = noCost ? 'not_incurred' : accounted ? 'accounted' : 'unknown';
+  result.accountedCostMicros = noCost ? 0 : accounted ? value.accountedCostMicros : null;
+  return result;
+}
 const objectiveError = (code, status = 409) => Object.assign(new Error(code), { code, status });
 function exactInput(value, fields) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
@@ -348,18 +365,23 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         let aiEnhancement={used:false,reason:'PROVIDER_NOT_CONFIGURED',route};
         if (aiProvider) {
           try {
-            aiEnhancement=await aiProvider.enhanceCommander({workspaceId,jobId:job.id,route,command:safeText(payload.command,1000),run,state});
+            aiEnhancement=await aiProvider.enhanceCommander({workspaceId,jobId:job.id,route,command:safeText(payload.command,1000),run,state,
+              jobContext:Object.freeze({workspaceId,jobId:job.id,type:job.type,status:job.status,
+                workerId:job.worker_id === workerId ? workerId : null,attempt:job.attempts,leaseUntil:job.lease_until,createdAt:job.created_at})});
           } catch(error) {
             aiEnhancement={used:false,reason:safeCode(error),route};
             console.warn(JSON.stringify({event:'agent_ai_enhancement_failed',jobId:job.id,workspaceId,code:safeCode(error)}));
           }
         }
         if (aiEnhancement.used) {
-          run.ai={provider:route.provider,model:route.model,tier:route.tier,summary:aiEnhancement.summary,usage:aiEnhancement.usage};
-          run.modelCalls=1;
+          run.ai={provider:route.provider,model:route.model,tier:route.tier,used:true,summary:aiEnhancement.summary,usage:aiEnhancement.usage};
         } else {
-          run.ai={provider:route.provider,model:route.model,tier:route.tier,used:false,reason:aiEnhancement.reason};
+          run.ai={provider:route.provider,model:route.model,tier:route.tier,used:false,reason:aiEnhancement.reason,
+            ...(aiEnhancement.usage ? {usage:aiEnhancement.usage} : {})};
         }
+        run.ai.effects = aiEffects(aiEnhancement.effects || (!aiProvider ? {submissionAttempts:0,confirmedSubmissions:0,uncertainSubmissions:0,
+          usageStatus:'uncertain',costStatus:'unknown',accountedCostMicros:null,currency:'USD'} : null));
+        run.modelCalls = run.ai.effects.submissionAttempts;
         recordAgentRun(state, run, job.actor || 'agent-ops');
         recordWork(state, { id:runId, title:safeText(payload.command,1000), source:'agent-ops', status:run.workStatus || 'COMPLETED',
           approvalId:run.approvalId || null, executedExternally:false,
@@ -377,7 +399,8 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       } else {
         throw Object.assign(new Error('Unsupported agent job type'), { code:'AGENT_JOB_TYPE_INVALID' });
       }
-      addAudit(state, { type:'agent_job_completed', actor:'agent-ops', detail:{ jobId:job.id, type:job.type, provider:job.provider || null, externalWrites:false } });
+      addAudit(state, { type:'agent_job_completed', actor:'agent-ops', detail:{ jobId:job.id, type:job.type, provider:job.provider || null, externalWrites:false,
+        ...(result.ai?.effects ? {providerEffects:result.ai.effects} : {}) } });
       await store.save(workspaceId, state);
       return result;
     });

@@ -439,6 +439,7 @@ class FileStore {
   // A process-local file/mutex cannot grant durable, cross-replica dispatch.
   async reserveProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
   async settleProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
+  async getOperatorBriefContext() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
   async providerUsageSummary(workspaceId, admissionMonth) {
     providerUsageMonth(workspaceId, admissionMonth);
     return { available: false, reason: 'AI_USAGE_NOT_CONFIGURED' };
@@ -525,6 +526,27 @@ class SupabaseStore {
   }
 
   get provider() { return 'supabase'; }
+
+  async getOperatorBriefContext(workspaceId, jobId) {
+    validateJobIdentity(workspaceId, jobId);
+    try {
+      // Final pre-dispatch revalidation only. No full snapshot, prompt, user
+      // records, credentials, result payloads or usage history are downloaded.
+      const [policies, jobs] = await Promise.all([
+        this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=workspace_id,governance:state->aiEconomics->governance,monthly_cost_limit_usd:state->aiEconomics->monthlyCostLimitUsd,agent_ops_enabled:state->agentOps->enabled,agent_ops_paused:state->agentOps->paused,commander_enabled:state->agentSettings->commander->enabled&limit=1`, { maxResponseBytes: 131072 }),
+        this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=id,workspace_id,type,status,worker_id,attempts,lease_until,created_at,ai_provider,ai_model&limit=1`, { maxResponseBytes: 4096 })
+      ]);
+      if (!Array.isArray(policies) || policies.length !== 1 || policies[0]?.workspace_id !== workspaceId
+        || !Array.isArray(jobs) || jobs.length !== 1 || jobs[0]?.workspace_id !== workspaceId || jobs[0]?.id !== jobId
+        || Buffer.byteLength(JSON.stringify(policies)) > 131072 || Buffer.byteLength(JSON.stringify(jobs)) > 4096) throw new Error('Unverified context');
+      const row = jobs[0];
+      return { workspaceId, aiEconomics: { governance: policies[0].governance, monthlyCostLimitUsd: policies[0].monthly_cost_limit_usd },
+        executionPolicy: { agentOpsEnabled: policies[0].agent_ops_enabled, agentOpsPaused: policies[0].agent_ops_paused,
+          commanderEnabled: policies[0].commander_enabled },
+        job: { workspaceId, jobId, type: row.type, status: row.status, workerId: row.worker_id, attempt: row.attempts,
+          leaseUntil: row.lease_until, createdAt: row.created_at, provider: row.ai_provider, model: row.ai_model } };
+    } catch { throw providerUsageError('AI_USAGE_CONTEXT_UNAVAILABLE'); }
+  }
 
   // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
   // DTO validation rejects client overrides, prices, raw bodies and credentials.

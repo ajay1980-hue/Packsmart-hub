@@ -170,3 +170,11 @@ Existing Render deploy `dep-db2m3b7avr4c73ej7mm0` became live at21:02:11 UTC on2
 ## Stage 8: governed creative submission boundary
 
 See [creative submission safeguards](creative-safety-rollout.md). New potentially chargeable creative POSTs require exact-phase owner authority, a finite verified cost allowance and an acknowledged durable claim. No production allowance issuer is installed by this stage; existing accepted-job status reads remain available. This stage adds no migration, access grant, provider activation or recurring schedule. Unknown costs remain unknown, and saved owner drafts/claims are never silently evicted.
+
+### Stage 8 release evidence
+
+[PR71](https://github.com/ajay1980-hue/Packsmart-hub/pull/71) merged as `b8fa9ebe4cc2ebb64be796d6e4983464d4679669`. SaaS CI37531874535 passed509 tests plus browser/container checks; atomic/archive37531874860, objective37531874762 and Android37531874689 passed. Existing Render deployment `dep-db2mabd9fdbs739veg30` became live at21:16:54.467628 UTC on2026-10-06. Health at21:17:08 returned the exact commit, productionReady:true and healthy authentication/encryption/persistence. Hot state was1,577,738 bytes, above the warning threshold but below the hard limit. These are the existing release verification observations; this cutover implementation made no additional production probes.
+
+## Preparation: atomic operator-brief dispatch
+
+See [the operator-brief cutover contract](operator-brief-cutover.md). The existing queued OpenAI enhancement is switched to the stage-5 reservation/settlement boundary, with current job/policy rechecks, verified conservative token ceilings, strict response identity/accounting and preserved local summaries. Missing policy, proof or clean baseline blocks paid dispatch. No price, cap, credential, provider or policy is activated; Firecrawl and broader routing remain separate integration work.
