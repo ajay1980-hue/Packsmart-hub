@@ -250,7 +250,9 @@ try {
     assert.match(await detail.textContent(), /This saved version has already been reviewed/);
     assert.doesNotMatch(await detail.textContent(), /ready for owner review/);
     assert.equal(await detail.locator('[data-outcome-action="publish"]').isDisabled(), true);
-    await refresh.click(); await summary.getByText('Owner-reviewed result', { exact: false }).waitFor();
+    await refresh.click();
+    // Wait for the actual result heading, not the previous empty-state sentence.
+    await summary.getByRole('heading', { name: 'Owner-reviewed result · version 1', exact: true }).waitFor();
     assert.match(await summary.textContent(), /-12\.004 GBP/);
     assert.match(await summary.textContent(), /Reconciled records/);
     assert.match(await summary.textContent(), /Recorded total/);
