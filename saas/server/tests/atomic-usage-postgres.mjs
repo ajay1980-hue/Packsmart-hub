@@ -154,7 +154,7 @@ before(async () => {
   await admin.query("INSERT INTO public.workspaces (id,name,slug) VALUES ('legacy-fixture','Legacy synthetic fixture','legacy-fixture')");
   await admin.query(`INSERT INTO public.runvara_ai_usage (id,workspace_id,task_type,provider,model,input_tokens,output_tokens,estimated_cost_usd,request_id,occurred_at)
     VALUES ('legacy-usage-sentinel','legacy-fixture','synthetic','openai','synthetic-model',7,3,0.01,'legacy-sentinel','2000-01-01T00:00:00Z')`);
-  const migration = await readFile(new URL('../supabase/migrations/20261006173435_atomic_provider_usage.sql', import.meta.url), 'utf8');
+  const migration = await readFile(new URL('../supabase/migrations/20261006190318_atomic_provider_usage.sql', import.meta.url), 'utf8');
   assert.ok(migration.includes('runvara_settle_provider_usage'), 'Atomic usage migration must be complete');
   await admin.query(migration);
 }, { timeout: 30_000 });
