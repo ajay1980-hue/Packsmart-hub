@@ -46,7 +46,7 @@ jobs:
           if-no-files-found: error
 
       - name: Android lint (debug and release)
-        run: gradle :app:lintDebug :app:lintRelease --stacktrace
+        run: gradle :app:lintDebug :app:lintRelease --continue --stacktrace
 
       - name: Upload lint reports
         if: always()

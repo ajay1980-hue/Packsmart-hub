@@ -43,8 +43,11 @@ public final class IconQaInstrumentation extends Instrumentation {
                     "android.permission.ACCESS_NETWORK_STATE"))), "App permissions changed");
             require(pm.getLaunchIntentForPackage(pkg) != null, "Launcher activity missing");
             Resources res = pm.getResourcesForApplication(pkg);
-            require(res.getResourceName(info.applicationInfo.icon).endsWith(":mipmap/ic_launcher"),
-                "Manifest uses the wrong launcher resource");
+            String resolvedIcon = res.getResourceName(info.applicationInfo.icon);
+            // PackageManager selects roundIcon as the app icon on round-icon devices.
+            require(resolvedIcon.endsWith(":mipmap/ic_launcher")
+                || resolvedIcon.endsWith(":mipmap/ic_launcher_round"),
+                "Unexpected resolved app icon: " + resolvedIcon);
             for (String name : new String[]{"ic_launcher", "ic_launcher_round"}) {
                 int id = res.getIdentifier(name, "mipmap", pkg);
                 require(id != 0, "Missing " + name);
@@ -84,7 +87,8 @@ public final class IconQaInstrumentation extends Instrumentation {
                 }
             }
             result.putString("stream", "ICON_QA_PASS: " + checks + " checks; API "
-                + Build.VERSION.SDK_INT + "; " + Build.SUPPORTED_ABIS[0] + "\n");
+                + Build.VERSION.SDK_INT + "; " + Build.SUPPORTED_ABIS[0]
+                + "; resolved icon: " + resolvedIcon + "\n");
             result.putInt("checks", checks);
             finish(Activity.RESULT_OK, result);
         } catch (Throwable error) {

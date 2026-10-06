@@ -29,7 +29,7 @@ and changes launcher resources plus release and validation metadata.
 ## Validation
 
 The Android workflow builds the existing debug flavor and unsigned release
-bundle, then runs `gradle :app:lintDebug :app:lintRelease --stacktrace` as a
+bundle, then runs `gradle :app:lintDebug :app:lintRelease --continue --stacktrace` as a
 separate step. Lint remains a blocking check and its full reports are uploaded.
 No lint baseline, disabled check or new suppression is introduced.
 
