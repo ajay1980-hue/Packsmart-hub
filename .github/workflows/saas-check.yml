@@ -40,6 +40,8 @@ jobs:
         run: node saas/server/tests/business-graph-browser-check.mjs
       - name: Verify governed usage on mobile and desktop
         run: node saas/server/tests/provider-usage-browser-check.mjs
+      - name: Verify objective preparation on mobile and desktop
+        run: node saas/server/tests/objective-review-browser-check.mjs
       - name: Upload responsive verification image
         if: always()
         uses: actions/upload-artifact@v4
@@ -50,6 +52,7 @@ jobs:
             /tmp/runvara-business-graph-*.png
             /tmp/runvara-business-objectives-*.png
             /tmp/runvara-provider-usage-*.png
+            /tmp/runvara-objective-review-*.png
           if-no-files-found: ignore
       - name: Build production container
         run: docker build -f saas/server/Dockerfile -t packsmart-ops:test .

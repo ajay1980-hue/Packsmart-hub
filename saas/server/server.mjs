@@ -325,6 +325,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const locks = new Map();
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
   let healthPending;
@@ -1125,7 +1126,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') });
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1213,6 +1214,28 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             'Set-Cookie': sessionCookie(token, { secure: secureCookies })
           });
           return;
+        }
+
+        if (req.method === 'POST' && pathname === '/api/business-objectives/reviews') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 2048);
+          if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => !['objectiveId','objectiveRevision'].includes(key))) {
+            throw Object.assign(new Error('Only a saved objective ID and revision may be submitted'), {status:400,code:'VALIDATION_FAILED'});
+          }
+          const rate = objectiveReviewLimiter.check(rateKey);
+          if (!rate.allowed) throw Object.assign(new Error('Objective review frequency limit reached; reuse or inspect the current review'), {status:429,code:'OBJECTIVE_REVIEW_RATE_LIMITED'});
+          objectiveReviewLimiter.fail(rateKey);
+          const result = await agentOps.enqueueObjectiveReview(auth.session.workspaceId, body, {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
+          send(res, 202, result); return;
+        }
+        const objectiveReviewJob = pathname.match(/^\/api\/business-objectives\/reviews\/(job_[A-Za-z0-9_-]{1,100})$/);
+        if (req.method === 'GET' && objectiveReviewJob) {
+          requireOwner(auth);
+          if ([...url.searchParams.keys()].some(key => key !== 'report') || (url.searchParams.has('report') && !['true','false'].includes(url.searchParams.get('report')))) {
+            throw Object.assign(new Error('Invalid objective review read options'), {status:400,code:'VALIDATION_FAILED'});
+          }
+          const result = await agentOps.objectiveReview(auth.session.workspaceId, objectiveReviewJob[1], {includeReport:url.searchParams.get('report') === 'true'}, {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
+          send(res, 200, result); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/business-objectives') {
@@ -1736,7 +1759,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const agentJobRetry = pathname.match(/^\/api\/agent-ops\/jobs\/([^/]+)\/retry$/);
         if (req.method === 'POST' && agentJobRetry) {
           requireOwner(auth);
-          const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), auth.user.id);
+          const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
           send(res, 202, { job }); return;
         }
         if (req.method === 'GET' && pathname === '/api/operator/provider-usage') {
@@ -1761,7 +1784,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const operatorAgentOpsRetry = pathname.match(/^\/api\/operator\/agent-ops\/workspaces\/([^/]+)\/jobs\/([^/]+)\/retry$/);
         if (req.method === 'POST' && operatorAgentOpsRetry) {
           requireLaunchAdmin(auth, env);
-          const job = await agentOps.retry(text(operatorAgentOpsRetry[1], 160), text(operatorAgentOpsRetry[2], 160), auth.user.id);
+          const job = await agentOps.retry(text(operatorAgentOpsRetry[1], 160), text(operatorAgentOpsRetry[2], 160), {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
           send(res, 202, { job }); return;
         }
         if (req.method === 'GET' && pathname === '/api/briefs') {

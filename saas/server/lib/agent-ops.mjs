@@ -6,12 +6,14 @@ import { addAudit, recordWork } from './events.mjs';
 import { marketingPlannerCycle } from './marketing.mjs';
 import { monitoredSync } from './scheduler.mjs';
 import { configureAiEconomics, ensureAiEconomics, planMonthlyValueGbp, routeAiWork } from './ai-economics.mjs';
+import { buildObjectiveReview, objectiveReviewFingerprint } from './objective-review.mjs';
 
 export const AGENT_JOB_TYPES = Object.freeze({
   agent_command: { priority: 70, maxAttempts: 3, aiUnits: 1 },
   connection_sync: { priority: 80, maxAttempts: 5, aiUnits: 0 },
   connection_doctor: { priority: 90, maxAttempts: 5, aiUnits: 0 },
-  marketing_plan: { priority: 40, maxAttempts: 3, aiUnits: 1 }
+  marketing_plan: { priority: 40, maxAttempts: 3, aiUnits: 1 },
+  objective_prepare: { priority: 60, maxAttempts: 3, aiUnits: 0 }
 });
 
 const safeText = (value, max = 500) => String(value ?? '').trim().slice(0, max);
@@ -21,6 +23,50 @@ const transient = error => error?.upstreamStatus === 429 || error?.upstreamStatu
   ['AbortError','TimeoutError','TypeError'].includes(error?.name);
 const blocked = error => /AUTH|CREDENTIAL|OWNER_APPROVAL|PERMISSION|ACCOUNT_MISMATCH|APPROVAL_REQUIRED/.test(String(error?.code || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? String(error.code) : 'AGENT_JOB_FAILED';
+const objectiveError = (code, status = 409) => Object.assign(new Error(code), { code, status });
+function exactInput(value, fields) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
+  for (const key of Reflect.ownKeys(value)) if (typeof key !== 'string' || !fields.includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key))) throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
+}
+function objectiveActor(state, workspaceId, auth) {
+  exactInput(auth, ['actorId', 'sessionVersion']);
+  if (state?.workspace?.id !== workspaceId || typeof auth.actorId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,119}$/.test(auth.actorId)
+    || !Number.isSafeInteger(auth.sessionVersion) || auth.sessionVersion < 1) throw objectiveError('OBJECTIVE_ACTOR_INVALID', 403);
+  const actor = state.users?.find(user => user.id === auth.actorId);
+  if (!actor || actor.active === false || actor.passwordChangeRequired || !['owner', 'admin'].includes(actor.role)
+    || actor.sessionVersion !== auth.sessionVersion) throw objectiveError('OBJECTIVE_ACTOR_PERMISSION_CHANGED', 403);
+  return actor;
+}
+function objectivePayload(payload) {
+  exactInput(payload, ['schema', 'objectiveId', 'objectiveRevision', 'typedInputFingerprint', 'actorSessionVersion']);
+  if (payload.schema !== 'runvara-objective-prepare/v1' || typeof payload.objectiveId !== 'string'
+    || !/^objective_[0-9a-f-]{36}$/.test(payload.objectiveId) || !Number.isSafeInteger(payload.objectiveRevision) || payload.objectiveRevision < 1
+    || !/^[0-9a-f]{32}$/.test(payload.typedInputFingerprint) || !Number.isSafeInteger(payload.actorSessionVersion) || payload.actorSessionVersion < 1) throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
+}
+function objectiveOpsEnabled(state) {
+  const settings = state?.agentOps;
+  if (settings !== undefined && (!settings || typeof settings !== 'object' || Array.isArray(settings)
+    || (settings.enabled !== undefined && typeof settings.enabled !== 'boolean')
+    || (settings.paused !== undefined && typeof settings.paused !== 'boolean'))) throw objectiveError('OBJECTIVE_JOB_POLICY_INVALID');
+  if (settings?.enabled === false || settings?.paused === true) throw objectiveError('AGENT_OPS_PAUSED');
+}
+function objectiveBindings(state, workspaceId, payload, actorId, timestamp) {
+  objectivePayload(payload);
+  objectiveActor(state, workspaceId, { actorId, sessionVersion: payload.actorSessionVersion });
+  objectiveOpsEnabled(state);
+  const fingerprint = objectiveReviewFingerprint(state, { objectiveId: payload.objectiveId, objectiveRevision: payload.objectiveRevision }, { workspaceId, now: timestamp });
+  if (!fingerprint) throw objectiveError('OBJECTIVE_POLICY_OR_STATUS_CHANGED');
+  if (fingerprint !== payload.typedInputFingerprint) throw objectiveError('OBJECTIVE_SOURCE_CHANGED');
+}
+function objectiveStatus(row) {
+  objectivePayload(row.payload);
+  const value = { id: row.id, type: row.type, status: row.status, objectiveId: row.payload.objectiveId,
+    objectiveRevision: row.payload.objectiveRevision, attempts: row.attempts, maxAttempts: row.max_attempts,
+    createdAt: row.created_at, updatedAt: row.updated_at, completedAt: row.completed_at || null,
+    errorCode: row.error_code || null, reportAvailable: row.status === 'succeeded' };
+  if (Buffer.byteLength(JSON.stringify(value)) > 2048) throw objectiveError('AGENT_JOB_RESPONSE_INVALID', 503);
+  return value;
+}
 
 function planLimits(state) {
   const plan = state?.subscription?.plan || 'starter';
@@ -70,6 +116,7 @@ function normalizeJob(input, workspaceId, actor, state) {
   const type = safeText(input?.type, 80);
   const definition = AGENT_JOB_TYPES[type];
   if (!definition) throw Object.assign(new Error('Unsupported agent job type'), { status:400, code:'AGENT_JOB_TYPE_INVALID' });
+  if (type === 'objective_prepare') throw objectiveError('OBJECTIVE_DEDICATED_ENQUEUE_REQUIRED', 400);
   const payload = input?.payload && typeof input.payload === 'object' && !Array.isArray(input.payload) ? structuredClone(input.payload) : {};
   const provider = safeText(input?.provider || payload.provider, 80) || null;
   if (provider && !CONNECTORS[provider]) throw Object.assign(new Error('Unknown provider'), { status:400, code:'PROVIDER_NOT_FOUND' });
@@ -126,6 +173,134 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     // then poll again immediately without overlapping a claim or execution.
     if (running) wakePending = true;
     else schedulePoll(0);
+  }
+
+  async function enqueueObjectiveReview(workspaceId, input, auth) {
+    exactInput(input, ['objectiveId', 'objectiveRevision']);
+    const state = await store.get(workspaceId);
+    if (!state) throw objectiveError('WORKSPACE_NOT_FOUND', 404);
+    objectiveActor(state, workspaceId, auth);
+    objectiveOpsEnabled(state);
+    const timestamp = new Date(now()).toISOString();
+    const fingerprint = objectiveReviewFingerprint(state, input, { workspaceId, now: timestamp });
+    if (!fingerprint) throw objectiveError('OBJECTIVE_POLICY_OR_STATUS_CHANGED');
+    const payload = { schema: 'runvara-objective-prepare/v1', objectiveId: input.objectiveId,
+      objectiveRevision: input.objectiveRevision, typedInputFingerprint: fingerprint, actorSessionVersion: auth.sessionVersion };
+    objectivePayload(payload);
+    const key = crypto.createHash('sha256').update(JSON.stringify([workspaceId, payload, auth.actorId])).digest('hex');
+    const limits = planLimits(state);
+    const concurrencyLimit = Number.isSafeInteger(state.agentOps?.maxConcurrentJobs) ? Math.max(1, Math.min(10, state.agentOps.maxConcurrentJobs)) : limits.maxConcurrentJobs;
+    const queued = await store.enqueueAgentJob(workspaceId, {
+      id: `job_${crypto.randomUUID()}`, workspaceId, type: 'objective_prepare', provider: null, payload,
+      priority: 60, attempts: 0, maxAttempts: 3, aiUnits: 0, concurrencyLimit,
+      idempotencyKey: `objective_prepare:v1:${key}`, actor: auth.actorId,
+      aiProvider: null, aiModel: null, aiTier: 'deterministic', availableAt: timestamp, createdAt: timestamp, updatedAt: timestamp
+    });
+    if (!queued || queued.workspace_id !== workspaceId || queued.type !== 'objective_prepare' || queued.actor !== auth.actorId
+      || Object.keys(payload).some(key => queued.payload?.[key] !== payload[key])) throw objectiveError('AGENT_JOB_RESPONSE_INVALID', 503);
+    // No workspace save or extra audit: the immutable job row is provenance.
+    if (queued.status === 'queued') wake();
+    return { job: objectiveStatus(queued), stale: false, staleReason: null };
+  }
+
+  async function objectiveReview(workspaceId, jobId, options = {}, auth) {
+    exactInput(options, ['includeReport']);
+    if (options.includeReport !== undefined && typeof options.includeReport !== 'boolean') throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
+    // Polling only reads compact identity + one job. Full evidence is read once
+    // on an explicit report request, never on every status poll.
+    const identity = await store.getIdentity(workspaceId);
+    objectiveActor(identity, workspaceId, auth);
+    const row = await store.getAgentJob(workspaceId, jobId, { includeReport: options.includeReport === true });
+    if (!row || row.type !== 'objective_prepare') throw objectiveError('AGENT_JOB_NOT_FOUND', 404);
+    const result = { job: objectiveStatus(row), stale: null, staleReason: 'not_checked' };
+    if (options.includeReport === true) {
+      const state = await store.get(workspaceId);
+      objectiveActor(state, workspaceId, auth);
+      try {
+        objectiveBindings(state, workspaceId, row.payload, row.actor, new Date(now()).toISOString());
+        result.stale = false; result.staleReason = null;
+      } catch (error) { result.stale = true; result.staleReason = safeCode(error); }
+      result.report = row.status === 'succeeded' ? row.result : null;
+    }
+    return result;
+  }
+
+  function sameObjectiveClaim(current, job) {
+    return current?.workspace_id === job.workspace_id && current.id === job.id && current.type === 'objective_prepare'
+      && current.status === 'running' && current.worker_id === job.worker_id && current.attempts === job.attempts
+      && Date.parse(current.lease_until) === Date.parse(job.lease_until) && Date.parse(current.lease_until) > now();
+  }
+
+  async function completeObjective(job, update) {
+    // Same prepared body/identity on retry; never recalculate a report after a
+    // potentially committed completion, or downgrade it through generic catch.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const finished = await store.finishAgentJob(job, update);
+        if (finished) return true;
+      } catch (error) {
+        if (['P0L01', 'P0L02', 'P0L03'].includes(error.databaseCode)) return false;
+      }
+      let current;
+      try { current = await store.getAgentJob(job.workspace_id, job.id, { includeReport: true }); }
+      catch { throw objectiveError('OBJECTIVE_COMPLETION_UNCERTAIN', 503); }
+      if (current?.status === 'succeeded' && current.result?.id === update.result.id
+        && current.result?.sourceAsOf?.typedInputFingerprint === job.payload.typedInputFingerprint) return true;
+      if (!sameObjectiveClaim(current, job)) return false;
+    }
+    throw objectiveError('OBJECTIVE_COMPLETION_UNCERTAIN', 503);
+  }
+
+  async function processObjective(job) {
+    // A malformed/stale claim must not even load tenant state. The trigger and
+    // FileStore recovery cap leases; this also bounds work against an older DB.
+    if (job.status !== 'running' || job.worker_id !== workerId
+      || typeof job.id !== 'string' || !/^job_[A-Za-z0-9_-]{1,100}$/.test(job.id)
+      || typeof job.workspace_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(job.workspace_id)
+      || !Number.isSafeInteger(job.attempts) || job.attempts < 1
+      || !Number.isSafeInteger(job.max_attempts) || job.max_attempts < 1 || job.max_attempts > 10
+      || typeof job.lease_until !== 'string' || !Number.isFinite(Date.parse(job.lease_until)) || Date.parse(job.lease_until) <= now()) {
+      status.lastError = 'OBJECTIVE_JOB_CLAIM_INVALID';
+      return;
+    }
+    if (job.attempts > job.max_attempts) {
+      status.lastError = 'OBJECTIVE_LEASE_ATTEMPTS_EXHAUSTED';
+      try {
+        const finished = await store.finishAgentJob(job, { status:'dead_letter', result:job.result ?? null,
+          errorCode:status.lastError, completedAt:new Date(now()).toISOString() });
+        if (finished) { status.failed++; status.deadLettered++; }
+      } catch { /* Never recompute or loop if exhausted-claim closure is uncertain. */ }
+      return;
+    }
+    let result;
+    try {
+      objectivePayload(job.payload);
+      if (job.provider !== null || job.ai_provider != null || job.ai_model != null || job.ai_units !== 0
+        || ![null, undefined, 'deterministic'].includes(job.ai_tier)) throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
+      if (Date.parse(job.lease_until) <= now()) return;
+      const state = await store.get(job.workspace_id);
+      objectiveBindings(state, job.workspace_id, job.payload, job.actor, new Date(now()).toISOString());
+      result = buildObjectiveReview(state, { objectiveId: job.payload.objectiveId,
+        objectiveRevision: job.payload.objectiveRevision, jobId: job.id }, { workspaceId: job.workspace_id, now: new Date(now()).toISOString() });
+      if (Buffer.byteLength(JSON.stringify(result)) > 65536 || result.specialists.length > 3) throw objectiveError('OBJECTIVE_REVIEW_RESULT_TOO_LARGE', 413);
+    } catch (error) {
+      const code = safeCode(error);
+      try {
+        let finished;
+        if (transient(error) && job.attempts < job.max_attempts) finished = await store.rescheduleAgentJob(job, {
+          errorCode: code, availableAt: new Date(now() + Math.min(3600000, 15000 * 2 ** (job.attempts - 1))).toISOString()
+        });
+        else finished = await store.finishAgentJob(job, { status: /OBJECTIVE|AGENT_OPS_PAUSED|WORKSPACE_NOT_FOUND/.test(code) ? 'blocked' : 'dead_letter', errorCode: code, completedAt: new Date(now()).toISOString() });
+        if (finished) status.failed++;
+      } catch { /* Leave an uncertain claim for durable lease recovery. */ }
+      return;
+    }
+    try {
+      if (await completeObjective(job, { status: 'succeeded', result, errorCode: null, completedAt: new Date(now()).toISOString() })) status.processed++;
+    } catch (error) {
+      // Lost outcome is neither a failed report nor permission to reschedule it.
+      status.lastError = safeCode(error);
+    }
   }
 
   async function enqueue(workspaceId, input, actor = 'system') {
@@ -209,6 +384,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   }
 
   async function process(job) {
+    if (job.type === 'objective_prepare') return processObjective(job);
     try {
       const result = await execute(job);
       await store.finishAgentJob(job, { status:'succeeded', result, errorCode:null, completedAt:nowIso() });
@@ -282,13 +458,25 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   }
 
   async function retry(workspaceId, jobId, actor) {
+    const existing = await store.getAgentJob(workspaceId, jobId);
+    if (existing?.type === 'objective_prepare') {
+      const state = await store.get(workspaceId);
+      const auth = typeof actor === 'object' ? actor : null;
+      if (!auth) throw objectiveError('OBJECTIVE_RETRY_AUTH_REQUIRED', 403);
+      objectiveActor(state, workspaceId, auth);
+      objectiveBindings(state, workspaceId, existing.payload, existing.actor, new Date(now()).toISOString());
+      const retried = await store.retryAgentJob(workspaceId, jobId);
+      if (!retried || retried.status !== 'queued') throw objectiveError('AGENT_JOB_NOT_RETRYABLE');
+      wake(); return compactObjectiveRetry(retried);
+    }
+    const auditActor = typeof actor === 'object' && actor !== null ? actor.actorId : actor;
     const retried = await withWorkspaceLock(workspaceId, async () => {
       const state = await store.get(workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status:404, code:'WORKSPACE_NOT_FOUND' });
       const job = await store.retryAgentJob(workspaceId, jobId);
       if (!job) throw Object.assign(new Error('Agent job not found'), { status:404, code:'AGENT_JOB_NOT_FOUND' });
       if (job.status !== 'queued') throw Object.assign(new Error('Only blocked or dead-letter jobs can be retried'), { status:409, code:'AGENT_JOB_NOT_RETRYABLE' });
-      addAudit(state, { type:'agent_job_retried', actor, detail:{ jobId, type:job.type, provider:job.provider || null } });
+      addAudit(state, { type:'agent_job_retried', actor: auditActor, detail:{ jobId, type:job.type, provider:job.provider || null } });
       await store.save(workspaceId, state);
       return job;
     });
@@ -375,5 +563,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   }
   function stop() { stopped = true; started = false; wakePending = false; clearPoll(); }
 
-  return { enqueue, retry, configureWorkspace, tick, start, stop, get status() { return Object.freeze({ ...status }); }, workspaceSnapshot, fleetSnapshot, workerId };
+  return { enqueue, enqueueObjectiveReview, objectiveReview, retry, configureWorkspace, tick, start, stop, get status() { return Object.freeze({ ...status }); }, workspaceSnapshot, fleetSnapshot, workerId };
 }
+
+function compactObjectiveRetry(job) { return { ...objectiveStatus(job), workspace_id: job.workspace_id }; }
