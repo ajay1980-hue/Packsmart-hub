@@ -11,7 +11,12 @@ trap 'rm -rf "$qa_work"' EXIT
 sdk_path="${ANDROID_HOME:-${ANDROID_SDK_ROOT:?Android SDK must be set}}"
 build_tools="$sdk_path/build-tools/35.0.0"
 android_jar="$sdk_path/platforms/android-36/android.jar"
-debug_key="${ANDROID_USER_HOME:-$HOME/.android}/debug.keystore"
+debug_key="$qa_work/debug.keystore"
+# Gradle's cache can restore the APK without restoring its signing keystore.
+# Use one disposable QA key for the app copy and its instrumentation probe.
+keytool -genkeypair -keystore "$debug_key" -alias androiddebugkey \
+  -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 1 \
+  -dname 'CN=Android Debug,O=Android,C=US' >/dev/null 2>&1
 
 javac -source 8 -target 8 -classpath "$android_jar" -d "$qa_work/classes" \
   "$qa_source/IconQaInstrumentation.java"
@@ -26,8 +31,11 @@ with zipfile.ZipFile(sys.argv[1], 'a', zipfile.ZIP_DEFLATED) as apk:
 PY
 "$build_tools/apksigner" sign --ks "$debug_key" --ks-key-alias androiddebugkey \
   --ks-pass pass:android --key-pass pass:android "$qa_work/probe.apk"
+"$build_tools/apksigner" sign --ks "$debug_key" --ks-key-alias androiddebugkey \
+  --ks-pass pass:android --key-pass pass:android --out "$qa_work/app-debug.apk" \
+  "$repo_root/app/build/outputs/apk/debug/app-debug.apk"
 
-adb install -r "$repo_root/app/build/outputs/apk/debug/app-debug.apk"
+adb install -r "$qa_work/app-debug.apk"
 adb install -r -t "$qa_work/probe.apk"
 adb shell am instrument -w com.packsmartsolutions.iconqa/.IconQaInstrumentation \
   | tee "$qa_output/instrumentation.txt"
@@ -67,7 +75,14 @@ else:
 PY
 )
 adb shell input tap "$icon_x" "$icon_y"
-adb shell dumpsys activity activities > "$qa_output/launcher-tap.txt"
+for qa_attempt in $(seq 1 20); do
+  adb shell dumpsys activity activities > "$qa_output/launcher-tap.txt"
+  if grep -Eq '(topResumedActivity|mResumedActivity).*com.packsmartsolutions.app.multiphoto' \
+    "$qa_output/launcher-tap.txt"; then
+    break
+  fi
+  sleep 0.5
+done
 grep -Eq '(topResumedActivity|mResumedActivity).*com.packsmartsolutions.app.multiphoto' \
   "$qa_output/launcher-tap.txt"
 adb shell dumpsys package com.packsmartsolutions.app.multiphoto > "$qa_output/package.txt"

@@ -41,7 +41,9 @@ issue requires a scope decision; this icon update does not alter the theme.
 The PR must remain draft until this error is resolved and emulator QA passes.
 
 The workflow's API 26 and API 36 emulator jobs install the debug APK and a
-temporary instrumentation APK. The probe asserts version, existing debug
+temporary instrumentation APK, signed with the same disposable QA key.
+Only APK signatures are replaced for the test; the uploaded debug artifact
+and release bundle are untouched. The probe asserts version, existing debug
 package, SDK levels, exact permission set, launcher mapping and adaptive
 launcher/round resources. It renders both icons with Android's actual drawable
 implementation at six densities and checks that silver/gold artwork exists
