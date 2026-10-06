@@ -59,6 +59,7 @@ import { buildSupportReply } from './lib/customer-support.mjs';
 import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
 import { deriveBusinessGraph, deriveBusinessGraphSummary } from './lib/business-graph.mjs';
+import { upsertBusinessObjective, businessObjectivesSnapshot, evaluateObjectivePlan } from './lib/business-objectives.mjs';
 import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
 import { runGrowthCouncil } from './lib/growth-council.mjs';
 import { deriveImpact } from './lib/impact-engine.mjs';
@@ -1211,6 +1212,28 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           send(res, 200, { user: publicUser(result), csrf: session.csrf }, {
             'Set-Cookie': sessionCookie(token, { secure: secureCookies })
           });
+          return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/business-objectives') {
+          send(res, 200, businessObjectivesSnapshot(auth.state, {workspaceId:auth.session.workspaceId}));
+          return;
+        }
+        if (req.method === 'PUT' && pathname === '/api/business-objectives') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 16384);
+          const result = await mutate(auth, async state => {
+            const objective = upsertBusinessObjective(state, body, {workspaceId:auth.session.workspaceId});
+            addAudit(state, {type:'business_objective_configured', actor:auth.user.id,
+              detail:{objectiveId:objective.id, revision:objective.revision, metric:objective.metric, status:objective.status, externalWrites:false}});
+            return {objective, snapshot:businessObjectivesSnapshot(state, {workspaceId:auth.session.workspaceId})};
+          });
+          send(res, 200, result); return;
+        }
+        if (req.method === 'POST' && pathname === '/api/business-objectives/evaluate') {
+          requireOwner(auth);
+          const body = await jsonBody(req, 16384);
+          send(res, 200, evaluateObjectivePlan(auth.state, body, {workspaceId:auth.session.workspaceId}));
           return;
         }
 

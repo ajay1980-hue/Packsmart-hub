@@ -7,7 +7,7 @@
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
   const state = {
-    csrf: '', session: null, data: null, graphGeneration: 0, audit: [], fleet: null, fleetQuery: '', view: 'overview',
+    csrf: '', session: null, data: null, graphGeneration: 0, objectiveGeneration: 0, objectiveSnapshot: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
     orderFilter: 'all', approvalFilter: 'pending'
   };
@@ -163,9 +163,13 @@
       catch (error) { showMessage('Pilot migration needs attention: ' + error.message, 'error'); }
     }
     const data = await request('/api/bootstrap');
+    if (state.data?.workspace?.id !== data.workspace.id) resetObjectiveForm();
     state.data = data; state.csrf = data.csrf || state.csrf;
-    state.graphGeneration++;
+    state.graphGeneration++; state.objectiveGeneration++;
     $('#business-graph-result').replaceChildren();
+    $('#business-objectives-list').replaceChildren();
+    state.objectiveSnapshot = null;
+    $('#business-objective-form').classList.toggle('hidden', !['owner','admin'].includes(data.user?.role));
     $('#workspace-label').textContent = data.workspace.name;
     $('#workspace-heading').textContent = data.workspace.name;
     $('#sidebar-workspace').textContent = data.workspace.name;
@@ -1089,6 +1093,68 @@
     const link = event.target.closest('[data-view-link]');
     if (link) { event.preventDefault(); setView(link.dataset.viewLink); applyTarget(link.dataset.viewLink, link.dataset.targetFilter); }
   });
+  function resetObjectiveForm() {
+    const form = $('#business-objective-form');
+    form.reset(); Object.keys(form.dataset).forEach(key => { delete form.dataset[key]; });
+    $('#cancel-objective-edit').classList.add('hidden');
+    $('#business-objective-error').textContent = '';
+  }
+  function renderBusinessObjectives(snapshot) {
+    state.objectiveSnapshot = snapshot;
+    const root = $('#business-objectives-list'), canEdit = ['owner','admin'].includes(state.data?.user?.role);
+    root.innerHTML = (snapshot.objectives || []).length ? snapshot.objectives.map(item => {
+      const limits = item.limits || {};
+      const policies = [limits.minGrossMarginPercent == null ? null : 'Margin ≥ ' + limits.minGrossMarginPercent + '%', limits.maxMonthlyAdBudget == null ? null : 'Ads ≤ ' + limits.maxMonthlyAdBudget + ' ' + limits.currency + '/month', limits.minStockCoverDays == null ? null : 'Stock ≥ ' + limits.minStockCoverDays + ' days', limits.profitFirst ? 'Profit first' : null].filter(Boolean).join(' · ');
+      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (canEdit ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + '</div>';
+    }).join('') : '<p class="muted">No saved objectives yet.</p>';
+  }
+  $('#cancel-objective-edit').addEventListener('click', resetObjectiveForm);
+  $('#business-objectives-list').addEventListener('click', event => {
+    const button = event.target.closest('[data-edit-objective]');
+    if (!button || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;
+    const item = state.objectiveSnapshot?.objectives?.find(row => row.id === button.dataset.editObjective);
+    if (!item || state.objectiveSnapshot.workspaceId !== state.data?.workspace?.id) return;
+    const form = $('#business-objective-form'), fields = form.elements;
+    form.dataset.objectiveId = item.id; form.dataset.revision = String(item.revision);
+    for (const key of ['title','metric','direction','status','baseline','target']) fields[key].value = item[key] ?? '';
+    for (const key of ['startsAt','endsAt']) { const value = new Date(item[key]); fields[key].value = new Date(value.getTime() - value.getTimezoneOffset() * 60000).toISOString().slice(0,-1); form.dataset[key + 'Original'] = item[key]; form.dataset[key + 'Display'] = fields[key].value; }
+    if (item.limits.currency && !Array.from(fields.currency.options).some(option => option.value === item.limits.currency)) { const option = document.createElement('option'); option.value = item.limits.currency; option.textContent = item.limits.currency; fields.currency.append(option); }
+    for (const key of ['currency','minGrossMarginPercent','maxMonthlyAdBudget','minStockCoverDays']) fields[key].value = item.limits[key] ?? '';
+    fields.profitFirst.checked = item.limits.profitFirst;
+    $('#cancel-objective-edit').classList.remove('hidden');
+    fields.title.focus();
+  });
+  $('#load-business-objectives').addEventListener('click', async event => {
+    const button = event.currentTarget, generation = state.graphGeneration, csrf = state.csrf;
+    if (button.disabled || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;
+    const objectiveGeneration = ++state.objectiveGeneration;
+    setBusy(button, true, 'Loading…');
+    try {
+      const snapshot = await request('/api/business-objectives');
+      if (generation === state.graphGeneration && csrf === state.csrf && objectiveGeneration === state.objectiveGeneration) renderBusinessObjectives(snapshot);
+    } catch(error) { if (generation === state.graphGeneration && csrf === state.csrf && objectiveGeneration === state.objectiveGeneration) $('#business-objectives-list').textContent = error.message; }
+    finally { setBusy(button, false); }
+  });
+  $('#business-objective-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget, fields = form.elements, button = form.querySelector('button'), error = $('#business-objective-error');
+    if (button.disabled) return;
+    const generation = state.graphGeneration, csrf = state.csrf, objectiveGeneration = ++state.objectiveGeneration;
+    const number = name => fields[name].value.trim() === '' ? null : Number(fields[name].value);
+    const timestamp = name => form.dataset[name + 'Original'] && fields[name].value === form.dataset[name + 'Display'] ? form.dataset[name + 'Original'] : new Date(fields[name].value).toISOString();
+    error.textContent = ''; setBusy(button, true, 'Saving…');
+    Array.from(fields).forEach(field => { field.disabled = true; });
+    try {
+      const body = {...(form.dataset.objectiveId ? {id:form.dataset.objectiveId,revision:Number(form.dataset.revision)} : {}), title:fields.title.value, status:fields.status.value, metric:fields.metric.value, baseline:number('baseline'), target:number('target'), direction:fields.direction.value,
+        startsAt:timestamp('startsAt'), endsAt:timestamp('endsAt'),
+        limits:{currency:fields.currency.value || null, minGrossMarginPercent:number('minGrossMarginPercent'), maxMonthlyAdBudget:number('maxMonthlyAdBudget'), minStockCoverDays:number('minStockCoverDays'), profitFirst:fields.profitFirst.checked}};
+      const result = await request('/api/business-objectives', {method:'PUT',body:JSON.stringify(body)});
+      if (generation !== state.graphGeneration || csrf !== state.csrf || objectiveGeneration !== state.objectiveGeneration) return;
+      renderBusinessObjectives(result.snapshot); resetObjectiveForm(); showMessage('Objective saved. Approval and execution safeguards remain in force.');
+    } catch(cause) { if (generation === state.graphGeneration && csrf === state.csrf) error.textContent = cause.message; }
+    finally { Array.from(fields).forEach(field => { field.disabled = false; }); setBusy(button, false); }
+  });
+
   $('#load-business-graph').addEventListener('click', async event => {
     const button = event.currentTarget;
     if (button.disabled || !state.data?.workspace?.id) return;

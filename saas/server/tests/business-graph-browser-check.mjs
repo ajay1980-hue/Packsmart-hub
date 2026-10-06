@@ -45,9 +45,37 @@ try {
     assert.ok(dimensions.scroll <= dimensions.width + 2, `graph viewport overflow at ${width}px: ${JSON.stringify(dimensions)}`);
     assert.deepEqual(errors,[]);
     await details.screenshot({path:`/tmp/runvara-business-graph-${width}.png`});
+    if (await page.locator('#mobile-menu').isVisible()) await page.locator('#mobile-menu').click();
+    await page.locator('#main-nav [data-view="ai-team"]').click();
+    const objectives = page.locator('.business-objectives-panel');
+    await objectives.locator('summary').click();
+    const form = page.locator('#business-objective-form');
+    await form.locator('[name="title"]').fill(`Packaging goal ${width}`);
+    await form.locator('[name="baseline"]').fill('100');
+    await form.locator('[name="target"]').fill('125');
+    await form.locator('[name="startsAt"]').fill(new Date(Date.now()-60000).toISOString().slice(0,16));
+    await form.locator('[name="endsAt"]').fill(new Date(Date.now()+86400000).toISOString().slice(0,16));
+    await form.locator('[name="maxMonthlyAdBudget"]').fill('0');
+    await form.locator('button[type="submit"]').click();
+    await page.locator('#business-objectives-list').getByText(`Packaging goal ${width}`,{exact:false}).waitFor();
+    assert.equal(await page.locator('#business-objective-error').textContent(),'');
+    const matching = page.locator('#business-objectives-list > div').filter({hasText:`Packaging goal ${width}`});
+    await matching.locator('[data-edit-objective]').click();
+    await form.locator('[name="status"]').selectOption('paused');
+    await form.locator('button[type="submit"]').click();
+    await matching.getByText('Revenue · Paused',{exact:true}).waitFor();
+    await matching.locator('[data-edit-objective]').click();
+    await form.locator('[name="title"]').fill('Cancelled edit');
+    await page.locator('#cancel-objective-edit').click();
+    assert.equal(await form.locator('[name="title"]').inputValue(),'');
+    const goalDimensions = await page.evaluate(() => ({scroll:document.documentElement.scrollWidth,width:innerWidth}));
+    assert.ok(goalDimensions.scroll <= goalDimensions.width + 2, `objective viewport overflow at ${width}px: ${JSON.stringify(goalDimensions)}`);
+    assert.deepEqual(errors,[]);
+    await objectives.screenshot({path:`/tmp/runvara-business-objectives-${width}.png`});
+
     await context.close();
   }
-  console.log('Business graph browser verification passed at 320, 390 and 1200 pixels.');
+  console.log('Business graph and objectives browser verification passed at 320, 390 and 1200 pixels.');
 } finally {
   if(browser) await browser.close();
   await new Promise(resolve => server.close(resolve));
