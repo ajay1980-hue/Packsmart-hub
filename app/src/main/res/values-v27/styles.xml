@@ -6,9 +6,7 @@
         <item name="android:navigationBarColor">#080808</item>
         <item name="android:statusBarColor">#080808</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowBackground">#080808</item>
-    </style>
-    <style name="Theme.Packsmart.Splash" parent="Theme.Packsmart">
+        <item name="android:windowLightNavigationBar">false</item>
         <item name="android:windowBackground">#080808</item>
     </style>
 </resources>
