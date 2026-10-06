@@ -961,11 +961,14 @@
       ['Processed', worker.processed || 0],
       ['Failures', worker.failed || 0],
       ['Dead-lettered', worker.deadLettered || 0],
+      ['Queue polls · since restart', worker.pollCalls ?? 'Not measured'],
+      ['Empty queue polls', worker.emptyPolls ?? 'Not measured'],
+      ['Polling delay', worker.backoffMs == null ? 'Not measured' : Math.round(worker.backoffMs / 1000) + ' seconds'],
       ['Last error', worker.lastError || 'None']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
 
     const used = Number(totals.aiUnitsToday || 0), limit = Number(totals.dailyAiUnitLimit || 0), pct = limit ? Math.min(100, used / limit * 100) : 0;
-    $('#fleet-ai-capacity').innerHTML = '<div class="fleet-meter"><span style="width:' + pct.toFixed(1) + '%"></span></div><div class="section-head"><b>' + escapeHtml(used) + ' AI units reserved today</b><span class="tag ' + (pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : 'good') + '">' + escapeHtml(limit ? Math.round(pct) + '%' : 'No limit') + '</span></div><p class="muted tiny">Units reserve workload capacity. Provider token cost is metered separately from real response usage.</p>';
+    $('#fleet-ai-capacity').innerHTML = '<div class="fleet-meter"><span style="width:' + pct.toFixed(1) + '%"></span></div><div class="section-head"><b>' + escapeHtml(used) + ' AI units reserved today</b><span class="tag ' + (pct >= 90 ? 'bad' : pct >= 70 ? 'warn' : 'good') + '">' + escapeHtml(limit ? Math.round(pct) + '%' : 'No AI capacity') + '</span></div><p class="muted tiny">Units reserve workload capacity. Provider token cost is metered separately from real response usage.</p>';
 
     $('#fleet-ai-provider-status').textContent = fleet.aiProviderConfigured ? 'Provider metering ready' : 'Deterministic fallback';
     $('#fleet-ai-provider-status').className = 'tag ' + (fleet.aiProviderConfigured ? 'good' : 'neutral');
