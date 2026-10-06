@@ -31,6 +31,62 @@ function assertWorkspace(workspaceId, state) {
   if (!workspaceId || state?.workspace?.id !== workspaceId) throw Object.assign(new Error('Workspace identity mismatch'), { status: 403, code: 'WORKSPACE_MISMATCH' });
 }
 const fileQueues = new Map();
+const JOB_FIELDS = 'id,workspace_id,type,provider,status,priority,attempts,max_attempts,ai_units,concurrency_limit,idempotency_key,actor,ai_provider,ai_model,ai_tier,available_at,lease_until,worker_id,error_code,created_at,updated_at,completed_at';
+const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
+const jobError = (code = 'AGENT_JOB_INPUT_INVALID') => Object.assign(new Error(code), { code, status: 400 });
+function validateJobIdentity(workspaceId, jobId) {
+  if (typeof workspaceId !== 'string' || !JOB_ID.test(workspaceId) || typeof jobId !== 'string' || !JOB_ID.test(jobId)) throw jobError();
+}
+function compactJobRow(row) {
+  if (row.type !== 'objective_prepare') return structuredClone(row);
+  return Object.fromEntries(JOB_FIELDS.split(',').filter(key => Object.hasOwn(row, key)).map(key => [key, structuredClone(row[key])]));
+}
+function validateObjectiveResult(job, result) {
+  const fields = ['schema', 'id', 'workspaceId', 'jobId', 'objectiveId', 'objectiveRevision', 'generatedAt', 'sourceAsOf', 'reportStatus', 'reportCompleted',
+    'commercialReady', 'objective', 'sourceResolution', 'metricEvidence', 'specialists', 'proposals', 'blockers', 'evidenceGaps', 'summary', 'synthesis', 'safeguards'];
+  if (!result || typeof result !== 'object' || Array.isArray(result) || Object.keys(result).some(key => !fields.includes(key))
+    || !/^objective_review_[0-9a-f]{32}$/.test(result.id) || result.schema !== 'runvara-objective-review/v1' || result.workspaceId !== job.workspace_id
+    || result.jobId !== job.id || result.objectiveId !== job.payload?.objectiveId
+    || result.objectiveRevision !== job.payload?.objectiveRevision
+    || result.sourceAsOf?.typedInputFingerprint !== job.payload?.typedInputFingerprint
+    || result.commercialReady !== false || typeof result.reportCompleted !== 'boolean' || !['blocked', 'completed', 'completed_with_gaps'].includes(result.reportStatus)
+    || !Array.isArray(result.specialists) || result.specialists.length > 3 || !Array.isArray(result.proposals) || result.proposals.length > 10
+    || result.safeguards?.providerCalls !== 0 || result.safeguards?.modelCalls !== 0
+    || result.safeguards?.externalWrites !== false || result.safeguards?.externalExecutionAllowed !== false
+    || Buffer.byteLength(JSON.stringify(result)) > 65536) throw jobError('OBJECTIVE_REVIEW_RESULT_INVALID');
+}
+function validateObjectiveEnqueue(workspaceId, job) {
+  if (job.type !== 'objective_prepare') return;
+  validateJobIdentity(workspaceId, job.id);
+  const payload = job.payload;
+  if (job.workspaceId !== workspaceId || job.provider !== null || job.aiProvider !== null || job.aiModel !== null
+    || job.aiTier !== 'deterministic' || job.aiUnits !== 0 || job.priority !== 60 || job.maxAttempts !== 3
+    || typeof job.actor !== 'string' || !JOB_ID.test(job.actor)
+    || !payload || typeof payload !== 'object' || Array.isArray(payload)
+    || Object.keys(payload).some(key => !['schema', 'objectiveId', 'objectiveRevision', 'typedInputFingerprint', 'actorSessionVersion'].includes(key))
+    || payload.schema !== 'runvara-objective-prepare/v1' || !/^objective_[0-9a-f-]{36}$/.test(payload.objectiveId)
+    || !Number.isSafeInteger(payload.objectiveRevision) || payload.objectiveRevision < 1
+    || !Number.isSafeInteger(payload.actorSessionVersion) || payload.actorSessionVersion < 1
+    || !/^[0-9a-f]{32}$/.test(payload.typedInputFingerprint)
+    || !/^objective_prepare:v1:[0-9a-f]{64}$/.test(job.idempotencyKey)
+    || Buffer.byteLength(JSON.stringify(payload)) > 2048) throw jobError('OBJECTIVE_JOB_INPUT_INVALID');
+}
+function finishedJobRow(rows, job, status) {
+  if (!Array.isArray(rows) || rows.length > 1) throw jobError('AGENT_JOB_RESPONSE_INVALID');
+  const row = rows[0];
+  if (row && (row.workspace_id !== job.workspace_id || row.id !== job.id || row.status !== status)) throw jobError('AGENT_JOB_RESPONSE_INVALID');
+  return row || null;
+}
+function jobFence(job) {
+  validateJobIdentity(job.workspace_id, job.id);
+  if (typeof job.worker_id !== 'string' || !JOB_ID.test(job.worker_id) || !Number.isSafeInteger(job.attempts) || job.attempts < 1
+    || typeof job.lease_until !== 'string' || !Number.isFinite(Date.parse(job.lease_until))) throw jobError('AGENT_JOB_CLAIM_INVALID');
+  return `workspace_id=eq.${encodeURIComponent(job.workspace_id)}&id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${encodeURIComponent(job.worker_id)}&attempts=eq.${job.attempts}&lease_until=eq.${encodeURIComponent(job.lease_until)}&lease_until=gt.now`;
+}
+function sameLiveClaim(row, job) {
+  return row && row.workspace_id === job.workspace_id && row.status === 'running' && row.worker_id === job.worker_id
+    && row.attempts === job.attempts && Date.parse(row.lease_until) === Date.parse(job.lease_until) && Date.parse(row.lease_until) > Date.now();
+}
 
 export function seedWorkspaceState(env = process.env, options = {}) {
   const now = new Date().toISOString();
@@ -198,6 +254,11 @@ class FileStore {
     return all[workspaceId] ? markPersisted(upgradeState(all[workspaceId])) : null;
   }
 
+  async getIdentity(workspaceId) {
+    const state = (await this.readAll())[workspaceId];
+    return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
+  }
+
   async save(workspaceId, state) {
     assertWorkspace(workspaceId, state);
     const previous = fileQueues.get(this.filePath) || Promise.resolve();
@@ -240,6 +301,7 @@ class FileStore {
   }
 
   async enqueueAgentJob(workspaceId, job) {
+    validateObjectiveEnqueue(workspaceId, job);
     const existing = this.agentJobs.find(item => item.workspace_id === workspaceId && item.idempotency_key === job.idempotencyKey);
     if (existing) return structuredClone(existing);
     const row = {
@@ -257,7 +319,11 @@ class FileStore {
   async claimAgentJobs(workerId, limit = 8, leaseSeconds = 300) {
     const now = Date.now();
     for (const row of this.agentJobs) if (row.status === 'running' && Date.parse(row.lease_until) <= now) {
-      Object.assign(row, { status:'queued', worker_id:null, lease_until:null, available_at:new Date(now).toISOString(), updated_at:new Date(now).toISOString(), error_code:'WORKER_LEASE_EXPIRED' });
+      const exhausted = row.type === 'objective_prepare' && row.attempts >= row.max_attempts;
+      Object.assign(row, { status:exhausted ? 'dead_letter' : 'queued', worker_id:null, lease_until:null,
+        available_at:new Date(now).toISOString(), updated_at:new Date(now).toISOString(),
+        ...(exhausted ? { completed_at:new Date(now).toISOString() } : {}),
+        error_code:exhausted ? 'OBJECTIVE_LEASE_ATTEMPTS_EXHAUSTED' : 'WORKER_LEASE_EXPIRED' });
     }
     const runningByWorkspace = new Map();
     for (const row of this.agentJobs) if (row.status === 'running' && Date.parse(row.lease_until) > now) runningByWorkspace.set(row.workspace_id, (runningByWorkspace.get(row.workspace_id) || 0) + 1);
@@ -275,8 +341,10 @@ class FileStore {
   }
 
   async finishAgentJob(job, update) {
+    jobFence(job);
     const row = this.agentJobs.find(item => item.id === job.id);
-    if (!row || (row.worker_id && job.worker_id && row.worker_id !== job.worker_id)) return null;
+    if (!sameLiveClaim(row, job)) return null;
+    if (row.type === 'objective_prepare' && update.status === 'succeeded') validateObjectiveResult(row, update.result);
     Object.assign(row, {
       status:update.status, result:update.result ?? row.result, error_code:update.errorCode ?? null,
       completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
@@ -285,14 +353,27 @@ class FileStore {
   }
 
   async rescheduleAgentJob(job, update) {
+    jobFence(job);
     const row = this.agentJobs.find(item => item.id === job.id);
-    if (!row || (row.worker_id && job.worker_id && row.worker_id !== job.worker_id)) return null;
+    if (!sameLiveClaim(row, job)) return null;
     Object.assign(row, { status:'queued', error_code:update.errorCode || null, available_at:update.availableAt, lease_until:null, worker_id:null, updated_at:new Date().toISOString() });
     return structuredClone(row);
   }
 
   async listAgentJobs(workspaceId, limit = 100) {
-    return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at)).slice(0, limit).map(item => structuredClone(item));
+    return this.agentJobs.filter(item => item.workspace_id === workspaceId).sort((a,b)=>Date.parse(b.created_at)-Date.parse(a.created_at) || a.id.localeCompare(b.id)).slice(0, Math.max(1,Math.min(500,Number(limit)||100))).map(compactJobRow);
+  }
+
+  async getAgentJob(workspaceId, jobId, { includeReport = false } = {}) {
+    validateJobIdentity(workspaceId, jobId);
+    const row = this.agentJobs.find(item => item.workspace_id === workspaceId && item.id === jobId);
+    if (!row) return null;
+    const result = { ...compactJobRow(row), payload: structuredClone(row.payload) };
+    if (includeReport && row.type === 'objective_prepare' && row.status === 'succeeded') {
+      validateObjectiveResult(row, row.result);
+      result.result = structuredClone(row.result);
+    }
+    return result;
   }
 
   async retryAgentJob(workspaceId, jobId) {
@@ -1089,6 +1170,7 @@ class SupabaseStore {
   }
 
   async enqueueAgentJob(workspaceId, job) {
+    validateObjectiveEnqueue(workspaceId, job);
     const key = encodeURIComponent(job.idempotencyKey);
     const existing = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
     if (existing?.[0]) return existing[0];
@@ -1115,29 +1197,52 @@ class SupabaseStore {
   }
 
   async finishAgentJob(job, update) {
-    const worker = encodeURIComponent(job.worker_id || '');
-    const rows = await this.request(`runvara_agent_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${worker}&select=*`, {
+    if (job.type === 'objective_prepare' && update.status === 'succeeded') validateObjectiveResult(job, update.result);
+    const rows = await this.request(`runvara_agent_jobs?${jobFence(job)}&select=${JOB_FIELDS}`, {
       method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
         status:update.status, result:update.result ?? null, error_code:update.errorCode ?? null,
-        completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
+        completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:update.completedAt || new Date().toISOString()
       })
     });
-    return rows?.[0] || null;
+    return finishedJobRow(rows, job, update.status);
   }
 
   async rescheduleAgentJob(job, update) {
-    const worker = encodeURIComponent(job.worker_id || '');
-    const rows = await this.request(`runvara_agent_jobs?id=eq.${encodeURIComponent(job.id)}&status=eq.running&worker_id=eq.${worker}&select=*`, {
+    const rows = await this.request(`runvara_agent_jobs?${jobFence(job)}&select=${JOB_FIELDS}`, {
       method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
         status:'queued', error_code:update.errorCode || null, available_at:update.availableAt,
         lease_until:null, worker_id:null, updated_at:new Date().toISOString()
       })
     });
-    return rows?.[0] || null;
+    return finishedJobRow(rows, job, 'queued');
   }
 
   async listAgentJobs(workspaceId, limit = 100) {
-    return await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=*&order=created_at.desc&limit=${Math.max(1,Math.min(500,Number(limit)||100))}`) || [];
+    const bound = Math.max(1,Math.min(500,Number(limit)||100));
+    const base = `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&order=created_at.desc,id.asc&limit=${bound}`;
+    // Explicit list/fleet views only: at most 2*bound rows fetched, bound returned.
+    // Preserve legacy result contracts without copying 100 full objective reports.
+    const [legacy, objectives] = await Promise.all([
+      this.request(`${base}&type=neq.objective_prepare&select=*`),
+      this.request(`${base}&type=eq.objective_prepare&select=${JOB_FIELDS}`)
+    ]);
+    return [...(legacy || []).filter(row => row.type !== 'objective_prepare'), ...(objectives || []).filter(row => row.type === 'objective_prepare').map(compactJobRow)]
+      .sort((a,b) => Date.parse(b.created_at)-Date.parse(a.created_at) || a.id.localeCompare(b.id)).slice(0, bound);
+  }
+
+  async getAgentJob(workspaceId, jobId, { includeReport = false } = {}) {
+    validateJobIdentity(workspaceId, jobId);
+    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=${JOB_FIELDS},payload${includeReport ? ',result' : ''}&limit=1`);
+    if (!Array.isArray(rows) || rows.length > 1) throw jobError('AGENT_JOB_RESPONSE_INVALID');
+    const row = rows[0];
+    if (!row) return null;
+    if (row.workspace_id !== workspaceId || row.id !== jobId) throw jobError('AGENT_JOB_RESPONSE_INVALID');
+    const result = { ...compactJobRow(row), payload: row.payload };
+    if (includeReport && row.type === 'objective_prepare' && row.status === 'succeeded') {
+      validateObjectiveResult(row, row.result);
+      result.result = row.result;
+    }
+    return result;
   }
 
   async retryAgentJob(workspaceId, jobId) {

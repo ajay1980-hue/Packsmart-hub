@@ -1,0 +1,48 @@
+name: Objective preparation PostgreSQL leases
+
+on:
+  pull_request:
+    paths:
+      - 'saas/server/**'
+      - '.github/workflows/objective-job-check.yml'
+  push:
+    paths:
+      - 'saas/server/**'
+      - '.github/workflows/objective-job-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-objective-jobs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-test-password
+          POSTGRES_DB: runvara_objective_job_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d runvara_objective_job_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Fixed local disposable database; no repository or production secrets.
+      OBJECTIVE_JOB_TEST_DATABASE_URL: postgres://postgres:disposable-test-password@127.0.0.1:5432/runvara_objective_job_test
+      OBJECTIVE_JOB_ALLOW_DISPOSABLE_TEST_DB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: saas/server/tests/atomic-usage/package-lock.json
+      - name: Install existing locked test-only PostgreSQL driver
+        run: npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts --no-audit --no-fund
+      - name: Verify objective lease expiry, claim recovery, immutable reports, and privileges
+        run: node --test --test-concurrency=1 saas/server/tests/objective-job-postgres.mjs

@@ -136,3 +136,13 @@ The production migration is additive apart from widening an existing decimal col
 Stage 5 pre-PR checks: 348/348 local server tests, syntax and Phase 1 guards passed. Independent read-only review found no blocking issue for inactive release after the exact-cost DTO and admission-denial-code fixes. Browser launch is restricted locally; responsive and real PostgreSQL gates remain required in CI.
 
 Stage 5 migration applied with explicit owner approval at 19:03 UTC, recorded by Supabase as version `20261006190318`; the source filename matches that history entry. SQL is identical to the 41-test PostgreSQL 17.6 CI run. Read-back confirms both tables enforce RLS, public/customer grants are absent, RPCs are SECURITY INVOKER with fixed search_path/timeouts, pricing is immutable, and reservation count remains zero.
+
+### Stage 5 production evidence
+
+[PR68](https://github.com/ajay1980-hue/Packsmart-hub/pull/68) merged as `6bcac35e11ca8b7b71431481fa797f95e7e546ec` after explicit owner approval of the scoped accounting-table/function access and deployment. Final PostgreSQL CI37516457079 passed41 concurrent/role tests; SaaS CI37516456660 passed348 Node tests, responsive browser flows, Docker and health smoke; Android37516456645 passed. The approved migration is recorded as20261006190318, and its repository filename matches that history entry. Security advisors show only the expected informational RLS-without-browser-policies notices for server-only tables.
+
+Existing Render deploy `dep-db2ki1qjnfac73clks0g` became live at19:16:50 UTC. Health at19:18:16 returned the exact merged commit, ok:true and productionReady:true with persistence/auth/encryption healthy. An optional unauthenticated endpoint probe was cancelled and is not claimed as verified. Provider routing/cutover remains inactive; an empty governed ledger does not establish zero actual provider spend.
+
+## Stage 6: objective-linked Commander preparation
+
+See [the objective review release record](objective-review-rollout.md) for the scope, authority boundaries, bounded request/data budget, retry/lease behavior and verification requirements. Saved objectives now drive a requested deterministic specialist review through the existing queue, with reports persisted in job.result rather than expanding the hot business snapshot. Completion of the diagnostic does not authorize or imply readiness for commercial execution.

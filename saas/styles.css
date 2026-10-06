@@ -1635,3 +1635,26 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 /* Long provider identifiers must remain readable on narrow operator screens. */
 #fleet-provider-usage-result span, #fleet-provider-usage-result b { min-width: 0; overflow-wrap: anywhere; }
 #fleet-provider-usage-result small { display: block; }
+
+/* Explicit, bounded objective-review diagnostics. */
+.business-objectives-panel #business-objectives-list > div { flex-wrap: wrap; }
+.business-objectives-panel #business-objectives-list span { min-width: 0; flex: 1 1 12rem; overflow-wrap: anywhere; }
+.objective-review { min-width: 0; margin: 1.2rem 0; padding: 1rem; border: 1px solid var(--line); border-radius: 12px; overflow-wrap: anywhere; }
+.objective-review h3, .objective-review h4, .objective-review h5 { margin: .7rem 0; }
+.objective-review h5 { font-size: .9rem; }
+.objective-review ul { padding-left: 1.2rem; }
+.objective-review li + li { margin-top: .4rem; }
+.objective-review-outcomes { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }
+.objective-review-outcomes section, .objective-review-specialist, .objective-review-proposal { min-width: 0; padding: .8rem; border: 1px solid var(--line); border-radius: 10px; margin-top: .7rem; }
+.objective-review-facts { display: grid; gap: .6rem; }
+.objective-review-facts > div { display: flex; gap: 1rem; justify-content: space-between; }
+.objective-review-facts dt, .objective-review-facts dd { min-width: 0; margin: 0; }
+.objective-review-facts dd { text-align: right; }
+.objective-review-stale { padding: .8rem; border: 1px solid var(--line); border-left: 4px solid #a66c13; border-radius: 8px; }
+.objective-review button { max-width: 100%; white-space: normal; }
+@media (max-width: 600px) {
+  .objective-review { padding: .75rem; }
+  .objective-review-outcomes { grid-template-columns: minmax(0,1fr); }
+  .objective-review-facts > div { display: block; }
+  .objective-review-facts dd { text-align: left; margin-top: .2rem; }
+}

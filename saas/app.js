@@ -103,6 +103,7 @@
   }
 
   function showLogin() {
+    resetObjectiveReview();
     closeWorkspaceSearch();
     $('#commander-result').replaceChildren(); $('#commander-result').classList.add('hidden');
     $('#loading-screen')?.classList.add('hidden');
@@ -119,6 +120,7 @@
   }
 
   function showPasswordSetup() {
+    resetObjectiveReview();
     closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
@@ -165,7 +167,7 @@
     const data = await request('/api/bootstrap');
     if (state.data?.workspace?.id !== data.workspace.id) resetObjectiveForm();
     state.data = data; state.csrf = data.csrf || state.csrf;
-    state.graphGeneration++; state.objectiveGeneration++;
+    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview();
     $('#business-graph-result').replaceChildren();
     $('#business-objectives-list').replaceChildren();
     $('#fleet-provider-usage-result').replaceChildren();
@@ -192,6 +194,7 @@
   }
 
   function setView(view) {
+    if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
     closeWorkspaceSearch();
     state.view = view;
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
@@ -1103,6 +1106,154 @@
     const link = event.target.closest('[data-view-link]');
     if (link) { event.preventDefault(); setView(link.dataset.viewLink); applyTarget(link.dataset.viewLink, link.dataset.targetFilter); }
   });
+  const objectiveReview = { active: null, timer: null, controller: null, epoch: 0 };
+  const reviewTerminal = new Set(['succeeded','blocked','dead_letter','failed','cancelled']);
+  const reviewStatuses = new Set(['queued','running', ...reviewTerminal]);
+  const reviewRows = (value, limit = 24) => Array.isArray(value) ? value.slice(0, limit) : [];
+  const canPrepareReview = () => ['owner','admin'].includes(state.data?.user?.role);
+  const reviewVisible = () => state.view === 'ai-team' && !document.hidden && $('.business-objectives-panel').open && !$('#app-shell').classList.contains('hidden');
+  const sameReviewSession = active => objectiveReview.active === active && active.workspaceId === state.data?.workspace?.id && active.csrf === state.csrf && active.session === state.session && active.generation === state.graphGeneration && canPrepareReview();
+  const currentReviewRequest = (active, epoch) => sameReviewSession(active) && objectiveReview.epoch === epoch && reviewVisible();
+  function stopReviewRequests() {
+    clearTimeout(objectiveReview.timer); objectiveReview.timer = null;
+    objectiveReview.epoch++;
+    objectiveReview.controller?.abort(); objectiveReview.controller = null;
+  }
+  function resetObjectiveReview() {
+    stopReviewRequests(); objectiveReview.active = null;
+    $('#business-objective-review').classList.add('hidden');
+    $('#business-objective-review-result').replaceChildren();
+    $('#business-objective-review-status').textContent = '';
+    $('#resume-objective-review').classList.add('hidden');
+    $('#refresh-objective-review').classList.add('hidden');
+  }
+  function pauseObjectiveReview(message) {
+    stopReviewRequests();
+    const active = objectiveReview.active;
+    if (!active) return;
+    active.busy = false; active.paused = true;
+    if (!active.report) active.message = message || 'Status checks paused. Select Check status to continue.';
+    renderObjectiveReview();
+  }
+  function renderObjectiveReview() {
+    const active = objectiveReview.active;
+    if (!active || !sameReviewSession(active)) return;
+    const panel = $('#business-objective-review'), status = $('#business-objective-review-status'), resume = $('#resume-objective-review');
+    panel.classList.remove('hidden');
+    $('#business-objective-review-title').textContent = 'Review: ' + active.title;
+    const job = active.job;
+    status.textContent = active.message || (active.creating ? 'Preparing diagnostic review…' : job ? statusLabel(job.status) + ' · attempt ' + (job.attempts ?? 'Unknown') + ' of ' + (job.maxAttempts ?? 'Unknown') : 'Review status is not yet available.');
+    panel.setAttribute('aria-busy', String(active.creating || active.busy));
+    resume.classList.toggle('hidden', !job || active.creating || Boolean(active.report) || (!active.paused && !reviewTerminal.has(job.status)));
+    resume.disabled = active.busy || active.creating;
+    const currentObjective = state.objectiveSnapshot?.objectives?.find(item => item.id === active.objectiveId);
+    const refresh = $('#refresh-objective-review');
+    refresh.classList.toggle('hidden', !active.report || currentObjective?.effectiveStatus !== 'active');
+    refresh.disabled = active.busy || active.creating;
+    resume.textContent = job?.status === 'succeeded' ? 'Load report' : 'Check status';
+    $$('[data-prepare-objective-review]').forEach(button => {
+      button.disabled = active.creating;
+      button.textContent = button.dataset.prepareObjectiveReview === active.objectiveId && Number(button.dataset.objectiveRevision) === active.objectiveRevision && job && !active.stale ? 'View review' : 'Prepare review';
+    });
+    const report = active.report, root = $('#business-objective-review-result');
+    if (!report) { root.replaceChildren(); return; }
+    const list = items => '<ul>' + reviewRows(items).map(item => '<li>' + escapeHtml(item?.message || item?.detail || item?.code || 'Evidence not established') + '</li>').join('') + '</ul>';
+    const stale = active.stale ? '<p class="objective-review-stale" role="status">Historical review: the objective or source inputs have changed. ' + escapeHtml(statusLabel(active.staleReason || 'Revalidation required')) + '. Prepare a new review for the current objective before relying on this snapshot.</p>' : '';
+    const metric = report.metricEvidence || {}, source = report.sourceAsOf || {};
+    root.innerHTML = stale + '<div class="objective-review-outcomes"><section><h4>Diagnostic review</h4><p>' + escapeHtml(report.reportCompleted === true ? (report.reportStatus === 'completed' ? 'Completed' : 'Completed with evidence gaps') : 'Blocked or incomplete') + '</p></section><section><h4>Commercial proposals</h4><p>Blocked. Evidence and any required owner approval must be established separately.</p></section></div>' +
+      '<p class="muted tiny">Historical source snapshot. This diagnostic is not a forecast, proof of objective progress, or permission to execute.</p>' +
+      '<dl class="objective-review-facts"><div><dt>Objective revision</dt><dd>' + escapeHtml(report.objectiveRevision) + '</dd></div><div><dt>Snapshot read</dt><dd>' + escapeHtml(source.snapshotReadAt ? date(source.snapshotReadAt) : 'Unknown') + '</dd></div><div><dt>Financial source as-of</dt><dd>' + escapeHtml(source.financialObservedAt ? date(source.financialObservedAt) : 'Unknown') + '</dd></div><div><dt>Measured objective progress</dt><dd>' + escapeHtml(metric.value == null ? 'Unknown; objective-period evidence is unresolved' : metric.value) + '</dd></div><div><dt>Source coverage</dt><dd>' + (report.sourceResolution?.complete === true ? 'Complete within the recorded review scope' : 'Incomplete or bounded; inspect evidence gaps') + '</dd></div></dl>' +
+      '<section><h4>Evidence gaps and review blockers</h4>' + (reviewRows(report.evidenceGaps).length || reviewRows(report.blockers).length ? list([...reviewRows(report.blockers), ...reviewRows(report.evidenceGaps)]) : '<p>No additional gaps were recorded. Commercial readiness is still not established.</p>') + '</section>' +
+      '<section><h4>Specialist findings</h4>' + (reviewRows(report.specialists, 3).map(task => '<article class="objective-review-specialist"><h5>' + escapeHtml(statusLabel(task.agentId)) + ' · ' + escapeHtml(statusLabel(task.status)) + '</h5><p class="muted tiny">' + escapeHtml(statusLabel(task.mode)) + ' mode</p>' + list([...reviewRows(task.findings, 8), ...reviewRows(task.blockers, 8), ...reviewRows(task.recommendations, 4)]) + '</article>').join('') || '<p>No specialist findings are available.</p>') + '</section>' +
+      '<section><h4>Blocked commercial proposals</h4>' + (reviewRows(report.proposals, 10).map(proposal => {
+        const sourceExists = proposal.sourceReferenceResolved === true && (state.data?.opportunities || []).some(item => item.id === proposal.opportunityId && item.present === true);
+        return '<article class="objective-review-proposal"><h5>' + escapeHtml(proposal.title || 'Recorded opportunity') + '</h5><p>' + (proposal.approvalRequired ? 'Blocked · owner approval required' : 'Blocked · missing verified evidence') + '</p>' + list(proposal.blockers) + '<p>' + escapeHtml(proposal.nextStep || 'Inspect the original record and resolve missing evidence.') + '</p>' + (sourceExists ? '<button class="secondary" type="button" data-investigate-review-opportunity="' + escapeHtml(proposal.opportunityId) + '">Investigate original opportunity</button>' : '<p class="muted tiny">Original opportunity is not available in the current workspace snapshot.</p>') + '</article>';
+      }).join('') || '<p>No commercial proposals were prepared. This is not a statement that the objective is achieved.</p>') + '</section>';
+  }
+  function acceptReviewJob(active, payload) {
+    const job = payload?.job;
+    if (!job || typeof job.id !== 'string' || !/^job_[A-Za-z0-9_-]{1,100}$/.test(job.id) || job.type !== 'objective_prepare' || job.objectiveId !== active.objectiveId || job.objectiveRevision !== active.objectiveRevision || !reviewStatuses.has(job.status) || (active.job && active.job.id !== job.id)) throw new Error('The review response does not match this objective and job. Reload before trying again.');
+    active.job = job; active.stale = active.stale || payload.stale === true;
+    if (payload.stale) active.staleReason = payload.staleReason || 'Source inputs changed';
+  }
+  async function loadObjectiveReviewReport(active, epoch) {
+    if (!currentReviewRequest(active, epoch) || active.reportRequested || active.report) return;
+    active.reportRequested = true; active.busy = true; active.message = 'Loading the completed diagnostic…'; renderObjectiveReview();
+    const controller = new AbortController(); objectiveReview.controller = controller;
+    try {
+      const payload = await request('/api/business-objectives/reviews/' + encodeURIComponent(active.job.id) + '?report=true', { signal: controller.signal });
+      if (!currentReviewRequest(active, epoch)) return;
+      acceptReviewJob(active, payload);
+      const report = payload.report;
+      if (active.job.status !== 'succeeded' || !report || report.schema !== 'runvara-objective-review/v1' || report.workspaceId !== active.workspaceId || report.jobId !== active.job.id || report.objectiveId !== active.objectiveId || report.objectiveRevision !== active.objectiveRevision) throw new Error('A matching persisted review report is not available.');
+      active.report = report; active.message = report.reportCompleted === true ? 'Diagnostic completed. Commercial proposals remain blocked.' : 'Diagnostic finished with blockers. Commercial proposals remain blocked.';
+    } catch (error) { if (currentReviewRequest(active, epoch)) { active.message = 'Could not load the review: ' + error.message; active.paused = true; } }
+    finally { if (objectiveReview.controller === controller) objectiveReview.controller = null; if (currentReviewRequest(active, epoch)) { active.busy = false; renderObjectiveReview(); } }
+  }
+  function scheduleObjectiveReview(active, epoch) {
+    if (!currentReviewRequest(active, epoch) || active.paused || active.busy) return;
+    if (active.checks >= 8) { active.paused = true; active.message = 'Automatic status checks paused after 8 requests. Select Check status when you want to continue.'; renderObjectiveReview(); return; }
+    const delay = [2000,4000,8000,10000][Math.min(active.checks,3)];
+    objectiveReview.timer = setTimeout(() => { objectiveReview.timer = null; checkObjectiveReview(active, epoch); }, delay);
+  }
+  async function checkObjectiveReview(active, epoch) {
+    if (!currentReviewRequest(active, epoch) || active.paused || active.busy || active.checks >= 8) return;
+    active.checks++; active.busy = true; active.message = ''; renderObjectiveReview();
+    const controller = new AbortController(); objectiveReview.controller = controller;
+    let complete = false;
+    try {
+      const payload = await request('/api/business-objectives/reviews/' + encodeURIComponent(active.job.id), { signal: controller.signal });
+      if (!currentReviewRequest(active, epoch)) return;
+      acceptReviewJob(active, payload);
+      complete = active.job.status === 'succeeded';
+      if (reviewTerminal.has(active.job.status)) {
+        active.paused = true;
+        active.message = complete ? 'Diagnostic finished; loading report.' : 'Review ' + statusLabel(active.job.status).toLowerCase() + (active.job.errorCode ? ': ' + statusLabel(active.job.errorCode) : '') + '. No business action was executed.';
+      }
+    } catch (error) { if (currentReviewRequest(active, epoch)) { active.paused = true; active.message = 'Status check paused: ' + error.message; } }
+    finally { if (objectiveReview.controller === controller) objectiveReview.controller = null; if (currentReviewRequest(active, epoch)) { active.busy = false; renderObjectiveReview(); } }
+    if (!currentReviewRequest(active, epoch)) return;
+    if (complete) await loadObjectiveReviewReport(active, epoch);
+    else scheduleObjectiveReview(active, epoch);
+  }
+  function beginObjectiveReviewWatch(active, manual = false) {
+    if (!sameReviewSession(active) || !reviewVisible() || !active.job || active.creating || active.busy) return;
+    stopReviewRequests(); active.checks = 0; active.paused = false; active.message = ''; active.reportRequested = false;
+    const epoch = objectiveReview.epoch; renderObjectiveReview();
+    if (active.report) return;
+    if (reviewTerminal.has(active.job.status) && active.job.status !== 'succeeded' && !manual) { active.paused = true; active.message = 'Review ' + statusLabel(active.job.status).toLowerCase() + (active.job.errorCode ? ': ' + statusLabel(active.job.errorCode) : '') + '. No business action was executed.'; renderObjectiveReview(); return; }
+    if (active.job.status === 'succeeded') loadObjectiveReviewReport(active, epoch);
+    else scheduleObjectiveReview(active, epoch);
+  }
+  async function prepareObjectiveReview(item, force = false) {
+    if (!canPrepareReview() || !reviewVisible() || objectiveReview.active?.creating) return;
+    const previous = objectiveReview.active;
+    if (!force && !previous?.stale && previous?.objectiveId === item.id && previous.objectiveRevision === item.revision && sameReviewSession(previous) && previous.job) { renderObjectiveReview(); if (!previous.busy && !previous.report) beginObjectiveReviewWatch(previous, true); return; }
+    resetObjectiveReview();
+    const active = { objectiveId: item.id, objectiveRevision: item.revision, title: item.title, workspaceId: state.data.workspace.id, csrf: state.csrf, session: state.session, generation: state.graphGeneration,
+      creating: true, busy: false, paused: false, checks: 0, job: null, report: null, stale: false, reportRequested: false, message: '' };
+    objectiveReview.active = active; renderObjectiveReview();
+    try {
+      const payload = await request('/api/business-objectives/reviews', { method: 'POST', body: JSON.stringify({ objectiveId: item.id, objectiveRevision: item.revision }) });
+      if (!sameReviewSession(active)) return;
+      acceptReviewJob(active, payload);
+      active.creating = false; renderObjectiveReview();
+      if (reviewVisible() && !active.paused) beginObjectiveReviewWatch(active);
+      else { active.paused = true; active.message = 'Review requested. Select Check status when you return.'; renderObjectiveReview(); }
+    } catch (error) { if (sameReviewSession(active)) { active.creating = false; active.paused = true; active.message = 'Could not prepare the review: ' + error.message; renderObjectiveReview(); } }
+  }
+  $('#refresh-objective-review').addEventListener('click', () => {
+    const active = objectiveReview.active, item = state.objectiveSnapshot?.objectives?.find(row => row.id === active?.objectiveId);
+    if (active && sameReviewSession(active) && item?.effectiveStatus === 'active' && state.objectiveSnapshot.workspaceId === active.workspaceId) prepareObjectiveReview(item, true);
+  });
+  $('#resume-objective-review').addEventListener('click', () => { if (objectiveReview.active) beginObjectiveReviewWatch(objectiveReview.active, true); });
+  $('.business-objectives-panel').addEventListener('toggle', () => { if (!$('.business-objectives-panel').open) pauseObjectiveReview('Status checks paused while the objectives panel is closed. Select Check status to continue.'); });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) pauseObjectiveReview('Status checks paused while this tab is hidden. Select Check status to continue.'); });
+  $('#business-objective-review-result').addEventListener('click', event => {
+    const button = event.target.closest('[data-investigate-review-opportunity]');
+    if (button) investigateOpportunity(button.dataset.investigateReviewOpportunity);
+  });
+
   function resetObjectiveForm() {
     const form = $('#business-objective-form');
     form.reset(); Object.keys(form.dataset).forEach(key => { delete form.dataset[key]; });
@@ -1115,11 +1266,23 @@
     root.innerHTML = (snapshot.objectives || []).length ? snapshot.objectives.map(item => {
       const limits = item.limits || {};
       const policies = [limits.minGrossMarginPercent == null ? null : 'Margin ≥ ' + limits.minGrossMarginPercent + '%', limits.maxMonthlyAdBudget == null ? null : 'Ads ≤ ' + limits.maxMonthlyAdBudget + ' ' + limits.currency + '/month', limits.minStockCoverDays == null ? null : 'Stock ≥ ' + limits.minStockCoverDays + ' days', limits.profitFirst ? 'Profit first' : null].filter(Boolean).join(' · ');
-      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (canEdit ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + '</div>';
+      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (canEdit ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + (canEdit && item.effectiveStatus === 'active' ? '<button class="secondary" type="button" data-prepare-objective-review="' + escapeHtml(item.id) + '" data-objective-revision="' + escapeHtml(item.revision) + '">Prepare review</button>' : '') + '</div>';
     }).join('') : '<p class="muted">No saved objectives yet.</p>';
+    const active = objectiveReview.active;
+    if (active) {
+      const current = (snapshot.objectives || []).find(item => item.id === active.objectiveId);
+      if (!current || current.revision !== active.objectiveRevision || current.effectiveStatus !== 'active') { active.stale = true; active.staleReason = 'Objective changed'; pauseObjectiveReview('Objective changed. This review refers to the previously saved revision.'); }
+      renderObjectiveReview();
+    }
   }
   $('#cancel-objective-edit').addEventListener('click', resetObjectiveForm);
   $('#business-objectives-list').addEventListener('click', event => {
+    const prepare = event.target.closest('[data-prepare-objective-review]');
+    if (prepare) {
+      const item = state.objectiveSnapshot?.objectives?.find(row => row.id === prepare.dataset.prepareObjectiveReview);
+      if (!prepare.disabled && !$('#business-objective-form').querySelector('button[type=submit]').disabled && item?.effectiveStatus === 'active' && item.revision === Number(prepare.dataset.objectiveRevision) && state.objectiveSnapshot.workspaceId === state.data?.workspace?.id) prepareObjectiveReview(item);
+      return;
+    }
     const button = event.target.closest('[data-edit-objective]');
     if (!button || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;
     const item = state.objectiveSnapshot?.objectives?.find(row => row.id === button.dataset.editObjective);
@@ -1134,14 +1297,15 @@
     $('#cancel-objective-edit').classList.remove('hidden');
     fields.title.focus();
   });
-  $('#hg-opportunities').addEventListener('click', event => {
-    const button = event.target.closest('[data-investigate-opportunity]');
-    if (!button) return;
-    const id = button.dataset.investigateOpportunity;
+  function investigateOpportunity(id) {
     if (!(state.data?.opportunities || []).some(item => item.id === id)) return;
     setView('opportunities');
     const target = Array.from(document.querySelectorAll('[data-opportunity-record]')).find(item => item.dataset.opportunityRecord === id);
     if (target) { target.tabIndex = -1; target.scrollIntoView({block:'center'}); target.focus(); }
+  }
+  $('#hg-opportunities').addEventListener('click', event => {
+    const button = event.target.closest('[data-investigate-opportunity]');
+    if (button) investigateOpportunity(button.dataset.investigateOpportunity);
   });
 
   $('#load-business-objectives').addEventListener('click', async event => {
@@ -1608,7 +1772,7 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { pauseObjectiveReview('Signing out. Status checks paused.'); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
