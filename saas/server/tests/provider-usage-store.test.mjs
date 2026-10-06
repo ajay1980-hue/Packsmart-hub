@@ -277,3 +277,136 @@ test('FileStore explicitly refuses durable reservations/settlements and cannot c
   assert.deepEqual(await store.providerUsageSummary(workspaceId, '2026-10'), { available: false, reason: 'AI_USAGE_NOT_CONFIGURED' });
   assert.deepEqual(store.aiUsage, []);
 });
+
+const briefPolicyRow = () => ({ workspace_id: workspaceId,
+  governance: { schema: 'fixture-policy', enabled: true, provider: 'openai' }, monthly_cost_limit_usd: 25,
+  agent_ops_enabled: true, agent_ops_paused: false, commander_enabled: true });
+const briefJobRow = () => ({ id: 'job_one', workspace_id: workspaceId, type: 'agent_command', status: 'running',
+  worker_id: 'worker_one', attempts: 2, lease_until: '2026-10-06T17:50:00.000Z', ai_provider: 'openai', ai_model: 'test-model',
+  created_at: '2026-10-06T17:40:00.000Z' });
+function briefContextFixture(handler = (_kind, rows) => rows) {
+  return fixture(call => {
+    const kind = call.url.pathname === '/rest/v1/saas_workspace_state' ? 'policy' : 'job';
+    return handler(kind, [kind === 'policy' ? briefPolicyRow() : briefJobRow()]);
+  });
+}
+const rejectsBriefContext = action => assert.rejects(action, error => {
+  assert.equal(error.code, 'AI_USAGE_CONTEXT_UNAVAILABLE');
+  assert.equal(error.dispatchAllowed, false);
+  assert.equal(error.cause, undefined);
+  assert.ok(!JSON.stringify(error).includes(secret));
+  assert.ok(!error.stack.includes(secret));
+  return true;
+});
+
+test('operator brief context uses exactly two bounded tenant/job projections without full state or private fields', async () => {
+  const { store, calls } = briefContextFixture((_kind, rows) => rows.map(row => ({ ...row,
+    prompt: secret, payload: { command: secret }, result: secret, users: [{ passwordHash: secret }], credentials: secret })));
+  store.get = () => assert.fail('Pre-dispatch context must not load full workspace state');
+  const result = await store.getOperatorBriefContext(workspaceId, 'job_one');
+  assert.equal(calls.length, 2);
+  const policy = calls.find(call => call.url.pathname === '/rest/v1/saas_workspace_state');
+  const job = calls.find(call => call.url.pathname === '/rest/v1/runvara_agent_jobs');
+  assert.ok(policy);
+  assert.ok(job);
+  for (const call of calls) {
+    assert.equal(call.url.searchParams.get('workspace_id'), 'eq.tenant-one');
+    assert.equal(call.url.searchParams.get('limit'), '1');
+    assert.equal(call.method, undefined);
+    assert.equal(call.body, undefined);
+    assert.ok(call.signal instanceof AbortSignal);
+    assert.ok(!/prompt|payload|result|users|credential|password|\*/i.test(call.url.searchParams.get('select')));
+  }
+  assert.deepEqual([...policy.url.searchParams.keys()].sort(), ['limit', 'select', 'workspace_id']);
+  assert.equal(policy.url.searchParams.get('select'), 'workspace_id,governance:state->aiEconomics->governance,monthly_cost_limit_usd:state->aiEconomics->monthlyCostLimitUsd,agent_ops_enabled:state->agentOps->enabled,agent_ops_paused:state->agentOps->paused,commander_enabled:state->agentSettings->commander->enabled');
+  assert.deepEqual([...job.url.searchParams.keys()].sort(), ['id', 'limit', 'select', 'workspace_id']);
+  assert.equal(job.url.searchParams.get('id'), 'eq.job_one');
+  assert.equal(job.url.searchParams.get('select'), 'id,workspace_id,type,status,worker_id,attempts,lease_until,created_at,ai_provider,ai_model');
+  assert.deepEqual(result, { workspaceId, aiEconomics: { governance: briefPolicyRow().governance, monthlyCostLimitUsd: 25 },
+    executionPolicy: { agentOpsEnabled: true, agentOpsPaused: false, commanderEnabled: true },
+    job: { workspaceId, jobId: 'job_one', type: 'agent_command', status: 'running', workerId: 'worker_one', attempt: 2,
+      leaseUntil: briefJobRow().lease_until, provider: 'openai', model: 'test-model', createdAt: briefJobRow().created_at } });
+  assert.ok(!JSON.stringify(result).includes(secret));
+});
+
+test('operator brief context projects current owner stop flags in the policy read without coercing legacy absence', async () => {
+  for (const [agentOpsEnabled, agentOpsPaused, commanderEnabled] of [
+    [false, false, true], [true, true, true], [true, false, false], [undefined, undefined, undefined]
+  ]) {
+    const { store, calls } = briefContextFixture((kind, rows) => kind === 'policy' ? [{ ...rows[0],
+      agent_ops_enabled: agentOpsEnabled, agent_ops_paused: agentOpsPaused, commander_enabled: commanderEnabled }] : rows);
+    const result = await store.getOperatorBriefContext(workspaceId, 'job_one');
+    assert.deepEqual(result.executionPolicy, { agentOpsEnabled, agentOpsPaused, commanderEnabled });
+    assert.equal(calls.length, 2, 'Owner pause revalidation must share the compact policy read');
+    assert.equal(calls.filter(call => call.url.pathname === '/rest/v1/saas_workspace_state').length, 1);
+  }
+});
+
+test('operator brief context rejects invalid workspace/job identities before either read', async () => {
+  const { store, calls } = briefContextFixture();
+  for (const invalid of [undefined, null, '', 'tenant&select=*', 'job/other', 'job\nother', ' id', 'x'.repeat(201), {}, 1]) {
+    await assert.rejects(() => store.getOperatorBriefContext(invalid, 'job_one'), error => error.code === 'AGENT_JOB_INPUT_INVALID');
+    await assert.rejects(() => store.getOperatorBriefContext(workspaceId, invalid), error => error.code === 'AGENT_JOB_INPUT_INVALID');
+  }
+  assert.equal(calls.length, 0);
+});
+
+test('operator brief context fails closed on missing, duplicate or cross-tenant rows and wrong job identity', async () => {
+  const cases = [
+    ['policy', null], ['job', null], ['policy', []], ['job', []], ['policy', {}], ['job', {}],
+    ['policy', [briefPolicyRow(), briefPolicyRow()]], ['job', [briefJobRow(), briefJobRow()]],
+    ['policy', [{ ...briefPolicyRow(), workspace_id: 'tenant-two' }]],
+    ['job', [{ ...briefJobRow(), workspace_id: 'tenant-two' }]],
+    ['policy', [{ ...briefPolicyRow(), workspace_id: undefined }]],
+    ['job', [{ ...briefJobRow(), workspace_id: undefined }]],
+    ['job', [{ ...briefJobRow(), id: 'job_other' }]], ['job', [{ ...briefJobRow(), id: undefined }]]
+  ];
+  for (const [target, response] of cases) {
+    const { store, calls } = briefContextFixture((kind, rows) => kind === target ? response : rows);
+    await rejectsBriefContext(() => store.getOperatorBriefContext(workspaceId, 'job_one'));
+    assert.equal(calls.length, 2, 'Unavailable context cannot trigger a full-state or unscoped fallback read');
+  }
+});
+
+test('operator brief context enforces policy and job response byte limits before accepting JSON', async () => {
+  for (const [target, limit] of [['policy', 131072], ['job', 4096]]) {
+    for (const declaredLength of [false, true]) {
+      let cancelled = false;
+      const { store, calls } = briefContextFixture((kind, rows) => {
+        if (kind !== target) return rows;
+        const body = new ReadableStream({
+          start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(rows) + ' '.repeat(limit + 1))); },
+          cancel() { cancelled = true; }
+        });
+        return new Response(body, { headers: declaredLength ? { 'content-length': String(limit + 1) } : {} });
+      });
+      await rejectsBriefContext(() => store.getOperatorBriefContext(workspaceId, 'job_one'));
+      assert.equal(cancelled, true, 'Oversized response bodies must be cancelled rather than buffered to completion');
+      assert.equal(calls.length, 2);
+    }
+  }
+});
+
+test('operator brief context sanitizes outages, malformed responses and missing schema without fallback', async () => {
+  for (const target of ['policy', 'job']) {
+    for (const failure of [
+      () => { throw Object.assign(new Error(secret), { cause: secret, body: secret }); },
+      () => new Response(`invalid JSON ${secret}`, { status: 200 }),
+      () => new Response(null, { status: 204 }),
+      () => Response.json({ code: '42P01', message: secret, details: secret }, { status: 404 }),
+      () => Response.json({ code: '42501', message: secret }, { status: 403 }),
+      () => new Response(secret, { status: 503 })
+    ]) {
+      const { store, calls } = briefContextFixture((kind, rows) => kind === target ? failure() : rows);
+      await rejectsBriefContext(() => store.getOperatorBriefContext(workspaceId, 'job_one'));
+      assert.equal(calls.length, 2);
+    }
+  }
+});
+
+test('FileStore cannot provide durable operator brief context or fall back to legacy workspace data', async () => {
+  const store = createStore({ SAAS_STATE_FILE: '/unused-operator-brief-test.json' });
+  store.readAll = store.get = () => assert.fail('File context must fail before reading any local workspace data');
+  await assert.rejects(() => store.getOperatorBriefContext(workspaceId, 'job_one'),
+    error => error.code === 'AI_USAGE_DURABLE_STORE_REQUIRED' && error.dispatchAllowed === false);
+});
