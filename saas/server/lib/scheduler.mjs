@@ -8,6 +8,41 @@ import { runWebIntelligence } from './web-intelligence.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
+const creativeCountKeys = ['providerReads', 'submissionAttempts', 'confirmedSubmissions', 'uncertainSubmissions', 'blockedSubmissions'];
+
+// Copy only the worker's safe effect contract. Missing completion evidence is
+// unknown, including after interruption; a zero-spend claim is not evidence.
+function copyCreativeEffects(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const validCounts = creativeCountKeys.every(key => Number.isSafeInteger(source[key]) && source[key] >= 0);
+  const effects = Object.fromEntries(creativeCountKeys.map(key => [key, Number.isSafeInteger(source[key]) && source[key] >= 0 ? source[key] : 0]));
+  effects.historicalExposureUnknown = source.historicalExposureUnknown !== false;
+  effects.externalWrites = effects.confirmedSubmissions > 0 ? true
+    : effects.submissionAttempts > 0 || effects.uncertainSubmissions > 0 || source.externalWrites !== false || !validCounts ? null : false;
+  const noCost = validCounts && source.costStatus === 'not_incurred' && source.spend === 0 && !effects.historicalExposureUnknown
+    && effects.submissionAttempts === 0 && effects.confirmedSubmissions === 0 && effects.uncertainSubmissions === 0;
+  effects.spend = noCost ? 0 : null;
+  effects.costStatus = noCost ? 'not_incurred' : 'unknown';
+  return effects;
+}
+
+function recordCreativeEffects(run, value) {
+  run.effects = copyCreativeEffects(value);
+  Object.assign(run, { spend: run.effects.spend, externalWrites: run.effects.externalWrites, costStatus: run.effects.costStatus });
+  return run.effects;
+}
+
+function summarizeCycleEffects(runs) {
+  const creative = runs.filter(run => run.ruleId === 'marketingCreativeWorker');
+  // Retain the existing response for noncreative, read-only automation cycles.
+  if (!creative.length) return { spend: 0, externalWrites: false };
+  const effects = Object.fromEntries(creativeCountKeys.map(key => [key, creative.reduce((total, run) => total + run.effects[key], 0)]));
+  effects.historicalExposureUnknown = creative.some(run => run.effects.historicalExposureUnknown);
+  effects.externalWrites = creative.some(run => run.externalWrites === true) ? true : creative.some(run => run.externalWrites === null) ? null : false;
+  effects.costStatus = creative.some(run => run.costStatus === 'unknown') ? 'unknown' : 'not_incurred';
+  effects.spend = effects.costStatus === 'unknown' ? null : creative.reduce((total, run) => total + run.spend, 0);
+  return { spend: effects.spend, externalWrites: effects.externalWrites, costStatus: effects.costStatus, effects };
+}
 
 export async function monitoredSync(state, integrations, provider, { automatic = false, retry = true, areas, run } = {}) {
   const previous = state.integrationStatus?.[provider] || {};
@@ -43,7 +78,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   }
 }
 
-export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000 }) {
+export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000, creativeCycle = marketingCreativeCycle }) {
   let timer = null, running = false, stopped = false;
   const status = { lastTickAt: null, lastError: null, running: false };
 
@@ -54,13 +89,17 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
       ensureControl(state);
       await runConnectionDoctor(state, { integrations, readSync: monitoredSync, save: () => store.save(workspaceId, state), now });
       const expired = state.automationRuns.filter(run => run.status === 'IN PROGRESS' && Date.parse(run.leaseUntil) <= now.getTime());
-      for (const run of expired) finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true, evidence: [{ type: 'expired_lease', id: run.id, detail: 'No completion evidence before the worker lease expired.' }] });
+      for (const run of expired) {
+        const effects = run.ruleId === 'marketingCreativeWorker' ? recordCreativeEffects(run, run.effects) : null;
+        finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true, evidence: [{ type: 'expired_lease', id: run.id, detail: 'No completion evidence before the worker lease expired.', ...(effects ? { effects: { ...effects } } : {}) }] });
+      }
       const rules = dueRules(state, now);
       if (!rules.length) {
         if (expired.length) await store.save(workspaceId, state);
         return { skipped: true, reason: state.autopilot.enabled ? 'FREQUENCY_OR_PERMISSION_LIMIT' : 'AUTOPILOT_OFF' };
       }
       const runs = rules.map(rule => claimAutomation(state, rule.id, now));
+      for (const run of runs) if (run.ruleId === 'marketingCreativeWorker') recordCreativeEffects(run);
       const providers = [];
       if (runs.some(run => run.ruleId === 'channelSync')) {
         for (const provider of Object.keys(CONNECTORS)) {
@@ -97,8 +136,21 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
             const result = marketingPlannerCycle(state, { now, source: 'autopilot' });
             evidence = [{ type: 'marketing_campaign', id: result.campaign?.id || run.id, detail: result.created ? `Prepared campaign for ${result.campaign.product.title}; publishing remains approval-gated.` : result.reason }];
           } else if (run.ruleId === 'marketingCreativeWorker') {
-            const result = await marketingCreativeCycle(state, { env, persist: () => store.save(workspaceId, state) });
-            evidence = [{ type: 'marketing_creative', id: result.campaign?.id || run.id, detail: result.advanced ? `Advanced Canva/Runway creative jobs for ${result.campaign.product.title}. No publishing or credit purchase was attempted.` : result.reason }];
+            const result = await creativeCycle(state, { env, persist: () => store.save(workspaceId, state), durableStore: store.provider === 'supabase' });
+            const effects = recordCreativeEffects(run, result.effects);
+            const reason = !result.effects ? 'CREATIVE_EFFECTS_UNAVAILABLE' : result.reason ? safeCode({ code: result.reason }) : null;
+            run.reason = reason;
+            evidence = [{ type: 'marketing_creative', id: result.campaign?.id || run.id,
+              detail: `${effects.providerReads} provider reads; ${effects.submissionAttempts} submission attempts; ${effects.confirmedSubmissions} confirmed; ${effects.uncertainSubmissions} uncertain; ${effects.blockedSubmissions} blocked.${reason ? ` ${reason}.` : ''}`,
+              reason, effects: { ...effects } }];
+            if (reason === 'CREATIVE_STATUS_READ_FAILED' || reason === 'CREATIVE_PROVIDER_JOB_FAILED') {
+              finishAutomation(state, run, { evidence, errorCode: reason });
+              continue;
+            }
+            if (effects.blockedSubmissions > 0 || effects.uncertainSubmissions > 0 || reason === 'CREATIVE_ALLOWANCE_REQUIRED' || reason === 'CREATIVE_EFFECTS_UNAVAILABLE' || reason === 'CREATIVE_PROVIDER_NOT_AVAILABLE') {
+              finishAutomation(state, run, { evidence, errorCode: reason || (effects.uncertainSubmissions > 0 ? 'CREATIVE_OUTCOME_UNKNOWN' : 'CREATIVE_SUBMISSION_BLOCKED'), blocked: true });
+              continue;
+            }
           } else if (run.ruleId === 'marketRadar') {
             const result = await runWebIntelligence(state, { env, actor: 'autopilot' });
             evidence = [{ type: 'web_intelligence', id: run.id, detail: `Scanned ${result.scanned || 0} public pages; ${result.changed || 0} changed and ${result.priceChanged || 0} had price-signal changes. No external writes were attempted.` }];
@@ -110,14 +162,16 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           }
           finishAutomation(state, run, { evidence });
         } catch (error) {
-          finishAutomation(state, run, { errorCode: safeCode(error), blocked: authFailure(error) || /UNAVAILABLE|NO_/.test(safeCode(error)), evidence: [{ type: 'monitor_failure', id: run.id, detail: safeCode(error) }] });
+          const effects = run.ruleId === 'marketingCreativeWorker' ? recordCreativeEffects(run, error.creativeEffects) : null;
+          finishAutomation(state, run, { errorCode: safeCode(error), blocked: authFailure(error) || /UNAVAILABLE|NO_/.test(safeCode(error)) || Boolean(effects?.blockedSubmissions), evidence: [{ type: 'monitor_failure', id: run.id, detail: safeCode(error), ...(effects ? { effects: { ...effects } } : {}) }] });
         }
       }
       detectExceptions(state, 'autopilot');
       state.autopilot.lastRunAt = new Date().toISOString();
-      addAudit(state, { type: 'autopilot_cycle_finished', actor: 'autopilot', detail: { runIds: runs.map(run => run.id), spend: 0, externalWrites: false } });
+      const effects = summarizeCycleEffects(runs);
+      addAudit(state, { type: 'autopilot_cycle_finished', actor: 'autopilot', detail: { runIds: runs.map(run => run.id), ...effects } });
       await store.save(workspaceId, state);
-      return { skipped: false, runs, spend: 0, externalWrites: false };
+      return { skipped: false, runs, ...effects };
     });
   }
 

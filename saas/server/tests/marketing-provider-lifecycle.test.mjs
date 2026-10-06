@@ -111,24 +111,13 @@ test('Canva OAuth callback enforces CSRF, owner, tenant, cookie, session revocat
   assert.equal(expired.status, 400); assert.equal(tokenRequests, 1);
 });
 
-test('creative jobs advance through Canva upload/autofill/export and Runway polling without publication', async t => {
+test('direct creative advancement cannot submit provider jobs without the new allowance boundary', async t => {
   const original = globalThis.fetch; t.after(() => { globalThis.fetch = original; });
-  const campaign = { product: { title: 'Mailing bags', sku: 'MAIL-001', price: 10, image: 'https://cdn.shopify.com/test.jpg' }, copy: { headline: 'Protect every parcel', cta: 'Shop now' }, creativeRequests: [{ provider: 'canva', status: 'pending' }, { provider: 'runway', status: 'pending' }], publish: { approvalRequired: true, status: 'not_requested' } };
-  const config = { CANVA_ACCESS_TOKEN: 'test-only-token', CANVA_BRAND_TEMPLATE_ID: 'template', RUNWAY_API_KEY: 'test-only-key' };
-  globalThis.fetch = async (url, options = {}) => {
-    if (url === campaign.product.image) return new Response('test image', { headers: { 'content-type': 'image/jpeg' } });
-    if (url.endsWith('/asset-uploads')) return json({ job: { id: 'upload' } });
-    if (url.endsWith('/asset-uploads/upload')) return json({ job: { status: 'success', asset: { id: 'asset' } } });
-    if (url.endsWith('/dataset')) return json({ dataset: { headline: { type: 'text' }, product_image: { type: 'image' } } });
-    if (url.endsWith('/autofills')) { const body = JSON.parse(options.body); assert.equal(body.data.product_image.asset_id, 'asset'); assert.equal(body.data.headline.text, 'Protect every parcel'); return json({ job: { id: 'autofill' } }); }
-    if (url.endsWith('/autofills/autofill')) return json({ job: { status: 'success', result: { design: { id: 'design' } } } });
-    if (url.endsWith('/exports')) return json({ job: { id: 'export' } });
-    if (url.endsWith('/exports/export')) return json({ job: { status: 'success', urls: ['https://example.test/creative.png'] } });
-    if (url.endsWith('/recipes/product_ad')) return json({ id: 'task' });
-    if (url.endsWith('/tasks/task')) return json({ status: 'SUCCEEDED', output: ['https://example.test/video.mp4'] });
-    throw new Error('Unexpected endpoint');
-  };
-  for (let i = 0; i < 4; i++) await advanceCampaignCreatives(campaign, config);
-  assert.equal(campaign.status, 'prepared'); assert.ok(campaign.creativeRequests.every(item => item.status === 'complete'));
+  const campaign = { product: { title: 'Mailing bags', sku: 'MAIL-001', price: 10, image: 'https://cdn.shopify.com/test.jpg' }, copy: { headline: 'Protect every parcel' },
+    creativeRequests: [{ provider: 'canva', status: 'pending' }, { provider: 'runway', status: 'pending' }], publish: { approvalRequired: true, status: 'not_requested' } };
+  globalThis.fetch = async () => assert.fail('Missing generation allowance must make no provider request');
+  const result = await advanceCampaignCreatives(campaign, { CANVA_ACCESS_TOKEN: 'test-only-token', CANVA_BRAND_TEMPLATE_ID: 'template', RUNWAY_API_KEY: 'test-only-key' });
+  assert.equal(result.advanced, 0); assert.equal(result.effects.submissionAttempts, 0); assert.equal(result.effects.blockedSubmissions, 2);
+  assert.ok(campaign.creativeRequests.every(item => item.status === 'pending' && item.blockReason === 'CREATIVE_ALLOWANCE_REQUIRED'));
   assert.deepEqual(campaign.publish, { approvalRequired: true, status: 'not_requested' });
 });

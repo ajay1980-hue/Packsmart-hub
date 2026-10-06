@@ -3,6 +3,7 @@ import { deriveOperations } from './operations.mjs';
 import { advanceCampaignCreatives, testMarketingProvider } from './marketing-providers.mjs';
 import { canvaOAuthReady, readCanvaCredentials, refreshCanvaCredentials } from './marketing-oauth.mjs';
 import { decryptCredentials, encryptCredentials } from './security.mjs';
+import { CREATIVE_ALLOWANCE_ACTION, createCreativeEffects, knownCreativeJob, newCreativeRequest, summarizeCreativeEffects } from './creative-safety.mjs';
 
 export const MARKETING_MODES = Object.freeze({
   draft: { id: 'draft', name: 'Draft only', description: 'Prepare campaigns and creatives without publishing.' },
@@ -33,6 +34,8 @@ export function ensureMarketing(state) {
       updatedBy: settings.updatedBy || null
     },
     campaigns: Array.isArray(previous.campaigns) ? previous.campaigns : [],
+    creativeCampaignCursor: typeof previous.creativeCampaignCursor === 'string' && previous.creativeCampaignCursor.length <= 200
+      ? previous.creativeCampaignCursor : null,
     lastPlannerRunAt: previous.lastPlannerRunAt || null,
     lastCreativeRunAt: previous.lastCreativeRunAt || null,
     providers: previous.providers && typeof previous.providers === 'object' ? previous.providers : {}
@@ -123,12 +126,14 @@ function campaignCopy(product) {
 export function draftMarketingCampaign(state, { now = new Date(), source = 'manual' } = {}) {
   const marketing = ensureMarketing(state);
   if (!marketing.settings.enabled) throw Object.assign(new Error('Marketing Autopilot is turned off'), { status: 409, code: 'MARKETING_AUTOPILOT_OFF' });
+  if (marketing.campaigns.length >= 200) throw Object.assign(new Error('Creative history needs a verified archive or owner-reviewed deletion before another campaign can be drafted. Existing drafts and submission evidence will not be discarded.'), { status: 409, code: 'CREATIVE_HISTORY_RETENTION_REQUIRED' });
   const products = eligibleProducts(state);
   if (!products.length) throw Object.assign(new Error('No product currently passes the stock, margin, image and active-product marketing guardrails'), { status: 409, code: 'NO_MARKETING_CANDIDATE' });
   const product = products[0];
   const activeChannels = validChannels.filter(channel => marketing.settings.channels[channel]);
+  const campaignId = id('campaign');
   const campaign = {
-    id: id('campaign'),
+    id: campaignId,
     createdAt: nowIso(now),
     updatedAt: nowIso(now),
     source,
@@ -150,8 +155,8 @@ export function draftMarketingCampaign(state, { now = new Date(), source = 'manu
     channels: activeChannels,
     copy: campaignCopy(product),
     creativeRequests: [
-      { provider: 'canva', kind: 'social_post', status: 'pending', formats: ['instagram_post', 'facebook_post', 'pinterest_pin', 'youtube_thumbnail'] },
-      { provider: 'runway', kind: 'product_video', status: 'pending', formats: ['vertical_video', 'landscape_video'] }
+      newCreativeRequest({ workspaceId: state.workspace.id, campaignId, provider: 'canva', kind: 'social_post', formats: ['instagram_post', 'facebook_post', 'pinterest_pin', 'youtube_thumbnail'], now: () => new Date(now).getTime() }),
+      newCreativeRequest({ workspaceId: state.workspace.id, campaignId, provider: 'runway', kind: 'product_video', formats: ['vertical_video', 'landscape_video'], now: () => new Date(now).getTime() })
     ],
     publish: {
       approvalRequired: true,
@@ -165,9 +170,10 @@ export function draftMarketingCampaign(state, { now = new Date(), source = 'manu
       { type: 'sales_signal', id: product.sku, detail: `${product.units30d || 0} units / £${Number(product.revenue30d || 0).toFixed(2)} recorded revenue in 30 days` }
     ]
   };
-  marketing.campaigns.unshift(campaign);
-  marketing.campaigns = marketing.campaigns.slice(0, 200);
-  marketing.lastPlannerRunAt = nowIso(now);
+  // Helpers above normalize state.marketing. Write through its current object,
+  // and never evict an existing draft, claim or upstream ID to make room.
+  state.marketing.campaigns = [campaign, ...state.marketing.campaigns];
+  state.marketing.lastPlannerRunAt = nowIso(now);
   return campaign;
 }
 
@@ -253,7 +259,7 @@ export async function testStoredMarketingProvider(state, provider, env = process
   try {
     if (record.status === 'disconnected') throw Object.assign(new Error('Reconnect this provider first.'), { code: 'PROVIDER_DISCONNECTED' });
     if (provider === 'canva') await refreshCanvaCredentials(state, env, options);
-    const result = await testMarketingProvider(provider, marketingRuntimeEnv(state, env));
+    const result = await testMarketingProvider(provider, marketingRuntimeEnv(state, env), options);
     Object.assign(record, { status: result.limitation ? 'degraded' : 'connected', lastTestAt: nowIso(), lastTestStatus: 'passed', lastError: null, health: result });
     return result;
   } catch (error) {
@@ -278,40 +284,112 @@ export async function saveCanvaTemplate(state, brandTemplateId, env, options = {
   return result;
 }
 
-export async function marketingCreativeCycle(state, { env = process.env, persist = async () => {} } = {}) {
-  const marketing = ensureMarketing(state);
-  if (!marketing.settings.enabled || !marketing.settings.autoCreative) return { advanced: 0, campaign: null, reason: 'AUTO_CREATIVE_OFF' };
+export async function marketingCreativeCycle(state, { env = process.env, persist, durableStore = false,
+  authorizePhase, campaignId = null, fetchImpl = fetch, now = Date.now } = {}) {
+  const effects = createCreativeEffects();
+  ensureMarketing(state);
+  const noWork = reason => ({ advanced: 0, campaign: null, reason, effects: summarizeCreativeEffects(effects) });
+  if (!state.marketing.settings.enabled || !state.marketing.settings.autoCreative) return noWork('AUTO_CREATIVE_OFF');
+  const campaigns = state.marketing.campaigns;
+  const previousIndex = campaigns.findIndex(item => item.id === state.marketing.creativeCampaignCursor);
+  const nextIndex = previousIndex < 0 ? 0 : (previousIndex + 1) % campaigns.length;
+  // Rotate a separate worklist, never the saved campaign array. A campaign
+  // whose upstream job stays RUNNING or whose GET keeps failing must share the
+  // existing one-campaign cycle with other accepted jobs.
+  const ordered = campaignId ? campaigns : [...campaigns.slice(nextIndex), ...campaigns.slice(0, nextIndex)];
+  const candidates = ordered.filter(item => (!campaignId || item.id === campaignId)
+    && ['draft', 'creative_generation', 'creative_attention'].includes(item.status)
+    && (item.creativeRequests || []).some(request => ['pending', 'in_progress'].includes(request.status)));
+  if (!candidates.length) return noWork('NO_CREATIVE_WORK');
+  // A newly blocked draft must not starve observation of older accepted jobs.
+  const canObserve = (request, runtime, providers) => {
+    if (!knownCreativeJob(request)) return false;
+    const record = state.marketing.providers[request.provider], info = providers[request.provider];
+    if (record?.status === 'disconnected' || info?.status === 'disconnected') return false;
+    if (info?.status === 'action_required') {
+      const templateOnly = request.provider === 'canva' && ['CANVA_TEMPLATE_FIELDS_REQUIRED','CANVA_TEMPLATE_REQUIRED','CANVA_BRAND_TEMPLATE_REQUIRED'].includes(record?.lastError)
+        && (!info.expiresAt || info.expiresAt > now() || info.refreshSupported);
+      if (!templateOnly) return false;
+    }
+    return Boolean(request.provider === 'canva' ? runtime.CANVA_ACCESS_TOKEN : runtime.RUNWAY_API_KEY);
+  };
+  const initialRuntime = marketingRuntimeEnv(state, env), initialProviders = marketingProviderStatus(state, env);
+  const canRead = request => canObserve(request, initialRuntime, initialProviders);
+  const campaign = candidates.find(item => (item.creativeRequests || []).some(canRead))
+    || candidates.find(item => (item.creativeRequests || []).some(request => request.status === 'pending' && state.marketing.providers[request.provider]?.status !== 'disconnected'))
+    || candidates[0];
+  if (!campaignId) state.marketing.creativeCampaignCursor = campaign.id;
+  effects.historicalExposureUnknown = (campaign.creativeRequests || []).some(request => request.safety?.origin !== 'server_created'
+    || request.jobId || request.taskId || Object.values(request.safety?.phases || {}).some(phase => ['dispatching','uncertain','accepted','completed'].includes(phase?.status)));
+  const needsCanvaRead = (campaign.creativeRequests || []).some(request => request.provider === 'canva' && knownCreativeJob(request));
+  const countedFetch = async (url, options = {}) => {
+    // Existing OAuth refresh is credential maintenance, not a creative status
+    // read or generation submission. Do not mislabel its POST as a GET.
+    if (String(options.method || 'GET').toUpperCase() === 'GET') effects.providerReads++;
+    return fetchImpl(url, options);
+  };
   try {
-    if (marketing.providers.canva?.encryptedCredentials && marketing.providers.canva.status !== 'disconnected') await refreshCanvaCredentials(state, env, { persist });
+    if (needsCanvaRead && state.marketing.providers.canva?.encryptedCredentials && state.marketing.providers.canva.status !== 'disconnected') {
+      await refreshCanvaCredentials(state, env, { persist, fetchImpl: countedFetch });
+    }
   } catch (error) {
-    Object.assign(marketing.providers.canva, { status: /UNAVAILABLE/.test(error.code || '') ? 'degraded' : 'action_required', lastError: error.code || 'CANVA_AUTH_REQUIRED', lastTestStatus: 'failed' });
+    if (error.code === 'STATE_CONFLICT' || /PERSISTENCE|SUPABASE/.test(error.code || '')) {
+      error.creativeEffects = summarizeCreativeEffects({ ...effects, historicalExposureUnknown: true });
+      throw error;
+    }
+    Object.assign(state.marketing.providers.canva, { status: /UNAVAILABLE/.test(error.code || '') ? 'degraded' : 'action_required', lastError: error.code || 'CANVA_AUTH_REQUIRED', lastTestStatus: 'failed' });
+  }
+  // No allowance issuer is installed by production routes. Missing permission
+  // causes no health/balance probe and never silently activates generation.
+  if (typeof authorizePhase === 'function') {
+    const runtime = marketingRuntimeEnv(state, env);
+    for (const provider of ['canva', 'runway']) {
+      const pending = campaign.creativeRequests?.some(request => request.provider === provider && request.status === 'pending');
+      const configured = provider === 'canva' ? runtime.CANVA_ACCESS_TOKEN && runtime.CANVA_BRAND_TEMPLATE_ID : runtime.RUNWAY_API_KEY;
+      const record = state.marketing.providers[provider];
+      if (pending && configured && record?.status !== 'disconnected'
+        && (!record?.lastTestAt || Date.parse(record.lastTestAt) < now() - 3600000)) {
+        await testStoredMarketingProvider(state, provider, env, { persist, fetchImpl: countedFetch });
+      }
+    }
   }
   const runtimeEnv = marketingRuntimeEnv(state, env);
-  for (const provider of ['canva', 'runway']) {
-    const configured = provider === 'canva' ? runtimeEnv.CANVA_ACCESS_TOKEN && runtimeEnv.CANVA_BRAND_TEMPLATE_ID : runtimeEnv.RUNWAY_API_KEY;
-    const record = marketing.providers[provider];
-    if (configured && record?.status !== 'disconnected' && (!record?.lastTestAt || Date.parse(record.lastTestAt) < Date.now() - 3600000)) await testStoredMarketingProvider(state, provider, env, { persist });
-  }
   const providers = marketingProviderStatus(state, env);
-  const available = request => providers[request.provider]?.configured && !['action_required', 'disconnected'].includes(providers[request.provider]?.status) && !(request.provider === 'runway' && request.status === 'pending' && marketing.providers.runway?.health?.canSubmit === false);
-  const campaign = marketing.campaigns.find(item =>
-    ['draft', 'creative_generation', 'creative_attention'].includes(item.status) &&
-    (item.creativeRequests || []).some(request =>
-      (request.status === 'in_progress' || request.status === 'pending') && available(request)
-    )
-  );
-  if (!campaign) return { advanced: 0, campaign: null, reason: 'NO_CREATIVE_WORK' };
-  const deferred = (campaign.creativeRequests || []).filter(request => !available(request));
-  campaign.creativeRequests = campaign.creativeRequests.filter(request => !deferred.includes(request));
-  await advanceCampaignCreatives(campaign, runtimeEnv);
-  campaign.creativeRequests.push(...deferred);
-  if (campaign.creativeRequests.some(request => request.status !== 'complete') && campaign.status === 'prepared') campaign.status = 'draft';
-  for (const request of campaign.creativeRequests.filter(item => item.status === 'failed')) {
-    const record = marketing.providers[request.provider];
-    if (record) Object.assign(record, { status: /HTTP_401|HTTP_403|AUTH|TOKEN/.test(request.errorCode || '') ? 'action_required' : 'degraded', lastError: request.errorCode || 'CREATIVE_FAILED' });
-  }
-  marketing.lastCreativeRunAt = nowIso();
-  return { advanced: 1, campaign, reason: null };
+  const eligible = request => {
+    const record = state.marketing.providers[request.provider];
+    if (record?.status === 'disconnected') return false;
+    if (knownCreativeJob(request)) {
+      // Status reads need current credentials, not a template or permission for
+      // another generation. A zero Runway generation balance does not hide a job.
+      return canObserve(request, runtimeEnv, providers);
+    }
+    if (typeof authorizePhase !== 'function') return true; // local, explicit allowance blocker only
+    return providers[request.provider]?.configured && !['action_required', 'disconnected'].includes(providers[request.provider]?.status)
+      && !(request.provider === 'runway' && state.marketing.providers.runway?.health?.canSubmit === false);
+  };
+  // Re-read live state after the acknowledged phase claim. The snapshot passed
+  // to adapters is what prepared their HTTP headers; it must not conceal a
+  // disconnect, credential replacement, or disabled worker during persistence.
+  const resolveRuntimeEnv = provider => {
+    const latest = marketingProviderStatus(state, env)[provider];
+    if (!state.marketing.settings.enabled || !state.marketing.settings.autoCreative || !latest?.configured
+      || ['action_required', 'disconnected'].includes(latest.status)
+      || (provider === 'runway' && state.marketing.providers.runway?.health?.canSubmit === false)) {
+      throw Object.assign(new Error('Creative dispatch prerequisites changed'), { code: 'CREATIVE_INPUT_CHANGED' });
+    }
+    return marketingRuntimeEnv(state, env);
+  };
+  const advanced = await advanceCampaignCreatives(campaign, runtimeEnv, { state, persist, durableStore,
+    authorizePhase, eligible, resolveRuntimeEnv, fetchImpl, now, effects });
+  // Runtime/status helpers normalize state.marketing, so write through the
+  // current object rather than the obsolete pre-normalization local reference.
+  if (advanced.advanced) state.marketing.lastCreativeRunAt = new Date(now()).toISOString();
+  const reason = advanced.reason || (!advanced.advanced && !advanced.effects.providerReads ? 'CREATIVE_PROVIDER_NOT_AVAILABLE' : null);
+  const ownerActions = { CREATIVE_ALLOWANCE_REQUIRED: CREATIVE_ALLOWANCE_ACTION,
+    CREATIVE_STATUS_READ_FAILED: 'The existing provider job could not be checked. Its ID is retained; retry the status check rather than submitting it again.',
+    CREATIVE_PROVIDER_JOB_FAILED: 'The provider reports that the existing job failed. Review its result and costs before creating a separately authorized request.',
+    CREATIVE_PROVIDER_NOT_AVAILABLE: 'Repair the existing provider connection to check its saved job. New generation still requires an approved allowance.' };
+  return { ...advanced, reason, ownerAction: ownerActions[reason] || null };
 }
 
 export function marketingProviderStatus(state = {}, env = process.env) {

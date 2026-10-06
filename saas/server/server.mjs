@@ -1605,13 +1605,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             ensureMarketing(state);
             const campaign = state.marketing.campaigns.find(item => item.id === marketingCreativeMatch[1]);
             if (!campaign) throw Object.assign(new Error('Marketing campaign not found'), { status: 404, code: 'MARKETING_CAMPAIGN_NOT_FOUND' });
-            const snapshot = state.marketing.campaigns;
-            state.marketing.campaigns = [campaign, ...snapshot.filter(item => item.id !== campaign.id)];
-            const advanced = await marketingCreativeCycle(state, { env, persist: () => store.save(auth.session.workspaceId, state) });
-            addAudit(state, { type: 'marketing_creatives_advanced', actor: auth.user.id, detail: { campaignId: campaign.id, advanced: advanced.advanced, statuses: campaign.creativeRequests?.map(item => [item.provider, item.status]) || [] } });
-            return campaign;
+            const advanced = await marketingCreativeCycle(state, { env, campaignId: campaign.id,
+              durableStore: store.provider === 'supabase', persist: () => store.save(auth.session.workspaceId, state) });
+            addAudit(state, { type: 'marketing_creatives_advanced', actor: auth.user.id, detail: { campaignId: campaign.id,
+              advanced: advanced.advanced, effects: advanced.effects, reason: advanced.reason,
+              statuses: campaign.creativeRequests?.map(item => [item.provider, item.status]) || [] } });
+            return { campaign, advanced: advanced.advanced, effects: advanced.effects, reason: advanced.reason, ownerAction: advanced.ownerAction };
           });
-          send(res, 200, { campaign: result });
+          const blocked = result.effects?.blockedSubmissions > 0 && !result.advanced;
+          const creativeFailure = { CREATIVE_STATUS_READ_FAILED: 503, CREATIVE_PROVIDER_JOB_FAILED: 422, CREATIVE_PROVIDER_NOT_AVAILABLE: 409 }[result.reason];
+          send(res, creativeFailure || (blocked ? 409 : 200), { ...result, ...(blocked || creativeFailure ? { code: result.reason,
+            error: result.ownerAction || 'This creative phase needs review before a new provider submission. Existing provider job IDs and connections are preserved.' } : {}) });
           return;
         }
 
