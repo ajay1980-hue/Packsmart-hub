@@ -23,8 +23,12 @@ changes were not committed to the current Android source.
 The accepted 103 bundle and retained 102 base have identical `classes.dex`
 (SHA-256 `903ca7299b4f6fdcd8d56c71821e3a18c6414d0a0e8b3b03455dc0506df51f81`).
 Comparing the embedded source revision with PR #62 shows identical Java,
-offline asset, layout and styles. This update retains that application code
-and changes launcher resources plus release and validation metadata.
+offline asset and layout. The separate API 26 theme compatibility correction
+in PR #63 was approved and merged into main before this branch was refreshed.
+Its API 27+ theme settings are identical to the verified Play source; the
+default theme omits only the attribute unavailable on API 26. Relative to
+current main, this update changes launcher resources plus release and
+validation metadata, with no theme or application-code changes.
 
 ## Validation
 
@@ -33,12 +37,13 @@ bundle, then runs `gradle :app:lintDebug :app:lintRelease --continue --stacktrac
 separate step. Lint remains a blocking check and its full reports are uploaded.
 No lint baseline, disabled check or new suppression is introduced.
 
-The local standalone lint run found one existing `NewApi` error in both
-variants: `android:windowLightNavigationBar` at `res/values/styles.xml:9`
-requires API 27 while the app supports API 26. This style is identical to
-the verified Play source and current main. Resolving this theme compatibility
-issue requires a scope decision; this icon update does not alter the theme.
-The PR must remain draft until this error is resolved and emulator QA passes.
+The first standalone lint run identified an existing `NewApi` error in both
+variants: `android:windowLightNavigationBar` requires API 27 while the app
+supports API 26. PR #63 fixed that in main by placing the setting in qualified
+resources. This branch includes that merged main commit
+`b280002d7d197e9fb2215c71e1713c09986692a8`; the fix is outside this PR's diff.
+The final head must pass both standalone lint variants and emulator jobs
+before the PR is marked ready and its signed bundle is prepared for Play.
 
 The workflow's API 26 and API 36 emulator jobs install the debug APK and a
 temporary instrumentation APK, signed with the same disposable QA key.
@@ -74,5 +79,6 @@ Verify the JAR signature and certificate, run `bundletool validate`, inspect
 the final manifest for code 104 / name 2.1.4 and the unchanged release package
 and permission set, and retain SHA-256 hashes with the final artifact. Recheck
 the Play bundle inventory immediately before any upload if another release
-has been prepared in the meantime. A signed candidate with an unresolved lint
-gate must not be described as Play ready or published.
+has been prepared in the meantime. Prepare the final bundle only from a clean
+validated commit, and record its source revision and SHA-256 in the release
+pack and PR. Store submission or rollout requires a separate instruction.
