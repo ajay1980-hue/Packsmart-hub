@@ -11,14 +11,14 @@ import { createSessionToken } from '../lib/security.mjs';
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-graph-browser-'));
 const secret = 'graph-browser-test-only-secret-more-than-32-characters';
-const server = createPacksmartServer({NODE_ENV:'test', SESSION_SECRET:secret, CREDENTIALS_KEY:secret,
+const server = createPacksmartServer({NODE_ENV:'test', APP_PUBLIC_URL:'http://127.0.0.1:18787', SESSION_SECRET:secret, CREDENTIALS_KEY:secret,
   SAAS_STATE_FILE:path.join(directory,'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED:'false'});
 let browser;
 try {
   const state = seedWorkspaceState({}, {workspaceId:'graph-preview', name:'Graph preview', email:'preview@example.test', passwordHash:'fixture-only'});
   state.products = [{id:'p1',provider:'shopify',title:'Packaging evidence fixture',status:'active',variants:[{id:'v1',sku:'PS-1',price:10,inventory:3,available:true}]}];
   await server.packsmart.store.save(state.workspace.id,state);
-  server.listen(0,'127.0.0.1'); await once(server,'listening');
+  server.listen(18787,'127.0.0.1'); await once(server,'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
   const token = createSessionToken({userId:state.users[0].id, workspaceId:state.workspace.id, email:state.users[0].email, role:'owner', sessionVersion:1},secret);
   browser = await chromium.launch({headless:true,args:['--no-sandbox']});
