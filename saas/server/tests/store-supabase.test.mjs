@@ -317,3 +317,82 @@ test('scheduler cache avoids per-minute Supabase traffic while retaining bounded
     Date.now = realNow;
   }
 });
+test('mirror-time timestamps never rewrite unchanged catalogue, economics, orders or rules', async () => {
+  const fake = fakeSupabase();
+  const store = createStore({ SUPABASE_URL:'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY:'test-only' }, { fetchImpl:fake.fetchImpl });
+  const state = seedWorkspaceState();
+  state.products = [1,2].map(id => ({ id:`p${id}`, title:`Product ${id}`, inventory:10,
+    updatedAt:'2026-10-01T00:00:00Z', variants:[{id:`v${id}`,externalId:`v${id}`,sku:`SKU${id}`,price:10,inventory:10}] }));
+  state.economics = { SKU1:{landed:2}, SKU2:{landed:3} };
+  state.orders = [{ id:'o1', total:10, createdAt:'2026-10-01T00:00:00Z', lineItems:[] }];
+  await store.save(state.workspace.id, state);
+  const tables = new Set(['products','variants','economics','product_cost_profiles','automation_rules','orders','order_financials']);
+  const writes = since => fake.calls.slice(since).filter(call => call.method === 'POST' && tables.has(call.url.pathname.split('/').pop()));
+  const start = fake.calls.length;
+  await new Promise(resolve => setTimeout(resolve, 5)); // Force a different mirror timestamp.
+  await store.save(state.workspace.id, state);
+  assert.equal(writes(start).length, 0, 'unchanged reporting data generates zero upsert calls');
+  const changedStart = fake.calls.length;
+  state.products[0].title = 'New title';
+  state.products[0].variants[0].price = 12;
+  state.economics.SKU1.landed = 4;
+  state.orders[0].total = 12;
+  await store.save(state.workspace.id, state);
+  const changes = writes(changedStart);
+  assert.deepEqual(changes.map(call => call.url.pathname.split('/').pop()).sort(), ['economics','orders','product_cost_profiles','products','variants']);
+  assert.ok(changes.every(call => JSON.parse(call.body).length === 1), 'only changed rows are sent');
+  assert.equal(fake.tables.get('products').find(row => row.id === 'p1').title, 'New title');
+  assert.equal(fake.tables.get('variants').find(row => row.id === 'v1').price, 12);
+  // A cold process must safely rebuild its cache, never presume persisted mirror parity.
+  const cold = createStore({ SUPABASE_URL:'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY:'test-only' }, { fetchImpl:fake.fetchImpl });
+  const coldStart = fake.calls.length;
+  await cold.save(state.workspace.id, state);
+  assert.ok(writes(coldStart).length >= 7);
+});
+
+test('stable mirror fingerprints retain source timestamp changes and retry failed product writes', async () => {
+  let fail = false;
+  const fake = fakeSupabase({ fault:({table,method}) => fail && table === 'products' && method === 'POST' ? {status:500,code:'57014'} : null });
+  const store = createStore({ SUPABASE_URL:'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY:'test-only' }, { fetchImpl:fake.fetchImpl });
+  const state = seedWorkspaceState();
+  state.products = [{id:'p1',title:'Product',variants:[],updatedAt:'2026-10-01T00:00:00Z'}];
+  await store.save(state.workspace.id,state);
+  state.products[0].updatedAt = '2026-10-02T00:00:00Z';
+  fail = true;
+  await store.save(state.workspace.id,state);
+  assert.equal(fake.tables.get('products')[0].source_updated_at,'2026-10-01T00:00:00Z');
+  fail = false;
+  await store.save(state.workspace.id,state);
+  assert.equal(fake.tables.get('products')[0].source_updated_at,'2026-10-02T00:00:00Z');
+});
+
+
+test('financial mirrors preserve source-only timestamp updates without synthetic churn', async () => {
+  const fake = fakeSupabase();
+  const store = createStore({ SUPABASE_URL:'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY:'test-only' }, { fetchImpl:fake.fetchImpl });
+  const state = seedWorkspaceState();
+  state.orders = [{id:'o1',createdAt:'2026-10-01T00:00:00Z',updatedAt:'2026-10-01T00:00:00Z',total:10}];
+  await store.save(state.workspace.id,state);
+  state.orders[0].updatedAt = '2026-10-02T00:00:00Z';
+  await store.save(state.workspace.id,state);
+  assert.equal(fake.tables.get('order_financials')[0].updated_at, '2026-10-02T00:00:00Z');
+  const before = fake.calls.length;
+  await new Promise(resolve => setTimeout(resolve,5));
+  await store.save(state.workspace.id,state);
+  assert.equal(fake.calls.slice(before).filter(call => call.method === 'POST' && call.url.pathname.endsWith('/order_financials')).length,0);
+});
+
+
+test('mirror cache invalidates after another replica changes the workspace revision', async () => {
+  const fake = fakeSupabase();
+  const create = () => createStore({ SUPABASE_URL:'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY:'test-only' }, { fetchImpl:fake.fetchImpl });
+  const first = create(), second = create();
+  const state = seedWorkspaceState(); state.economics = {SKU:{landed:2}};
+  await first.save(state.workspace.id,state);
+  const other = await second.get(state.workspace.id); other.economics.SKU.landed = 3;
+  await second.save(state.workspace.id,other);
+  assert.equal(fake.tables.get('economics')[0].landed_cost,3);
+  const fresh = await first.get(state.workspace.id); fresh.economics.SKU.landed = 2;
+  await first.save(state.workspace.id,fresh);
+  assert.equal(fake.tables.get('economics')[0].landed_cost,2, 'restoring a prior value must update normalized data too');
+});

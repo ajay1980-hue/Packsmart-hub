@@ -40,7 +40,8 @@ export function ensureAgentOps(state) {
     ...state.agentOps
   };
   state.agentOps.maxConcurrentJobs = Math.max(1, Math.min(10, Number(state.agentOps.maxConcurrentJobs) || limits.maxConcurrentJobs));
-  state.agentOps.dailyAiUnitLimit = Math.max(0, Math.min(100000, Number(state.agentOps.dailyAiUnitLimit) || limits.dailyAiUnitLimit));
+  const dailyAiUnitLimit = Number(state.agentOps.dailyAiUnitLimit);
+  state.agentOps.dailyAiUnitLimit = Number.isFinite(dailyAiUnitLimit) ? Math.max(0, Math.min(100000, dailyAiUnitLimit)) : limits.dailyAiUnitLimit;
   return state.agentOps;
 }
 
@@ -79,25 +80,56 @@ function normalizeJob(input, workspaceId, actor, state) {
   if (type === 'connection_sync' && !provider) throw Object.assign(new Error('Provider required'), { status:400, code:'PROVIDER_REQUIRED' });
   const priority = Math.max(0, Math.min(100, Number(input?.priority ?? definition.priority)));
   const maxAttempts = Math.max(1, Math.min(10, Number(input?.maxAttempts ?? definition.maxAttempts)));
+  const requestedAiUnits = Number(input?.aiUnits ?? definition.aiUnits);
+  if (!Number.isFinite(requestedAiUnits) || requestedAiUnits < 0) {
+    throw Object.assign(new Error('AI units must be a finite non-negative number'), { status:400, code:'VALIDATION_FAILED' });
+  }
   const idempotencyKey = safeText(input?.idempotencyKey, 180) || `${type}:${provider || 'none'}:${crypto.randomUUID()}`;
   const settings = ensureAgentOps(state);
   const route = routeAiWork(state,{jobType:type,payload});
   return {
     id:`job_${crypto.randomUUID()}`, workspaceId, type, provider, payload, status:'queued',
-    priority, attempts:0, maxAttempts, aiUnits:Math.max(0, Number(input?.aiUnits ?? definition.aiUnits) || 0),
+    priority, attempts:0, maxAttempts, aiUnits:Math.max(definition.aiUnits, requestedAiUnits),
     concurrencyLimit:settings.maxConcurrentJobs, idempotencyKey, actor:safeText(actor,120) || 'system',
     aiProvider:route.provider, aiModel:route.model, aiTier:route.tier,
     availableAt:nowIso(), createdAt:nowIso(), updatedAt:nowIso()
   };
 }
 
-export function createAgentOperations({ store, integrations, withWorkspaceLock, aiProvider = null, env = process.env, enabled = true, intervalMs = 2500 }) {
+export function createAgentOperations({ store, integrations, withWorkspaceLock, aiProvider = null, env = process.env, enabled = true, intervalMs = 2500,
+  now = Date.now, random = Math.random, scheduleTimeout = setTimeout, cancelTimeout = clearTimeout }) {
   const workerId = `agent_worker_${process.pid}_${crypto.randomUUID()}`;
-  let timer = null, running = false, stopped = false;
-  const status = { workerId, running:false, lastTickAt:null, lastError:null, processed:0, failed:0, deadLettered:0 };
+  const baseIntervalMs = Math.max(1000, Math.min(60000, Number(intervalMs) || 2500));
+  const maxBackoffMs = 60000;
+  let timer = null, running = false, stopped = false, started = false, wakePending = false;
+  const status = { workerId, running:false, lastTickAt:null, lastError:null, processed:0, failed:0, deadLettered:0,
+    pollCalls:0, emptyPolls:0, pollErrors:0, backoffMs:baseIntervalMs, nextPollAt:null };
+
+  function clearPoll() {
+    if (timer !== null) cancelTimeout(timer);
+    timer = null;
+    status.nextPollAt = null;
+  }
+
+  function schedulePoll(delay) {
+    clearPoll();
+    if (!started || stopped) return;
+    status.nextPollAt = new Date(now() + delay).toISOString();
+    timer = scheduleTimeout(() => { timer = null; status.nextPollAt = null; void tick(); }, delay);
+    timer.unref?.();
+  }
+
+  function wake() {
+    if (!started || stopped) return;
+    status.backoffMs = baseIntervalMs;
+    // A claim already in flight might have missed this enqueue. Drain first,
+    // then poll again immediately without overlapping a claim or execution.
+    if (running) wakePending = true;
+    else schedulePoll(0);
+  }
 
   async function enqueue(workspaceId, input, actor = 'system') {
-    return withWorkspaceLock(workspaceId, async () => {
+    const queued = await withWorkspaceLock(workspaceId, async () => {
       const state = await store.get(workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status:404, code:'WORKSPACE_NOT_FOUND' });
       const settings = ensureAgentOps(state);
@@ -116,6 +148,8 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       await store.save(workspaceId, state);
       return queued;
     });
+    if (queued.status === 'queued') wake();
+    return queued;
   }
 
   async function execute(job) {
@@ -152,9 +186,10 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
           run.ai={provider:route.provider,model:route.model,tier:route.tier,used:false,reason:aiEnhancement.reason};
         }
         recordAgentRun(state, run, job.actor || 'agent-ops');
-        recordWork(state, { id:runId, title:safeText(payload.command,1000), source:'agent-ops', status:'COMPLETED',
+        recordWork(state, { id:runId, title:safeText(payload.command,1000), source:'agent-ops', status:run.workStatus || 'COMPLETED',
+          approvalId:run.approvalId || null, executedExternally:false,
           evidence:[{ type:'agent_run', id:run.id, detail:`Routed to ${run.routedAgents?.length || 0} specialist agents.` }] });
-        result = { runId:run.id, status:run.status, routedAgents:run.routedAgents || [], ai:run.ai, externalWrites:false };
+        result = { runId:run.id, status:run.status, workStatus:run.workStatus, approvalId:run.approvalId || null, routedAgents:run.routedAgents || [], ai:run.ai, externalWrites:false };
       } else if (job.type === 'connection_sync') {
         const provider = job.provider || payload.provider;
         const sync = await monitoredSync(state, integrations, provider, { automatic:true, retry:false, areas:Array.isArray(payload.areas) ? payload.areas : undefined });
@@ -198,15 +233,40 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
 
   async function tick() {
     if (running || stopped) return;
+    // Explicit ticks bypass backoff, but replace any scheduled poll.
+    clearPoll();
     running = true; status.running = true; status.lastError = null;
     try {
+      status.pollCalls++;
       const jobs = await store.claimAgentJobs(workerId, Math.max(1, Math.min(20, Number(env.AGENT_OPS_GLOBAL_CONCURRENCY) || 8)), 300);
+      if (jobs?.length) status.backoffMs = baseIntervalMs;
+      else {
+        status.emptyPolls++;
+        status.backoffMs = Math.min(maxBackoffMs, status.backoffMs * 2);
+      }
       await Promise.allSettled((jobs || []).map(process));
-      status.lastTickAt = nowIso();
+      status.lastTickAt = new Date(now()).toISOString();
     } catch (error) {
+      status.pollErrors++;
+      status.backoffMs = Math.min(maxBackoffMs, status.backoffMs * 2);
       status.lastError = safeCode(error);
       console.warn(JSON.stringify({ event:'agent_ops_tick_failed', code:status.lastError }));
-    } finally { running = false; status.running = false; }
+    } finally {
+      running = false; status.running = false;
+      if (started && !stopped) {
+        if (wakePending) {
+          wakePending = false;
+          status.backoffMs = baseIntervalMs;
+          schedulePoll(0);
+        } else {
+          // Jitter stays below the cap so work enqueued on another replica is
+          // discovered within 60 seconds of an idle poll (plus claim latency).
+          const delay = status.backoffMs === baseIntervalMs ? baseIntervalMs :
+            Math.max(baseIntervalMs, Math.round(status.backoffMs * (0.8 + 0.2 * random())));
+          schedulePoll(delay);
+        }
+      }
+    }
   }
 
   async function workspaceSnapshot(workspaceId, state) {
@@ -222,7 +282,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   }
 
   async function retry(workspaceId, jobId, actor) {
-    return withWorkspaceLock(workspaceId, async () => {
+    const retried = await withWorkspaceLock(workspaceId, async () => {
       const state = await store.get(workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status:404, code:'WORKSPACE_NOT_FOUND' });
       const job = await store.retryAgentJob(workspaceId, jobId);
@@ -232,6 +292,8 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       await store.save(workspaceId, state);
       return job;
     });
+    wake();
+    return retried;
   }
 
   async function configureWorkspace(workspaceId, input, actor='platform-owner') {
@@ -305,8 +367,13 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     };
   }
 
-  function start() { if (!enabled || timer) return; stopped=false; timer=setInterval(()=>{ void tick(); }, Math.max(1000, intervalMs)); timer.unref?.(); void tick(); }
-  function stop() { stopped=true; if (timer) clearInterval(timer); timer=null; }
+  function start() {
+    if (!enabled || started) return;
+    started = true; stopped = false; status.backoffMs = baseIntervalMs;
+    if (running) wakePending = true;
+    else void tick();
+  }
+  function stop() { stopped = true; started = false; wakePending = false; clearPoll(); }
 
-  return { enqueue, retry, configureWorkspace, tick, start, stop, status, workspaceSnapshot, fleetSnapshot, workerId };
+  return { enqueue, retry, configureWorkspace, tick, start, stop, get status() { return Object.freeze({ ...status }); }, workspaceSnapshot, fleetSnapshot, workerId };
 }

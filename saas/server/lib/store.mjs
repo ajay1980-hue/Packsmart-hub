@@ -344,6 +344,7 @@ class SupabaseStore {
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
     this.mirrorDigests = new Map();
+    this.mirrorRevisions = new Map();
     this.schedulerCache = new Map();
     this.schedulerWorkspaceIdsCache = null;
     this.schedulerCacheMaxAgeMs = Math.max(300000, Math.min(21600000, Number(env.SCHEDULER_STATE_CACHE_MS) || 3600000));
@@ -527,11 +528,24 @@ class SupabaseStore {
   async mirrorNormalized(workspaceId, state) {
     const errors = [];
     const deadline = Date.now() + this.mirrorDeadlineMs;
+    const orderSourceUpdates = new Map((state.orders || []).map(order => [order.id, order.updatedAt || null]));
     const mirror = async (table, rows, conflict) => {
       if (!rows.length) return;
       try {
         const cacheKey = `${workspaceId}:${table}`, previous = this.mirrorDigests.get(cacheKey) || new Map();
-        const fingerprinted = rows.map(row => ({ row, key: conflict.split(',').map(key => String(row[key])).join(':'), hash: crypto.createHash('sha256').update(JSON.stringify(row)).digest('hex') }));
+        // These tables stamp mirror time on every save. It is not business data:
+        // hashing it makes unchanged rows appear dirty and defeats incremental writes.
+        // Source timestamps remain in source_updated_at / cost_data / financial_data.
+        const mirrorTimestampTables = new Set(['products', 'variants', 'economics', 'product_cost_profiles', 'automation_rules', 'orders', 'order_financials']);
+        const fingerprinted = rows.map(row => {
+          const content = { ...row };
+          if (mirrorTimestampTables.has(table)) delete content.updated_at;
+          // Financial rows reuse a real source timestamp when supplied. Keep it
+          // in the digest without inventing a column in the reporting schema.
+          if (table === 'order_financials') content.source_updated_at = orderSourceUpdates.get(row.order_id) || null;
+          return { row, key: JSON.stringify(conflict.split(',').map(key => String(row[key]))),
+            hash: crypto.createHash('sha256').update(JSON.stringify(content)).digest('hex') };
+        });
         const changed = fingerprinted.filter(item => previous.get(item.key) !== item.hash);
         if (!changed.length) return;
         if (Date.now() >= deadline) throw Object.assign(new Error('Mirror deferred'), { code: 'MIRROR_DEFERRED' });
@@ -931,6 +945,11 @@ class SupabaseStore {
 
   async save(workspaceId, state) {
     assertWorkspace(workspaceId, state);
+    // Digests only describe rows mirrored by this process at its last saved
+    // revision. A different replica may have changed them since then.
+    if (this.mirrorRevisions.get(workspaceId) !== state._revision) {
+      for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
+    }
     const existing = Boolean(state[PERSISTED] || state._revision);
     const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
     // Archive append-only operational histories before compacting existing hot state.
@@ -973,8 +992,10 @@ class SupabaseStore {
     upgraded.integrationStatus.reporting = report;
     const expected = upgraded._revision;
     upgraded._revision = crypto.randomUUID();
+    let reportingCommitted = false;
     try {
       await this.commit(workspaceId, upgraded, expected, true);
+      reportingCommitted = true;
       state._revision = upgraded._revision;
       state.integrationStatus = upgraded.integrationStatus;
     } catch (error) {
@@ -985,6 +1006,11 @@ class SupabaseStore {
       console.warn(JSON.stringify({ event: 'reporting_status_deferred', workspaceId, code: error.code || 'PERSISTENCE_UNAVAILABLE' }));
     }
     const persisted = markPersisted(upgraded);
+    if (reportingCommitted) this.mirrorRevisions.set(workspaceId, state._revision);
+    else {
+      this.mirrorRevisions.delete(workspaceId);
+      for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
+    }
     this.rememberSchedulerState(workspaceId, persisted);
     return persisted;
   }
