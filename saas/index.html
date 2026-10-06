@@ -491,6 +491,13 @@
           <article class="card"><div class="section-head"><div><p class="eyebrow">MODEL ROUTER</p><h2>Cost-aware model ladder</h2><p class="muted tiny">Routing respects plan ceilings and per-workspace operator controls.</p></div></div><div id="fleet-model-catalog" class="model-catalog"></div></article>
         </div>
 
+        <details class="card">
+          <summary>Governed provider usage ledger</summary>
+          <p class="muted">On-demand accounting for governed reservations only. This excludes legacy activity and is not your provider bill. Missing accounting is shown as unavailable, never zero spend.</p>
+          <div class="record-form"><label>Workspace<select id="fleet-provider-usage-workspace"></select></label><label>Admission month (UTC)<input id="fleet-provider-usage-month" type="month"></label><button id="fleet-provider-usage-refresh" class="secondary" type="button">Inspect governed usage</button></div>
+          <div id="fleet-provider-usage-result" class="status-list" aria-live="polite"></div>
+        </details>
+
         <article class="card">
           <div class="section-head stack-mobile"><div><p class="eyebrow">CUSTOMER FLEET</p><h2>Workspace operations</h2><p class="muted">Risk-first ordering surfaces blocked work, dead letters, connection problems and exceptions first.</p></div>
             <label class="fleet-filter">Filter workspaces<input id="fleet-search" type="search" placeholder="Business, plan or workspace…" maxlength="120" autocomplete="off"></label>

@@ -1,0 +1,64 @@
+name: Atomic provider usage PostgreSQL
+
+on:
+  pull_request:
+    paths:
+      - 'saas/server/**'
+      - '.github/workflows/atomic-usage-check.yml'
+  push:
+    paths:
+      - 'saas/server/**'
+      - '.github/workflows/atomic-usage-check.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-test-password
+          POSTGRES_DB: runvara_atomic_usage_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d runvara_atomic_usage_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Deliberately fixed localhost database. No repository or production secrets.
+      ATOMIC_USAGE_TEST_DATABASE_URL: postgres://postgres:disposable-test-password@127.0.0.1:5432/runvara_atomic_usage_test
+      ATOMIC_USAGE_ALLOW_DISPOSABLE_TEST_DB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: saas/server/tests/atomic-usage/package-lock.json
+      - name: Allow 100 simultaneous independent database sessions
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec "$POSTGRES_CONTAINER_ID" psql -U postgres -d runvara_atomic_usage_test \
+            -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET max_connections = '160';"
+          docker restart "$POSTGRES_CONTAINER_ID"
+          for attempt in {1..30}; do
+            if docker exec "$POSTGRES_CONTAINER_ID" pg_isready -U postgres -d runvara_atomic_usage_test; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Install locked test-only PostgreSQL driver
+        run: npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts --no-audit --no-fund
+      - name: Run real PostgreSQL admission, settlement, and privilege tests
+        run: npm --prefix saas/server/tests/atomic-usage test

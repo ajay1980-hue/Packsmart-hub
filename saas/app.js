@@ -168,6 +168,7 @@
     state.graphGeneration++; state.objectiveGeneration++;
     $('#business-graph-result').replaceChildren();
     $('#business-objectives-list').replaceChildren();
+    $('#fleet-provider-usage-result').replaceChildren();
     state.objectiveSnapshot = null;
     $('#business-objective-form').classList.toggle('hidden', !['owner','admin'].includes(data.user?.role));
     $('#workspace-label').textContent = data.workspace.name;
@@ -951,6 +952,13 @@
   function renderFleet() {
     if (!state.fleet || !state.data?.launchAdmin) return;
     const fleet = state.fleet, totals = fleet.totals || {}, worker = fleet.worker || {};
+    const usageWorkspace = $('#fleet-provider-usage-workspace'), selectedUsageWorkspace = usageWorkspace.value;
+    usageWorkspace.replaceChildren();
+    for (const workspace of fleet.workspaces || []) { const option=document.createElement('option');option.value=workspace.workspaceId;option.textContent=workspace.name || workspace.workspaceId;usageWorkspace.append(option); }
+    if (Array.from(usageWorkspace.options).some(option=>option.value===selectedUsageWorkspace)) usageWorkspace.value=selectedUsageWorkspace;
+    else if (state.data?.workspace?.id) usageWorkspace.value=state.data.workspace.id;
+    if (!$('#fleet-provider-usage-month').value) $('#fleet-provider-usage-month').value=new Date().toISOString().slice(0,7);
+
     const workerHealthy = !worker.lastError && Boolean(worker.lastTickAt);
     $('#fleet-worker-status').textContent = workerHealthy ? 'Worker healthy' : worker.lastError ? 'Worker needs attention' : 'Worker starting';
     $('#fleet-worker-status').className = 'tag ' + (workerHealthy ? 'good' : worker.lastError ? 'bad' : 'warn');
@@ -960,7 +968,7 @@
       ['Running', totals.running || 0, 'jobs now'],
       ['Queued', totals.queued || 0, 'waiting safely'],
       ['Blocked', totals.blocked || 0, 'needs attention'],
-      ['AI cost · month', usd(totals.aiEstimatedCostUsdMonth || 0), (totals.aiRequestsMonth || 0) + ' metered requests'],
+      ['Recorded AI cost · month', usd(totals.aiEstimatedCostUsdMonth || 0), (totals.aiRequestsMonth || 0) + ' metered requests'],
       ['Plan value · month', money(totals.planMonthlyValueGbp || 0), 'GBP list/billing value']
     ].map(item => '<article class="card kpi"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong><small>' + escapeHtml(item[2]) + '</small></article>').join('');
 
@@ -1191,6 +1199,27 @@
     } catch(error) {
       if (state.data?.workspace?.id === workspaceId && state.csrf === csrf && state.graphGeneration === generation) target.textContent = 'Could not inspect relationships: ' + error.message;
     } finally { setBusy(button, false); }
+  });
+
+  $('#fleet-provider-usage-refresh').addEventListener('click', async event => {
+    const button=event.currentTarget, workspace=$('#fleet-provider-usage-workspace'), month=$('#fleet-provider-usage-month'), target=$('#fleet-provider-usage-result');
+    if (button.disabled || !state.data?.launchAdmin) return;
+    const generation=state.graphGeneration, csrf=state.csrf;
+    if (!workspace.value || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month.value)) { target.textContent='Select a workspace and valid UTC month.'; return; }
+    setBusy(button,true,'Reading ledger…');workspace.disabled=true;month.disabled=true;
+    try {
+      const result=await request('/api/operator/provider-usage?workspaceId='+encodeURIComponent(workspace.value)+'&month='+encodeURIComponent(month.value));
+      if (generation!==state.graphGeneration || csrf!==state.csrf) return;
+      if (!result.available) { target.textContent='Governed accounting is unavailable: '+statusLabel(result.reason || 'unknown')+'. This does not mean zero provider spend.'; return; }
+      if (!result.scopes?.length) { target.textContent='No governed reservations recorded for this month. Legacy activity and provider billing are not included.'; return; }
+      target.innerHTML=result.scopes.map(scope=>{
+        const held=scope.held || {}, settled=scope.settled || {};
+        return '<div><span>'+escapeHtml(scope.scopeKey)+'<small>'+escapeHtml(result.admissionMonth)+' · USD · recorded governed usage only</small></span><b>'+escapeHtml(settled.requests ?? 'Unknown')+' settled requests<small>'+escapeHtml(held.requests ?? 'Unknown')+' held or uncertain requests</small></b></div>'+
+          '<div><span>Estimated settled cost / held exposure</span><b>'+escapeHtml(usd(settled.costMicros == null ? null : settled.costMicros/1000000))+' / '+escapeHtml(usd(held.costMicros == null ? null : held.costMicros/1000000))+'</b></div>'+
+          '<div><span>Settled tokens / held token bounds</span><b>'+escapeHtml(settled.totalTokens ?? 'Unknown')+' / '+escapeHtml(held.totalTokens ?? 'Unknown')+'</b></div>';
+      }).join('')+'<p class="muted tiny">Tenant and provider rows overlap; do not add them together. Held amounts include requests whose final usage is not established.</p>';
+    } catch(error) { if (generation===state.graphGeneration && csrf===state.csrf) target.textContent='Could not read governed accounting: '+error.message; }
+    finally { workspace.disabled=false;month.disabled=false;setBusy(button,false); }
   });
 
   $('#fleet-refresh').addEventListener('click', async event => {

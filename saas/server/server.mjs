@@ -1125,7 +1125,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/auth/session' });
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1738,6 +1738,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireOwner(auth);
           const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), auth.user.id);
           send(res, 202, { job }); return;
+        }
+        if (req.method === 'GET' && pathname === '/api/operator/provider-usage') {
+          requireLaunchAdmin(auth, env);
+          const workspaceId = text(url.searchParams.get('workspaceId') || auth.session.workspaceId, 256);
+          const month = url.searchParams.get('month') || new Date().toISOString().slice(0,7);
+          const summary = await store.providerUsageSummary(workspaceId, month);
+          send(res, 200, {workspaceId, source:'governed_reservations_only', excludesLegacyUsage:true, excludesProviderBill:true, ...summary});
+          return;
         }
         if (req.method === 'GET' && pathname === '/api/operator/agent-ops') {
           requireLaunchAdmin(auth, env);
