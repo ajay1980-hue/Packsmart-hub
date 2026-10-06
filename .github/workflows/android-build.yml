@@ -34,13 +34,66 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Packsmart-Mirror-v2.1.2-debug
+          name: Packsmart-Mirror-v2.1.4-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
       - name: Upload unsigned Play AAB
         uses: actions/upload-artifact@v4
         with:
-          name: Packsmart-Mirror-v2.1.2-Play-unsigned
+          name: Packsmart-Mirror-v2.1.4-Play-unsigned
           path: app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
+
+      - name: Android lint (debug and release)
+        run: gradle :app:lintDebug :app:lintRelease --stacktrace
+
+      - name: Upload lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Packsmart-Mirror-v2.1.4-lint
+          path: app/build/reports/lint-results-*
+          if-no-files-found: warn
+
+  launcher-qa:
+    name: Launcher QA (API ${{ matrix.api }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 36]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build QA APK
+        run: gradle assembleDebug --stacktrace
+      - name: Allow this runner to use KVM
+        run: |
+          sudo chown "$USER" /dev/kvm
+          sudo chmod 600 /dev/kvm
+      - name: Verify installed launcher resources and app launch
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          profile: Nexus 5
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          disable-animations: true
+          script: bash .github/android-icon-qa/run.sh
+      - name: Upload launcher QA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Packsmart-Mirror-v2.1.4-icon-qa-api${{ matrix.api }}
+          path: app/build/reports/icon-qa/
+          if-no-files-found: warn
