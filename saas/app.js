@@ -1712,10 +1712,10 @@
     if (creativeButton) {
       setBusy(creativeButton, true, 'Working…');
       try {
-        await request('/api/marketing/campaigns/' + encodeURIComponent(creativeButton.dataset.marketingCreatives) + '/creatives/advance', { method: 'POST', body: '{}' });
+        const result = await request('/api/marketing/campaigns/' + encodeURIComponent(creativeButton.dataset.marketingCreatives) + '/creatives/advance', { method: 'POST', body: '{}' });
         await loadBootstrap({ migrate: false });
         setView('marketing');
-        showMessage('Creative jobs advanced. Runvara will continue them automatically.');
+        showMessage(result.ownerAction || 'Creative status checked. New generation requires an approved provider allowance.');
       } catch (error) { showMessage(error.message, 'error'); }
       finally { setBusy(creativeButton, false); }
       return;

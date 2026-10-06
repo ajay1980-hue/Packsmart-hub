@@ -160,3 +160,13 @@ A bounded Render metrics read at20:14 UTC reported0.18449497 MB for18:00–19:00
 ## Stage 7: quota-safe automation payload retention
 
 See [the retention release record](automation-retention-rollout.md). The stage reduces repeated hot-state payloads while preserving quota membership, immutable full evidence, active scheduler references and bounded explicit history access. It adds no database schema, access grant, service or recurring worker.
+
+### Stage 7 release evidence
+
+[PR70](https://github.com/ajay1980-hue/Packsmart-hub/pull/70) merged as `dd5819a9e91239a30c4de9ba73aa4fdb1cf23267`. SaaS CI37529212431 passed463 Node tests, responsive archive-history browser tests, the existing browser flows and container health. PostgreSQL CI37529212340 passed41 atomic accounting tests plus8 actual archive round-trip cases; objective lease CI37529212346 passed51 cases; Android37529212318 passed.
+
+Existing Render deploy `dep-db2m3b7avr4c73ej7mm0` became live at21:02:11 UTC on2026-10-06. Health at21:02:20 confirmed the exact commit, productionReady:true, healthy persistence/authentication/encryption and automationRetentionEnabled:true. Initial hot state was1,573,310 JSON bytes, just above the1,572,864-byte warning threshold and below the2,097,152-byte hard limit. No normal primary save had occurred after startup at that check, so no live compaction reduction is claimed. A bounded SQL read at21:03 still found832 retained runs and no archive stubs. SQL JSONB-text bytes use a different representation and are not compared directly to application JSON bytes.
+
+## Stage 8: governed creative submission boundary
+
+See [creative submission safeguards](creative-safety-rollout.md). New potentially chargeable creative POSTs require exact-phase owner authority, a finite verified cost allowance and an acknowledged durable claim. No production allowance issuer is installed by this stage; existing accepted-job status reads remain available. This stage adds no migration, access grant, provider activation or recurring schedule. Unknown costs remain unknown, and saved owner drafts/claims are never silently evicted.

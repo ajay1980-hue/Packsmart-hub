@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { draftMarketingCampaign, ensureMarketing, marketingPlannerCycle, marketingProviderStatus, marketingPublishingReadiness, updateMarketingSettings } from '../lib/marketing.mjs';
+import { newCreativeRequest } from '../lib/creative-safety.mjs';
 
 function stateWithProduct() {
   const state = seedWorkspaceState({}, { workspaceId: 'packsmart-solutions', email: 'owner@example.com' });
@@ -63,6 +64,26 @@ test('planner prepares no more than one campaign per day', () => {
   assert.equal(second.created, 0);
   assert.equal(second.reason, 'CAMPAIGN_ALREADY_PREPARED_TODAY');
   assert.equal(state.marketing.campaigns.length, 1);
+});
+
+test('campaign cap never deletes existing drafts, owner content, claims or upstream IDs', () => {
+  const state = stateWithProduct(); ensureMarketing(state);
+  state.marketing.campaigns = Array.from({ length: 199 }, (_, index) => {
+    const campaignId = `campaign_saved_${index}`;
+    return { id: campaignId, status: 'draft', copy: { headline: `Saved owner content ${index}` }, publish: { status: 'not_requested' }, creativeRequests: [newCreativeRequest({ workspaceId: state.workspace.id,
+      campaignId, provider: 'runway', kind: 'product_video', formats: [] })] };
+  });
+  const originals = structuredClone(state.marketing.campaigns);
+  const next = draftMarketingCampaign(state);
+  assert.equal(state.marketing.campaigns.length, 200); assert.equal(state.marketing.campaigns[0].id, next.id);
+  assert.deepEqual(state.marketing.campaigns.slice(1), originals);
+  const before = structuredClone(state.marketing.campaigns);
+  assert.throws(() => draftMarketingCampaign(state), { code: 'CREATIVE_HISTORY_RETENTION_REQUIRED' });
+  assert.deepEqual(state.marketing.campaigns, before, 'Even never-dispatched owner drafts must not be evicted');
+  Object.assign(state.marketing.campaigns[199].creativeRequests[0], { status: 'in_progress', taskId: 'existing_task', safety: { preserved: 'uncertain-claim' } });
+  const withClaim = structuredClone(state.marketing.campaigns);
+  assert.throws(() => draftMarketingCampaign(state), { code: 'CREATIVE_HISTORY_RETENTION_REQUIRED' });
+  assert.deepEqual(state.marketing.campaigns, withClaim);
 });
 
 test('automatic organic publishing cannot be enabled outside automatic mode', () => {
