@@ -36,12 +36,16 @@ jobs:
         run: |
           node saas/server/tests/render-connection-preview.mjs /tmp/runvara-mobile-preview.html
           node saas/server/tests/mobile-connection-check.mjs /tmp/runvara-mobile-preview.html
+      - name: Verify business graph inspector on mobile and desktop
+        run: node saas/server/tests/business-graph-browser-check.mjs
       - name: Upload responsive verification image
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: runvara-mobile-onboarding
-          path: /tmp/runvara-onboarding-mobile.png
+          path: |
+            /tmp/runvara-onboarding-mobile.png
+            /tmp/runvara-business-graph-*.png
           if-no-files-found: ignore
       - name: Build production container
         run: docker build -f saas/server/Dockerfile -t packsmart-ops:test .

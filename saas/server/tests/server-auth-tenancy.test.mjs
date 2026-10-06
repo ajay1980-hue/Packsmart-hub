@@ -80,6 +80,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
 
   const protectedResponse = await request('/api/bootstrap');
   assert.equal(protectedResponse.response.status, 401);
+  assert.equal((await request('/api/business-graph')).response.status, 401);
 
   const wrongLogin = await request('/api/auth/login', {
     method: 'POST',
@@ -143,6 +144,17 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   const repeatedBootstrap = await request('/api/bootstrap', { cookie });
   assert.equal(repeatedBootstrap.response.status, 200);
   assert.equal(redundantBootstrapSaves, 0, 'an unchanged read-only bootstrap must not rewrite persistence');
+  const graph = await request('/api/business-graph', { cookie });
+  assert.equal(graph.response.status, 200);
+  assert.equal(graph.payload.workspaceId, 'packsmart-solutions');
+  assert.equal(graph.payload.mode, 'summary');
+  assert.equal(graph.payload.nodes, undefined, 'summary does not ship entity rows');
+  const detailedGraph = await request('/api/business-graph?detail=true&nodeLimit=999999', { cookie });
+  assert.equal(detailedGraph.response.status, 200);
+  assert.ok(detailedGraph.payload.nodes.length <= 200, 'caller cannot expand server limits');
+  assert.ok(detailedGraph.payload.edges.length <= 400);
+  assert.equal(redundantBootstrapSaves, 0, 'graph reads must never write persistence');
+  assert.equal(JSON.stringify(detailedGraph.payload).includes('passwordHash'), false);
   server.packsmart.store.save = originalSave;
 
   const economics = await request('/api/economics', {
@@ -334,6 +346,11 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(isolated.response.status, 200);
   assert.equal(isolated.payload.workspace.id, 'beta-workspace');
   assert.notEqual(isolated.payload.workspace.id, 'packsmart-solutions');
+  const isolatedGraph = await request('/api/business-graph?workspaceId=packsmart-solutions&detail=true', { cookie: betaCookie });
+  assert.equal(isolatedGraph.response.status, 200);
+  assert.equal(isolatedGraph.payload.workspaceId, 'beta-workspace');
+  assert.equal(JSON.stringify(isolatedGraph.payload).includes('packsmart-solutions'), false, 'graph tenant comes only from authenticated session');
+
 
   const deniedFleet = await request('/api/operator/agent-ops', { cookie: betaCookie });
   assert.equal(deniedFleet.response.status, 403);
