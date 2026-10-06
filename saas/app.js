@@ -7,7 +7,7 @@
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
   const state = {
-    csrf: '', session: null, data: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
+    csrf: '', session: null, data: null, graphGeneration: 0, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
     orderFilter: 'all', approvalFilter: 'pending'
   };
@@ -76,6 +76,7 @@
 
   async function request(path, options) {
     const config = options || {};
+    const originatingSession = state.session, originatingCsrf = state.csrf;
     const headers = new Headers(config.headers || {});
     const method = String(config.method || 'GET').toUpperCase();
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -91,7 +92,7 @@
     } catch (cause) {
       throw Object.assign(new Error(cause.name === 'TimeoutError' || cause.name === 'AbortError' ? 'The request took too long. Check connection activity before retrying; it may still be running.' : 'Runvara could not be reached. Check your internet connection and connection activity before retrying any change.'), { code: 'REQUEST_UNAVAILABLE' });
     } finally { clearTimeout(timeout); config.signal?.removeEventListener('abort', cancel); }
-    if (response.status === 401 && !path.endsWith('/login') && !path.endsWith('/activate-owner') && !path.endsWith('/signup-options')) {
+    if (response.status === 401 && state.session === originatingSession && state.csrf === originatingCsrf && !path.endsWith('/login') && !path.endsWith('/activate-owner') && !path.endsWith('/signup-options')) {
       state.session = null; state.data = null; state.csrf = ''; showLogin();
     }
     if (!response.ok) {
@@ -163,6 +164,8 @@
     }
     const data = await request('/api/bootstrap');
     state.data = data; state.csrf = data.csrf || state.csrf;
+    state.graphGeneration++;
+    $('#business-graph-result').replaceChildren();
     $('#workspace-label').textContent = data.workspace.name;
     $('#workspace-heading').textContent = data.workspace.name;
     $('#sidebar-workspace').textContent = data.workspace.name;
@@ -1086,6 +1089,32 @@
     const link = event.target.closest('[data-view-link]');
     if (link) { event.preventDefault(); setView(link.dataset.viewLink); applyTarget(link.dataset.viewLink, link.dataset.targetFilter); }
   });
+  $('#load-business-graph').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    if (button.disabled || !state.data?.workspace?.id) return;
+    const workspaceId = state.data.workspace.id, generation = state.graphGeneration, csrf = state.csrf;
+    const target = $('#business-graph-result');
+    setBusy(button, true, 'Inspecting…');
+    target.textContent = 'Reading recorded relationships…';
+    try {
+      const graph = await request('/api/business-graph');
+      if (state.data?.workspace?.id !== workspaceId || state.csrf !== csrf || state.graphGeneration !== generation) return;
+      const summary = graph.summary || {}, coverage = graph.coverage || {};
+      const rows = [
+        ['Recorded entities inspected', summary.nodes || 0],
+        ['Evidence-backed links', summary.edges || 0],
+        ['Missing or ambiguous mappings', summary.unknownMappings || 0],
+        ['Coverage', coverage.truncated ? 'Bounded sample; not the whole business' : 'Retained workspace records only'],
+        ...Object.entries(summary.nodesByType || {}).map(([kind,count]) => [statusLabel(kind), count]),
+        ...Object.entries(summary.unknownByReason || {}).slice(0,12).map(([reason,count]) => [statusLabel(reason), count])
+      ];
+      target.innerHTML = rows.map(([label,value]) => '<div><span>' + escapeHtml(label) + '</span><b>' + escapeHtml(value) + '</b></div>').join('') +
+        '<p class="muted tiny">Read-only links to existing records. A shared SKU is not proof of the same product, and a campaign link is not proof of revenue attribution.</p>';
+    } catch(error) {
+      if (state.data?.workspace?.id === workspaceId && state.csrf === csrf && state.graphGeneration === generation) target.textContent = 'Could not inspect relationships: ' + error.message;
+    } finally { setBusy(button, false); }
+  });
+
   $('#fleet-refresh').addEventListener('click', async event => {
     const button=event.currentTarget; setBusy(button,true,'Refreshing…');
     try { await loadFleet(); showMessage('Fleet status refreshed.'); } catch(error) { showMessage(error.message,'error'); }

@@ -49,3 +49,25 @@ Rollback is a revert of the scoped stage commit on the same main/service; no sch
 - Live pre-change health: HTTP 200, `productionReady:true`, Supabase, version 6.15.2 and baseline commit above.
 - Local mobile test initially blocked by missing Playwright browser; CI must supply the browser/container verification before release.
 - Container build unavailable locally (Docker absent); require the existing CI Docker build and health-smoke gate.
+
+### Stage 1 production evidence, 6 October 2026
+
+- [PR64](https://github.com/ajay1980-hue/Packsmart-hub/pull/64) merged as `552827ece04a88c4dac3d5a63ce33dc22ef09712` after SaaS and Android workflows passed.
+- [SaaS CI 37494641874](https://github.com/ajay1980-hue/Packsmart-hub/actions/runs/37494641874) passed all stages, including Node22 tests, browser mobile/desktop checks, Docker build and container health smoke. This resolves the local browser/container verification limits for that change.
+- Render auto-deploy was configured but no build or deployment event arrived. Verified no pending deployment and exact main, then triggered one deployment of the existing service, without clearing cache or changing service settings.
+- Deploy `dep-db2i1349v7es73c8bp20` became live at 16:24:12 UTC. `/api/health` returned HTTP200 with exact commit552827e, productionReady, primary persistence, authentication, credential encryption and state-size checks all true.
+- Live `/app.js` bytes exactly matched the merged source. SHA256: `f5dae34bdb8ea2a936b488a7b476ccbdfb7bc0ee0111e15324f46a692278e5e9`.
+- The post-deploy log query was unavailable due to Render's Loki502/503 response. Do not describe this as an empty error log. Financial bandwidth savings are not yet measured.
+
+## Stage 2: inspect recorded business relationships
+
+An on-demand tenant-scoped graph projection now links the existing authoritative records for products/variants, exact recorded SKUs, cost profiles/suppliers, supported channels, eBay listings, orders/lines, opaque customer identities, campaigns, opportunities, approvals, experiments and work outcomes. It does not copy the catalogue or introduce a second persistence system. Opaque identities and source pointers allow relationships to be traced; source records remain authoritative.
+
+This is a bounded projection of retained records, not a complete persistent graph or archive ledger. Leads, competitor observations, integration health, full inventory/fulfilment history, discount attribution, canonical opportunity reconciliation and durable cross-archive outcome aggregation remain later work. Unknown mappings are visible; no generated-SKU guesses or implied campaign attribution are accepted. Historical eBay line SKU provenance is ambiguous, so those cost links are withheld. Outcome counts mean records, not deduplicated financial value.
+
+- Authenticated `/api/business-graph` defaults to a small summary. Detail is opt-in, capped at200 nodes/400 edges,50 rows per source and2000 scanned records. Caller parameters cannot widen limits or select another tenant.
+- Existing Command Centre gains a collapsed inspector with explicit loading/error/retry states. It fetches the summary only when clicked; opening/closing creates no recurring requests.
+- A delayed401 from an earlier session cannot sign out a newer authenticated session. Repeated clicks, failure/retry and logout/login interruptions have DOM coverage.
+-236/236 stage-specific tests pass locally, including21 graph tests; syntax and guard checks pass. Objective-module experiments are excluded from this stage's commit/test count.
+- Synthetic5000-product/100-variant-per-product input: summary scanned48 records, returned about3KB, and took about4ms on this cloud executor. This is a local synthetic benchmark, not a production capacity guarantee.
+- A dedicated CI browser test exercises the actual app/server at320,390 and1200 pixels, checks overflow and zero automatic graph fetching. Local Chromium cannot launch under executor socket restrictions; do not weaken that CI gate.

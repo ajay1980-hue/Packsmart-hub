@@ -7,19 +7,19 @@ import { once } from 'node:events';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
-import { createSessionToken } from '../lib/security.mjs';
+import { createSessionToken, hashPasswordAsync } from '../lib/security.mjs';
 
 test('cockpit renders authenticated controls and submits real persisted workflows', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-cockpit-'));
   const secret = 'ui-test-only-session-secret-more-than-32-characters';
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: 'ui-test-only-credential-key-more-than-32-characters', SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
-  const state = seedWorkspaceState({}, { workspaceId: 'ui-test', email: 'ui@example.test', passwordHash: 'test-only' });
+  const state = seedWorkspaceState({}, { workspaceId: 'ui-test', email: 'ui@example.test', passwordHash: await hashPasswordAsync('GraphSessionTest!2026') });
   state.products = [{ id: 'p1', title: '<img src=x onerror=alert(1)>', status: 'active', variants: [{ id: 'v1', sku: 'SKU-1', price: 10, inventory: 1, available: true }] }];
   state.revenueEngine.quotes = [{ id: 'q1', status: 'draft', lines: [{ sku: 'SKU-1', quantity: 20, unitPrice: 12 }] }];
   await server.packsmart.store.save('ui-test', state);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
-  const token = createSessionToken({ userId: state.users[0].id, workspaceId: 'ui-test', email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
+  let token = createSessionToken({ userId: state.users[0].id, workspaceId: 'ui-test', email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
   const errors = [], calls = [], console = new VirtualConsole(); console.on('jsdomError', error => errors.push(error.message));
   const dom = new JSDOM(await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8'), { url: base, runScripts: 'outside-only', virtualConsole: console, pretendToBeVisual: true });
   t.after(async () => { dom.window.close(); await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
@@ -30,6 +30,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   window.fetch = async (route, options = {}) => {
     const headers = new Headers(options.headers); headers.set('Cookie', `packsmart_session=${token}`);
     const response = await fetch(base + route, { ...options, headers });
+    if (route === '/api/auth/login' && response.ok) token = response.headers.get('set-cookie').split(';')[0].split('=').slice(1).join('=');
     calls.push({ route, method: options.method || 'GET', status: response.status }); return response;
   };
   const until = async condition => {
@@ -39,6 +40,28 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
+  const graphButton = document.getElementById('load-business-graph');
+  const graphDetails = document.querySelector('.business-graph-inspector');
+  assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 0, 'bootstrap never polls the graph');
+  graphDetails.open = true;
+  graphButton.click(); graphButton.click();
+  await until(() => !graphButton.disabled);
+  assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1, 'repeated clicks coalesce through the disabled button');
+  assert.match(document.getElementById('business-graph-result').textContent, /Evidence-backed links/);
+  assert.equal(document.getElementById('business-graph-result').querySelector('[onerror]'), null);
+  graphDetails.open = false; graphDetails.open = true;
+  assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1, 'close/reopen does not add a provider or graph request');
+  const graphFetch = window.fetch;
+  window.fetch = async (route, options) => route.startsWith('/api/business-graph') ? Response.json({error:'Temporary graph failure'}, {status:503}) : graphFetch(route, options);
+  graphButton.click();
+  await until(() => !graphButton.disabled);
+  assert.match(document.getElementById('business-graph-result').textContent, /Could not inspect relationships/);
+  window.fetch = graphFetch;
+  graphButton.click();
+  await until(() => !graphButton.disabled);
+  assert.match(document.getElementById('business-graph-result').textContent, /Recorded entities inspected/);
+  graphDetails.open = false;
+
   document.querySelector('[data-view="revenue-engine"]').click();
   assert.equal(document.querySelector('.view.active').id, 'view-revenue-engine');
   assert.equal(document.getElementById('re-pipeline').textContent, '£240.00', 'Revenue Engine renders retained tenant data from bootstrap');
@@ -190,6 +213,27 @@ test('cockpit renders authenticated controls and submits real persisted workflow
       assert.deepEqual(chartErrors, []);
     } finally { chartDom.window.close(); }
   });
+  // A late 401 from the old session must not sign out a newly authenticated one.
+  let resolveOldGraph;
+  const currentFetch = window.fetch;
+  window.fetch = (route, options) => route.startsWith('/api/business-graph') ? new Promise(resolve => { resolveOldGraph = resolve; }) : currentFetch(route, options);
+  document.getElementById('load-business-graph').click();
+  await until(() => Boolean(resolveOldGraph));
+  document.getElementById('logout').click();
+  await until(() => document.getElementById('app-shell').classList.contains('hidden'));
+  const loginForm = document.getElementById('login-form');
+  Object.defineProperty(loginForm, 'email', {value:loginForm.elements.email});
+  Object.defineProperty(loginForm, 'password', {value:loginForm.elements.password});
+  loginForm.elements.email.value = 'ui@example.test';
+  loginForm.elements.password.value = 'GraphSessionTest!2026';
+  loginForm.dispatchEvent(new window.Event('submit', { bubbles:true, cancelable:true }));
+  await until(() => !document.getElementById('app-shell').classList.contains('hidden'));
+  resolveOldGraph(Response.json({code:'AUTH_REQUIRED'}, {status:401}));
+  await until(() => !document.getElementById('load-business-graph').disabled);
+  assert.equal(document.getElementById('app-shell').classList.contains('hidden'), false, 'old-session graph failure must not invalidate the new session');
+  assert.equal(document.getElementById('business-graph-result').textContent, '', 'old graph results stay cleared after new login');
+  window.fetch = currentFetch;
+  document.getElementById('signup-form').elements.invitation.required = false;
   document.getElementById('open-workspace-search').click();
   document.getElementById('logout').click();
   await until(() => document.getElementById('app-shell').classList.contains('hidden'));

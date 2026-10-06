@@ -58,6 +58,7 @@ import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
 import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
+import { deriveBusinessGraph, deriveBusinessGraphSummary } from './lib/business-graph.mjs';
 import { deriveOpportunityQueue } from './lib/opportunity-engine.mjs';
 import { runGrowthCouncil } from './lib/growth-council.mjs';
 import { deriveImpact } from './lib/impact-engine.mjs';
@@ -1210,6 +1211,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           send(res, 200, { user: publicUser(result), csrf: session.csrf }, {
             'Set-Cookie': sessionCookie(token, { secure: secureCookies })
           });
+          return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/business-graph') {
+          // On-demand projection of already persisted records. No provider calls,
+          // writes, recurring refreshes or caller-selected tenant are permitted.
+          const detailed = url.searchParams.get('detail') === 'true';
+          const options = { workspaceId: auth.session.workspaceId, ...(detailed ? {nodeLimit:200, edgeLimit:400, recordLimit:50, scanLimit:2000} : {}) };
+          send(res, 200, detailed ? deriveBusinessGraph(auth.state, options) : deriveBusinessGraphSummary(auth.state, options));
           return;
         }
 
