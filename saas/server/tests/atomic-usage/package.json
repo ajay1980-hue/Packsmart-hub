@@ -1,0 +1,10 @@
+{
+  "name": "runvara-atomic-usage-postgres-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Disposable PostgreSQL-only integration test dependencies; never used by production",
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "scripts": { "test": "node --test --test-concurrency=1 ../atomic-usage-postgres.mjs" },
+  "dependencies": { "pg": "8.16.3" }
+}

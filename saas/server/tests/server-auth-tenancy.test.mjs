@@ -6,7 +6,7 @@ import path from 'node:path';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, decryptCredentials, sessionCookie } from '../lib/security.mjs';
-import { seedWorkspaceState } from '../lib/store.mjs';
+import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 
 const SESSION_SECRET = 'server-integration-session-secret-more-than-thirty-two-characters';
 const BOOTSTRAP_PASSWORD = 'BootstrapOnly!789Abc';
@@ -35,6 +35,148 @@ function requestFactory(base) {
 function cookieValue(setCookie) {
   return String(setCookie).split(';')[0];
 }
+
+test('operator provider usage requires platform-owner auth and stays read-only when durable accounting is unavailable', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-provider-usage-auth-'));
+  const stateFile = path.join(directory, 'state.json');
+  const server = createPacksmartServer({
+    NODE_ENV: 'test', APP_PUBLIC_URL: 'http://localhost:8787', SAAS_STATE_FILE: stateFile,
+    PACKSMART_ADMIN_EMAIL: 'sales@packsmartsolutions.com', SESSION_SECRET,
+    SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', BETA_SIGNUPS_ENABLED: 'false', BILLING_CHECKOUT_ENABLED: 'false'
+  }, { schedulerEnabled: false, agentOpsEnabled: false });
+  t.after(async () => {
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+  const { store } = server.packsmart;
+  const platformState = seedWorkspaceState({}, { workspaceId: 'packsmart-solutions', email: 'sales@packsmartsolutions.com' });
+  const tenantState = seedWorkspaceState({}, { workspaceId: 'usage-tenant', email: 'owner@usage-tenant.test' });
+  for (const state of [platformState, tenantState]) {
+    state.users[0].passwordChangeRequired = false;
+    await store.save(state.workspace.id, state);
+  }
+  const cookieFor = state => cookieValue(sessionCookie(createSessionToken({
+    userId: state.users[0].id, workspaceId: state.workspace.id, email: state.users[0].email,
+    role: state.users[0].role, sessionVersion: state.users[0].sessionVersion
+  }, SESSION_SECRET), { secure: false }));
+  const platformCookie = cookieFor(platformState);
+  const tenantCookie = cookieFor(tenantState);
+  const before = await fs.readFile(stateFile, 'utf8');
+  const summaries = [];
+  const originalSummary = store.providerUsageSummary.bind(store);
+  store.providerUsageSummary = async (...args) => {
+    summaries.push(args);
+    return originalSummary(...args);
+  };
+  let writes = 0;
+  for (const method of ['save', 'reserveProviderUsage', 'settleProviderUsage', 'recordAiUsage', 'enqueueAgentJob']) {
+    store[method] = async () => { writes++; throw new Error('Provider usage GET must not write'); };
+  }
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const request = requestFactory(`http://127.0.0.1:${server.address().port}`);
+
+  await t.test('unauthenticated access and tenant-owner query spoofing are rejected before usage lookup', async () => {
+    const anonymous = await request('/api/operator/provider-usage?month=2026-10');
+    assert.equal(anonymous.response.status, 401);
+    assert.equal(anonymous.payload.code, 'AUTH_REQUIRED');
+    assert.equal(tenantState.users[0].role, 'owner');
+    for (const target of ['', '&workspaceId=packsmart-solutions', '&workspaceId=another-tenant']) {
+      const denied = await request(`/api/operator/provider-usage?month=2026-10${target}`, { cookie: tenantCookie });
+      assert.equal(denied.response.status, 403);
+      assert.equal(denied.payload.code, 'PLATFORM_ADMIN_REQUIRED');
+      assert.equal(denied.payload.scopes, undefined);
+    }
+    assert.equal(summaries.length, 0);
+  });
+
+  await t.test('platform owner gets explicit FileStore unavailability, with no invented zero totals', async () => {
+    const own = await request('/api/operator/provider-usage?month=2026-10', { cookie: platformCookie });
+    assert.equal(own.response.status, 200);
+    assert.deepEqual(own.payload, { workspaceId: 'packsmart-solutions', source: 'governed_reservations_only',
+      excludesLegacyUsage: true, excludesProviderBill: true, available: false, reason: 'AI_USAGE_NOT_CONFIGURED' });
+    const selected = await request('/api/operator/provider-usage?workspaceId=usage-tenant&month=2026-09', { cookie: platformCookie });
+    assert.equal(selected.response.status, 200);
+    assert.equal(selected.payload.workspaceId, 'usage-tenant');
+    assert.equal(selected.payload.available, false);
+    for (const key of ['scopes', 'totals', 'held', 'settled', 'costMicros']) assert.equal(selected.payload[key], undefined);
+    assert.deepEqual(summaries, [['packsmart-solutions', '2026-10'], ['usage-tenant', '2026-09']]);
+  });
+
+  await t.test('invalid admission months return a safe 400 without changing accounting', async () => {
+    for (const month of ['2026-13', '2026-00', '2026-10-01', '2026-1', '0000-01', '2026-10&select=*']) {
+      const invalid = await request(`/api/operator/provider-usage?month=${encodeURIComponent(month)}`, { cookie: platformCookie });
+      assert.equal(invalid.response.status, 400);
+      assert.equal(invalid.payload.code, 'AI_USAGE_INPUT_INVALID');
+      assert.equal(invalid.payload.available, undefined);
+      assert.equal(invalid.payload.scopes, undefined);
+    }
+  });
+
+  assert.equal(writes, 0, 'on-demand inspection must never reserve, settle, enqueue, or persist');
+  assert.equal(await fs.readFile(stateFile, 'utf8'), before, 'GETs preserve every byte of persisted workspace data');
+  assert.deepEqual(store.aiUsage, []);
+  assert.deepEqual(store.agentJobs, []);
+});
+
+test('provider usage keeps unsafe NUMERIC summaries unavailable while preserving exact settlement costs', async () => {
+  const numericRow = { workspace_id: 'usage-tenant', scope_key: 'tenant', window_start: '2026-10-01', currency: 'USD',
+    held_requests: 0, held_input_tokens: 0, held_output_tokens: 0, held_total_tokens: 0, held_cost_micros: 0,
+    settled_requests: 1, settled_input_tokens: 10, settled_output_tokens: 2, settled_total_tokens: 12, settled_cost_micros: 20 };
+  let responseBody;
+  const calls = [];
+  const store = createStore({ SUPABASE_URL: 'https://usage-numeric-test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test-key' }, {
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      return new Response(responseBody, { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+  });
+  for (const key of ['held_requests', 'held_input_tokens', 'held_total_tokens', 'held_cost_micros',
+    'settled_requests', 'settled_output_tokens', 'settled_total_tokens', 'settled_cost_micros']) {
+    for (const decimal of ['9007199254740993', '999999999999999999999999999999999999999999999999999999999999']) {
+      // SQL may explicitly return a lossless decimal string. It must never be
+      // coerced/rounded into a displayed money, token, or request total.
+      responseBody = JSON.stringify([{ ...numericRow, [key]: decimal }]);
+      assert.deepEqual(await store.providerUsageSummary('usage-tenant', '2026-10'), { available: false, reason: 'AI_USAGE_RESPONSE_INVALID' });
+      // PostgREST numeric aggregates also arrive as JSON number literals.
+      responseBody = responseBody.replace(`"${decimal}"`, decimal);
+      assert.deepEqual(await store.providerUsageSummary('usage-tenant', '2026-10'), { available: false, reason: 'AI_USAGE_RESPONSE_INVALID' });
+    }
+  }
+  assert.ok(calls.every(call => new URL(call.url).pathname === '/rest/v1/runvara_provider_usage_windows'));
+  responseBody = JSON.stringify([{ ...numericRow, settled_cost_micros: Number.MAX_SAFE_INTEGER }]);
+  const safe = await store.providerUsageSummary('usage-tenant', '2026-10');
+  assert.equal(safe.available, true);
+  assert.equal(safe.scopes[0].settled.costMicros, Number.MAX_SAFE_INTEGER);
+
+  const settlementInput = {
+    reservationId: 'reservation-numeric-test', requestFingerprint: 'a'.repeat(64), outcome: 'complete',
+    receipt: { jobId: 'usage-job', providerRequestId: 'provider-request', inputTokens: 10, cachedInputTokens: 0,
+      cacheWriteTokens: 0, outputTokens: 2, totalTokens: 12 }
+  };
+  const exactSqlCost = '81129638414606663681390496';
+  responseBody = JSON.stringify({ reservation_id: 'reservation-numeric-test', status: 'overrun',
+    accounted_cost_micros: exactSqlCost, window_start: '2026-10-01', idempotent: false });
+  const settled = await store.settleProviderUsage('usage-tenant', settlementInput);
+  assert.deepEqual(settled, { reservationId: 'reservation-numeric-test', status: 'overrun',
+    accountedCostMicros: exactSqlCost, windowStart: '2026-10-01', idempotent: false });
+  assert.equal(typeof settled.accountedCostMicros, 'string');
+  responseBody = JSON.stringify({ reservation_id: 'reservation-numeric-test', status: 'overrun',
+    accounted_cost_micros: exactSqlCost, idempotent: true });
+  assert.deepEqual(await store.settleProviderUsage('usage-tenant', settlementInput), {
+    reservationId: 'reservation-numeric-test', status: 'overrun', accountedCostMicros: exactSqlCost, idempotent: true
+  });
+  responseBody = JSON.stringify({ reservation_id: 'reservation-numeric-test', status: 'overrun',
+    accounted_cost_micros: '9'.repeat(60), window_start: '2026-10-01', idempotent: false });
+  assert.equal((await store.settleProviderUsage('usage-tenant', settlementInput)).accountedCostMicros, '9'.repeat(60));
+  for (const cost of ['', ' ', '00', '01', '+1', '-1', '1.0', '1.5', '1e30', 'Infinity', '9'.repeat(61), `${exactSqlCost}\n`]) {
+    responseBody = JSON.stringify({ reservation_id: 'reservation-numeric-test', status: 'overrun',
+      accounted_cost_micros: cost, window_start: '2026-10-01', idempotent: false });
+    await assert.rejects(() => store.settleProviderUsage('usage-tenant', settlementInput),
+      error => error.code === 'AI_USAGE_RESPONSE_INVALID' && error.dispatchAllowed === false);
+  }
+  assert.equal(new URL(calls.at(-1).url).pathname, '/rest/v1/rpc/runvara_settle_provider_usage');
+});
 
 test('production auth, CSRF, approval, logout and tenant isolation work end to end', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'packsmart-ops-test-'));

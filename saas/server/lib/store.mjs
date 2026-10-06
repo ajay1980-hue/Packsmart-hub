@@ -10,6 +10,11 @@ import { ensureMarketing } from './marketing.mjs';
 import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
+import {
+  providerUsageError, providerUsageMonth, providerUsageReservationParams, providerUsageReservationResult,
+  providerUsageSettlementParams, providerUsageSettlementResult, providerUsageSummaryResult,
+  providerUsageUnavailableReason, USAGE_SUMMARY_COLUMNS, USAGE_SUMMARY_MAX_SCOPES
+} from './usage-governance.mjs';
 export { addAudit } from './events.mjs';
 
 const PERSISTED = Symbol('persisted');
@@ -303,6 +308,14 @@ class FileStore {
       .reduce((sum,item)=>sum + Number(item.ai_units || 0), 0);
   }
 
+  // A process-local file/mutex cannot grant durable, cross-replica dispatch.
+  async reserveProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
+  async settleProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
+  async providerUsageSummary(workspaceId, admissionMonth) {
+    providerUsageMonth(workspaceId, admissionMonth);
+    return { available: false, reason: 'AI_USAGE_NOT_CONFIGURED' };
+  }
+
   async recordAiUsage(workspaceId, usage) {
     const existing = usage.requestId ? this.aiUsage.find(item => item.workspace_id === workspaceId && item.provider === usage.provider && item.request_id === usage.requestId) : null;
     if (existing) return structuredClone(existing);
@@ -382,6 +395,48 @@ class SupabaseStore {
   }
 
   get provider() { return 'supabase'; }
+
+  // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
+  // DTO validation rejects client overrides, prices, raw bodies and credentials.
+  async reserveProviderUsage(workspaceId, input) {
+    const params = providerUsageReservationParams(workspaceId, input);
+    let result;
+    try {
+      // Never retry here: a lost response may represent a committed reservation.
+      result = await this.request('rpc/runvara_reserve_provider_usage', { method: 'POST', body: JSON.stringify(params) });
+    } catch (error) {
+      const reason = providerUsageUnavailableReason(error);
+      throw providerUsageError(reason === 'AI_USAGE_UNAVAILABLE' ? 'AI_USAGE_RESERVATION_UNCERTAIN' : reason);
+    }
+    return providerUsageReservationResult(result, params);
+  }
+
+  async settleProviderUsage(workspaceId, input) {
+    const params = providerUsageSettlementParams(workspaceId, input);
+    let result;
+    try {
+      // A caller may retry the same immutable identity/receipt after a lost reply.
+      // Never mint an alternate reservation, fingerprint or receipt on retry.
+      result = await this.request('rpc/runvara_settle_provider_usage', { method: 'POST', body: JSON.stringify(params) });
+    } catch (error) {
+      const reason = providerUsageUnavailableReason(error);
+      throw providerUsageError(reason === 'AI_USAGE_UNAVAILABLE' ? 'AI_USAGE_SETTLEMENT_UNCERTAIN' : reason);
+    }
+    return providerUsageSettlementResult(result, params);
+  }
+
+  async providerUsageSummary(workspaceId, admissionMonth) {
+    const windowStart = providerUsageMonth(workspaceId, admissionMonth);
+    let rows;
+    try {
+      // One bounded read of materialized counters only. The extra row is a
+      // truncation sentinel; incomplete accounting is unavailable, never zero.
+      rows = await this.request(`runvara_provider_usage_windows?workspace_id=eq.${encodeURIComponent(workspaceId)}&window_start=eq.${windowStart}&select=${USAGE_SUMMARY_COLUMNS}&order=scope_key.asc&limit=${USAGE_SUMMARY_MAX_SCOPES + 1}`);
+    } catch (error) {
+      return { available: false, reason: providerUsageUnavailableReason(error) };
+    }
+    return providerUsageSummaryResult(rows, workspaceId, windowStart);
+  }
 
   headers(extra = {}) {
     return {

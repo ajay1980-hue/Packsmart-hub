@@ -1631,3 +1631,7 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .blocked-row:last-child{border-bottom:0}
 .blocked-row>div{display:grid;gap:4px}
 .unlock-note{color:#f0c66b!important}
+
+/* Long provider identifiers must remain readable on narrow operator screens. */
+#fleet-provider-usage-result span, #fleet-provider-usage-result b { min-width: 0; overflow-wrap: anywhere; }
+#fleet-provider-usage-result small { display: block; }

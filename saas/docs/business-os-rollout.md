@@ -101,3 +101,38 @@ Portfolio, council, learning and impact use consistent tenant evidence boundarie
 Preparation planning now requires known cost, effort and capacity, preserves meaningful fractional values, blocks positive spend without approval, accounts for cumulative hours and caps a plan at 25 returned steps. No queue jobs, time reservations, payments or external writes are committed by this projection.
 
 Validation: 298 stage-specific server tests passed locally, plus syntax, guards and independent review. Existing positive experiment fixtures now include reciprocal opportunity IDs; the revenue-only assertion was strengthened from zero contribution to unknown/null. New tests cover malformed/foreign scope, duplicate weaker permissions, original-record UI navigation, fractional costs, unknown capacity and cumulative limits. The existing browser CI gate additionally exercises the real Investigate navigation on mobile and desktop. Rollback remains a scoped code revert, with no schema or customer-data change to undo.
+
+### Stage 4 production evidence
+
+[PR67](https://github.com/ajay1980-hue/Packsmart-hub/pull/67) merged as `eb1021fe589937aba2c7b2e0b25d3a7556215259`. [SaaS CI37503671882](https://github.com/ajay1980-hue/Packsmart-hub/actions/runs/37503671882) and the Android workflow passed. Existing Render deploy `dep-db2j1qijnfac73cfn840` became live at 17:33:56 UTC. The 17:37:11 UTC health check returned the exact commit, ok:true and productionReady:true.
+
+## Stage 5: inactive atomic provider accounting foundation
+
+This stage supplies durable admission and settlement primitives in the existing Supabase database, a pure provider-routing policy module, and an on-demand platform-admin ledger inspector. Existing paid execution has NOT been switched to this boundary. No governance policy, provider credentials, provider connection, model pricing, recurring sync or paid capability is activated by this release. The admin view explicitly excludes legacy usage and provider invoices; unavailable telemetry never means zero spend.
+
+### Admission and settlement invariants
+
+- The existing workspace state row serializes policy changes, reservations and settlements across replicas. The RPC reads the authoritative policy server-side; callers cannot supply their own balance, price or ceiling.
+- A running matching tenant/job/worker/attempt lease and a current route deadline are required. A stable logical call key deduplicates attempts. An existing reservation never grants a second dispatch, including after an ambiguous response.
+- Tenant and provider month windows hold request, input/output/total-token and cost exposure before dispatch. Zero caps mean zero. Exact NUMERIC integer aggregates prevent cumulative JavaScript/bigint overflow; the JavaScript summary refuses values it cannot represent safely. Settlement acknowledgements preserve larger exact costs as canonical decimal strings (number|string contract), never rounded numbers.
+- Immutable pricing snapshots determine settlement. Unknown outcomes retain the complete hold. Only trusted proof of no dispatch permits cancellation. Verified overrun records all measured usage and blocks subsequent calls for that provider; observed usage is never clipped to the reservation.
+- Settlement and legacy usage-ledger insertion occur in the same transaction and retain the admission month. Idempotent receipts cannot be contradicted. No prompts, response text, keys or credentials are stored in these accounting tables.
+- Both new tables have RLS and no public/anon/authenticated access. Existing service_role alone receives the minimum table/RPC privileges; reservation identity, pricing and bounds are not updateable. RPCs are SECURITY INVOKER with empty search_path. The existing estimated_cost_usd column only widens precision, preserving scale and records.
+
+### Usage and cutover gates
+
+There is no periodic work. An explicit inspector click authenticates with the existing compact identity projection and performs one bounded query of at most 130 compact window rows (129 accepted scopes plus overflow sentinel), without fetching workspace snapshots or full ledgers. Each eventual governed provider call requires one reservation RPC and one settlement RPC, with a maximum of two window rows updated per phase and one reservation row; complete settlement appends one existing usage record. Uncertain reconciliation is explicit rather than a retry loop. This is expected logical operation volume, not a claim that provider traffic is already governed or that database billing has been measured.
+
+The routing module is deterministic and makes no provider calls. It uses trusted, fresh capability/configuration/health/credential/pricing/quality evidence and tenant limits, and returns a proposal only. Registered provider names are supported routing envelopes, not connected accounts or activated adapters.
+
+Before enabling a paid path: verify platform-controlled allowlists/prices and plan ceilings; establish a clean accounting boundary or independently verified opening balance; disable/drain the old paid path on every replica; wire a single dispatch through reservation and settlement; recheck the deadline/lease after reservation immediately before HTTP; cover timeout and reconciliation end to end; obtain any required credentials/owner approval. The supplied policy requires initial accounting attestation before its UTC month boundary. Never backdate an attestation to bypass that requirement. Mid-month migration/opening-balance support remains unfinished. Tenant owners must not control shared-key model rates or plan ceilings.
+
+### Verification and rollback
+
+Local PostgreSQL-compatible WASM checks supplement, but do not replace, the dedicated PostgreSQL 17.6 CI service. Its tests use a fixed disposable local database with no production secrets and exercise 100 independent concurrent connections, leases, duplicate calls, settlement races, exact arithmetic, tenant/RLS/grant denial and immutable snapshots. Production migration must wait for these tests and the ordinary SaaS/Android gates.
+
+The production migration is additive apart from widening an existing decimal column; it does not rewrite customer business state or activate policy. Apply using the existing project's migration history, then verify table RLS, column-level grants and RPC execution grants before deployment. If release rollback is needed, revert application code while retaining ledger/history and widened precision. Never drop accounting records or narrow cost columns. Once any paid cutover occurs, disable that paid path first before rollback so legacy execution cannot bypass outstanding holds.
+
+Stage 5 pre-PR checks: 348/348 local server tests, syntax and Phase 1 guards passed. Independent read-only review found no blocking issue for inactive release after the exact-cost DTO and admission-denial-code fixes. Browser launch is restricted locally; responsive and real PostgreSQL gates remain required in CI.
+
+Stage 5 migration applied with explicit owner approval at 19:03 UTC, recorded by Supabase as version `20261006190318`; the source filename matches that history entry. SQL is identical to the 41-test PostgreSQL 17.6 CI run. Read-back confirms both tables enforce RLS, public/customer grants are absent, RPCs are SECURITY INVOKER with fixed search_path/timeouts, pricing is immutable, and reservation count remains zero.
