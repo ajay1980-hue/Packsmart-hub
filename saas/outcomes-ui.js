@@ -10,6 +10,25 @@
   const unknown = value => value === null || value === undefined || value === '' ? 'Unknown' : bounded(value);
   const amount = value => `${unknown(value?.amount)} ${value?.currency || '(currency unknown)'}`;
   const windowText = value => value ? `${unknown(value.startsAt)} → ${unknown(value.endsAt)} (UTC, end exclusive)` : 'Unknown';
+  const METHOD_LABELS = Object.freeze({ reconciled_manual: 'Reconciled records', before_after: 'Before and after', holdout: 'Holdout comparison', unknown: 'Unknown' });
+  const labelFrom = (labels, value, fallback) => typeof value === 'string' && Object.hasOwn(labels, value) ? labels[value] : fallback;
+  const methodLabel = value => labelFrom(METHOD_LABELS, value, 'Unknown');
+  const coverageLabel = value => labelFrom({ complete: 'Complete', partial: 'Partial', unknown: 'Unknown' }, value, 'Unknown');
+  const totalLabel = value => labelFrom({ measured_sum: 'Recorded total', standalone_observations: 'Separate results; no combined total', incomplete_publication_read: 'Results incomplete; total unavailable' }, value, 'Total unavailable');
+  const reviewLabel = action => labelFrom({ publish: 'result', correct: 'correction', withdraw: 'withdrawal' }, action, 'result');
+  const REASON_LABELS = Object.freeze({
+    AMOUNT_UNKNOWN: 'The measured amount is unknown.', CURRENCY_UNKNOWN: 'The currency is unknown.', WINDOW_UNKNOWN: 'The measurement period is unknown.',
+    COVERAGE_INCOMPLETE: 'Measurement coverage is incomplete.', METHOD_UNKNOWN: 'The measurement method is unknown.',
+    OBSERVATION_TIME_UNKNOWN: 'The observation time is unknown.', OBSERVATION_BEFORE_WINDOW_END: 'The observation time is before the measurement period ends.',
+    COSTS_INCOMPLETE: 'Some relevant costs are missing.', COST_COMPLETENESS_UNKNOWN: 'Confirm whether all relevant costs are included.',
+    INVALID_OUTCOME_VERSION: 'A saved result could not be checked.', UNPUBLISHED_OUTCOME: 'A result has not completed owner review.',
+    PUBLICATION_UNAVAILABLE: 'A saved result could not be loaded.', CONFLICTING_OUTCOME_VERSION: 'Conflicting versions need review.',
+    OUTCOME_WITHDRAWN: 'A result was withdrawn.', CURRENT_VERSION_UNPROVED: 'The latest reviewed result could not be checked.',
+    UNQUALIFIED_MEASUREMENT: 'Required measurement details are missing.', DUPLICATE_OBSERVATION: 'The same observation appears more than once.',
+    DUPLICATE_MEASUREMENT: 'The same measurement appears more than once.', REUSED_MEASUREMENT_REPORT: 'The same report supports more than one result.',
+    OVERLAPPING_SCOPE: 'Measurement periods overlap for the same business activity.'
+  });
+  const reasonLabel = code => labelFrom(REASON_LABELS, code, 'More evidence is needed before this result can be included.');
   const role = () => api.getContext().role;
   const canPrepare = () => ['owner', 'admin'].includes(role());
   const key = c => `${c.workspaceId || ''}:${c.userId || ''}`;
@@ -30,14 +49,14 @@
   }
   function facts(value) {
     const rows = [ ['Incremental contribution', amount(value)], ['Measurement window', windowText(value?.window)],
-      ['Coverage', `${value?.coverage?.status || 'unknown'} · ${unknown(value?.coverage?.observedCount)} / ${unknown(value?.coverage?.expectedCount)}`],
-      ['Method', value?.method?.kind || 'unknown'], ['Observed at (UTC)', unknown(value?.provenance?.observedAt)],
-      ['Scope', 'Whole business; overlapping windows are not additive'], ['Attribution to Runvara', 'Unestablished'] ];
+      ['Coverage', `${coverageLabel(value?.coverage?.status)} · ${unknown(value?.coverage?.observedCount)} / ${unknown(value?.coverage?.expectedCount)}`],
+      ['Method', methodLabel(value?.method?.kind)], ['Observed at (UTC)', unknown(value?.provenance?.observedAt)],
+      ['Scope', 'Whole business; overlapping periods cannot be added together'], ['Attribution to Runvara', 'Not established'] ];
     return '<dl class="outcome-facts">' + rows.map(([label, text]) => `<div><dt>${esc(label)}</dt><dd>${esc(text)}</dd></div>`).join('') + '</dl>';
   }
   function publicationCard(publication, index) {
     const { head, version } = publication;
-    return `<article class="outcome-record"><h4>${head.status === 'withdrawn' ? 'Withdrawn' : 'Owner-verified measurement'} · version ${esc(version.revision)}</h4><p class="muted tiny">Experiment ${esc(bounded(version.source?.experimentId, 180))}</p>${facts(version)}<p class="muted tiny">${head.status === 'withdrawn' ? 'Excluded from measured results.' : 'Owner attestation; not independently verified. No forecast or ROI claim.'}</p><button type="button" class="secondary" data-outcome-evidence="${index}">Read retained source evidence</button><div data-outcome-evidence-result="${index}"></div></article>`;
+    return `<article class="outcome-record"><h4>${head.status === 'withdrawn' ? 'Withdrawn' : 'Owner-reviewed result'} · version ${esc(version.revision)}</h4><p class="muted tiny">Experiment ${esc(bounded(version.source?.experimentId, 180))}</p>${facts(version)}<p class="muted tiny">${head.status === 'withdrawn' ? 'Excluded from recorded totals.' : 'Reviewed by the owner; not independently verified.'}</p><button type="button" class="secondary" data-outcome-evidence="${index}">View original report</button><div data-outcome-evidence-result="${index}"></div></article>`;
   }
   function validPublication(value) {
     return value?.head?.workspaceId === context().workspaceId && value?.version?.workspaceId === context().workspaceId && value.head.versionId === value.version.versionId && value.head.digest === value.version.digest && typeof value.version.versionId === 'string' && value.version.versionId.length <= 180;
@@ -45,27 +64,27 @@
   function renderOverview() {
     if (!overview) return;
     const summary = overview.summary || {}, groups = Array.isArray(summary.groups) ? summary.groups : [], current = overview.current;
-    $('business-outcomes-summary').innerHTML = `<p class="muted">${summary.coverage?.complete === true ? 'Current committed selection loaded.' : 'Selection is incomplete; totals are withheld.'} This is not a lifetime-history total.</p>` +
-      groups.slice(0, LIMIT).map(group => `<article class="outcome-record"><h4>${esc(group.currency || 'Currency unknown')} · ${esc(group.method?.kind || group.method || 'Method unknown')}</h4><p>${esc(windowText(group.window))}</p><strong>${esc(summary.coverage?.complete === true && group.amountStatus === 'measured_sum' ? amount(group) : 'No additive total')}</strong><p class="muted tiny">${esc(group.amountStatus || 'unknown')} · ${esc(unknown(group.measuredCount))} measurements</p></article>`).join('') +
-      (!groups.length ? '<p class="empty-state">No qualified comparable result group is available.</p>' : '') +
+    $('business-outcomes-summary').innerHTML = `<p class="muted">${summary.coverage?.complete === true ? 'Reviewed results loaded for the periods shown.' : 'Some results could not be checked; totals are unavailable.'} These are not lifetime totals.</p>` +
+      groups.slice(0, LIMIT).map(group => `<article class="outcome-record"><h4>${esc(group.currency || 'Currency unknown')} · ${esc(methodLabel(group.method?.kind || group.method))}</h4><p>${esc(windowText(group.window))}</p><strong>${esc(summary.coverage?.complete === true && group.amountStatus === 'measured_sum' ? amount(group) : 'Total unavailable')}</strong><p class="muted tiny">${esc(totalLabel(summary.coverage?.complete === true ? group.amountStatus : 'incomplete_publication_read'))} · ${esc(unknown(group.measuredCount))} ${group.measuredCount === 1 ? 'measurement' : 'measurements'}</p></article>`).join('') +
+      (!groups.length ? '<p class="empty-state">No comparable reviewed results yet.</p>' : '') +
       (groups.length > LIMIT ? `<p>Showing ${LIMIT} of ${groups.length} result groups.</p>` : '') +
-      (Array.isArray(summary.exclusions) && summary.exclusions.length ? '<p class="muted">Some measurements are excluded: ' + summary.exclusions.slice(0, LIMIT).map(row => esc(bounded(row.code, 100))).join(', ') + '.</p>' : '') +
-      '<h3>Current publications</h3>' + current.slice(0, LIMIT).map(publicationCard).join('') +
-      (!current.length ? '<p class="empty-state">No published business results yet. Prepare a measurement below.</p>' : '') +
-      (current.length > LIMIT ? `<p>Showing ${LIMIT} of ${current.length} publications. Select an experiment below for its current result.</p>` : '');
+      (Array.isArray(summary.exclusions) && summary.exclusions.length ? '<p class="muted">Not included in totals: ' + summary.exclusions.slice(0, LIMIT).map(row => esc(reasonLabel(row.code))).join(' ') + '</p>' : '') +
+      '<h3>Reviewed results</h3>' + current.slice(0, LIMIT).map(publicationCard).join('') +
+      (!current.length ? '<p class="empty-state">No owner-reviewed results yet. Record a draft below.</p>' : '') +
+      (current.length > LIMIT ? `<p>Showing ${LIMIT} of ${current.length} reviewed results. Select an experiment below for its latest result.</p>` : '');
   }
   async function read(name, path, apply) {
     if (busy.has(name)) return;
     const t = ticket(), controller = new AbortController(); controllers.add(controller); busy.add(name); controls();
     try { const result = await api.request(path, { signal: controller.signal }); if (active(t)) apply(result); }
-    catch (error) { if (active(t)) status(error.status === 401 ? 'Sign in again to read business results.' : 'Could not load business results. Refresh explicitly to try again.', true); }
+    catch (error) { if (active(t)) status(error.status === 401 ? 'Sign in again to read business results.' : 'Could not load business results. Select Refresh to try again.', true); }
     finally { controllers.delete(controller); if (active(t)) { busy.delete(name); controls(); } }
   }
   function loadOverview() {
-    status('Loading committed business results…');
+    status('Loading reviewed results…');
     return read('overview', '/api/business-outcomes', result => {
       if (result.workspaceId !== context().workspaceId || !Array.isArray(result.current) || result.current.some(p => !validPublication(p))) throw new Error('Mismatched business results');
-      overview = result; renderOverview(); status('Loaded on request. Amounts retain their recorded currency and window.');
+      overview = result; renderOverview(); status('Results loaded. Refresh when you want to check for updates.');
     });
   }
   function dateInput(value) { return value ? String(value).replace(/Z$/, '') : ''; }
@@ -75,27 +94,32 @@
     for (const [name, value] of Object.entries(values)) f.elements[name].value = value;
     f.classList.toggle('hidden', !canPrepare()); controls();
   }
-  function renderDetail() {
+  function renderDetail(justReviewed = false) {
     const d = selected; if (!d) { $('business-outcomes-detail').replaceChildren(); $('business-outcomes-form').classList.add('hidden'); return; }
     const m = d.measurement, publication = d.currentPublication;
     const blockers = Array.isArray(d.assessment?.blockers) ? d.assessment.blockers : [];
-    let html = `<h3>${esc(bounded(d.experiment.title || d.experiment.id, 180))}</h3><p class="muted">${m ? `Saved draft revision ${esc(m.revision)}` : 'No typed measurement saved.'} · Legacy verification does not qualify this measurement.</p>`;
-    if (m) html += facts(m) + `<p>Cost completeness: ${m.report?.costsComplete === true ? 'Complete (reported)' : m.report?.costsComplete === false ? 'Incomplete' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
-    html += `<p>${d.assessment?.readyForOwnerVerification === true ? 'Ready for explicit owner review.' : 'Draft is unqualified.'}</p>` + (blockers.length ? '<ul>' + blockers.slice(0, LIMIT).map(b => `<li>${esc(bounded(b.code, 100))}</li>`).join('') + '</ul>' : '');
-    if (publication) html += `<div class="outcome-current"><h4>Current ${publication.head.status === 'withdrawn' ? 'withdrawn' : 'published'} result · version ${esc(publication.version.revision)}</h4>${facts(publication.version)}<p class="muted tiny">A later draft does not change this immutable result.</p><button type="button" class="secondary" data-outcome-source-current>Read current result source evidence</button><div id="business-outcomes-current-source"></div></div>`;
+    let html = `<h3>${esc(bounded(d.experiment.title || d.experiment.id, 180))}</h3><p class="muted">${m ? `Saved measurement · version ${esc(m.revision)}` : 'No business result recorded yet.'} · Earlier legacy reviews do not count as reviewed business results.</p>`;
+    if (m) html += facts(m) + `<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : m.report?.costsComplete === false ? 'No' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
+    const alreadyReviewed = justReviewed || (m && publication?.head.status === 'published' && m.revision === publication.version.source.measurementRevision && m.digest === publication.version.source.measurementDigest);
+    const reviewStatus = alreadyReviewed ? 'This saved version has already been reviewed. Save an updated draft to request a correction.'
+      : stale ? 'Refresh the experiment before reviewing these details.'
+      : publication?.head.status === 'withdrawn' ? 'This result was withdrawn and cannot be reviewed again.'
+      : d.assessment?.readyForOwnerVerification === true ? 'Measurement details are complete and ready for owner review.' : 'More detail is needed before owner review.';
+    html += `<p>${reviewStatus}</p>` + (blockers.length ? '<ul>' + blockers.slice(0, LIMIT).map(b => `<li>${esc(reasonLabel(b.code))}</li>`).join('') + '</ul>' : '');
+    if (publication) html += `<div class="outcome-current"><h4>Current ${publication.head.status === 'withdrawn' ? 'withdrawn' : 'owner-reviewed'} result · version ${esc(publication.version.revision)}</h4>${facts(publication.version)}<p class="muted tiny">Editing a draft leaves this reviewed version unchanged.</p><button type="button" class="secondary" data-outcome-source-current>View report for this result</button><div id="business-outcomes-current-source"></div></div>`;
     if (role() === 'owner') {
       const withdrawn = publication?.head.status === 'withdrawn';
       const newer = !publication || m?.revision > publication.version.source.measurementRevision;
-      if (m && d.assessment?.readyForOwnerVerification === true && newer && !withdrawn) html += `<button type="button" class="primary" data-outcome-action="${publication ? 'correct' : 'publish'}">Review ${publication ? 'correction' : 'publication'}</button>`;
+      if (m && d.assessment?.readyForOwnerVerification === true && newer && !withdrawn) html += `<button type="button" class="primary" data-outcome-action="${publication ? 'correct' : 'publish'}">Review ${publication ? 'correction' : 'result'}</button>`;
       if (publication?.head.status === 'published') html += '<button type="button" class="secondary" data-outcome-action="withdraw">Review withdrawal</button>';
-      if (withdrawn) html += '<p class="muted">This result was withdrawn. Reinstatement is not supported.</p>';
-    } else html += '<p class="muted">Only the owner can verify, correct or withdraw a published result.</p>';
+      if (withdrawn) html += '<p class="muted">This result was withdrawn and cannot be restored.</p>';
+    } else html += '<p class="muted">Only the owner can confirm, correct or withdraw a reviewed result.</p>';
     $('business-outcomes-detail').innerHTML = html; controls();
   }
   function loadDetail() {
     if (busy.has('detail') || busy.has('save') || busy.has('publish')) return;
     const id = $('business-outcomes-experiment').value; if (!id) return status('Choose an experiment.');
-    if (pending?.attempted) return status('Resolve the pending publication with the same retry identity before changing this measurement.', true);
+    if (pending?.attempted) return status('Finish checking the pending action before editing this result. Retrying keeps the same request.', true);
     generation++; controllers.forEach(c => c.abort()); controllers.clear(); busy.clear(); pending = null; renderReview();
     selected = null; renderDetail(); status('Loading the selected experiment…');
     return read('detail', '/api/business-outcomes/experiments/' + encodeURIComponent(id), result => {
@@ -117,12 +141,12 @@
     event.preventDefault(); if (!selected || !canPrepare() || stale || pending?.attempted || busy.has('save') || busy.has('publish')) return;
     let body; try { body = measurementInput(); } catch (error) { status(error.message, true); return; }
     pending = null; renderReview(); const t = ticket(), id = selected.experiment.id, controller = new AbortController(); controllers.add(controller);
-    busy.add('save'); controls(); status('Saving typed measurement…');
+    busy.add('save'); controls(); status('Saving measurement…');
     try {
       const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/measurement', { method: 'PUT', body: JSON.stringify(body), signal: controller.signal });
       if (!active(t)) return;
       if (result.workspaceId !== context().workspaceId || result.measurement?.experimentId !== id) throw new Error('Unexpected measurement response');
-      selected = { ...selected, ...result }; renderDetail(); populateForm(); status('Draft saved. It is not a published result.');
+      selected = { ...selected, ...result }; renderDetail(); populateForm(); status('Draft saved. Owner review is still required.');
     } catch (error) { if (active(t)) { stale = true; status(error.status === 409 ? 'The measurement changed. Refresh the experiment before editing again.' : 'Save was not confirmed. Refresh the experiment before making another change.', true); } }
     finally { controllers.delete(controller); if (t.scope === scope && t.session === session) { busy.delete('save'); if (!active(t)) stale = true; controls(); } }
   }
@@ -131,7 +155,7 @@
     const p = selected.currentPublication, m = selected.measurement;
     if (action === 'withdraw' ? p?.head.status !== 'published' : !m || selected.assessment?.readyForOwnerVerification !== true || p?.head.status === 'withdrawn') return;
     const source = action === 'withdraw' ? p.version.source : { measurementRevision: m.revision, measurementDigest: m.digest };
-    const id = window.crypto?.randomUUID?.(); if (!id) return status('Secure publication identity is unavailable. Refresh in a supported secure browser.', true);
+    const id = window.crypto?.randomUUID?.(); if (!id) return status('This browser cannot safely submit the review. Refresh in a supported secure browser.', true);
     pending = { action, attempted: false, uncertain: false, facts: action === 'withdraw' ? p.version : m,
       payload: { publicationId: id, action, experimentId: selected.experiment.id, expectedWorkspaceRevision: selected.workspaceRevision,
         expectedMeasurementRevision: source.measurementRevision, expectedMeasurementDigest: source.measurementDigest,
@@ -141,11 +165,11 @@
   function renderReview() {
     const root = $('business-outcomes-review'); root.classList.toggle('hidden', !pending); if (!pending) { root.replaceChildren(); controls(); return; }
     const p = pending;
-    root.innerHTML = `<h3>Review ${esc(p.action)}</h3>${facts(p.facts)}<p>Measurement revision ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the published result only. A later measurement draft is preserved.' : 'You are attesting to the saved measured facts and complete costs. This does not prove Runvara caused the result.'}</p>` +
-      (p.action === 'withdraw' ? `<label>Withdrawal reason<select id="business-outcomes-reason" ${p.attempted ? 'disabled' : ''}>${[['','Choose a reason'],['incorrect_measurement','Incorrect measurement'],['duplicate_observation','Duplicate observation'],['incorrect_scope','Incorrect scope'],['evidence_retracted','Evidence retracted']].map(([value,label]) => `<option value="${value}" ${p.payload.withdrawalReason === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : `<p>Costs: ${p.facts.report?.costsComplete === true ? 'Complete (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(p.facts.report?.description))}</p>`) +
+    root.innerHTML = `<h3>Review ${esc(reviewLabel(p.action))}</h3>${facts(p.facts)}<p>Measurement version ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the reviewed result. Any later draft is kept.' : 'Confirm the saved measurement and its complete costs below. This does not prove Runvara caused the result.'}</p>` +
+      (p.action === 'withdraw' ? `<label>Withdrawal reason<select id="business-outcomes-reason" ${p.attempted ? 'disabled' : ''}>${[['','Choose a reason'],['incorrect_measurement','Incorrect measurement'],['duplicate_observation','Duplicate observation'],['incorrect_scope','Incorrect scope'],['evidence_retracted','Evidence retracted']].map(([value,label]) => `<option value="${value}" ${p.payload.withdrawalReason === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : `<p>All relevant costs included: ${p.facts.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(p.facts.report?.description))}</p>`) +
       `<label class="outcome-attest"><input id="business-outcomes-attest" type="checkbox">I reviewed these exact details and ${p.action === 'withdraw' ? 'want to withdraw this result' : 'attest that this measurement and its costs are complete'}.</label>` +
-      (p.uncertain ? '<p class="outcome-error">The response was uncertain. No automatic retry occurred. Retry uses the same publication identity and the same reviewed details.</p>' : '') +
-      `<div class="outcome-actions"><button id="business-outcomes-confirm" class="primary" type="button" disabled>${p.uncertain ? 'Retry same reviewed action' : 'Confirm ' + esc(p.action)}</button><button id="business-outcomes-cancel" class="secondary" type="button">${p.attempted ? 'Close review (keep pending action)' : 'Cancel'}</button></div>`;
+      (p.uncertain ? '<p class="outcome-error">Confirmation was not received. Nothing was retried automatically. Retrying submits the same reviewed details as the same request.</p>' : '') +
+      `<div class="outcome-actions"><button id="business-outcomes-confirm" class="primary" type="button" disabled>${p.uncertain ? 'Retry same reviewed action' : 'Confirm ' + esc(reviewLabel(p.action))}</button><button id="business-outcomes-cancel" class="secondary" type="button">${p.attempted ? 'Close review (keep pending action)' : 'Cancel'}</button></div>`;
     controls();
   }
   async function publish() {
@@ -157,10 +181,10 @@
       const result = await api.request('/api/business-outcomes/publish', { method: 'POST', body: JSON.stringify(p.payload), signal: controller.signal });
       if (!active(t)) { p.uncertain = true; return; }
       if (!validPublication(result.publication) || result.publication.head.publicationId !== p.payload.publicationId) throw new Error('Publication response did not match the reviewed action');
-      pending = null; stale = true; renderReview(); status(result.isCurrent === false ? 'This action is recorded but has since been superseded. Refresh the experiment and results.' : 'Reviewed action recorded. Refresh the experiment and results to load current committed state.');
+      pending = null; stale = true; renderDetail(result.isCurrent === true && p.action !== 'withdraw' && result.publication.version.source?.measurementDigest === selected?.measurement?.digest); renderReview(); status(result.isCurrent === false ? 'This action was recorded; a newer result is now available. Refresh the experiment and results.' : 'Review saved. Refresh the experiment and results to see the latest version.');
     } catch (error) {
       if ([400,403,404,409,413,422].includes(error.status)) { if (pending !== p || t.scope !== scope || t.session !== session) return; pending = null; stale = true; if (active(t)) { renderReview(); status('The action was not accepted. Refresh the experiment and review its current details before trying again.', true); } }
-      else { p.uncertain = true; if (active(t)) { renderReview(); status('Publication was not confirmed. Retry only the same reviewed action.', true); } }
+      else { p.uncertain = true; if (active(t)) { renderReview(); status('Confirmation was not received. Retry only the same reviewed action.', true); } }
     } finally { controllers.delete(controller); if (t.scope === scope && t.session === session) { busy.delete('publish'); controls(); } }
   }
   function evidence(publication, target, button) {
@@ -169,8 +193,8 @@
     return read(name, '/api/business-outcomes/versions/' + encodeURIComponent(publication.version.versionId), result => {
       if (result.source !== 'immutable_business_outcome_version' || result.currentStatus !== 'not_checked' || !validPublication(result.publication) || result.publication.version.versionId !== publication.version.versionId || result.publication.version.digest !== publication.version.digest || result.sourceMeasurement?.digest !== publication.version.source.measurementDigest || result.sourceMeasurement?.workspaceId !== context().workspaceId) throw new Error('Evidence mismatch');
       const m = result.sourceMeasurement;
-      target.innerHTML = `<h4>Retained immutable source</h4><p class="muted tiny">Historical evidence; current status has not been rechecked. Owner/admin recorded report, not independent source verification.</p>${facts(m)}<p>Costs: ${m.report?.costsComplete === true ? 'Complete (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
-      button.dataset.loaded = 'true'; button.textContent = 'Retained source loaded';
+      target.innerHTML = `<h4>Original measurement report</h4><p class="muted tiny">Saved with this result; its current status has not been rechecked. Recorded by an owner or admin, not independently verified.</p>${facts(m)}<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
+      button.dataset.loaded = 'true'; button.textContent = 'Original report loaded';
     }).finally(() => { if (button.isConnected && !button.dataset.loaded) button.disabled = false; });
   }
   function reset() {
@@ -181,7 +205,7 @@
     $('business-outcomes-panel').open = false; $('business-outcomes-summary').replaceChildren(); renderDetail(); renderReview();
     const experiments = context().experiments || [];
     $('business-outcomes-experiment').innerHTML = '<option value="">Choose an experiment</option>' + experiments.slice(0, 100).map(e => `<option value="${esc(e.id)}">${esc(bounded(e.title || e.id, 180))}</option>`).join('');
-    status('Open this panel to load committed results. No background checks.'); controls();
+    status('Open this panel to load reviewed results. Updates run only when requested.'); controls();
   }
   function pause() {
     if (!api) return;

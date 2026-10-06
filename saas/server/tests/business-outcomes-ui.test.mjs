@@ -79,8 +79,11 @@ test('publication requires exact reviewed details, checked attestation, cancel, 
   h.$('business-outcomes-cancel').click(); assert.ok(h.$('business-outcomes-review').classList.contains('hidden')); assert.equal(h.writes().length, 0);
   h.review('publish'); const hold = deferred(); h.handler = () => hold.promise; h.confirm(); h.$('business-outcomes-confirm').dispatchEvent(new h.w.MouseEvent('click', { bubbles: true }));
   assert.equal(h.writes().length, 1); const payload = JSON.parse(h.writes()[0].body); assert.match(payload.publicationId, /^[a-f0-9-]{36}$/); assert.equal(payload.expectedMeasurementDigest, h.m.digest); assert.equal(payload.expectedWorkspaceRevision, 'revision_one');
-  hold.resolve({ publication: publication(h.m, payload.publicationId), replayed: false, isCurrent: true }); await until(() => h.$('business-outcomes-status').textContent.includes('Reviewed action recorded'));
+  hold.resolve({ publication: publication(h.m, payload.publicationId), replayed: false, isCurrent: true }); await until(() => h.$('business-outcomes-status').textContent.includes('Review saved'));
   assert.equal(h.writes().length, 1); assert.equal(h.form.elements.amount.disabled, true);
+  assert.match(h.$('business-outcomes-detail').textContent, /This saved version has already been reviewed/);
+  assert.doesNotMatch(h.$('business-outcomes-detail').textContent, /ready for owner review/);
+  assert.equal(h.d.querySelector('[data-outcome-action="publish"]').disabled, true);
 });
 
 test('uncertain publication retries only on explicit review with identical payload and identity', async t => {
@@ -119,7 +122,7 @@ test('current-source evidence is explicit, bound to exact tenant/version/digest,
   assert.equal(h.calls.some(c => c.path.includes('/versions/')), false); const button = h.d.querySelector('[data-outcome-evidence]'), hold = deferred(); h.handler = () => hold.promise;
   button.click(); button.dispatchEvent(new h.w.MouseEvent('click', { bubbles: true })); assert.equal(h.calls.filter(c => c.path.includes('/versions/')).length, 1);
   hold.resolve({ publication: p, sourceMeasurement: m, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' });
-  await until(() => button.textContent === 'Retained source loaded'); assert.match(button.nextElementSibling.textContent, /current status has not been rechecked/); assert.equal(button.nextElementSibling.querySelector('img'), null);
+  await until(() => button.textContent === 'Original report loaded'); assert.match(button.nextElementSibling.textContent, /current status has not been rechecked/); assert.equal(button.nextElementSibling.querySelector('img'), null);
 });
 
 test('navigation aborts and ignores late reads; new session clears old measurement and pending review', async t => {
@@ -132,8 +135,8 @@ test('navigation aborts and ignores late reads; new session clears old measureme
 test('summary DOM stays bounded and incomplete, mixed-currency or standalone groups never become invented totals', async t => {
   const m = measurement(), p = publication(m), groups = Array.from({ length: 200 }, (_, i) => ({ currency: i % 2 ? 'EUR' : 'GBP', method: 'reconciled_manual', window: m.window, amount: '3', amountStatus: 'standalone_observations', measuredCount: 1 }));
   const h = await harness(t, { current: Array(200).fill(p), groups }); await h.open();
-  assert.equal(h.$('business-outcomes-summary').querySelectorAll('.outcome-record').length, 40); assert.match(h.$('business-outcomes-summary').textContent, /Showing 20 of 200/); assert.equal(h.$('business-outcomes-summary').querySelector('strong').textContent, 'No additive total');
-  h.summary.summary.coverage.complete = false; h.summary.summary.groups[0].amountStatus = 'measured_sum'; h.$('business-outcomes-refresh').click(); await until(() => !h.$('business-outcomes-refresh').disabled); assert.equal(h.$('business-outcomes-summary').querySelector('strong').textContent, 'No additive total');
+  assert.equal(h.$('business-outcomes-summary').querySelectorAll('.outcome-record').length, 40); assert.match(h.$('business-outcomes-summary').textContent, /Showing 20 of 200/); assert.equal(h.$('business-outcomes-summary').querySelector('strong').textContent, 'Total unavailable');
+  h.summary.summary.coverage.complete = false; h.summary.summary.groups[0].amountStatus = 'measured_sum'; h.$('business-outcomes-refresh').click(); await until(() => !h.$('business-outcomes-refresh').disabled); assert.equal(h.$('business-outcomes-summary').querySelector('strong').textContent, 'Total unavailable');
 });
 
 test('mismatched tenant payload is never rendered', async t => {
@@ -197,14 +200,63 @@ test('real app wiring aborts navigation reads and a late 401 cannot sign out or 
   assert.match(d.getElementById('re-experiment-list').textContent,/Legacy recorded \/ unqualified · contribution unknown/);
   assert.doesNotMatch(d.getElementById('re-experiment-list').textContent,/£0|0\.00/);
   d.querySelector('#main-nav [data-view="revenue-engine"]').click(); const panel=d.getElementById('business-outcomes-panel'); panel.open=true;
-  await until(()=>d.getElementById('business-outcomes-status').textContent.includes('Loaded on request'));
+  await until(()=>d.getElementById('business-outcomes-status').textContent.includes('Results loaded'));
   held=deferred(); d.getElementById('business-outcomes-refresh').click(); const old=calls.at(-1); const oldPromise=held;
   d.querySelector('#main-nav [data-view="overview"]').click(); assert.equal(old.config.signal.aborted,true); held=null;
   await new Promise(r=>setTimeout(r,10)); d.querySelector('#main-nav [data-view="revenue-engine"]').click(); panel.open=true; await new Promise(r=>setTimeout(r,10)); d.getElementById('business-outcomes-refresh').click();
-  await until(()=>d.getElementById('business-outcomes-status').textContent.includes('Loaded on request'));
+  await until(()=>d.getElementById('business-outcomes-status').textContent.includes('Results loaded'));
   oldPromise.resolve(Response.json({code:'AUTH_REQUIRED'},{status:401})); await new Promise(r=>setTimeout(r,10));
   assert.equal(d.getElementById('app-shell').classList.contains('hidden'),false); assert.equal(d.getElementById('login-screen').classList.contains('hidden'),true);
   assert.equal(calls.filter(c=>c.route==='/api/bootstrap').length,1,'all read-only outcomes loads avoid full bootstrap');
   held=deferred(); d.getElementById('business-outcomes-refresh').click(); held.resolve(Response.json({code:'AUTH_REQUIRED'},{status:401}));
   await until(()=>d.getElementById('app-shell').classList.contains('hidden')); assert.equal(panel.open,false); assert.equal(d.getElementById('business-outcomes-summary').textContent,'');
+});
+
+test('owner-facing labels translate methods, totals and missing-evidence reasons without changing recorded values', async t => {
+  const m = measurement({ ...input, amount: '0' }), p = publication(m);
+  const groups = [{ method: 'reconciled_manual', amountStatus: 'measured_sum', amount: '0', currency: 'GBP', window: m.window, measuredCount: 1 },
+    { method: 'before_after', amountStatus: 'standalone_observations', amount: null, currency: 'EUR', window: m.window, measuredCount: 2 },
+    { method: 'holdout', amountStatus: 'incomplete_publication_read', amount: null, currency: 'USD', window: m.window, measuredCount: 1 }];
+  const h = await harness(t, { measurement: m, current: [p], groups });
+  h.summary.summary.exclusions = [{ code: 'OVERLAPPING_SCOPE' }, { code: 'REUSED_MEASUREMENT_REPORT' }, { code: 'toString' }];
+  await h.open(); await h.load();
+  const text = h.$('business-outcomes-summary').textContent;
+  assert.match(text, /GBP · Reconciled records/); assert.match(text, /Recorded total · 1 measurement/); assert.match(text, /0 GBP/);
+  assert.match(text, /EUR · Before and after/); assert.match(text, /Separate results; no combined total/);
+  assert.match(text, /USD · Holdout comparison/); assert.match(text, /Results incomplete; total unavailable/);
+  assert.match(text, /Measurement periods overlap for the same business activity/); assert.match(text, /The same report supports more than one result/);
+  assert.match(text, /More evidence is needed before this result can be included/);
+  assert.doesNotMatch(text, /reconciled_manual|before_after|measured_sum|standalone_observations|incomplete_publication_read|OVERLAPPING_SCOPE|REUSED_MEASUREMENT_REPORT|toString|native code|committed selection|publications/);
+  assert.equal(h.$('business-outcomes-refresh').textContent, 'Refresh reviewed results');
+  assert.equal(h.form.querySelector('h3').textContent, 'Record a business result');
+  assert.equal(h.form.elements.method.value, 'reconciled_manual');
+  assert.equal(h.form.elements.method.selectedOptions[0].textContent, 'Reconciled records');
+  h.review('publish'); assert.match(h.$('business-outcomes-review').textContent, /Review result/);
+  assert.equal(h.$('business-outcomes-confirm').textContent, 'Confirm result'); assert.equal(h.$('business-outcomes-confirm').disabled, true);
+  assert.match(h.$('business-outcomes-review').textContent, /attest that this measurement and its costs are complete/);
+  assert.match(h.$('business-outcomes-review').textContent, /does not prove Runvara caused the result/);
+  assert.equal(h.writes().length, 0);
+});
+
+test('incomplete drafts describe unknowns and costs plainly without exposing assessment codes', async t => {
+  const m = measurement({ expectedRevision: 0, report: { description: 'Reconciliation is incomplete.', costsComplete: false } });
+  const h = await harness(t, { measurement: m }); await h.open(); await h.load();
+  const text = h.$('business-outcomes-detail').textContent;
+  assert.match(text, /More detail is needed before owner review/); assert.match(text, /The measured amount is unknown/);
+  assert.match(text, /The currency is unknown/); assert.match(text, /The measurement period is unknown/);
+  assert.match(text, /Some relevant costs are missing/); assert.match(text, /All relevant costs included: No/);
+  assert.doesNotMatch(text, /AMOUNT_UNKNOWN|CURRENCY_UNKNOWN|WINDOW_UNKNOWN|COSTS_INCOMPLETE/);
+  assert.equal(h.form.elements.amount.value, ''); assert.equal(h.form.elements.currency.value, ''); assert.equal(h.form.elements.costsComplete.value, 'false');
+  assert.equal(h.d.querySelector('[data-outcome-action="publish"]'), null);
+});
+
+test('an already reviewed saved version explains correction requirements without offering another review', async t => {
+  const m = measurement(), p = publication(m), h = await harness(t, { measurement: m, publication: p }); await h.open(); await h.load();
+  assert.match(h.$('business-outcomes-detail').textContent, /This saved version has already been reviewed\. Save an updated draft to request a correction/);
+  assert.doesNotMatch(h.$('business-outcomes-detail').textContent, /ready for owner review/);
+  assert.equal(h.d.querySelector('[data-outcome-action="publish"]'), null); assert.equal(h.d.querySelector('[data-outcome-action="correct"]'), null);
+  assert.ok(h.d.querySelector('[data-outcome-action="withdraw"]')); assert.equal(h.writes().length, 0);
+  h.m = measurement({ ...input, expectedRevision: 1, amount: '-2' }, m); await h.load();
+  assert.match(h.$('business-outcomes-detail').textContent, /ready for owner review/);
+  assert.ok(h.d.querySelector('[data-outcome-action="correct"]')); assert.match(h.$('business-outcomes-detail').textContent, /-2 GBP/);
 });

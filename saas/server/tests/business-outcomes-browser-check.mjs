@@ -178,7 +178,7 @@ try {
     assert.equal(callCount('GET', '/api/business-outcomes'), 1, 'repeated refresh clicks coalesce with the opening read');
     assert.equal(await refresh.isDisabled(), true);
     await releaseRequest(initialRead);
-    await summary.getByText('No published business results yet.', { exact: false }).waitFor();
+    await summary.getByText('No owner-reviewed results yet.', { exact: false }).waitFor();
     const openedCalls = calls.length;
     await panel.locator(':scope > summary').click(); await open();
     assert.equal(calls.length, openedCalls, 'a cached selection is reused on reopening without polling');
@@ -191,7 +191,7 @@ try {
     assert.equal(callCount('GET', detailPath), 1, 'repeated experiment load clicks coalesce');
     assert.equal(await load.isDisabled(), true);
     await releaseRequest(detailRead); await form.waitFor({ state: 'visible' });
-    assert.match(await detail.textContent(), /No typed measurement saved/);
+    assert.match(await detail.textContent(), /No business result recorded yet/);
     assert.equal(await form.locator('[name="amount"]').inputValue(), '', 'unknown amount is blank, never an inferred zero');
     assert.equal(await form.locator('[name="currency"]').inputValue(), '', 'measurement currency is not inferred from workspace defaults');
     assert.equal(callCount('PUT'), 0); assert.equal(callCount('POST'), 0);
@@ -220,14 +220,14 @@ try {
     assert.equal(callCount('POST'), 0, 'draft preparation never publishes');
     await releaseRequest(draftSave); await status.getByText('Draft saved.', { exact: false }).waitFor();
     assert.match(await detail.textContent(), /-12\.004 GBP/);
-    assert.match(await detail.textContent(), /Ready for explicit owner review/);
+    assert.match(await detail.textContent(), /ready for owner review/);
     assert.equal(await detail.locator('img,script,[onerror]').count(), 0);
     assert.equal(await page.evaluate(() => window.outcomeInjected), undefined);
 
     const publicationReview = detail.locator('[data-outcome-action="publish"]');
     await publicationReview.click(); await review.waitFor({ state: 'visible' });
     assert.match(await review.textContent(), /-12\.004 GBP/);
-    assert.match(await review.textContent(), /Measurement revision 1/);
+    assert.match(await review.textContent(), /Measurement version 1/);
     assert.match(await review.textContent(), /does not prove Runvara caused the result/);
     assert.equal(await page.locator('#business-outcomes-confirm').isDisabled(), true);
     await page.locator('#business-outcomes-confirm').evaluate(element => element.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -245,12 +245,19 @@ try {
     assert.equal(callCount('POST'), 1, 'repeated confirm clicks submit one reviewed publication');
     assert.equal(await page.locator('#business-outcomes-confirm').isDisabled(), true);
     await releaseRequest(publicationWrite);
-    await status.getByText('Reviewed action recorded.', { exact: false }).waitFor();
+    await status.getByText('Review saved.', { exact: false }).waitFor();
     await review.waitFor({ state: 'hidden' });
-    await refresh.click(); await summary.getByText('Owner-verified measurement', { exact: false }).waitFor();
+    assert.match(await detail.textContent(), /This saved version has already been reviewed/);
+    assert.doesNotMatch(await detail.textContent(), /ready for owner review/);
+    assert.equal(await detail.locator('[data-outcome-action="publish"]').isDisabled(), true);
+    await refresh.click(); await summary.getByText('Owner-reviewed result', { exact: false }).waitFor();
     assert.match(await summary.textContent(), /-12\.004 GBP/);
+    assert.match(await summary.textContent(), /Reconciled records/);
+    assert.match(await summary.textContent(), /Recorded total/);
+    assert.doesNotMatch(await summary.textContent(), /reconciled_manual|measured_sum|committed selection|Current publications/);
+    assert.equal(await form.locator('h3').textContent(), 'Record a business result');
     assert.match(await summary.textContent(), /not independently verified/);
-    assert.match(await summary.textContent(), /Attribution to RunvaraUnestablished/);
+    assert.match(await summary.textContent(), /Attribution to RunvaraNot established/);
     assert.doesNotMatch(await summary.textContent(), /Synthetic retained evidence/);
     const sourcePath = `/api/business-outcomes/versions/${publication.version.versionId}`;
     assert.equal(callCount('GET', sourcePath), 0, 'loading a committed selection does not eagerly hydrate retained evidence');
@@ -258,8 +265,8 @@ try {
     await tripleClick(evidence); await waitUntil(() => evidenceRead.seen, 'explicit retained evidence request must be observed');
     assert.equal(callCount('GET', sourcePath), 1, 'repeated evidence clicks coalesce');
     await releaseRequest(evidenceRead);
-    await summary.getByText('Retained immutable source', { exact: true }).waitFor();
-    assert.match(await summary.textContent(), /Historical evidence; current status has not been rechecked/);
+    await summary.getByText('Original measurement report', { exact: true }).waitFor();
+    assert.match(await summary.textContent(), /Saved with this result; its current status has not been rechecked/);
     assert.match(await summary.textContent(), /Synthetic retained evidence/);
     assert.equal(await summary.locator('img,script,[onerror]').count(), 0);
     assert.equal(await page.evaluate(() => window.outcomeInjected), undefined);
@@ -273,7 +280,7 @@ try {
     const navigation401 = holdRequest('GET', '/api/business-outcomes', 401);
     await refresh.click(); await waitUntil(() => navigation401.seen, 'navigation race request must be in flight');
     await navigate(page, 'overview'); await navigate(page, 'revenue-engine'); await open();
-    await refresh.click(); await status.getByText('Loaded on request.', { exact: false }).waitFor();
+    await refresh.click(); await status.getByText('Results loaded.', { exact: false }).waitFor();
     await loadExperiment();
     const freshDetail = await detail.textContent(), freshSummary = await summary.textContent();
     await releaseRequest(navigation401);
@@ -294,7 +301,7 @@ try {
     await page.locator('#login-form button[type="submit"]').click();
     await page.locator('#app-shell:not(.hidden)').waitFor();
     await navigate(page, 'revenue-engine'); await open();
-    await status.getByText('Loaded on request.', { exact: false }).waitFor();
+    await status.getByText('Results loaded.', { exact: false }).waitFor();
     await loadExperiment();
     const newSessionDetail = await detail.textContent(), newSessionSummary = await summary.textContent();
     await releaseRequest(session401);
