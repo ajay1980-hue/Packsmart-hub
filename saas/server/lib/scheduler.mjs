@@ -8,6 +8,7 @@ import { runWebIntelligence } from './web-intelligence.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
+const providerEffectRule = ruleId => ['marketingCreativeWorker', 'marketRadar'].includes(ruleId);
 const creativeCountKeys = ['providerReads', 'submissionAttempts', 'confirmedSubmissions', 'uncertainSubmissions', 'blockedSubmissions'];
 
 // Copy only the worker's safe effect contract. Missing completion evidence is
@@ -19,7 +20,7 @@ function copyCreativeEffects(value) {
   effects.historicalExposureUnknown = source.historicalExposureUnknown !== false;
   effects.externalWrites = effects.confirmedSubmissions > 0 ? true
     : effects.submissionAttempts > 0 || effects.uncertainSubmissions > 0 || source.externalWrites !== false || !validCounts ? null : false;
-  const noCost = validCounts && source.costStatus === 'not_incurred' && source.spend === 0 && !effects.historicalExposureUnknown
+  const noCost = validCounts && source.externalWrites === false && source.costStatus === 'not_incurred' && source.spend === 0 && !effects.historicalExposureUnknown
     && effects.submissionAttempts === 0 && effects.confirmedSubmissions === 0 && effects.uncertainSubmissions === 0;
   effects.spend = noCost ? 0 : null;
   effects.costStatus = noCost ? 'not_incurred' : 'unknown';
@@ -33,8 +34,9 @@ function recordCreativeEffects(run, value) {
 }
 
 function summarizeCycleEffects(runs) {
-  const creative = runs.filter(run => run.ruleId === 'marketingCreativeWorker');
-  // Retain the existing response for noncreative, read-only automation cycles.
+  const creative = runs.filter(run => providerEffectRule(run.ruleId));
+  // Firecrawl scrape is a chargeable provider POST, not a free read-only job.
+  // Other read-only automation cycles retain their existing response contract.
   if (!creative.length) return { spend: 0, externalWrites: false };
   const effects = Object.fromEntries(creativeCountKeys.map(key => [key, creative.reduce((total, run) => total + run.effects[key], 0)]));
   effects.historicalExposureUnknown = creative.some(run => run.effects.historicalExposureUnknown);
@@ -78,7 +80,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   }
 }
 
-export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000, creativeCycle = marketingCreativeCycle }) {
+export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000, creativeCycle = marketingCreativeCycle, webCycle = runWebIntelligence }) {
   let timer = null, running = false, stopped = false;
   const status = { lastTickAt: null, lastError: null, running: false };
 
@@ -90,7 +92,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
       await runConnectionDoctor(state, { integrations, readSync: monitoredSync, save: () => store.save(workspaceId, state), now });
       const expired = state.automationRuns.filter(run => run.status === 'IN PROGRESS' && Date.parse(run.leaseUntil) <= now.getTime());
       for (const run of expired) {
-        const effects = run.ruleId === 'marketingCreativeWorker' ? recordCreativeEffects(run, run.effects) : null;
+        const effects = providerEffectRule(run.ruleId) ? recordCreativeEffects(run, run.effects) : null;
         finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true, evidence: [{ type: 'expired_lease', id: run.id, detail: 'No completion evidence before the worker lease expired.', ...(effects ? { effects: { ...effects } } : {}) }] });
       }
       const rules = dueRules(state, now);
@@ -99,7 +101,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
         return { skipped: true, reason: state.autopilot.enabled ? 'FREQUENCY_OR_PERMISSION_LIMIT' : 'AUTOPILOT_OFF' };
       }
       const runs = rules.map(rule => claimAutomation(state, rule.id, now));
-      for (const run of runs) if (run.ruleId === 'marketingCreativeWorker') recordCreativeEffects(run);
+      for (const run of runs) if (providerEffectRule(run.ruleId)) recordCreativeEffects(run);
       const providers = [];
       if (runs.some(run => run.ruleId === 'channelSync')) {
         for (const provider of Object.keys(CONNECTORS)) {
@@ -152,8 +154,22 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
               continue;
             }
           } else if (run.ruleId === 'marketRadar') {
-            const result = await runWebIntelligence(state, { env, actor: 'autopilot' });
-            evidence = [{ type: 'web_intelligence', id: run.id, detail: `Scanned ${result.scanned || 0} public pages; ${result.changed || 0} changed and ${result.priceChanged || 0} had price-signal changes. No external writes were attempted.` }];
+            const result = await webCycle(state, { env, actor: 'autopilot' });
+            const effects = recordCreativeEffects(run, result.effects);
+            const reason = !result.effects ? 'WEB_SCAN_EFFECTS_UNAVAILABLE' : result.reason ? safeCode({ code: result.reason }) : null;
+            run.reason = reason;
+            evidence = [{ type: 'web_intelligence', id: run.id,
+              detail: `${result.scanned || 0} verified scans; ${effects.submissionAttempts} provider submission attempts; ${effects.blockedSubmissions} blocked.${reason ? ` ${reason}.` : ''}`,
+              reason, effects: { ...effects } }];
+            if (effects.blockedSubmissions > 0 || effects.uncertainSubmissions > 0
+              || reason === 'WEB_SCAN_ALLOWANCE_REQUIRED' || reason === 'WEB_SCAN_EFFECTS_UNAVAILABLE') {
+              finishAutomation(state, run, { evidence, errorCode: reason || 'WEB_SCAN_BLOCKED', blocked: true });
+              continue;
+            }
+            if (result.failed > 0 || reason === 'WEB_SCAN_RESPONSE_UNVERIFIED' || reason === 'WEB_SCAN_SOURCE_UNVERIFIED') {
+              finishAutomation(state, run, { evidence, errorCode: reason || 'WEB_SCAN_FAILED' });
+              continue;
+            }
           } else {
             const d = deriveOperations(state);
             if (!d.products && !d.orders30d) throw Object.assign(new Error('No recorded business data'), { code: 'NO_RECORDED_DATA' });
@@ -162,7 +178,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           }
           finishAutomation(state, run, { evidence });
         } catch (error) {
-          const effects = run.ruleId === 'marketingCreativeWorker' ? recordCreativeEffects(run, error.creativeEffects) : null;
+          const effects = providerEffectRule(run.ruleId) ? recordCreativeEffects(run, run.ruleId === 'marketRadar' ? error.webEffects : error.creativeEffects) : null;
           finishAutomation(state, run, { errorCode: safeCode(error), blocked: authFailure(error) || /UNAVAILABLE|NO_/.test(safeCode(error)) || Boolean(effects?.blockedSubmissions), evidence: [{ type: 'monitor_failure', id: run.id, detail: safeCode(error), ...(effects ? { effects: { ...effects } } : {}) }] });
         }
       }

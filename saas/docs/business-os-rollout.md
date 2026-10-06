@@ -178,3 +178,13 @@ See [creative submission safeguards](creative-safety-rollout.md). New potentiall
 ## Preparation: atomic operator-brief dispatch
 
 See [the operator-brief cutover contract](operator-brief-cutover.md). The existing queued OpenAI enhancement is switched to the stage-5 reservation/settlement boundary, with current job/policy rechecks, verified conservative token ceilings, strict response identity/accounting and preserved local summaries. Missing policy, proof or clean baseline blocks paid dispatch. No price, cap, credential, provider or policy is activated; Firecrawl and broader routing remain separate integration work.
+
+## Stage 9: atomic operator-brief admission
+
+[PR72](https://github.com/ajay1980-hue/Packsmart-hub/pull/72) merged as `419806847a0aa5c81e8cbff3bef22350d99da94c`. SaaS CI37536691799 passed543 Node tests, existing responsive browser checks and container health; atomic/archive PostgreSQL37536691862, objective PostgreSQL37536691725 and Android37536691744 passed.
+
+Existing Render deploy `dep-db2mucvlk1mc73cr6u6g` became live at21:59:39 UTC on2026-10-06. Health at21:59:59 confirmed the exact commit, productionReady:true and healthy persistence/authentication/encryption. Hot state was1,589,300 bytes, above its warning threshold but below the hard limit. See [operator-brief governance](operator-brief-cutover.md) for the actual reserve-before-POST path, immutable job identity, bounded reads/requests, uncertainty handling and required trusted activation evidence. No paid provider policy, credential or feature was activated.
+
+## Stage 10: paid web-scan safety boundary
+
+See [web-scan safeguards](web-intelligence-safety-rollout.md). Live Firecrawl dispatch is paused until genuine per-target request/credit accounting is available. Existing targets and observations remain usable. Manual requests and scheduled work report the missing authority honestly, without erasing successful source data or claiming unknown historical costs were zero. No new service, schema, access grant or polling schedule is added.

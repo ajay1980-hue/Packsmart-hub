@@ -1495,8 +1495,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
         if (req.method === 'POST' && pathname === '/api/web-intelligence/scan') {
           requireOwner(auth); const body = await jsonBody(req, 32768);
-          const result = await mutate(auth, async state => { ensureWebIntelligence(state); const next = await runWebIntelligence(state, { env, fetchImpl: options.fetchImpl || fetch, actor: auth.user.id, targetId: body.targetId ? text(body.targetId, 120) : null }); addAudit(state, { type: 'web_intelligence_scan_completed', actor: auth.user.id, detail: next }); return next; });
-          send(res, 200, { result }); return;
+          const result = await mutate(auth, async state => {
+            ensureWebIntelligence(state);
+            const next = await runWebIntelligence(state, { actor: auth.user.id,
+              targetId: Object.hasOwn(body, 'targetId') ? body.targetId : null });
+            addAudit(state, { type: next.blocked ? 'web_intelligence_scan_blocked' : 'web_intelligence_scan_no_work',
+              actor: auth.user.id, detail: next });
+            return next;
+          });
+          const blocked = result.blocked > 0;
+          send(res, blocked ? 409 : 200, { result, ...(blocked ? { code: result.reason, error: result.ownerAction } : {}) }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/marketing') {

@@ -796,7 +796,7 @@
     const radar = intelligence.radar || {};
     const targets = intelligence.targets || [];
     const findings = intelligence.findings || [];
-    $('#radar-provider-chip').innerHTML = '<span class="tag ' + (provider.configured ? 'good' : 'warn') + '">Firecrawl · ' + escapeHtml(provider.configured ? 'Runvara ready' : 'API setup required') + '</span>';
+    $('#radar-provider-chip').innerHTML = '<span class="tag warn">Firecrawl · ' + escapeHtml(provider.readinessLabel || 'Paid scans paused') + '</span>';
     $('#radar-change-count').textContent = String(radar.changes24h || 0);
     $('#radar-target-count').textContent = String(radar.monitoredTargets || 0);
     $('#radar-price-count').textContent = String(radar.priceSignals24h || 0);
@@ -1749,7 +1749,7 @@
     try {
       const payload = await request('/api/web-intelligence/scan', { method: 'POST', body: '{}' });
       await loadBootstrap({ migrate: false }); setView('market-radar');
-      showMessage('Market Radar scanned ' + (payload.result?.scanned || 0) + ' page(s).');
+      showMessage(payload.result?.ownerAction || ((payload.result?.scanned || 0) > 0 ? 'Market Radar verified ' + payload.result.scanned + ' page(s).' : 'No new scans ran. Saved targets and findings remain available.'));
     } catch (error) { showMessage(error.message, 'error'); }
     finally { setBusy(button, false); }
   });
@@ -1759,8 +1759,8 @@
     if (scan) {
       setBusy(scan, true, 'Scanning…');
       try {
-        await request('/api/web-intelligence/scan', { method: 'POST', body: JSON.stringify({ targetId: scan.dataset.radarScan }) });
-        await loadBootstrap({ migrate: false }); setView('market-radar'); showMessage('Web intelligence scan completed.');
+        const payload = await request('/api/web-intelligence/scan', { method: 'POST', body: JSON.stringify({ targetId: scan.dataset.radarScan }) });
+        await loadBootstrap({ migrate: false }); setView('market-radar'); showMessage(payload.result?.ownerAction || 'No new scan ran. Saved findings remain available.');
       } catch (error) { showMessage(error.message, 'error'); }
       finally { setBusy(scan, false); }
       return;
