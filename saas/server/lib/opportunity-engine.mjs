@@ -1,6 +1,14 @@
 const round = (value, digits = 2) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
 const clamp01 = value => Math.max(0, Math.min(1, Number(value) || 0));
 const clean = (value, max = 240) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
+const workspaceIdentity = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value) ? value : '';
+
+function inWorkspace(record, workspaceId) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return false;
+  const scopes = ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id'].filter(key => Object.hasOwn(record, key)).map(key => record[key]);
+  for (const key of ['workspace', 'tenant']) if (Object.hasOwn(record, key)) scopes.push(record[key] && typeof record[key] === 'object' ? record[key].id : record[key]);
+  return scopes.every(value => typeof value === 'string' && value === workspaceId);
+}
 
 const CONFIDENCE = Object.freeze({ high:0.9, medium:0.65, low:0.35, unknown:0 });
 const RISK = Object.freeze({ low:0.05, medium:0.2, high:0.45, critical:0.8 });
@@ -28,7 +36,7 @@ function learningPrior(kind, learning) {
 }
 
 function applyLearning(opportunity, learning) {
-  const prior = learningPrior(opportunity.kind, learning);
+  const prior = learningPrior(opportunity.evidenceKind || opportunity.kind, learning);
   if (!prior) return { ...opportunity, learning:null, learningPriority:0 };
   const rate = Math.max(0, Math.min(100, Number(prior.positiveRatePercent) || 0));
   const sampleWeight = Math.min(1, prior.samples / 8);
@@ -42,15 +50,18 @@ function applyLearning(opportunity, learning) {
 
 export function scoreOpportunity(opportunity = {}) {
   const rawExpectedProfit = opportunity.expectedContributionProfit;
-  const expectedProfit = rawExpectedProfit === null || rawExpectedProfit === undefined || rawExpectedProfit === '' ? null : Number(rawExpectedProfit);
+  const expectedProfit = (typeof rawExpectedProfit === 'number' || (typeof rawExpectedProfit === 'string' && rawExpectedProfit.trim() !== '')) ? Number(rawExpectedProfit) : null;
   const confidence = evidenceConfidence(opportunity);
   const probability = clamp01(opportunity.probability ?? confidence);
-  const executionCost = Math.max(0, Number(opportunity.executionCost) || 0);
+  const rawCost = opportunity.executionCost;
+  const numericCost = (typeof rawCost === 'number' || (typeof rawCost === 'string' && rawCost.trim() !== '')) ? Number(rawCost) : null;
+  const executionCost = numericCost !== null && Number.isFinite(numericCost) && numericCost >= 0 ? numericCost : null;
   const risk = riskPenalty(opportunity);
   const hasProfitEvidence = expectedProfit !== null && Number.isFinite(expectedProfit);
+  const economicEvidenceComplete = hasProfitEvidence && executionCost !== null;
 
   // Unknown economics must never be converted into invented pounds.
-  const score = hasProfitEvidence
+  const score = economicEvidenceComplete
     ? Math.max(0, expectedProfit * confidence * probability * (1 - risk) - executionCost)
     : null;
 
@@ -61,9 +72,14 @@ export function scoreOpportunity(opportunity = {}) {
     probability: round(probability, 3),
     risk: round(risk, 3),
     executionCost: round(executionCost),
+    approvalRequired:Boolean(opportunity.approvalRequired || opportunity.requiredAction || (opportunity.actionType && opportunity.actionType !== 'safe') || executionCost > 0),
     score: score === null ? null : round(score),
-    economicEvidenceComplete: hasProfitEvidence,
-    needsEvidence: hasProfitEvidence ? [] : [...new Set(opportunity.needsEvidence || ['expectedContributionProfit'])]
+    economicEvidenceComplete,
+    needsEvidence: economicEvidenceComplete ? [] : [...new Set([
+      ...(Array.isArray(opportunity.needsEvidence) ? opportunity.needsEvidence : []),
+      ...(!hasProfitEvidence ? ['expectedContributionProfit'] : []),
+      ...(executionCost === null ? ['executionCost'] : [])
+    ])]
   };
 }
 
@@ -126,7 +142,7 @@ function stockOpportunity(businessState) {
 }
 
 function recommendationOpportunities(businessState) {
-  return (businessState.recommendations || [])
+  return (businessState.recommendations || []).slice(0, 100)
     .filter(item => !['complete-costs','negative-margin','stock-risk'].includes(item.id))
     .map(item => scoreOpportunity({
       id:`ops-${clean(item.id,80)}`,
@@ -144,26 +160,88 @@ function recommendationOpportunities(businessState) {
     }));
 }
 
+function canonicalOpportunities(businessState) {
+  const workspaceId = workspaceIdentity(businessState.workspaceId);
+  if (!workspaceId || !inWorkspace(businessState, workspaceId)) return [];
+  const scoped = businessState.opportunities.filter(item => inWorkspace(item, workspaceId) && typeof item.id === 'string' && item.id && item.id === item.id.trim() && item.id.length <= 180);
+  const idCounts = new Map(), fingerprintCounts = new Map();
+  for (const item of scoped) {
+    idCounts.set(item.id, (idCounts.get(item.id) || 0) + 1);
+    if (item.fingerprint) fingerprintCounts.set(item.fingerprint, (fingerprintCounts.get(item.fingerprint) || 0) + 1);
+  }
+  return scoped.filter(item => item.present !== false && !['dismissed', 'resolved', 'rejected', 'cancelled', 'closed'].includes(String(item.status || '').toLowerCase())
+    && idCounts.get(item.id) === 1 && (!item.fingerprint || fingerprintCounts.get(item.fingerprint) === 1)).slice(0, 100).map(item => {
+    const evidenceKind = clean(item.kind || 'operations', 80).toLowerCase();
+    const requiredAction = clean(item.requiredAction, 80) || null;
+    const actionType = requiredAction || clean(item.actionType, 80) || 'safe';
+    // Only business-state's authoritative linked-experiment projection sets
+    // this flag. Raw opportunity posture fields alone are never sufficient.
+    const verified = item.evidenceVerified === true && Boolean(item.experimentId) && item.experimentStatus === 'completed';
+    const contribution = verified ? round(item.verifiedContributionValue) : null;
+    const decision = !verified ? null : contribution !== null && contribution > 0 ? 'ready-for-owner-review'
+      : contribution !== null && contribution < 0 ? 'deprioritise' : 'needs-more-evidence';
+    const needsEvidence = Array.isArray(item.needsEvidence) ? item.needsEvidence.filter(value => typeof value === 'string').slice(0, 12).map(value => clean(value, 160)) : [];
+    return scoreOpportunity({
+      id:item.id.trim(), workspaceId,
+      kind:({ pricing:'margin', reorder:'inventory', seo:'marketing' })[evidenceKind] || evidenceKind,
+      evidenceKind,
+      reference:clean(item.reference, 180),
+      title:clean(item.title || 'Review recorded opportunity', 180),
+      evidence:typeof item.evidence === 'string' ? clean(item.evidence, 600) : '',
+      expectedContributionProfit:null,
+      confidence:item.confidence ?? 'unknown',
+      probability:item.probability ?? undefined,
+      risk:item.risk ?? 'medium',
+      executionCost:round(item.executionCost),
+      effort:clean(item.effort, 40), effortHours:round(item.effortHours),
+      approvalRequired:Boolean(item.approvalRequired || requiredAction || actionType !== 'safe'),
+      requiredAction, actionType,
+      recommendedNextStep:clean(item.recommendedNextStep, 360),
+      needsEvidence:needsEvidence.length ? needsEvidence : ['measured incremental contribution-profit estimate'],
+      experimentId:clean(item.experimentId, 180) || null,
+      experimentStatus:clean(item.experimentStatus, 40) || null,
+      evidenceVerified:verified,
+      evidenceDecision:decision,
+      verifiedContributionValue:contribution,
+      evidenceDecisionReason:verified ? clean(item.evidenceDecisionReason, 240) || null : null,
+      evidenceUpdatedAt:verified ? clean(item.evidenceUpdatedAt, 80) || null : null
+    });
+  });
+}
+
 export function deriveOpportunityQueue(businessState = {}, { limit = 50, learning = null } = {}) {
+  const canonical = Array.isArray(businessState.opportunities);
+  const candidateWorkspaceId = workspaceIdentity(businessState.workspaceId);
+  const workspaceId = candidateWorkspaceId && inWorkspace(businessState, candidateWorkspaceId) ? candidateWorkspaceId : '';
+  const scopedLearning = inWorkspace(learning, workspaceId) ? learning : null;
   const candidates = [
     missingCostOpportunity(businessState),
-    lossMakingOpportunity(businessState),
-    stockOpportunity(businessState),
-    ...recommendationOpportunities(businessState)
-  ].filter(Boolean).map(item => applyLearning(item, learning));
+    ...(canonical ? canonicalOpportunities(businessState) : [
+      lossMakingOpportunity(businessState),
+      stockOpportunity(businessState),
+      ...recommendationOpportunities(businessState)
+    ])
+  ].filter(item => item && workspaceId).filter((item, index, all) => all.findIndex(other => other.id === item.id) === index)
+    .map(item => applyLearning(item, scopedLearning));
 
   const ranked = candidates.sort((a,b) => {
+    // Verification is evidence, not a blanket promotion. A negative realised
+    // result must not leapfrog stronger ideas just because it is measured.
+    const aNegative = a.evidenceDecision === 'deprioritise' ? 1 : 0, bNegative = b.evidenceDecision === 'deprioritise' ? 1 : 0;
+    if (aNegative !== bNegative) return aNegative - bNegative;
     const aKnown = a.score !== null ? 1 : 0, bKnown = b.score !== null ? 1 : 0;
     if (aKnown !== bKnown) return bKnown - aKnown;
     if (a.score !== b.score) return (b.score || 0) - (a.score || 0);
     if (a.learningPriority !== b.learningPriority) return (b.learningPriority || 0) - (a.learningPriority || 0);
     if (a.confidence !== b.confidence) return b.confidence - a.confidence;
+    const aPositive = a.evidenceDecision === 'ready-for-owner-review' ? 1 : 0, bPositive = b.evidenceDecision === 'ready-for-owner-review' ? 1 : 0;
+    if (aPositive !== bPositive) return bPositive - aPositive;
     return a.title.localeCompare(b.title);
-  }).slice(0, Math.max(1, Math.min(200, Number(limit) || 50)));
+  }).slice(0, Math.max(0, Math.min(50, Number.isFinite(Number(limit)) ? Math.floor(Number(limit)) : 50)));
 
   return {
     schema:'runvara-opportunity-queue/v1',
-    workspaceId:clean(businessState.workspaceId,120),
+    workspaceId,
     generatedAt:businessState.generatedAt || null,
     objective:'maximise verified incremental contribution profit, not headline revenue',
     opportunities:ranked,
@@ -172,13 +250,15 @@ export function deriveOpportunityQueue(businessState = {}, { limit = 50, learnin
       economicallyScored:ranked.filter(item => item.score !== null).length,
       awaitingEconomicEvidence:ranked.filter(item => item.score === null).length,
       approvalRequired:ranked.filter(item => item.approvalRequired).length,
-      withVerifiedLearning:ranked.filter(item => item.learning).length
+      withVerifiedLearning:ranked.filter(item => item.learning).length,
+      withVerifiedOutcomes:ranked.filter(item => item.evidenceVerified).length
     },
     safeguards:{
       unknownProfitRanksAsMoney:false,
       historicalResultsNeverBecomeExpectedProfit:true,
+      durableOpportunityIdentityPreserved:canonical,
       approvalsPreserved:true,
-      tenantScope:clean(businessState.workspaceId,120)
+      tenantScope:workspaceId
     }
   };
 }

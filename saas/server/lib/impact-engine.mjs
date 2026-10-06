@@ -1,3 +1,4 @@
+import { tenantBusinessEvidence } from './business-evidence-scope.mjs';
 const clean = (value, max = 240) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 const round = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
 const hasNumber = value => value !== '' && value !== null && value !== undefined && Number.isFinite(Number(value));
@@ -61,13 +62,14 @@ function approvalEvidence(state = {}) {
 }
 
 function uniqueEvidence(rows) {
-  const seen = new Set();
-  return rows.filter(row => {
+  const byId = new Map(), conflicts = new Set();
+  for (const row of rows) {
     const key = row.id || `${row.sourceType}:${row.sourceId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const previous = byId.get(key);
+    if (previous && JSON.stringify(previous.metrics) !== JSON.stringify(row.metrics)) conflicts.add(key);
+    else if (!previous) byId.set(key,row);
+  }
+  return {rows:[...byId.entries()].filter(([key])=>!conflicts.has(key)).map(([,row])=>row),conflicts:conflicts.size};
 }
 
 function sum(rows, metric) {
@@ -75,12 +77,14 @@ function sum(rows, metric) {
 }
 
 export function deriveImpact(state = {}) {
-  const evidence = uniqueEvidence([
+  state = tenantBusinessEvidence(state);
+  const deduplicated = uniqueEvidence([
     ...workEvidence(state),
     ...experimentEvidence(state),
     ...approvalEvidence(state)
   ]);
 
+  const evidence = deduplicated.rows;
   const incrementalRevenue = sum(evidence, 'incrementalRevenue');
   const incrementalContribution = sum(evidence, 'incrementalContribution');
   const contributionProtected = sum(evidence, 'contributionProtected');
@@ -96,7 +100,7 @@ export function deriveImpact(state = {}) {
 
   return {
     schema:'runvara-impact/v1',
-    workspaceId:clean(state.workspace?.id,120),
+    workspaceId:clean(state.workspace?.id,256),
     generatedAt:new Date().toISOString(),
     verified:{
       incrementalRevenue,
@@ -119,6 +123,8 @@ export function deriveImpact(state = {}) {
     },
     evidence:evidence.slice(0,100),
     coverage:{
+      conflictingEvidenceExcluded:deduplicated.conflicts,
+      ambiguousSourceRecordsExcluded:state.evidenceScope.ambiguousSourceRecordsExcluded,
       financiallyVerifiedEvents:evidence.filter(row => row.metrics.incrementalContribution || row.metrics.contributionProtected || row.metrics.costAvoided).length,
       timeVerifiedEvents:evidence.filter(row => row.metrics.minutesSaved).length,
       note:'Runvara only counts realised value when an explicit verified measurement is recorded. Recommendations, forecasts and approval estimates are excluded.'

@@ -10,7 +10,7 @@ test('portfolio ranks verified contribution ahead of unverified ideas without in
       {id:'o2',title:'Conversion idea',kind:'conversion',present:true,status:'open',confidence:.9,risk:'low',effort:'low',learning:{samples:8,positiveRatePercent:90}}
     ],
     revenueEngine:{experiments:[
-      {id:'e1',status:'completed',impact:{verified:true,incrementalContribution:120,incrementalRevenue:500}}
+      {id:'e1',opportunityId:'o1',status:'completed',impact:{verified:true,incrementalContribution:120,incrementalRevenue:500}}
     ]}
   };
   const result=derivePortfolioAllocation(state);
@@ -31,8 +31,8 @@ test('next pound and next hour use explicit execution cost and effort only', () 
       {id:'o2',title:'B',kind:'conversion',present:true,status:'open',confidence:.8,risk:'low',effort:'low',experimentId:'e2',executionCost:50,effortHours:1}
     ],
     revenueEngine:{experiments:[
-      {id:'e1',status:'completed',impact:{verified:true,incrementalContribution:100}},
-      {id:'e2',status:'completed',impact:{verified:true,incrementalContribution:150}}
+      {id:'e1',opportunityId:'o1',status:'completed',impact:{verified:true,incrementalContribution:100}},
+      {id:'e2',opportunityId:'o2',status:'completed',impact:{verified:true,incrementalContribution:150}}
     ]}
   };
   const result=derivePortfolioAllocation(state);
@@ -46,10 +46,10 @@ test('revenue alone never becomes contribution evidence', () => {
   const state={
     workspace:{id:'tenant-revenue'},
     opportunities:[{id:'o1',title:'Revenue-only',kind:'conversion',present:true,status:'open',confidence:.9,risk:'low',effort:'low',experimentId:'e1'}],
-    revenueEngine:{experiments:[{id:'e1',status:'completed',impact:{verified:true,incrementalRevenue:1000}}]}
+    revenueEngine:{experiments:[{id:'e1',opportunityId:'o1',status:'completed',impact:{verified:true,incrementalRevenue:1000}}]}
   };
   const result=derivePortfolioAllocation(state);
-  assert.equal(result.portfolio[0].verifiedContribution,0);
+  assert.equal(result.portfolio[0].verifiedContribution,null, 'revenue-only evidence must remain unknown contribution');
   assert.equal(result.safeguards.revenueNotUsedAsContribution,true);
   assert.equal(result.allocation.nextPound,null);
 });
@@ -64,7 +64,7 @@ test('capacity-aware portfolio excludes approval-gated and already-active work f
     opportunities:[
       {id:'o1',title:'Approval-bound',kind:'pricing',present:true,status:'open',confidence:.9,risk:'low',effort:'low',effortHours:1,approvalRequired:true},
       {id:'o2',title:'Already testing',kind:'retention',present:true,status:'open',confidence:.8,risk:'low',effort:'low',effortHours:1,experimentId:'e2'},
-      {id:'o3',title:'Executable analysis',kind:'operations',present:true,status:'open',confidence:.7,risk:'low',effort:'low',effortHours:2,approvalRequired:false}
+      {id:'o3',title:'Executable analysis',kind:'operations',present:true,status:'open',confidence:.7,risk:'low',effort:'low',effortHours:2,executionCost:0,approvalRequired:false}
     ],
     revenueEngine:{experiments:[{id:'e2',opportunityId:'o2',status:'running'}]}
   };
@@ -80,7 +80,7 @@ test('explicit growth-hour capacity blocks work that does not fit', () => {
     workspace:{id:'tenant-hours'},
     settings:{growthCapacityHours:1,maxConcurrentGrowthExperiments:3},
     approvals:[],exceptions:[],
-    opportunities:[{id:'o1',title:'Two-hour task',kind:'operations',present:true,status:'open',confidence:.8,risk:'low',effort:'low',effortHours:2,approvalRequired:false}],
+    opportunities:[{id:'o1',title:'Two-hour task',kind:'operations',present:true,status:'open',confidence:.8,risk:'low',effort:'low',effortHours:2,executionCost:0,approvalRequired:false}],
     revenueEngine:{experiments:[]}
   };
   const result=derivePortfolioAllocation(state);
@@ -100,4 +100,15 @@ test('unknown hour capacity is surfaced as unknown instead of invented', () => {
   assert.equal(result.capacity.availableGrowthHours,null);
   assert.match(result.capacity.note,/unknown/i);
   assert.equal(result.safeguards.unknownCapacityDoesNotBecomeUnlimited,true);
+});
+
+test('fractional positive costs and effort never round to free or zero-hour work', () => {
+  const result=derivePortfolioAllocation({workspace:{id:'fractional'},settings:{growthCapacityHours:0.004,maxConcurrentGrowthExperiments:1},opportunities:[{id:'tiny',title:'Tiny',kind:'operations',executionCost:0.004,effortHours:0.004,approvalRequired:false}],revenueEngine:{experiments:[]}});
+  assert.equal(result.portfolio[0].executionCost,0.004);assert.equal(result.portfolio[0].effortHours,0.004);assert.equal(result.portfolio[0].approvalRequired,true);
+  assert.equal(result.capacity.availableGrowthHours,0.004);assert.equal(result.allocation.nextExecutable,null);
+});
+
+test('foreign approval and experiment metadata cannot change tenant capacity', () => {
+  const result=derivePortfolioAllocation({workspace:{id:'owner'},settings:{growthCapacityHours:2,maxConcurrentGrowthExperiments:1},opportunities:[{id:'o1',title:'Own analysis',kind:'operations',executionCost:0,effortHours:1,approvalRequired:false}],approvals:[{workspaceId:'foreign',status:'pending',payload:{opportunityId:'o1'}}],revenueEngine:{workspaceId:'foreign',experiments:[{opportunityId:'o1',status:'running'}]}});
+  assert.equal(result.capacity.pendingApprovals,0);assert.equal(result.capacity.activeGrowthExperiments,0);assert.equal(result.allocation.nextExecutable.opportunityId,'o1');
 });

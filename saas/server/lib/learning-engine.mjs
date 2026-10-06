@@ -1,3 +1,4 @@
+import { tenantBusinessEvidence } from './business-evidence-scope.mjs';
 const clean = (value, max = 180) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 const round = (value, digits = 2) => Number.isFinite(Number(value)) ? Number(Number(value).toFixed(digits)) : null;
 
@@ -50,13 +51,14 @@ function workRows(state = {}) {
 }
 
 function unique(rows) {
-  const seen = new Set();
-  return rows.filter(row => {
+  const byId = new Map(), conflicts = new Set();
+  for (const row of rows) {
     const key = row.id || `${row.kind}:${row.measuredAt}:${row.contribution}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const previous = byId.get(key);
+    if (previous && (previous.kind !== row.kind || previous.contribution !== row.contribution)) conflicts.add(key);
+    else if (!previous) byId.set(key,row);
+  }
+  return {rows:[...byId.entries()].filter(([key])=>!conflicts.has(key)).map(([,row])=>row),conflicts:conflicts.size};
 }
 
 function confidence(samples) {
@@ -88,8 +90,10 @@ function summarize(kind, rows, minSamples) {
 }
 
 export function deriveLearning(state = {}, { minSamples = 2 } = {}) {
+  state = tenantBusinessEvidence(state);
   const requiredSamples = Math.max(2, Math.min(20, Number(minSamples) || 2));
-  const evidence = unique([...experimentRows(state), ...workRows(state)]);
+  const deduplicated = unique([...experimentRows(state), ...workRows(state)]);
+  const evidence = deduplicated.rows;
   const grouped = new Map();
   for (const row of evidence) {
     const bucket = grouped.get(row.kind) || [];
@@ -102,13 +106,15 @@ export function deriveLearning(state = {}, { minSamples = 2 } = {}) {
 
   return {
     schema:'runvara-learning/v1',
-    workspaceId:clean(state.workspace?.id, 120),
+    workspaceId:clean(state.workspace?.id, 256),
     generatedAt:new Date().toISOString(),
     minimumSamples:requiredSamples,
     priors,
     evidence:evidence.slice(0, 200),
     summary:{
       verifiedLearningEvents:evidence.length,
+      conflictingEvidenceExcluded:deduplicated.conflicts,
+      ambiguousSourceRecordsExcluded:state.evidenceScope.ambiguousSourceRecordsExcluded,
       domainsObserved:priors.length,
       domainsUsableForGuidance:priors.filter(item => item.usableForGuidance).length
     },

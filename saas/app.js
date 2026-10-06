@@ -504,8 +504,10 @@
       const learned = item.learning ? ' · learned from ' + item.learning.samples + ' verified result' + (item.learning.samples === 1 ? '' : 's') + ' · ' + item.learning.positiveRatePercent + '% positive' : '';
       const posture = item.evidenceDecision === 'ready-for-owner-review' ? 'Ready for owner review' : item.evidenceDecision === 'deprioritise' ? 'Deprioritise' : item.evidenceDecision === 'needs-more-evidence' ? 'Needs more evidence' : item.score !== null ? money(item.score) : item.learning ? 'Learned signal' : 'Needs evidence';
       const tone = item.evidenceDecision === 'deprioritise' ? 'bad' : item.evidenceDecision === 'ready-for-owner-review' ? 'good' : item.evidenceDecision === 'needs-more-evidence' ? 'warn' : item.score !== null ? 'good' : 'neutral';
-      const verifiedOutcome = item.evidenceDecision ? ' · ' + (item.evidenceDecisionReason || 'verified experiment updated decision posture') + (Number.isFinite(Number(item.verifiedContributionValue)) ? ' · verified contribution ' + money(item.verifiedContributionValue) : '') : '';
-      return '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.evidence || '') + learned + verifiedOutcome) + '</small></span><span class="tag ' + tone + '">' + escapeHtml(posture) + '</span></li>';
+      const verifiedOutcome = item.evidenceDecision ? ' · ' + (item.evidenceDecisionReason || 'verified experiment updated decision posture') + (item.verifiedContributionValue !== null && item.verifiedContributionValue !== undefined && item.verifiedContributionValue !== '' && Number.isFinite(Number(item.verifiedContributionValue)) ? ' · verified contribution ' + money(item.verifiedContributionValue) : '') : '';
+      const recorded = (state.data.opportunities || []).some(row => row.id === item.id);
+      const investigate = recorded ? '<button class="text-button" type="button" data-investigate-opportunity="' + escapeHtml(item.id) + '">Investigate</button>' : '<button class="text-button" type="button" data-view-link="profit">Inspect evidence</button>';
+      return '<li><span class="priority-number">' + (index + 1) + '</span><span class="priority-link"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml((item.evidence || '') + learned + verifiedOutcome) + '</small>' + investigate + '</span><span class="tag ' + tone + '">' + escapeHtml(posture) + '</span></li>';
     }).join('') || '<li class="empty-state">No Hypergrowth opportunities detected yet.</li>';
     $('#hg-council-list').innerHTML = [
       ['Recommended now', recommended, recommended ? 'good':'neutral'],
@@ -554,16 +556,16 @@
     $('#hg-allocation-badge').className = 'tag ' + (allocationReady ? 'good' : 'neutral');
     $('#hg-allocation').innerHTML = [
       {
-        label:'Next £1',
+        label:'Evidence / planned cost',
         title:nextPound?.title || 'Not enough cost evidence',
         value:nextPound ? Number(nextPound.verifiedContributionPerPound).toFixed(2) + '× verified contribution / £' : '—',
-        note:nextPound ? 'Uses explicit execution cost only.' : 'Add execution cost to a verified opportunity before Runvara recommends capital efficiency.'
+        note:nextPound ? 'Historical contribution divided by recorded planned cost; not forecast profit or measured ROI.' : 'Add execution cost to a verified opportunity before Runvara recommends capital efficiency.'
       },
       {
-        label:'Next hour',
+        label:'Evidence / planned hour',
         title:nextHour?.title || 'Not enough effort evidence',
         value:nextHour ? money(nextHour.verifiedContributionPerHour) + ' / hour' : '—',
-        note:nextHour ? 'Uses explicit effort hours only.' : 'Add effort hours to a verified opportunity before Runvara recommends time efficiency.'
+        note:nextHour ? 'Historical contribution divided by recorded planned hours; no future return is promised.' : 'Add effort hours to a verified opportunity before Runvara recommends time efficiency.'
       },
       {
         label:'Top evidence priority',
@@ -572,7 +574,7 @@
         note:topPriority ? (topPriority.verifiedContribution == null ? 'Evidence-weighted priority; no verified contribution value yet.' : 'Verified contribution ' + money(topPriority.verifiedContribution) + '.') : 'Runvara will rank opportunities as verified evidence accumulates.'
       },
       {
-        label:'Executable now',
+        label:'Ready for internal preparation',
         title:nextExecutable?.title || 'No safe work fits current constraints',
         value:nextExecutable ? 'Priority ' + Number(nextExecutable.priorityIndex || 0).toFixed(3) : '—',
         note:nextExecutable ? 'Fits current capacity and needs no owner-gated external action.' : (portfolio.capacity?.availableGrowthHours == null ? 'Set growth capacity hours to make execution-fit recommendations stricter.' : 'Current approval, experiment or capacity constraints block the remaining portfolio.')
@@ -583,7 +585,7 @@
     $('#hg-execution-badge').textContent = sequence.length ? sequence.length + ' safe step' + (sequence.length === 1 ? '' : 's') : 'No safe step';
     $('#hg-execution-badge').className = 'tag ' + (sequence.length ? 'good' : 'neutral');
     $('#hg-execution').innerHTML = sequence.slice(0,6).map(item =>
-      '<li><span class="priority-number">' + escapeHtml(item.step) + '</span><div><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.nextAction || '') + (Number.isFinite(Number(item.verifiedContribution)) ? ' · verified contribution ' + escapeHtml(money(item.verifiedContribution)) : '') + '</small></div></li>'
+      '<li><span class="priority-number">' + escapeHtml(item.step) + '</span><div><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.nextAction || '') + (item.verifiedContribution !== null && item.verifiedContribution !== undefined && item.verifiedContribution !== '' && Number.isFinite(Number(item.verifiedContribution)) ? ' · verified contribution ' + escapeHtml(money(item.verifiedContribution)) : '') + '</small></div></li>'
     ).join('') || '<li class="empty-state">No safe internal step is ready under the current evidence, approval and capacity constraints.</li>';
     $('#hg-blocked-badge').textContent = blocked.length + ' blocked';
     $('#hg-blocked-badge').className = 'tag ' + (blocked.length ? 'warn' : 'good');
@@ -1124,6 +1126,16 @@
     $('#cancel-objective-edit').classList.remove('hidden');
     fields.title.focus();
   });
+  $('#hg-opportunities').addEventListener('click', event => {
+    const button = event.target.closest('[data-investigate-opportunity]');
+    if (!button) return;
+    const id = button.dataset.investigateOpportunity;
+    if (!(state.data?.opportunities || []).some(item => item.id === id)) return;
+    setView('opportunities');
+    const target = Array.from(document.querySelectorAll('[data-opportunity-record]')).find(item => item.dataset.opportunityRecord === id);
+    if (target) { target.tabIndex = -1; target.scrollIntoView({block:'center'}); target.focus(); }
+  });
+
   $('#load-business-objectives').addEventListener('click', async event => {
     const button = event.currentTarget, generation = state.graphGeneration, csrf = state.csrf;
     if (button.disabled || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;

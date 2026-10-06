@@ -47,3 +47,10 @@ test('growth council surfaces verified learning without bypassing current econom
   assert.equal(council.safeguards.historicalLearningCannotBypassCurrentEconomics,true);
   assert.equal(council.commander.externalWrites,false);
 });
+
+test('council rejects cross-tenant queue evidence and retains long tenant identities', () => {
+  const tenant='a'.repeat(180);
+  assert.throws(()=>runGrowthCouncil({workspaceId:tenant},{workspaceId:'other',opportunities:[]}),error=>error.code==='WORKSPACE_MISMATCH');
+  assert.throws(()=>runGrowthCouncil({workspaceId:tenant},{workspaceId:tenant,opportunities:[{id:'one',workspaceId:'other'}]}),error=>error.code==='WORKSPACE_MISMATCH');
+  assert.equal(runGrowthCouncil({workspaceId:tenant},{workspaceId:tenant,opportunities:[]}).workspaceId,tenant);
+});
