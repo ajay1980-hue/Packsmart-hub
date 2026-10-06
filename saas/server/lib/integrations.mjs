@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { decryptCredentials } from './security.mjs';
 import { connectorMethods } from './connector-oauth.mjs';
+import { dispatchConnectionMutation } from './connection-dispatch.mjs';
 import { metaMethods } from './meta-commerce.mjs';
 import { connectionSettings, connectionError } from './connection-centre.mjs';
 
@@ -529,20 +530,24 @@ export class IntegrationService {
     }
   }
 
-  async shopifyGraphql(query, variables, config) {
+  async shopifyGraphql(query, variables, config, { dispatch } = {}) {
     const version = String(config.apiVersion || '2026-07');
     if (!/^20\d\d-(01|04|07|10)$/.test(version)) throw integrationError('Invalid Shopify API version', 503, 'SHOPIFY_CONFIG_INVALID');
+    const mutation = !/^\s*query\b/.test(query);
+    const url = `https://${config.domain}/admin/api/${version}/graphql.json`;
+    const body = JSON.stringify({ query, variables });
     const token = await this.shopifyAccessToken(config);
-    const response = await this.fetch(`https://${config.domain}/admin/api/${version}/graphql.json`, {
+    const submit = () => this.fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': token,
         'User-Agent': 'Packsmart-Ops/4.2'
       },
-      body: JSON.stringify({ query, variables }),
+      body, redirect: 'error',
       signal: AbortSignal.timeout(20000)
     });
+    const response = mutation ? await dispatchConnectionMutation(dispatch, { provider: 'shopify', phase: 'shopify_mutation', method: 'POST', url, body }, submit) : await submit();
     const payload = await responseJson(response, 'Shopify');
     if (Array.isArray(payload.errors) && payload.errors.length) {
       const denied = payload.errors.some(error => error.extensions?.code === 'ACCESS_DENIED' || /access denied|permission/i.test(error.message || ''));

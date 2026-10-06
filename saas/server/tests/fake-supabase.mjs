@@ -1,4 +1,21 @@
 // Contract fake: FK creation, unique identities and conditional PATCH semantics.
+function projectWorkspaceRow(workspaceId, state, select) {
+  const row = { workspace_id: workspaceId, state };
+  return Object.fromEntries(select.split(',').map(expression => {
+    // Only ordinary columns and simple JSON-arrow paths are implemented. Keep
+    // projection behavior explicit so a bad query cannot silently fetch state.
+    const match = /^(?:([A-Za-z_]\w*):)?(workspace_id|state)((?:(?:->>|->)(?:[A-Za-z_]\w*|\d+))*)$/.exec(expression);
+    if (!match) throw new Error(`Unsupported fake Supabase projection: ${expression}`);
+    const [, alias, column, path] = match;
+    let value = row[column], key = column;
+    for (const [, operator, segment] of path.matchAll(/(->>|->)([A-Za-z_]\w*|\d+)/g)) {
+      key = segment;
+      value = value !== null && typeof value === 'object' && Object.hasOwn(value, segment) ? value[segment] : null;
+      if (operator === '->>' && value !== null) value = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    }
+    return [alias || key, value ?? null];
+  }));
+}
 export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
   const states = new Map(initialStates.map(state => [state.workspace.id, structuredClone(state)]));
   const tables = new Map(), calls = [];
@@ -24,14 +41,15 @@ export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
         states.set(id, structuredClone(body.state));
         return Response.json([{ workspace_id: id }]);
       }
+      let selected = [...states].filter(([key]) => !id || key === id);
+      const revision = url.searchParams.get('state->>_revision');
+      if (revision !== null) selected = selected.filter(([, state]) => revision === 'is.null' ? state._revision == null : revision === `eq.${state._revision}`);
       if (url.searchParams.has('state->users')) {
         const wanted = JSON.parse(url.searchParams.get('state->users').slice(3))[0].email;
-        return Response.json([...states].filter(([, state]) => state.users.some(user => user.email === wanted)).map(([key, state]) => ({ workspace_id: key, users: state.users })));
+        selected = selected.filter(([, state]) => state.users.some(user => user.email === wanted));
       }
-      if (url.searchParams.get('select') === 'state->workspace,state->users') return Response.json(states.has(id) ? [{ workspace: states.get(id).workspace, users: states.get(id).users }] : []);
-      if (url.searchParams.get('select') === 'revision:state->>_revision') return Response.json(states.has(id) ? [{ revision: states.get(id)._revision || null }] : []);
-      if (url.searchParams.get('select') === 'state') return Response.json(states.has(id) ? [{ state: states.get(id) }] : []);
-      return Response.json([...states.keys()].slice(Number(url.searchParams.get('offset') || 0), Number(url.searchParams.get('offset') || 0) + Number(url.searchParams.get('limit') || 200)).map(key => ({ workspace_id: key })));
+      const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 200);
+      return Response.json(selected.slice(offset, offset + limit).map(([key, state]) => projectWorkspaceRow(key, state, url.searchParams.get('select') || 'workspace_id')));
     }
     if (method === 'POST') {
       const rows = tables.get(table) || [];

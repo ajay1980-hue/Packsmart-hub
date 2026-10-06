@@ -326,6 +326,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
+  const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
@@ -461,14 +462,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   }
 
-  async function mutate(auth, callback) {
+  async function mutate(auth, callback, { persist = true } = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
       const state = await store.get(auth.session.workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status: 404, code: 'WORKSPACE_NOT_FOUND' });
       const currentUser = state.users.find(item => item.id === auth.user.id);
       if (!currentUser || currentUser.active === false || currentUser.role !== auth.user.role || Number(currentUser.sessionVersion || 1) !== Number(auth.session.sessionVersion || 1)) throw Object.assign(new Error('Session changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
       const result = await callback(state);
-      await store.save(auth.session.workspaceId, state);
+      if (persist) await store.save(auth.session.workspaceId, state);
       return result;
     });
   }
@@ -1127,7 +1128,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { identityOnly: (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -2100,7 +2101,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const executeWrite = pathname.match(/^\/api\/connection-writes\/([a-z0-9_-]+)\/execute$/i);
         if (req.method === 'POST' && executeWrite) {
           requireApprover(auth);
-          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state)));
+          const executionRate = connectionWriteLimiter.check(auth.session.workspaceId);
+          if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
+          connectionWriteLimiter.fail(auth.session.workspaceId);
+          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), durableStore: store.provider === 'supabase',
+            actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write, executedExternally: write.status === 'completed' }); return;
         }
 
