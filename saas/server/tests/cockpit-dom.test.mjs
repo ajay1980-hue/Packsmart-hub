@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
+import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
 import { createSessionToken, hashPasswordAsync } from '../lib/security.mjs';
 
 test('cockpit renders authenticated controls and submits real persisted workflows', async t => {
@@ -62,6 +63,46 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   assert.match(document.getElementById('business-graph-result').textContent, /Recorded entities inspected/);
   graphDetails.open = false;
 
+  await t.test('objective create, edit, cancel, currency and stale-load flows preserve owner input', async () => {
+    const form=document.getElementById('business-objective-form'), fields=form.elements, button=form.querySelector('button[type=submit]');
+    assert.equal(calls.filter(call=>call.route==='/api/business-objectives').length,0,'no automatic objective polling');
+    const fill = title => {
+      fields.title.value=title;fields.metric.value='revenue';fields.direction.value='increase';fields.baseline.value='100';fields.target.value='125';fields.currency.value='GBP';
+      fields.startsAt.value=new Date(Date.now()-60000).toISOString().slice(0,16);fields.endsAt.value=new Date(Date.now()+86400000).toISOString().slice(0,16);
+      fields.maxMonthlyAdBudget.value='0';fields.minGrossMarginPercent.value='35';
+    };
+    const submit=()=>form.dispatchEvent(new window.Event('submit',{bubbles:true,cancelable:true}));
+    fill('Profitable packaging growth');submit();submit();
+    await until(()=>!button.disabled);
+    assert.equal(document.getElementById('business-objective-error').textContent,'');
+    let saved=await server.packsmart.store.get('ui-test');
+    assert.equal(saved.businessObjectives.length,1);assert.equal(saved.businessObjectives[0].limits.maxMonthlyAdBudget,0);
+    assert.match(document.getElementById('business-objectives-list').textContent,/Ads ≤ 0 GBP/);
+    document.querySelector('[data-edit-objective]').click();fields.status.value='paused';submit();await until(()=>!button.disabled);
+    saved=await server.packsmart.store.get('ui-test');assert.equal(saved.businessObjectives[0].status,'paused');assert.equal(saved.businessObjectives[0].revision,2);
+    document.querySelector('[data-edit-objective]').click();fields.title.value='Not saved';
+    const beforeCancel=calls.length;document.getElementById('cancel-objective-edit').click();assert.equal(calls.length,beforeCancel);assert.equal(form.dataset.objectiveId,undefined);
+    const cad=upsertBusinessObjective(saved,{title:'CAD objective',metric:'revenue',baseline:1,target:2,direction:'increase',startsAt:'2026-10-01T01:02:03.456Z',endsAt:'2027-10-01T02:03:04.567Z',limits:{currency:'CAD',minGrossMarginPercent:35.55,minStockCoverDays:1.25,maxMonthlyAdBudget:0.005}});
+    await server.packsmart.store.save('ui-test',saved);
+    document.getElementById('load-business-objectives').click();await until(()=>!document.getElementById('load-business-objectives').disabled);
+    document.querySelector('[data-edit-objective="'+cad.id+'"]').click();assert.equal(fields.currency.value,'CAD');assert.equal(fields.minGrossMarginPercent.validity.stepMismatch,false);assert.equal(fields.minStockCoverDays.validity.stepMismatch,false);assert.equal(fields.maxMonthlyAdBudget.validity.stepMismatch,false);fields.status.value='paused';submit();await until(()=>!button.disabled);
+    saved=await server.packsmart.store.get('ui-test');const edited=saved.businessObjectives.find(item=>item.id===cad.id);
+    assert.equal(edited.startsAt,cad.startsAt);assert.equal(edited.endsAt,cad.endsAt);assert.equal(edited.limits.currency,'CAD');
+    const countGoal=upsertBusinessObjective(saved,{title:'Order count target',metric:'orders',baseline:1,target:2,direction:'increase',startsAt:cad.startsAt,endsAt:cad.endsAt,limits:{currency:null}});
+    await server.packsmart.store.save('ui-test',saved);
+    document.getElementById('load-business-objectives').click();await until(()=>!document.getElementById('load-business-objectives').disabled);
+    document.querySelector('[data-edit-objective="'+countGoal.id+'"]').click();assert.equal(fields.currency.value,'');fields.status.value='paused';submit();await until(()=>!button.disabled);
+    assert.equal(document.getElementById('business-objective-error').textContent,'');
+    saved=await server.packsmart.store.get('ui-test');assert.equal(saved.businessObjectives.find(item=>item.id===countGoal.id).limits.currency,null);
+    let resolveOld;const fetchBefore=window.fetch;
+    window.fetch=(route,options={})=>route==='/api/business-objectives' && (!options.method || options.method==='GET') ? new Promise(resolve=>{resolveOld=resolve;}) : fetchBefore(route,options);
+    document.getElementById('load-business-objectives').click();await until(()=>Boolean(resolveOld));
+    fill('Newer saved objective');submit();await until(()=>!button.disabled);
+    assert.match(document.getElementById('business-objectives-list').textContent,/Newer saved objective/);
+    resolveOld(Response.json({workspaceId:'ui-test',objectives:[]}));await until(()=>!document.getElementById('load-business-objectives').disabled);
+    assert.match(document.getElementById('business-objectives-list').textContent,/Newer saved objective/,'late load cannot replace saved result');
+    window.fetch=fetchBefore;
+  });
   document.querySelector('[data-view="revenue-engine"]').click();
   assert.equal(document.querySelector('.view.active').id, 'view-revenue-engine');
   assert.equal(document.getElementById('re-pipeline').textContent, '£240.00', 'Revenue Engine renders retained tenant data from bootstrap');

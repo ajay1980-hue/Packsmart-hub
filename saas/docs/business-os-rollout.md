@@ -71,3 +71,17 @@ This is a bounded projection of retained records, not a complete persistent grap
 -236/236 stage-specific tests pass locally, including21 graph tests; syntax and guard checks pass. Objective-module experiments are excluded from this stage's commit/test count.
 - Synthetic5000-product/100-variant-per-product input: summary scanned48 records, returned about3KB, and took about4ms on this cloud executor. This is a local synthetic benchmark, not a production capacity guarantee.
 - A dedicated CI browser test exercises the actual app/server at320,390 and1200 pixels, checks overflow and zero automatic graph fetching. Local Chromium cannot launch under executor socket restrictions; do not weaken that CI gate.
+
+### Stage 2 production evidence
+
+[PR65](https://github.com/ajay1980-hue/Packsmart-hub/pull/65) merged as `2288af6daf141ae6aeca62d1a2ddd3b2697de4f8`. [CI37497487076](https://github.com/ajay1980-hue/Packsmart-hub/actions/runs/37497487076) passed full tests, existing onboarding checks, the new actual graph UI browser flow at320/390/1200 pixels, Docker and health smoke. Existing Render deploy `dep-db2iba60tbcc739c04e0` became live at16:46:12 UTC after confirming auto-deploy had not queued. Health returned exact commit2288af6 and productionReady:true. Unauthenticated graph access returned401/AUTH_REQUIRED. Authenticated behavior was exercised against synthetic tenant data in CI, not by modifying live customer records.
+
+## Stage 3: structured planning objectives and limits
+
+Definitions persist in existing tenant state as `businessObjectives`, with at most50 entries, generated identities, optimistic revisions, audit events, UTC windows and strict finite metric values. Owner/admin CRUD follows existing authentication/CSRF and mutation locks. Monetary objectives require currency; unknown baseline stays null; explicit zero budgets stay zero. Targets cannot contradict their own margin/advertising/stock limits.
+
+Existing AI Team gets on-demand load/create/edit/pause/cancel controls. This is explicitly labelled a planning foundation: definitions do not yet globally govern existing executors or launch actions. Editing retains exact UTC dates, valid currencies and numeric precision. Stale loads cannot replace newly saved goals, repeated submissions coalesce, and changed revisions require reload.
+
+The evaluator checks bounded internal preparation against known baseline, source references, remaining time, cost/currency, capacity, margin, stock and advertising limits. Evidence is supplied/unverified and references are not yet resolved. A conditional ready result is never execution authority. Every risky action or positive spend remains approval-required; external execution is always false. No model call, provider request, recurring job, purchase or external write is introduced.
+
+Verification includes module, API, tenant/CSRF, persistence/audit, zero-budget and contradiction cases; DOM create/edit/cancel, missing/cross-currency precision and stale-session/load cases. The real mobile/desktop CI flow additionally saves and edits only synthetic objectives. No Packsmart objective or spending limit is created on the user's behalf by deployment.
