@@ -146,3 +146,17 @@ Existing Render deploy `dep-db2ki1qjnfac73clks0g` became live at19:16:50 UTC. He
 ## Stage 6: objective-linked Commander preparation
 
 See [the objective review release record](objective-review-rollout.md) for the scope, authority boundaries, bounded request/data budget, retry/lease behavior and verification requirements. Saved objectives now drive a requested deterministic specialist review through the existing queue, with reports persisted in job.result rather than expanding the hot business snapshot. Completion of the diagnostic does not authorize or imply readiness for commercial execution.
+
+### Stage 6 production evidence
+
+[PR69](https://github.com/ajay1980-hue/Packsmart-hub/pull/69) merged as `ce9c0edaa73ea3278fced6e4a1c57f8c960388dd`. Final CI passed405 Node tests,51 real PostgreSQL objective-lease tests,41 atomic-accounting tests, responsive browser flows, Android and container smoke. The migration is recorded as20261006194326 and its repository filename matches. Live catalog verification confirms validated constraints, the enabled SECURITY INVOKER trigger, unchanged RLS and no direct helper-execution grants, including service_role.
+
+Existing Render deploy `dep-db2l2s8m7kps739320dg` became live at19:52:41 UTC. Health at19:53:16 returned the exact commit, productionReady:true and healthy persistence/auth/encryption. No customer objective or review was created during verification. Hot state was1,557,015 bytes, close to its1,572,864-byte warning threshold; new objective reports live in job.result rather than adding to that snapshot.
+
+### Mature usage observation
+
+A bounded Render metrics read at20:14 UTC reported0.18449497 MB for18:00–19:00 UTC (timestamp19:00),99.52% below the prior23-hour baseline of38.53855 MB/hour. The preceding17:00–18:00 hour was35.690376 MB and included deployments through17:34. The mature18:00–19:00 observation predates stages5/6 and is one full hour after the earlier releases. It is a descriptive one-hour reduction, not a causal attribution, sustained-rate guarantee or billing forecast. An earlier provisional value for that hour revised upward, so publication delay matters: [Render bandwidth timing](https://render.com/docs/service-metrics#outbound-bandwidth).
+
+## Stage 7: quota-safe automation payload retention
+
+See [the retention release record](automation-retention-rollout.md). The stage reduces repeated hot-state payloads while preserving quota membership, immutable full evidence, active scheduler references and bounded explicit history access. It adds no database schema, access grant, service or recurring worker.

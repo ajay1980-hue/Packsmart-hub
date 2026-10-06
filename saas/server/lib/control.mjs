@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { connectionDue, CONNECTORS } from './connection-centre.mjs';
 import { AUTOMATION_DEFINITIONS, deriveOperations, ebayComparisonAvailable, integrationMatrix, normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
+import { automationEvidenceCount } from './automation-retention.mjs';
 
 const nowIso = () => new Date().toISOString();
 const clean = (value, max = 1000) => String(value ?? '').trim().slice(0, max);
@@ -254,12 +255,12 @@ export function finishAutomation(state, run, { evidence = [], errorCode = null, 
 export function valueSummary(state) {
   const runs = state.automationRuns || [];
   const finished = runs.filter(item => ['COMPLETED', 'FAILED', 'BLOCKED'].includes(item.status));
-  const succeeded = finished.filter(item => item.status === 'COMPLETED' && item.evidence?.length);
+  const succeeded = finished.filter(item => item.status === 'COMPLETED' && automationEvidenceCount(item, state.workspace?.id) > 0);
   return { actual: { tasksAutomated: succeeded.length, issuesDetected: (state.exceptions || []).length, opportunitiesGenerated: (state.opportunities || []).length,
     automationSuccessRate: finished.length ? Math.round(succeeded.length / finished.length * 100) : null,
     moneySaved: null, revenueCreated: null, hoursSaved: null, customerResponsesHandled: 0 },
     estimated: { opportunities: (state.opportunities || []).filter(item => item.present && item.estimatedImpact).map(item => ({ id: item.id, title: item.title, ...item.estimatedImpact })) },
-    explanation: 'Actual counts come from durable records. Financial savings and time savings remain unknown until verified. Opportunity estimates are per unit and are never added to realised value.' };
+    explanation: 'Actual counts cover retained durable records, including archived-run counts, not all-time history. Financial savings and time savings remain unknown until verified. Opportunity estimates are per unit and are never added to realised value.' };
 }
 
 export function controlSnapshot(state) {
