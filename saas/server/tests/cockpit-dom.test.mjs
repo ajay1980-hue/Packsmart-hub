@@ -8,6 +8,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
+import { detectOpportunities } from '../lib/control.mjs';
 import { createSessionToken, hashPasswordAsync } from '../lib/security.mjs';
 
 test('cockpit renders authenticated controls and submits real persisted workflows', async t => {
@@ -17,6 +18,11 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   const state = seedWorkspaceState({}, { workspaceId: 'ui-test', email: 'ui@example.test', passwordHash: await hashPasswordAsync('GraphSessionTest!2026') });
   state.products = [{ id: 'p1', title: '<img src=x onerror=alert(1)>', status: 'active', variants: [{ id: 'v1', sku: 'SKU-1', price: 10, inventory: 1, available: true }] }];
   state.revenueEngine.quotes = [{ id: 'q1', status: 'draft', lines: [{ sku: 'SKU-1', quantity: 20, unitPrice: 12 }] }];
+  detectOpportunities(state);
+  const evidencedOpportunity = state.opportunities[0];
+  assert.ok(evidencedOpportunity);
+  evidencedOpportunity.experimentId = 'verified-ui-experiment';
+  state.revenueEngine.experiments = [{id:'verified-ui-experiment',opportunityId:evidencedOpportunity.id,status:'completed',impact:{verified:true,incrementalContribution:12.34}}];
   await server.packsmart.store.save('ui-test', state);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -41,6 +47,15 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
+  const investigate = document.querySelector('[data-investigate-opportunity="' + evidencedOpportunity.id + '"]');
+  assert.ok(investigate, 'Command links the original durable opportunity');
+  assert.match(investigate.closest('li').textContent, /Ready for owner review/);
+  assert.match(investigate.closest('li').textContent, /verified contribution £12.34/);
+  const beforeInvestigate = calls.length;
+  investigate.click();
+  assert.equal(document.querySelector('.view.active').id,'view-opportunities');
+  assert.equal(document.activeElement.className,'control-record');
+  assert.equal(calls.length,beforeInvestigate,'investigation navigates to evidence without requesting approval or executing');
   const graphButton = document.getElementById('load-business-graph');
   const graphDetails = document.querySelector('.business-graph-inspector');
   assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 0, 'bootstrap never polls the graph');

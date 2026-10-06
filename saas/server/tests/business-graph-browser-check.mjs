@@ -32,6 +32,15 @@ try {
     await page.goto(base);
     await page.locator('#app-shell:not(.hidden)').waitFor();
     assert.equal(calls.length,0,'no automatic graph requests');
+    const investigate = page.locator('[data-investigate-opportunity]').first();
+    await investigate.waitFor();
+    const navigatedId = await investigate.getAttribute('data-investigate-opportunity');
+    await investigate.click();
+    await page.locator('#view-opportunities.active').waitFor();
+    assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('data-opportunity-record')),navigatedId);
+    if (await page.locator('#mobile-menu').isVisible()) await page.locator('#mobile-menu').click();
+    await page.locator('#main-nav [data-view="overview"]').click();
+
     const details = page.locator('.business-graph-inspector');
     await details.locator('summary').click();
     await page.locator('#load-business-graph').click();

@@ -79,6 +79,9 @@ export function deliberateOpportunity(opportunity, businessState) {
 }
 
 export function runGrowthCouncil(businessState, opportunityQueue, { limit = 10 } = {}) {
+  const scope = businessState?.workspaceId;
+  if (opportunityQueue?.workspaceId !== undefined && opportunityQueue.workspaceId !== scope) throw Object.assign(new Error('Workspace identity mismatch'), {status:403,code:'WORKSPACE_MISMATCH'});
+  if ((opportunityQueue?.opportunities || []).some(item => item?.workspaceId !== undefined && item.workspaceId !== scope)) throw Object.assign(new Error('Workspace identity mismatch'), {status:403,code:'WORKSPACE_MISMATCH'});
   const opportunities = (opportunityQueue?.opportunities || []).slice(0, Math.max(1, Math.min(50, Number(limit) || 10)));
   const deliberations = opportunities.map(item => deliberateOpportunity(item, businessState));
   const recommended = deliberations.filter(item => item.decision === 'recommend');
@@ -87,7 +90,7 @@ export function runGrowthCouncil(businessState, opportunityQueue, { limit = 10 }
 
   return {
     schema:'runvara-growth-council/v1',
-    workspaceId:clean(businessState?.workspaceId,120),
+    workspaceId:clean(businessState?.workspaceId,256),
     generatedAt:businessState?.generatedAt || null,
     deliberations,
     commander:{
@@ -107,7 +110,7 @@ export function runGrowthCouncil(businessState, opportunityQueue, { limit = 10 }
       externalWrites:false,
       unknownProfitCanBeRecommendedAsVerified:false,
       historicalLearningCannotBypassCurrentEconomics:true,
-      tenantScope:clean(businessState?.workspaceId,120)
+      tenantScope:clean(businessState?.workspaceId,256)
     }
   };
 }
