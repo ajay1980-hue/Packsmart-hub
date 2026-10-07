@@ -10,6 +10,7 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
+import { actionUiFixture } from './business-outcomes-action-ui-fixture.mjs';
 import { createActivityMeter } from '../lib/activity-meter.mjs';
 
 const workspaceId = 'outcome-app-lifecycle', experimentId = 'experiment_one', actorId = 'owner_one';
@@ -35,7 +36,11 @@ async function until(predicate) {
 }
 const expired = () => Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 });
 
-async function harness(t) {
+async function harness(t, { linked = false } = {}) {
+  const action = linked ? actionUiFixture(workspaceId) : null;
+  const selectedMeasurement = action ? prepareExperimentOutcomeMeasurement({ expectedRevision: 0, actionSelection: { actionId: action.choice.id }, amount: '10', currency: 'GBP', window: measurement.window, coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' }, observedAt: measurement.provenance.observedAt, report: { description: 'Linked lifecycle fixture', costsComplete: true } }, { workspaceId, experimentId, actorId, now, actionEvidence: action.source }) : measurement;
+  const selectedDetail = structuredClone(detail); selectedDetail.measurement = selectedMeasurement; selectedDetail.relationships.publication.draftDigest = selectedMeasurement.digest;
+  if (action) Object.assign(selectedDetail, { actionLinkContract: 'runvara-reviewed-action/v1', actionChoices: [action.choice], currentActionAssociation: null });
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-outcome-app-'));
   const secret = 'outcome-app-lifecycle-fixture-over-thirty-two-characters';
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
@@ -57,7 +62,7 @@ async function harness(t) {
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
   t.after(async () => { await new Promise(r => setTimeout(r, 15)); dom.window.close(); await fs.rm(directory, { recursive: true, force: true }); assert.deepEqual(errors, []); });
-  const h = { w, d, calls: [], handler: null, logout: null, $: id => d.getElementById(id) };
+  const h = { w, d, action, measurement: selectedMeasurement, calls: [], handler: null, logout: null, $: id => d.getElementById(id) };
   w.fetch = async (route, config = {}) => {
     h.calls.push({ route, config });
     if (route === '/api/bootstrap') return Response.json(bootstrap);
@@ -70,7 +75,7 @@ async function harness(t) {
     if (route.startsWith('/api/business-outcomes')) {
       const held = h.handler?.(route, config); if (held) return held;
       if (route === '/api/business-outcomes') return Response.json({ workspaceId, current: [], summary: { groups: [], coverage: { complete: true } } });
-      return Response.json(detail);
+      return Response.json(selectedDetail);
     }
     throw new Error('Unexpected fixture route ' + route);
   };
@@ -203,5 +208,30 @@ for (const kind of ['read', 'save', 'publish']) {
     old.hold.resolve(expired()); await new Promise(r => setTimeout(r, 10)); assert.equal(h.signedIn(), true);
     const active = await h.begin(kind); active.hold.resolve(expired()); await until(() => !h.signedIn());
     assert.equal(h.panel.open, false);
+  });
+}
+
+for (const kind of ['save', 'publish']) {
+  test(`linked ${kind} preserves exact selection and ignores responses after navigation and replacement login`, async t => {
+    const h = await harness(t, { linked: true }), old = await h.begin(kind);
+    const body = JSON.parse(old.request.config.body);
+    if (kind === 'save') assert.deepEqual(body.actionSelection, { actionId: h.action.choice.id });
+    else {
+      assert.equal(body.expectedMeasurementDigest, h.measurement.digest);
+      assert.match(h.$('business-outcomes-review').textContent, /write_reviewed_action/);
+      assert.match(h.$('business-outcomes-review').textContent, /explicitly associate/);
+    }
+    h.navigate('overview'); assert.equal(old.request.config.isCurrent(), false); assert.equal(old.request.config.signal.aborted, true);
+    h.logout = deferred(); h.$('logout').click(); h.logout.resolve(Response.json({ ok: true })); await until(() => !h.signedIn());
+    h.handler = null; h.logout = null;
+    const login = h.$('login-form'); Object.defineProperty(login, 'email', { value: login.elements.email }); Object.defineProperty(login, 'password', { value: login.elements.password });
+    login.elements.email.value = 'owner@outcome-app.test'; login.elements.password.value = 'synthetic-only'; login.dispatchEvent(new h.w.Event('submit', { bubbles: true, cancelable: true })); await until(h.signedIn);
+    await h.open(); await h.load();
+    const writes = h.calls.filter(c => ['PUT', 'POST'].includes(c.config.method) && c.route.startsWith('/api/business-outcomes')).length;
+    old.hold.resolve(expired()); await new Promise(r => setTimeout(r, 20));
+    assert.equal(h.signedIn(), true); assert.equal(h.$('business-outcomes-action').value, 'saved');
+    assert.equal(h.$('business-outcomes-review').textContent, '', 'the old pending owner review cannot cross sessions');
+    assert.equal(h.calls.filter(c => ['PUT', 'POST'].includes(c.config.method) && c.route.startsWith('/api/business-outcomes')).length, writes);
+    assert.equal(h.calls.some(c => c.route.includes('/versions/')), false, 'replacement login does not eagerly hydrate action evidence');
   });
 }

@@ -412,7 +412,9 @@ export function aggregateBusinessOutcomes(input, options) {
       amount: complete && additive ? decimal(rows.reduce((total, row) => total + units(row.amount), 0n)) : null,
       amountStatus: !complete ? 'incomplete_publication_read' : additive ? 'measured_sum' : 'standalone_observations',
       outcomeIds: rows.map(row => row.outcomeId).sort(), versionIds: rows.map(row => row.versionId).sort(),
-      learningComparable: complete && additive, forecastingAuthorized: false };
+      // Recorded action/approval associations do not establish comparison
+      // evidence. This deny-only guard leaves amounts and grouping unchanged.
+      learningComparable: complete && additive && rows.every(row => row.links.action === null && row.links.approval === null), forecastingAuthorized: false };
   });
   return { schema: 'runvara-business-outcome-summary/v1', workspaceId: workspace, publicationSnapshotId: boundary.snapshotId,
     generatedAt: now, groups, overallAmount: null, roi: null,

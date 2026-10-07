@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { reviewedActionFixture } from './reviewed-action-test-fixture.mjs';
+import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 import { createHash } from 'node:crypto';
 import { deriveImpact } from '../lib/impact-engine.mjs';
 import { deriveLearning } from '../lib/learning-engine.mjs';
@@ -399,4 +401,24 @@ test('qualified outcomes stay descriptive even above minSamples and derivation n
   assert.deepEqual(currentState, beforeState);
   assert.deepEqual(rows, beforeRows);
   assert.equal(outcomeSnapshot.publicationBoundary, publicationBoundary);
+});
+
+
+test('owner-associated immutable action and approval links remain descriptive with no learning or forecast authority', () => {
+  const action=reviewedActionFixture({workspaceId:WORKSPACE});
+  const m=prepareExperimentOutcomeMeasurement({expectedRevision:0,amount:'12',currency:'GBP',window:WINDOW,
+    coverage:{status:'complete',observedCount:10,expectedCount:10},method:{kind:'holdout'},observedAt:'2026-10-06T12:00:00.000Z',
+    report:{description:'Synthetic owner-associated action report',costsComplete:true},actionSelection:{actionId:action.write.id}},
+    {workspaceId:WORKSPACE,experimentId:'experiment_linked',actorId:'user_owner',now:NOW,previousMeasurement:null,actionEvidence:action.source});
+  const row=createBusinessOutcomeCandidate({source:{type:'experiment_measurement',experimentId:m.experimentId,measurementRevision:m.revision,measurementDigest:m.digest},
+    ...Object.fromEntries(['metric','amount','currency','window','coverage','method','provenance','links'].map(k=>[k,m[k]])),
+    verification:{kind:'owner_attestation',actorId:'user_owner',verifiedAt:NOW,measurementDigest:m.digest}},OPTIONS);
+  assert.ok(row.links.action); assert.ok(row.links.approval); assert.equal(row.links.objective,null);
+  const linkedHead=head(row,{committedAt:NOW});
+  const publicationBoundary=proof([row],{resolveCommittedPublication:()=>({head:linkedHead,version:row})});
+  for(const result of evaluateBoth(snapshot([row],publicationBoundary))) {
+    assert.equal(result.qualifiedOutcomeGroups[0].measuredCount,1); assert.equal(result.qualifiedOutcomeGroups[0].amount,'12');
+    assert.equal(result.qualifiedOutcomeGroups[0].learningComparable,false); assert.equal(result.qualifiedOutcomeGroups[0].forecastingAuthorized,false);
+  }
+  assert.equal(m.intervention.comparison,'not_established');
 });

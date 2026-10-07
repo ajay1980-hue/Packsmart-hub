@@ -226,6 +226,9 @@
             <label>Expected population<input name="expectedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
             <label>Measurement method<select name="method"><option value="unknown">Unknown</option><option value="holdout">Holdout comparison</option><option value="before_after">Before and after</option><option value="reconciled_manual">Reconciled records</option></select></label>
             <label>All relevant costs included?<select name="costsComplete"><option value="">Unknown</option><option value="false">No, incomplete</option><option value="true">Yes, complete</option></select></label>
+            <label class="wide">Associated recorded action (optional)<select id="business-outcomes-action" name="actionSelection" aria-describedby="business-outcomes-action-hint"><option value="">No recorded action</option></select></label>
+            <p id="business-outcomes-action-hint" class="muted tiny wide"></p>
+            <div id="business-outcomes-action-details" class="wide"></div>
             <label class="wide">Recorded measurement report<textarea name="description" maxlength="1000" required placeholder="Describe the measured facts and cost coverage. Do not include personal data or credentials."></textarea></label>
             <button type="submit" class="primary">Save measurement draft</button>
           </form>

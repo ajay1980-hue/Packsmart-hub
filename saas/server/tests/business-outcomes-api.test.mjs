@@ -15,6 +15,8 @@ import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 import { prepareExperimentOutcomeMeasurement, validateExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
+import { reviewedActionFixture } from './reviewed-action-test-fixture.mjs';
+import { resolveRecordedActionEvidence, REVIEWED_ACTION_CONTRACT } from '../lib/reviewed-action-evidence.mjs';
 import { evidenceInWorkspace } from '../lib/business-evidence-scope.mjs';
 
 const BASE = '/api/business-outcomes', EXPERIMENT = 'experiment_alpha';
@@ -39,9 +41,9 @@ function publicationRow(workspaceId, version, publicationId, commitRevision, at,
     intent_digest: digestMeasurementValue([workspaceId,publicationId]), committed_at: at, commit_revision: commitRevision, source_measurement: structuredClone(measurement) };
   return { row, receipt: { publication: { head, version }, replayed: false, isCurrent: true } };
 }
-const joinedRow = row => { const { source_measurement, ...compact } = row; return { workspace_id: row.workspace_id, outcome_id: row.outcome_id, version_id: row.version_id, version: compact }; };
+const joinedRow = row => { const { source_measurement, source_action, ...compact } = row; return { workspace_id: row.workspace_id, outcome_id: row.outcome_id, version_id: row.version_id, version: compact }; };
 
-async function fixture(t, { measured = true, published = false, env = {} } = {}) {
+async function fixture(t, { measured = true, published = false, env = {}, linkedContract = false } = {}) {
   const states = new Map(), rows = new Map(), receipts = new Map(), calls = [], invalidations = [];
   const counts = { identities: 0, gets: 0, saves: 0, providerCalls: 0 };
   const hooks = { afterIdentity: null, transport: null };
@@ -80,7 +82,9 @@ async function fixture(t, { measured = true, published = false, env = {} } = {})
       const matches = s?.revenueEngine?.experiments?.filter(x => x?.id === experimentId) || [];
       if (matches.length !== 1) throw sqlError('P0O09');
       const e = matches[0], current = [...rows.values()].filter(x => x.workspace_id === id && x.payload.source.experimentId === experimentId).sort((a,b) => b.revision-a.revision)[0];
-      return structuredClone({ workspaceId: id, workspaceRevision: s._revision, experiment: { id: e.id, title: e.title ?? null, status: e.status ?? null }, measurement: e.outcomeMeasurement ?? null, current: current ? joinedRow(current) : null });
+      return structuredClone({ workspaceId: id, workspaceRevision: s._revision, experiment: { id: e.id, title: e.title ?? null, status: e.status ?? null }, measurement: e.outcomeMeasurement ?? null, current: current ? joinedRow(current) : null,
+        ...(linkedContract ? { actionLinkContract: REVIEWED_ACTION_CONTRACT, currentActionAssociation: current?.source_measurement?.intervention ?? null,
+          actionChoices: (s.connectionWrites || []).filter(w=>w.recordedActionContext).map(w=>({ id:w.id, account:w.account, productId:w.input.productId, title:w.input.title, completedAt:w.completedAt, digest:w.recordedActionContext.snapshotDigest })) } : {}) });
     }
     if (path === 'rpc/runvara_publish_business_outcome') {
       const p = JSON.parse(options.body), s = states.get(p.p_workspace_id), actors = s?.users?.filter(x => x.id === p.p_actor_id) || [];
@@ -102,6 +106,10 @@ async function fixture(t, { measured = true, published = false, env = {} } = {})
         : p.p_action === 'correct' ? correctBusinessOutcomeCandidate(previous.payload, recordInput(measurement, verification), context)
         : createBusinessOutcomeCandidate(recordInput(measurement, verification), context);
       const value = publicationRow(p.p_workspace_id, version, p.p_publication_id, randomUUID(), at, measurement);
+      if (measurement.intervention) {
+        value.row.source_action = p.p_action === 'withdraw' ? previous.source_action
+          : measurement.intervention.reuseVersionId ? rows.get(measurement.intervention.reuseVersionId)?.source_action : resolveRecordedActionEvidence(s, measurement.intervention.action.id);
+      } else value.row.source_action = null;
       rows.set(version.versionId, value.row); receipts.set(p.p_publication_id, value.receipt);
       s._revision = value.receipt.publication.head.commitRevision; e.currentOutcome = value.receipt.publication.head;
       return structuredClone(value.receipt);
@@ -406,5 +414,49 @@ test('publication rollback switch and malformed values pause mutations while exi
     assert.equal(f.calls.length, 2); assert.ok(f.calls.every(call => !call.path.startsWith('rpc/runvara_publish')));
     assert.deepEqual(f.states.get('outcome-alpha'), beforeState); assert.deepEqual([...f.rows], beforeRows);
     assert.equal(f.counts.providerCalls, 0);
+  }
+});
+
+
+test('linked measurement save fails closed without compatible SQL and rejects caller evidence injection', async t => {
+  const f=await fixture(t), before=structuredClone(f.states.get('outcome-alpha'));
+  const r=await f.request(MEASURE,{method:'PUT',body:{...measurementInput(1),actionSelection:{actionId:'write_synthetic'}}});
+  assertError(r,503,'OUTCOME_ACTION_STORAGE_UNAVAILABLE'); assert.equal(f.counts.saves,0); assert.equal(f.counts.providerCalls,0);
+  assert.deepEqual(f.states.get('outcome-alpha'),before);
+  const g=await fixture(t,{linkedContract:true});
+  const injected=await g.request(MEASURE,{method:'PUT',body:{...measurementInput(1),actionSelection:{actionId:'write_synthetic',digest:'a'.repeat(64)}}});
+  assert.equal(injected.status,409); assert.equal(g.calls.length,0); assert.equal(g.counts.saves,0);
+});
+
+test('HTTP explicit action association publishes exact immutable evidence and correction reuses after mutable deletion', async t => {
+  const f=await fixture(t,{linkedContract:true}), state=f.states.get('outcome-alpha'), action=reviewedActionFixture({workspaceId:'outcome-alpha'});
+  Object.assign(state,{connectionWrites:action.state.connectionWrites,approvals:action.state.approvals,connections:action.state.connections});
+  const review=await f.request(REVIEW); assert.equal(review.status,200); assert.equal(review.body.actionChoices.length,1);
+  assert.equal(JSON.stringify(review.body).includes(action.source.input.description),false);
+  const saved=await f.request(MEASURE,{method:'PUT',body:{...measurementInput(1),actionSelection:{actionId:action.write.id}}});
+  assert.equal(saved.status,200); assert.equal(saved.body.measurement.schema,'runvara-experiment-measurement/v2');
+  assert.equal(saved.body.measurement.intervention.action.digest,action.source.digest);
+  const first=await f.request(BASE+'/publish',{method:'POST',body:f.publicationInput()}); assert.equal(first.status,200);
+  const versionId=first.body.publication.head.versionId;
+  const evidence=await f.request(BASE+'/versions/'+versionId); assert.equal(evidence.status,200); assert.deepEqual(evidence.body.sourceAction,action.source);
+  assert.equal(evidence.body.currentStatus,'not_checked'); assert.ok(evidence.bytes<128*1024);
+  const current=f.states.get('outcome-alpha'); delete current.connectionWrites; delete current.approvals; delete current.connections;
+  const reused=await f.request(MEASURE,{method:'PUT',body:{...measurementInput(2),amount:'11',actionSelection:{reuseVersionId:versionId}}});
+  assert.equal(reused.status,200); assert.equal(reused.body.measurement.intervention.reuseVersionId,versionId);
+  const correction={...f.publicationInput(),action:'correct',expectedHeadVersionId:versionId,expectedHeadDigest:first.body.publication.head.digest};
+  const next=await f.request(BASE+'/publish',{method:'POST',body:correction}); assert.equal(next.status,200);
+  const old=await f.request(BASE+'/versions/'+versionId); assert.deepEqual(old.body.sourceAction,action.source);
+  const nextSource=await f.request(BASE+'/versions/'+next.body.publication.head.versionId); assert.deepEqual(nextSource.body.sourceAction,action.source);
+  assert.equal(f.counts.providerCalls,0);
+});
+
+test('linked save revalidates session and mutable action after the compatibility read', async t => {
+  for(const change of ['session','action']) {
+    const f=await fixture(t,{linkedContract:true}), state=f.states.get('outcome-alpha'), action=reviewedActionFixture({workspaceId:'outcome-alpha'});
+    Object.assign(state,{connectionWrites:action.state.connectionWrites,approvals:action.state.approvals,connections:action.state.connections});
+    const original=f.store.getBusinessOutcomeReview;
+    f.store.getBusinessOutcomeReview=async(...args)=>{const result=await original(...args); if(change==='session')state.users[0].sessionVersion++; else state.connectionWrites[0].input.title='Changed after review'; return result;};
+    const r=await f.request(MEASURE,{method:'PUT',body:{...measurementInput(1),actionSelection:{actionId:action.write.id}}});
+    assert.ok([401,409].includes(r.status)); assert.equal(f.counts.saves,0); assert.equal(f.counts.providerCalls,0);
   }
 });

@@ -119,3 +119,49 @@ controls. Any rollback must preserve those controls; reverting to an older
 executor that ignores an active owner policy is unsafe. This stage still leaves
 canonical graph integration, real action/objective links, causal attribution and
 qualified financial execution as separate, unresolved work.
+
+## Prepared owner-selected action association
+
+The selected review may include compact action candidates and `currentActionAssociation` from the same committed review snapshot when `actionLinkContract` is supported. No full action text is added to summary or current-head reads. Exact action/approval links are descriptive owner associations only; originating objective and opportunity remain null. Historical action text is fetched only for an exact immutable version and does not check current head. Existing refresh-only/session/stale-response safeguards apply. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md); real migration/application is held.
+
+## Prepared reviewed-action selection UI (2026-10-07)
+
+The optional action selector is separate from the opaque relationship indication
+above. It is enabled only by `actionLinkContract: runvara-reviewed-action/v1`
+with a bounded, unique compact candidate list from the existing selected review
+snapshot. New drafts start with no action. A choice sends only `actionId`; an
+explicit reuse choice sends only the exact `reuseVersionId`. Removing a saved
+association sends `actionSelection: null`. No choice triggers provider work,
+extra browser reads, background hydration or automatic publication.
+
+A linked saved draft retains its explicit association. If a fresh action choice
+has disappeared or its digest differs from the saved draft, the UI refuses to
+silently replace it. The owner can choose the exact current immutable source for
+a correction, choose another available action or remove the association. The
+current immutable association arrives separately from the current draft, so a
+later unlinked draft cannot replace the published source. Existing immutable
+reuse selections preserve their exact version ID.
+
+The saved measurement and owner confirmation show the exact recorded action ID,
+Shopify account, product ID and completion timestamp. Attestation explicitly
+includes the selected association and states that it establishes neither a
+comparison, causality nor commercial benefit. Manual policy references do not
+become an originating objective. Snapshot immutability begins at publication;
+there is no claim of an execution-time immutable acknowledgement.
+
+Full recorded action input appears only in the existing explicit exact-version
+evidence request. The UI checks strict source/intervention shapes, tenant and
+reference bindings, bounded source bytes and SHA-256 hashes before rendering
+escaped, untruncated title and description text. A linked response without exact
+source evidence fails closed. WebCrypto absence or an integrity failure cannot
+produce a verified source display. Summaries do not include action input text.
+Historical evidence remains available after withdrawal and says that the current
+status was not checked.
+
+The existing refresh-only relationship lifecycle remains unchanged. Form edits
+cancel an unsubmitted review; duplicate writes coalesce; an uncertain publication
+keeps the same intent and requires another explicit attestation. Close,
+navigation, logout, replacement sessions and late source-hash completions cannot
+restore stale indications or render abandoned evidence. This local preparation
+adds synthetic UI/lifecycle and intercepted 320/390/1200 browser coverage; it is
+not a deployment or proof that the live storage contract is installed.

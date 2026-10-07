@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { actionIntervention, validateActionIntervention, validateActionSelection, validateReviewedSourceAction } from './reviewed-action-evidence.mjs';
 import { normalizeOutcomeDecimal, BUSINESS_OUTCOME_CURRENCIES } from './business-outcomes.mjs';
 
 /**
@@ -24,6 +25,8 @@ import { normalizeOutcomeDecimal, BUSINESS_OUTCOME_CURRENCIES } from './business
  * populations. Genuine disjoint cohorts need a later real source resolver.
  */
 export const EXPERIMENT_MEASUREMENT_SCHEMA = 'runvara-experiment-measurement/v1';
+export const LINKED_EXPERIMENT_MEASUREMENT_SCHEMA = 'runvara-experiment-measurement/v2';
+export const LINKED_MEASUREMENT_REPORT_SCHEMA = 'runvara-measurement-report/v2';
 export const MEASUREMENT_REPORT_SCHEMA = 'runvara-measurement-report/v1';
 export const EXPERIMENT_MEASUREMENT_MAX_BYTES = 8192;
 export const MEASUREMENT_REPORT_DESCRIPTION_MAX = 1000;
@@ -131,9 +134,10 @@ function description(value) {
   if (typeof value !== 'string' || !value.isWellFormed() || !value.trim() || value.trim().length > MEASUREMENT_REPORT_DESCRIPTION_MAX || /[\u0000-\u001f\u007f]/.test(value)) throw fail('A nonempty plain measurement description of at most 1000 characters is required');
   return value.trim();
 }
-const INPUT_FIELDS = ['expectedRevision', 'amount', 'currency', 'window', 'coverage', 'method', 'observedAt', 'report'];
+const INPUT_FIELDS = ['expectedRevision', 'amount', 'currency', 'window', 'coverage', 'method', 'observedAt', 'report', 'actionSelection'];
 function normalizeInput(input, context) {
   exact(input, INPUT_FIELDS, 'measurement input');
+  if (own(input, 'actionSelection')) validateActionSelection(input.actionSelection);
   const expectedRevision = number(input.expectedRevision, 'Expected revision', { maximum: Number.MAX_SAFE_INTEGER });
   let amount;
   try { amount = normalizeOutcomeDecimal(input.amount); } catch { throw fail('Amount must be an exact decimal string with at most 18 integer and 6 fractional digits, or null'); }
@@ -169,17 +173,18 @@ function normalizeInput(input, context) {
 function buildMeasurement(facts, context, revision) {
   const { workspaceId, experimentId, actorId: recordedBy, recordedAt } = context;
   const reportFacts = { metric: METRIC, amount: facts.amount, currency: facts.currency, window: facts.window,
-    coverage: facts.coverage, method: facts.method, observedAt: facts.observedAt };
-  const reportBody = { schema: MEASUREMENT_REPORT_SCHEMA,
+    coverage: facts.coverage, method: facts.method, observedAt: facts.observedAt, ...(facts.intervention ? { intervention: facts.intervention } : {}) };
+  const reportBody = { schema: facts.intervention ? LINKED_MEASUREMENT_REPORT_SCHEMA : MEASUREMENT_REPORT_SCHEMA,
     id: `measurement_report_${digestMeasurementValue([workspaceId, experimentId, revision])}`,
     workspaceId, experimentId, measurementRevision: revision, recordedBy, recordedAt,
     description: facts.description, costsComplete: facts.costsComplete, facts: reportFacts };
   const report = { ...reportBody, digest: digestMeasurementValue(reportBody) };
-  const body = { schema: EXPERIMENT_MEASUREMENT_SCHEMA, workspaceId, experimentId, revision, recordedBy, recordedAt,
+  const body = { schema: facts.intervention ? LINKED_EXPERIMENT_MEASUREMENT_SCHEMA : EXPERIMENT_MEASUREMENT_SCHEMA, workspaceId, experimentId, revision, recordedBy, recordedAt,
     metric: METRIC, amount: facts.amount, currency: facts.currency, window: facts.window, coverage: facts.coverage, method: facts.method,
     provenance: { observationId: `measurement_observation_${digestMeasurementValue([workspaceId, experimentId])}`,
       sourceRefs: [{ type: 'measurement_report', id: report.id, digest: report.digest }], observedAt: facts.observedAt, aggregation: 'standalone' },
-    links: { action: null, opportunity: null, approval: null, objective: null }, report };
+    links: { action: facts.intervention?.action ?? null, opportunity: null, approval: facts.intervention?.approval ?? null, objective: null },
+    ...(facts.intervention ? { intervention: facts.intervention } : {}), report };
   const envelope = { ...body, digest: digestMeasurementValue(body) };
   if (Buffer.byteLength(JSON.stringify(envelope), 'utf8') > EXPERIMENT_MEASUREMENT_MAX_BYTES) throw fail('Typed measurement exceeds its 8 KiB serialized bound', 'MEASUREMENT_TOO_LARGE', 413);
   // Return detached ordinary data: the repeated report facts must not share
@@ -187,17 +192,28 @@ function buildMeasurement(facts, context, revision) {
   return JSON.parse(JSON.stringify(envelope));
 }
 function readContext(options, preparing = false) {
-  exact(options, preparing ? ['workspaceId', 'experimentId', 'actorId', 'now', 'previousMeasurement'] : ['workspaceId', 'experimentId', 'now'], 'trusted measurement context');
+  exact(options, preparing ? ['workspaceId', 'experimentId', 'actorId', 'now', 'previousMeasurement', 'actionEvidence', 'reuseVersionId'] : ['workspaceId', 'experimentId', 'now'], 'trusted measurement context');
   return { workspaceId: workspace(options.workspaceId), experimentId: opaque(options.experimentId, 'Experiment ID'),
     ...(preparing ? { actorId: opaque(options.actorId, 'Recording actor ID') } : {}), recordedAt: trustedNow(options.now) };
 }
 
 export function prepareExperimentOutcomeMeasurement(input, options) {
   const context = readContext(options, true), facts = normalizeInput(input, context);
+  const selection = validateActionSelection(input.actionSelection);
+  if (selection) {
+    const source = validateReviewedSourceAction(options.actionEvidence, { workspaceId: context.workspaceId });
+    if (selection.actionId ? selection.actionId !== source.context.writeId || options.reuseVersionId != null
+      : selection.reuseVersionId !== options.reuseVersionId) throw fail('Action selection does not match resolved evidence');
+    facts.intervention = actionIntervention(source, options.reuseVersionId ?? null);
+    if (facts.intervention.completedAt > context.recordedAt) throw fail('Action completion is in the future');
+  } else if (options.actionEvidence != null || options.reuseVersionId != null) throw fail('Action evidence requires an explicit owner selection');
   const previous = options.previousMeasurement ?? null;
   const before = previous === null ? null : validateExperimentOutcomeMeasurement(previous, {
     workspaceId: context.workspaceId, experimentId: context.experimentId, now: context.recordedAt
   });
+  if (before?.intervention && facts.intervention && before.intervention.action.id === facts.intervention.action.id
+    && before.intervention.action.digest !== facts.intervention.action.digest) throw fail('Recorded action changed; select a different action or reuse its exact immutable version', 'MEASUREMENT_ACTION_CONFLICT', 409);
+  if (before?.intervention && !own(input, 'actionSelection')) throw fail('Choose explicitly whether to retain, replace or remove the recorded action');
   if (facts.expectedRevision !== (before?.revision ?? 0)) throw fail('Measurement changed; reload before editing', 'MEASUREMENT_CONFLICT', 409);
   if (before && before.revision >= Number.MAX_SAFE_INTEGER) throw fail('Measurement revision is exhausted', 'MEASUREMENT_CONFLICT', 409);
   return buildMeasurement(facts, context, (before?.revision ?? 0) + 1);
@@ -210,10 +226,11 @@ const REPORT_FIELDS = ['schema', 'id', 'workspaceId', 'experimentId', 'measureme
  */
 export function validateExperimentOutcomeMeasurement(envelope, options) {
   const trusted = readContext(options);
-  exact(envelope, ENVELOPE_FIELDS, 'measurement envelope');
+  const envelopeFields = descriptors(envelope, 'measurement envelope');
+  exact(envelope, envelopeFields.schema?.value === LINKED_EXPERIMENT_MEASUREMENT_SCHEMA ? [...ENVELOPE_FIELDS, 'intervention'] : ENVELOPE_FIELDS, 'measurement envelope');
   if (envelope.workspaceId !== trusted.workspaceId) throw fail('Measurement workspace mismatch', 'WORKSPACE_MISMATCH', 403);
   if (envelope.experimentId !== trusted.experimentId) throw fail('Measurement experiment mismatch', 'EXPERIMENT_MISMATCH', 403);
-  if (envelope.schema !== EXPERIMENT_MEASUREMENT_SCHEMA) throw fail('Unsupported measurement schema');
+  if (![EXPERIMENT_MEASUREMENT_SCHEMA, LINKED_EXPERIMENT_MEASUREMENT_SCHEMA].includes(envelope.schema)) throw fail('Unsupported measurement schema');
   const revision = number(envelope.revision, 'Server measurement revision', { minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
   const context = { ...trusted, actorId: opaque(envelope.recordedBy, 'Recording actor ID'), recordedAt: timestamp(envelope.recordedAt, 'Recording timestamp') };
   if (context.recordedAt > trusted.recordedAt) throw fail('Measurement recording time is in the future');
@@ -225,6 +242,10 @@ export function validateExperimentOutcomeMeasurement(envelope, options) {
     coverage: { status: envelope.coverage.status, observedCount: envelope.coverage.observedCount, expectedCount: envelope.coverage.expectedCount },
     method: { kind: envelope.method.kind }, observedAt: envelope.provenance.observedAt,
     report: { description: envelope.report.description, costsComplete: envelope.report.costsComplete } }, context);
+  if (envelope.schema === LINKED_EXPERIMENT_MEASUREMENT_SCHEMA) {
+    facts.intervention = validateActionIntervention(envelope.intervention, trusted.workspaceId);
+    if (facts.intervention.completedAt > context.recordedAt) throw fail('Action completion is in the future');
+  }
   const expected = buildMeasurement(facts, context, revision);
   if (typeof envelope.digest !== 'string' || !HASH.test(envelope.digest) || canonicalMeasurementJson(envelope) !== canonicalMeasurementJson(expected)) throw fail('Measurement/report facts, identity or canonical digest do not match', 'MEASUREMENT_INTEGRITY_FAILED', 409);
   return expected;

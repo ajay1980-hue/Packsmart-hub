@@ -80,3 +80,7 @@ This worker performed only local filename/document alignment and disposable-data
 
 
 Local alignment verification passed 141 focused Node22.23.3 tests, all 25 outcome PostgreSQL17.6 cases and all 73 reporting PostgreSQL17.6 cases, with zero failures/skips. Syntax, SaaS guards, whitespace and independent alignment review passed. Each database suite used a fresh disposable local cluster and both were stopped. These are affected checks on the renamed file; the earlier full 708-test preparation result does not replace fresh complete CI on this aligned head.
+
+## Prepared reviewed action extension (not applied)
+
+`20261007175355_reviewed_action_outcome_snapshot.sql` prepares publication-time immutable snapshots for explicitly owner-associated recorded Shopify product-content actions. Existing unlinked v1 publication remains supported, with new linking disabled until the compatible SQL contract is installed. Public RPC signatures and existing grants are preserved. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md) for bounds, acknowledgement limits, correction/withdrawal behavior and the separate real-application/release hold. This does not complete original milestone 2 or establish causal/commercial benefit.

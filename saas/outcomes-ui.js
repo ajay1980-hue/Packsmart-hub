@@ -44,10 +44,175 @@
     $('business-outcomes-load').disabled = busy.has('detail') || busy.has('save') || busy.has('publish');
     $('business-outcomes-experiment').disabled = busy.has('save') || busy.has('publish') || Boolean(pending?.attempted);
     $('business-outcomes-form').querySelectorAll('input,select,textarea,button').forEach(el => { el.disabled = !canPrepare() || busy.has('save') || busy.has('publish') || stale || Boolean(pending?.attempted); });
+    if ($('business-outcomes-action')) $('business-outcomes-action').disabled ||= !actionChoices(selected) && !selected?.measurement?.intervention;
     $('business-outcomes-review').querySelectorAll('button,input,textarea').forEach(el => { el.disabled = busy.has('publish'); });
     if (pending?.attempted && $('business-outcomes-reason')) $('business-outcomes-reason').disabled = true;
     const confirm = $('business-outcomes-confirm'); if (confirm) confirm.disabled = busy.has('publish') || !$('business-outcomes-attest').checked;
     $('business-outcomes-detail').querySelectorAll('[data-outcome-action]').forEach(el => { el.disabled = stale || busy.has('save') || busy.has('publish') || Boolean(pending?.attempted); });
+  }
+  const ACTION_CONTRACT = 'runvara-reviewed-action/v1';
+  const exact = (value, fields) => value !== null && typeof value === 'object' && !Array.isArray(value)
+    && Reflect.ownKeys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field)
+      && Object.getOwnPropertyDescriptor(value, field)?.enumerable && Object.hasOwn(Object.getOwnPropertyDescriptor(value, field), 'value'));
+  const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  const identifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(value);
+  const versionIdentifier = value => typeof value === 'string' && /^outcome_version_[a-f0-9]{64}$/.test(value);
+  const productIdentifier = value => typeof value === 'string' && /^gid:\/\/shopify\/Product\/\d+$/.test(value) && value.length <= 160;
+  const accountIdentifier = value => typeof value === 'string' && /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(value) && value.length <= 253;
+  const timestamp = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  const recordedText = (value, max) => typeof value === 'string' && value.length <= max && !value.includes('\u0000') && (!value.isWellFormed || value.isWellFormed());
+  const sameRef = (a, b) => a?.workspaceId === b?.workspaceId && a?.id === b?.id && a?.revision === b?.revision && a?.digest === b?.digest;
+  const actionRef = value => exact(value, ['workspaceId', 'id', 'revision', 'digest']) && value.workspaceId === context().workspaceId
+    && identifier(value.id) && Number.isSafeInteger(value.revision) && value.revision > 0 && hash(value.digest);
+  function validAssociation(value, links) {
+    return exact(value, ['schema', 'relationship', 'comparison', 'action', 'approval', 'account', 'productId', 'completedAt', 'reuseVersionId'])
+      && value.schema === 'runvara-owner-action-association/v1' && value.relationship === 'owner_associated_recorded_action'
+      && value.comparison === 'not_established' && actionRef(value.action) && value.action.revision === 1 && actionRef(value.approval) && value.approval.revision === 1
+      && accountIdentifier(value.account) && productIdentifier(value.productId) && timestamp(value.completedAt)
+      && (value.reuseVersionId === null || versionIdentifier(value.reuseVersionId))
+      && exact(links, ['action', 'approval', 'objective', 'opportunity']) && actionRef(links.action) && actionRef(links.approval) && sameRef(value.action, links.action)
+      && sameRef(value.approval, links.approval) && links.objective === null && links.opportunity === null;
+  }
+  function measurementAssociation(m) {
+    if (!m) return null;
+    if (m.schema === 'runvara-experiment-measurement/v2') {
+      if (!validAssociation(m.intervention, m.links) || m.report?.schema !== 'runvara-measurement-report/v2'
+        || !validAssociation(m.report.facts?.intervention, m.links)
+        || canonical(m.report.facts.intervention) !== canonical(m.intervention)) throw new Error('Invalid recorded action association');
+      return m.intervention;
+    }
+    if (m.intervention != null || m.links?.action != null || m.links?.approval != null) throw new Error('Invalid unlinked measurement');
+    return null;
+  }
+  function associationFacts(a) {
+    if (!a) return '<p class="muted">No recorded action associated with this measurement.</p>';
+    const rows = [['Recorded action ID', a.action.id], ['Shopify account', a.account], ['Product ID', a.productId], ['Recorded completion (UTC)', a.completedAt]];
+    return '<section class="outcome-association"><h4>Owner-selected recorded action</h4><dl class="outcome-facts">'
+      + rows.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')
+      + '</dl><p class="muted tiny">This association does not establish a comparison, causality or commercial benefit. The response was recorded by the application; the action snapshot becomes immutable only when the outcome is published.</p></section>';
+  }
+  function actionChoices(detail) {
+    if (detail?.actionLinkContract !== ACTION_CONTRACT || !Array.isArray(detail.actionChoices) || detail.actionChoices.length > LIMIT) return null;
+    const ids = new Set();
+    for (const choice of detail.actionChoices) {
+      if (!exact(choice, ['id', 'account', 'productId', 'title', 'completedAt', 'digest']) || !identifier(choice.id)
+        || ids.has(choice.id) || !accountIdentifier(choice.account) || !productIdentifier(choice.productId)
+        || !recordedText(choice.title, 200) || !timestamp(choice.completedAt) || !hash(choice.digest)) return null;
+      ids.add(choice.id);
+    }
+    return detail.actionChoices;
+  }
+  function currentAssociation(detail) {
+    const value = detail?.currentActionAssociation, p = detail?.currentPublication;
+    return p && validAssociation(value, p.version.links) ? value : null;
+  }
+  function populateActionSelection() {
+    const field = $('business-outcomes-action'), hint = $('business-outcomes-action-hint');
+    const choices = actionChoices(selected), m = measurementAssociation(selected?.measurement), current = currentAssociation(selected);
+    const options = [{ value: '', label: 'No recorded action' }];
+    if (m) options.push({ value: 'saved', label: `Keep saved association · ${m.action.id} · ${m.account}` });
+    if (choices) for (const c of choices) options.push({ value: 'action:' + c.id, label: `${c.id} · ${c.account} · ${c.title}` });
+    if (choices && current && selected.currentPublication.head.status === 'published') options.push({ value: 'reuse:' + selected.currentPublication.head.versionId, label: `Reuse exact published snapshot · ${current.action.id} · ${current.account}` });
+    field.innerHTML = options.map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
+    field.value = m ? 'saved' : '';
+    hint.textContent = !choices ? 'Recorded action linking is unavailable until compatible storage is installed. Unlinked drafts remain available.'
+      : 'Optional. Choose a recorded action explicitly, then save and review the association. No action is selected for you.';
+    renderActionSelection();
+  }
+  function renderActionSelection() {
+    const value = $('business-outcomes-action').value, m = measurementAssociation(selected?.measurement);
+    const c = value.startsWith('action:') ? actionChoices(selected)?.find(row => row.id === value.slice(7)) : null;
+    const association = value === 'saved' ? m : value.startsWith('reuse:') ? currentAssociation(selected)
+      : c ? { action: { id: c.id }, account: c.account, productId: c.productId, completedAt: c.completedAt } : null;
+    $('business-outcomes-action-details').innerHTML = associationFacts(association);
+  }
+  function selectedActionInput() {
+    const value = $('business-outcomes-action').value, m = measurementAssociation(selected?.measurement);
+    if (!value) return m ? { actionSelection: null } : {};
+    const choices = actionChoices(selected);
+    if (!choices) throw new Error('Recorded action linking is unavailable. Refresh after compatible storage is installed, or explicitly choose no action.');
+    if (value === 'saved') {
+      if (!m) throw new Error('Refresh the saved association before editing.');
+      if (m.reuseVersionId) return { actionSelection: { reuseVersionId: m.reuseVersionId } };
+      if (!choices.some(c => c.id === m.action.id && c.digest === m.action.digest)) throw new Error('The saved action is no longer an exact current choice. Explicitly reuse its published snapshot, choose another action, or remove the association.');
+      return { actionSelection: { actionId: m.action.id } };
+    }
+    if (value.startsWith('action:') && choices.some(c => c.id === value.slice(7))) return { actionSelection: { actionId: value.slice(7) } };
+    if (value === 'reuse:' + selected.currentPublication?.head.versionId && currentAssociation(selected)
+      && selected.currentPublication.head.status === 'published') return { actionSelection: { reuseVersionId: selected.currentPublication.head.versionId } };
+    throw new Error('Choose an available recorded action, or leave it unlinked.');
+  }
+  // Exact evidence is explicit and display-only. The server validates its
+  // authority; these bounds, bindings and hashes also prevent malformed bytes
+  // from being presented as the selected immutable source in the browser.
+  function canonical(value, depth = 0) {
+    if (depth > 16) throw new Error('Evidence nesting is too deep');
+    if (value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isSafeInteger(value))) return JSON.stringify(value);
+    if (typeof value === 'string' && recordedText(value, 32768)) return JSON.stringify(value);
+    if (Array.isArray(value) && value.length <= 50 && Object.keys(value).length === value.length) return '[' + value.map(v => canonical(v, depth + 1)).join(',') + ']';
+    if (value && typeof value === 'object' && !Array.isArray(value) && exact(value, Object.keys(value))) return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k], depth + 1)).join(',') + '}';
+    throw new Error('Invalid evidence JSON');
+  }
+  async function digest(value, stringified = false) {
+    if (!window.crypto?.subtle) throw new Error('Evidence integrity cannot be checked in this browser');
+    const bytes = new TextEncoder().encode(stringified ? value : canonical(value));
+    return Array.from(new Uint8Array(await window.crypto.subtle.digest('SHA-256', bytes)), v => v.toString(16).padStart(2, '0')).join('');
+  }
+  async function sourceActionMarkup(source, m, publication) {
+    const a = measurementAssociation(m);
+    if (!a) { if (source != null || publication.version.links?.action != null || publication.version.links?.approval != null) throw new Error('Unexpected linked evidence'); return ''; }
+    if (!validAssociation(a, publication.version.links) || !exact(source, ['schema', 'revision', 'context', 'input', 'digest'])
+      || source.schema !== 'runvara-reviewed-source-action/v1' || source.revision !== 1 || source.digest !== a.action.digest
+      || new TextEncoder().encode(canonical(source)).length > 24576) throw new Error('Linked evidence mismatch');
+    const c = source.context, i = source.input, approval = c?.approval;
+    if (!exact(c, ['schema', 'workspaceId', 'writeId', 'requestId', 'claimId', 'claimIdentity', 'provider', 'operation', 'connectionId', 'account', 'apiVersion', 'requestedBy', 'executedBy', 'inputDigest', 'phase', 'dispatchRequestDigest', 'resultId', 'completedAt', 'origin', 'originatingObjective', 'approval', 'proposal', 'policies'])
+      || c.schema !== 'runvara-recorded-action-context/v1' || c.workspaceId !== context().workspaceId || c.writeId !== a.action.id
+      || !['requestId', 'claimId', 'connectionId', 'requestedBy', 'executedBy'].every(k => identifier(c[k]))
+      || c.provider !== 'shopify' || c.operation !== 'product_content' || c.phase !== 'shopify_mutation'
+      || c.origin !== 'owner_manual' || c.originatingObjective !== null || c.account !== a.account || c.completedAt !== a.completedAt
+      || !/^[a-zA-Z0-9_-]{16,100}$/.test(c.requestId) || !hash(c.claimIdentity) || !/^\d{4}-(01|04|07|10)$/.test(c.apiVersion)
+      || !hash(c.inputDigest) || !hash(c.dispatchRequestDigest) || !exact(i, ['productId', 'operation', 'title', 'description'])
+      || i.productId !== a.productId || c.resultId !== i.productId || i.operation !== 'product_content'
+      || !recordedText(i.title, 200) || !i.title.trim() || i.title !== i.title.trim() || !recordedText(i.description, 10000)
+      || !exact(approval, ['workspaceId', 'id', 'revision', 'status', 'decidedBy', 'decidedAt', 'payload', 'digest'])
+      || !sameRef(approval, a.approval) || approval.status !== 'approved' || !identifier(approval.decidedBy) || !timestamp(approval.decidedAt) || approval.decidedAt > c.completedAt
+      || ![2, 3].includes(Object.keys(approval.payload || {}).length)
+      || !exact(approval.payload, Object.hasOwn(approval.payload || {}, 'objectivePolicyProposalDigest') ? ['connectionWriteId', 'digest', 'objectivePolicyProposalDigest'] : ['connectionWriteId', 'digest'])
+      || approval.payload.connectionWriteId !== c.writeId || approval.payload.digest !== c.inputDigest
+      || !Array.isArray(c.policies) || c.policies.length > 50 || c.policies.some(p => !exact(p, ['objectiveId', 'revision', 'digest']) || !identifier(p.objectiveId) || !Number.isSafeInteger(p.revision) || p.revision < 1 || !hash(p.digest))) throw new Error('Invalid recorded action evidence');
+    if (new Set(c.policies.map(p => p.objectiveId)).size !== c.policies.length) throw new Error('Duplicate policy references');
+    const proposal = c.proposal;
+    if (proposal === null) { if (c.policies.length || Object.hasOwn(approval.payload, 'objectivePolicyProposalDigest')) throw new Error('Unexpected policy reference'); }
+    else if (!exact(proposal, ['schema', 'workspaceId', 'origin', 'writeId', 'provider', 'operation', 'inputDigest', 'connectionId', 'account', 'requestedBy', 'approvalKind', 'policies', 'evidenceQualification', 'digest'])
+      || proposal.schema !== 'runvara-objective-dispatch-proposal/v1' || proposal.approvalKind !== 'customer_facing_publish'
+      || proposal.evidenceQualification !== 'no_financial_execution_evidence' || !c.policies.length
+      || !['workspaceId', 'origin', 'writeId', 'provider', 'operation', 'inputDigest', 'connectionId', 'account', 'requestedBy'].every(k => proposal[k] === c[k])
+      || canonical(proposal.policies) !== canonical(c.policies) || proposal.digest !== approval.payload.objectivePolicyProposalDigest) throw new Error('Invalid policy proposal');
+    const checkTenant = value => { if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) { if (['workspaceId', 'workspace_id', 'tenantId', 'tenant_id'].includes(k) && v !== context().workspaceId) throw new Error('Foreign action evidence'); if (['workspace', 'tenant'].includes(k) && (v && typeof v === 'object' ? v.id : v) !== context().workspaceId) throw new Error('Foreign action evidence'); checkTenant(v); } };
+    checkTenant(source);
+    const { digest: sourceDigest, ...body } = source, { digest: approvalDigest, ...decision } = approval;
+    const query = 'mutation RunvaraProductContent($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id title } userErrors { field message } } }';
+    const variables = { product: { id: i.productId, title: i.title, descriptionHtml: `<p>${i.description.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replace(/\n/g, '<br>')}</p>` } };
+    const request = { provider: 'shopify', phase: 'shopify_mutation', method: 'POST', url: `https://${c.account}/admin/api/${c.apiVersion}/graphql.json`, body: JSON.stringify({ query, variables }) };
+    // Match the executor's typed JSON.stringify order, not canonical evidence
+    // ordering. Older fingerprints never acquire a new interpretation here.
+    const orderedInput = { productId: i.productId, operation: i.operation, title: i.title, description: i.description };
+    const orderedProposal = proposal === null ? null : { schema: proposal.schema, workspaceId: proposal.workspaceId,
+      origin: proposal.origin, writeId: proposal.writeId, provider: proposal.provider, operation: proposal.operation,
+      inputDigest: proposal.inputDigest, connectionId: proposal.connectionId, account: proposal.account,
+      requestedBy: proposal.requestedBy, approvalKind: proposal.approvalKind,
+      policies: proposal.policies.map(p => ({ objectiveId: p.objectiveId, revision: p.revision, digest: p.digest })),
+      evidenceQualification: proposal.evidenceQualification, digest: proposal.digest };
+    const claim = { id: c.writeId, requestId: c.requestId, provider: c.provider, input: orderedInput, digest: c.inputDigest,
+      connectionId: c.connectionId, account: c.account, requestedBy: c.requestedBy, requiresApproval: true, approvalId: approval.id,
+      ...(orderedProposal ? { objectivePolicyProposal: orderedProposal } : {}) };
+    if (proposal && await digest(Object.fromEntries(Object.entries(proposal).filter(([k]) => k !== 'digest'))) !== proposal.digest) throw new Error('Changed policy proposal');
+    if (await digest(body) !== sourceDigest || await digest(decision) !== approvalDigest
+      || await digest(JSON.stringify(orderedInput), true) !== c.inputDigest
+      || await digest(JSON.stringify(request), true) !== c.dispatchRequestDigest
+      || await digest(JSON.stringify(claim), true) !== c.claimIdentity) throw new Error('Changed recorded action evidence');
+    return `${associationFacts(a)}<h4>Exact recorded action input</h4><p class="muted tiny">Historical snapshot retained with this outcome version. Current status was not checked. Manual action; objective policy references are restrictions, not an originating objective.</p><dl class="outcome-facts"><div><dt>Product title</dt><dd class="outcome-description">${esc(i.title)}</dd></div><div><dt>Product description</dt><dd class="outcome-description">${esc(i.description)}</dd></div></dl>`;
   }
   function facts(value) {
     const rows = [ ['Incremental contribution', amount(value)], ['Measurement window', windowText(value?.window)],
@@ -139,7 +304,7 @@
   async function read(name, path, apply) {
     if (busy.has(name)) return;
     const t = ticket(), controller = new AbortController(); controllers.add(controller); busy.add(name); controls();
-    try { const result = await api.request(path, { signal: controller.signal, isCurrent: () => active(t) }); if (active(t)) apply(result); }
+    try { const result = await api.request(path, { signal: controller.signal, isCurrent: () => active(t) }); if (active(t)) await apply(result, () => active(t)); }
     catch (error) { if (active(t)) status(error.status === 401 ? 'Sign in again to read business results.' : 'Could not load business results. Select Refresh to try again.', true); }
     finally { controllers.delete(controller); if (active(t)) { busy.delete(name); controls(); } }
   }
@@ -155,14 +320,14 @@
     const f = $('business-outcomes-form'), m = selected?.measurement;
     const values = { amount: m?.amount ?? '', currency: m?.currency ?? '', startsAt: dateInput(m?.window?.startsAt), endsAt: dateInput(m?.window?.endsAt), observedAt: dateInput(m?.provenance?.observedAt), coverageStatus: m?.coverage?.status || 'unknown', observedCount: m?.coverage?.observedCount ?? '', expectedCount: m?.coverage?.expectedCount ?? '', method: m?.method?.kind || 'unknown', description: m?.report?.description || '', costsComplete: m?.report?.costsComplete === true ? 'true' : m?.report?.costsComplete === false ? 'false' : '' };
     for (const [name, value] of Object.entries(values)) f.elements[name].value = value;
-    f.classList.toggle('hidden', !canPrepare()); controls();
+    populateActionSelection(); f.classList.toggle('hidden', !canPrepare()); controls();
   }
   function renderDetail(justReviewed = false) {
     const d = selected; if (!d) { $('business-outcomes-detail').replaceChildren(); $('business-outcomes-form').classList.add('hidden'); return; }
     const m = d.measurement, publication = d.currentPublication;
     const blockers = Array.isArray(d.assessment?.blockers) ? d.assessment.blockers : [];
     let html = `<h3>${esc(bounded(d.experiment.title || d.experiment.id, 180))}</h3>${relationshipText()}<p class="muted">${m ? `Saved measurement · version ${esc(m.revision)}` : 'No business result recorded yet.'} · Earlier legacy reviews do not count as reviewed business results.</p>`;
-    if (m) html += facts(m) + `<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : m.report?.costsComplete === false ? 'No' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
+    if (m) html += facts(m) + associationFacts(measurementAssociation(m)) + `<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : m.report?.costsComplete === false ? 'No' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
     const alreadyReviewed = justReviewed || (m && publication?.head.status === 'published' && m.revision === publication.version.source.measurementRevision && m.digest === publication.version.source.measurementDigest);
     const reviewStatus = alreadyReviewed ? 'This saved version has already been reviewed. Save an updated draft to request a correction.'
       : stale ? 'Refresh the experiment before reviewing these details.'
@@ -187,6 +352,7 @@
     selected = null; renderDetail(); status('Loading the selected experiment…');
     return read('detail', '/api/business-outcomes/experiments/' + encodeURIComponent(id), result => {
       if (result.workspaceId !== context().workspaceId || result.experiment?.id !== id || (result.measurement && (result.measurement.workspaceId !== result.workspaceId || result.measurement.experimentId !== id)) || (result.currentPublication && !validPublication(result.currentPublication))) throw new Error('Mismatched experiment');
+      measurementAssociation(result.measurement);
       selected = result; relationship = selectedRelationship(result); stale = false; renderDetail(); populateForm(); status('Experiment loaded. Edit a draft or review the saved measurement.');
     });
   }
@@ -196,7 +362,7 @@
     const utc = name => { const v = get(name); if (!v) return null; const d = new Date(v + 'Z'); if (!Number.isFinite(d.getTime())) throw new Error('Enter a valid UTC date and time.'); return d.toISOString(); };
     const startsAt = utc('startsAt'), endsAt = utc('endsAt');
     if (Boolean(startsAt) !== Boolean(endsAt)) throw new Error('Supply both UTC window dates, or leave both unknown.');
-    return { expectedRevision: selected.measurement?.revision || 0, amount: get('amount') || null, currency: get('currency') || null,
+    return { ...selectedActionInput(), expectedRevision: selected.measurement?.revision || 0, amount: get('amount') || null, currency: get('currency') || null,
       window: startsAt ? { startsAt, endsAt } : null, coverage: { status: get('coverageStatus'), observedCount: count('observedCount'), expectedCount: count('expectedCount') },
       method: { kind: get('method') }, observedAt: utc('observedAt'), report: { description: get('description'), costsComplete: get('costsComplete') === '' ? null : get('costsComplete') === 'true' } };
   }
@@ -209,6 +375,7 @@
       const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/measurement', { method: 'PUT', body: JSON.stringify(body), signal: controller.signal, isCurrent: () => active(t) });
       if (!active(t)) return;
       if (result.workspaceId !== context().workspaceId || result.measurement?.experimentId !== id) throw new Error('Unexpected measurement response');
+      measurementAssociation(result.measurement);
       selected = { ...selected, ...result }; renderDetail(); populateForm(); status('Draft saved. Owner review is still required.');
     } catch (error) { if (active(t)) { stale = true; status(error.status === 409 ? 'The measurement changed. Refresh the experiment before editing again.' : 'Save was not confirmed. Refresh the experiment before making another change.', true); } }
     finally { controllers.delete(controller); if (t.scope === scope && t.session === session) { busy.delete('save'); if (!active(t)) stale = true; controls(); } }
@@ -217,9 +384,11 @@
     if (!selected || stale || role() !== 'owner' || busy.has('save') || busy.has('publish') || pending) return;
     const p = selected.currentPublication, m = selected.measurement;
     if (action === 'withdraw' ? p?.head.status !== 'published' : !m || selected.assessment?.readyForOwnerVerification !== true || p?.head.status === 'withdrawn') return;
+    const association = action === 'withdraw' ? currentAssociation(selected) : measurementAssociation(m);
+    if (action !== 'withdraw' && association && !actionChoices(selected)) return status('Refresh after compatible action-link storage is installed before reviewing this association.', true);
     const source = action === 'withdraw' ? p.version.source : { measurementRevision: m.revision, measurementDigest: m.digest };
     const id = window.crypto?.randomUUID?.(); if (!id) return status('This browser cannot safely submit the review. Refresh in a supported secure browser.', true);
-    pending = { action, attempted: false, uncertain: false, facts: action === 'withdraw' ? p.version : m,
+    pending = { action, attempted: false, uncertain: false, association, facts: action === 'withdraw' ? p.version : m,
       payload: { publicationId: id, action, experimentId: selected.experiment.id, expectedWorkspaceRevision: selected.workspaceRevision,
         expectedMeasurementRevision: source.measurementRevision, expectedMeasurementDigest: source.measurementDigest,
         expectedHeadVersionId: p?.head.versionId || null, expectedHeadDigest: p?.head.digest || null, withdrawalReason: null } };
@@ -228,9 +397,9 @@
   function renderReview() {
     const root = $('business-outcomes-review'); root.classList.toggle('hidden', !pending); if (!pending) { root.replaceChildren(); controls(); return; }
     const p = pending;
-    root.innerHTML = `<h3>Review ${esc(reviewLabel(p.action))}</h3>${facts(p.facts)}<p>Measurement version ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the reviewed result. Any later draft is kept.' : 'Confirm the saved measurement and its complete costs below. This does not prove Runvara caused the result.'}</p>` +
+    root.innerHTML = `<h3>Review ${esc(reviewLabel(p.action))}</h3>${facts(p.facts)}${p.action === 'withdraw' && !p.association && p.facts.links?.action ? '<p>The exact retained action snapshot stays in this withdrawn result’s history.</p>' : associationFacts(p.association)}<p>Measurement version ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the reviewed result. Any later draft is kept.' : 'Confirm the saved measurement and its complete costs below. This does not prove Runvara caused the result.'}</p>` +
       (p.action === 'withdraw' ? `<label>Withdrawal reason<select id="business-outcomes-reason" ${p.attempted ? 'disabled' : ''}>${[['','Choose a reason'],['incorrect_measurement','Incorrect measurement'],['duplicate_observation','Duplicate observation'],['incorrect_scope','Incorrect scope'],['evidence_retracted','Evidence retracted']].map(([value,label]) => `<option value="${value}" ${p.payload.withdrawalReason === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : `<p>All relevant costs included: ${p.facts.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(p.facts.report?.description))}</p>`) +
-      `<label class="outcome-attest"><input id="business-outcomes-attest" type="checkbox">I reviewed these exact details and ${p.action === 'withdraw' ? 'want to withdraw this result' : 'attest that this measurement and its costs are complete'}.</label>` +
+      `<label class="outcome-attest"><input id="business-outcomes-attest" type="checkbox">I reviewed these exact details and ${p.action === 'withdraw' ? 'want to withdraw this result' : 'attest that this measurement and its costs are complete' + (p.association ? ' and explicitly associate the recorded action shown above' : '')}.</label>` +
       (p.uncertain ? '<p class="outcome-error">Confirmation was not received. Nothing was retried automatically. Retrying submits the same reviewed details as the same request.</p>' : '') +
       `<div class="outcome-actions"><button id="business-outcomes-confirm" class="primary" type="button" disabled>${p.uncertain ? 'Retry same reviewed action' : 'Confirm ' + esc(reviewLabel(p.action))}</button><button id="business-outcomes-cancel" class="secondary" type="button">${p.attempted ? 'Close review (keep pending action)' : 'Cancel'}</button></div>`;
     controls();
@@ -253,10 +422,12 @@
   function evidence(publication, target, button) {
     const name = 'source:' + publication.version.versionId; if (busy.has(name) || button.dataset.loaded) return;
     button.disabled = true;
-    return read(name, '/api/business-outcomes/versions/' + encodeURIComponent(publication.version.versionId), result => {
+    return read(name, '/api/business-outcomes/versions/' + encodeURIComponent(publication.version.versionId), async (result, isCurrent) => {
       if (result.source !== 'immutable_business_outcome_version' || result.currentStatus !== 'not_checked' || !validPublication(result.publication) || result.publication.version.versionId !== publication.version.versionId || result.publication.version.digest !== publication.version.digest || result.sourceMeasurement?.digest !== publication.version.source.measurementDigest || result.sourceMeasurement?.workspaceId !== context().workspaceId) throw new Error('Evidence mismatch');
       const m = result.sourceMeasurement;
-      target.innerHTML = `<h4>Original measurement report</h4><p class="muted tiny">Saved with this result; its current status has not been rechecked. Recorded by an owner or admin, not independently verified.</p>${facts(m)}<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
+      const actionMarkup = await sourceActionMarkup(result.sourceAction, m, result.publication);
+      if (!isCurrent() || !target.isConnected) return;
+      target.innerHTML = `<h4>Original measurement report</h4><p class="muted tiny">Saved with this result; its current status has not been rechecked. Recorded by an owner or admin, not independently verified.</p>${facts(m)}<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>${actionMarkup}`;
       button.dataset.loaded = 'true'; button.textContent = 'Original report loaded';
     }).finally(() => { if (button.isConnected && !button.dataset.loaded) button.disabled = false; });
   }
@@ -287,6 +458,7 @@
     $('business-outcomes-load').addEventListener('click', loadDetail);
     $('business-outcomes-experiment').addEventListener('change', () => { if (pending?.attempted) return; invalidate(); pending = null; selected = null; renderDetail(); renderReview(); status('Select Load experiment to read current details.'); });
     $('business-outcomes-form').addEventListener('submit', save);
+    $('business-outcomes-action').addEventListener('change', () => { renderActionSelection(); if (!pending?.attempted) { pending = null; renderReview(); } });
     $('business-outcomes-form').addEventListener('input', () => { if (!pending?.attempted) { pending = null; renderReview(); } });
     $('business-outcomes-panel').addEventListener('click', event => {
       const action = event.target.closest('[data-outcome-action]'); if (action) review(action.dataset.outcomeAction);

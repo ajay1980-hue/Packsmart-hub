@@ -70,3 +70,7 @@ Before any real owner activation, every production dispatcher must run code that
 After activation, do not roll back to an older executor that ignores `executionPolicy`. A rollback must retain the restriction reader and deny affected dispatch, or deploy a reviewed fail-closed executor while preserving all objectives, approvals, phase claims and results. Do not erase policies, regenerate old bindings, delete uncertain phases or silently change owner limits to make rollback pass. Previously in-flight calls cannot be recalled.
 
 The remaining original-scope work includes a usable activation UI, qualified operation-specific financial evidence and allowances, objective-driven proposals/delegation, action-to-outcome links and comparable learning, and other action scopes. This stage is not a completion claim for those capabilities or for the original autonomous OS.
+
+## Prepared publication-time action evidence
+
+Successful supported content dispatch may retain a bounded prospective context through its existing exact final save. Every applicable policy ID/revision/digest and the exact approved proposal are preserved, or linking is unavailable without losing a known provider result. These are restrictions on `owner_manual` actions; they never become an originating-objective link. Publication-time immutable outcome snapshots can preserve this context after explicit owner association. No financial gate, dispatch permission, policy activation or provider retry changes. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md).

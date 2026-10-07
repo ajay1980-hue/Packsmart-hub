@@ -11,9 +11,10 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, hashPassword } from '../lib/security.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary, aggregateBusinessOutcomes } from '../lib/business-outcomes.mjs';
+import { actionUiFixture } from './business-outcomes-action-ui-fixture.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 
-async function selectedReviewPayload({ workspaceId, workspaceRevision, experiment, measurement, publication, now }) {
+async function selectedReviewPayload({ workspaceId, workspaceRevision, experiment, measurement, publication, action, now }) {
   let reads = 0;
   const adapter = createBusinessOutcomePersistence({ now: () => new Date(now), request: async (pathname, options) => {
     reads++;
@@ -26,7 +27,7 @@ async function selectedReviewPayload({ workspaceId, workspaceRevision, experimen
         digest: version.digest, status: version.status, payload: version, publication_id: head.publicationId,
         intent_digest: digestMeasurementValue(['synthetic_browser_review', head.publicationId]), committed_at: head.committedAt, commit_revision: head.commitRevision } } : null;
     // The real review RPC bounds its title; bootstrap retains the long fixture.
-    return structuredClone({ workspaceId, workspaceRevision, experiment: { ...experiment, title: experiment.title.slice(0, 180) }, measurement, current });
+    return structuredClone({ workspaceId, workspaceRevision, experiment: { ...experiment, title: experiment.title.slice(0, 180) }, measurement, current, actionLinkContract: 'runvara-reviewed-action/v1', actionChoices: [action.choice], currentActionAssociation: publication ? measurement.intervention : null });
   } });
   const result = await adapter.review(workspaceId, experiment.id);
   assert.equal(reads, 1, 'selected relationships use the existing single review snapshot');
@@ -97,7 +98,7 @@ try {
     });
     const page = await context.newPage(), errors = [], calls = [], writes = [], external = [];
     let measurement = null, publication = null, workspaceRevision = 'browser_workspace_revision_1', holdNext = null;
-    const now = new Date().toISOString();
+    const now = new Date().toISOString(), action = actionUiFixture(state.workspace.id, { title: 'Recorded product ' + hostile, description: 'Retained Shopify description ' + hostile + '\n' + 'long-synthetic-product-content'.repeat(200) });
     const detailPayload = () => ({ workspaceId: state.workspace.id, workspaceRevision, experiment,
       measurement, assessment: measurement ? assessExperimentOutcomeMeasurement(measurement,
         { workspaceId: state.workspace.id, experimentId: experiment.id, now }) : null, currentPublication: publication });
@@ -138,11 +139,11 @@ try {
       if (gate && gate.status !== 200) response = { status: gate.status, json: { error: 'Synthetic expired request', code: 'AUTH_REQUIRED' } };
       else if (method === 'GET' && url.pathname === '/api/business-outcomes') response = { json: summaryPayload() };
       else if (method === 'GET' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}`) response = {
-        json: await selectedReviewPayload({ workspaceId: state.workspace.id, workspaceRevision, experiment, measurement, publication, now }) };
+        json: await selectedReviewPayload({ workspaceId: state.workspace.id, workspaceRevision, experiment, measurement, publication, action, now }) };
       else if (method === 'PUT' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}/measurement`) {
         const input = request.postDataJSON();
         measurement = prepareExperimentOutcomeMeasurement(input, { workspaceId: state.workspace.id,
-          experimentId: experiment.id, actorId: state.users[0].id, now, previousMeasurement: measurement });
+          experimentId: experiment.id, actorId: state.users[0].id, now, previousMeasurement: measurement, actionEvidence: action.source });
         workspaceRevision = 'browser_workspace_revision_2';
         response = { json: detailPayload() };
       } else if (method === 'POST' && url.pathname === '/api/business-outcomes/publish') {
@@ -167,7 +168,7 @@ try {
           status: 'published', publicationId: input.publicationId, committedAt: now, commitRevision: workspaceRevision }, version };
         response = { json: { workspaceId: state.workspace.id, publication, replayed: false, isCurrent: true } };
       } else if (method === 'GET' && publication && url.pathname === `/api/business-outcomes/versions/${publication.version.versionId}`) {
-        response = { json: { workspaceId: state.workspace.id, publication, sourceMeasurement: measurement,
+        response = { json: { workspaceId: state.workspace.id, publication, sourceMeasurement: measurement, sourceAction: action.source,
           currentStatus: 'not_checked', source: 'immutable_business_outcome_version' } };
       } else assert.fail(`Unexpected outcome request: ${method} ${url.pathname}`);
       await route.fulfill(response);
@@ -221,7 +222,13 @@ try {
     assert.equal(await form.locator('[name="currency"]').inputValue(), '', 'measurement currency is not inferred from workspace defaults');
     assert.equal(callCount('PUT'), 0); assert.equal(callCount('POST'), 0);
 
-    const input = { expectedRevision: 0, amount: '-12.004000', currency: 'GBP',
+    assert.equal(await form.locator('[name="actionSelection"]').inputValue(), '', 'a recorded action is never chosen automatically');
+    const beforeSelection = calls.length;
+    await form.locator('[name="actionSelection"]').selectOption('action:' + action.choice.id);
+    assert.equal(calls.length, beforeSelection, 'choosing an action uses the same selected snapshot without another request');
+    for (const value of [action.choice.id, action.choice.account, action.choice.productId, action.choice.completedAt]) assert.ok((await page.locator('#business-outcomes-action-details').textContent()).includes(value));
+    await assertNoOverflow(page, width, 'explicit recorded action selector');
+    const input = { actionSelection: { actionId: action.choice.id }, expectedRevision: 0, amount: '-12.004000', currency: 'GBP',
       window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-04T00:00:00.000Z' },
       coverage: { status: 'complete', observedCount: 12, expectedCount: 12 }, method: { kind: 'reconciled_manual' },
       observedAt: '2026-10-05T12:00:00.000Z', report: { description: 'Synthetic retained evidence. ' + hostile + ' ' + 'long-recorded-source-detail'.repeat(12), costsComplete: true } };
@@ -256,6 +263,8 @@ try {
     await publicationReview.click(); await review.waitFor({ state: 'visible' });
     assert.match(await review.textContent(), /-12\.004 GBP/);
     assert.match(await review.textContent(), /Measurement version 1/);
+    assert.match(await review.textContent(), /explicitly associate the recorded action shown above/);
+    for (const value of [action.choice.id, action.choice.account, action.choice.productId, action.choice.completedAt]) assert.ok((await review.textContent()).includes(value));
     assert.match(await review.textContent(), /does not prove Runvara caused the result/);
     assert.equal(await page.locator('#business-outcomes-confirm').isDisabled(), true);
     await page.locator('#business-outcomes-confirm').evaluate(element => element.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -289,7 +298,7 @@ try {
     assert.equal(await form.locator('h3').textContent(), 'Record a business result');
     assert.match(await summary.textContent(), /not independently verified/);
     assert.match(await summary.textContent(), /Attribution to RunvaraNot established/);
-    assert.doesNotMatch(await summary.textContent(), /Synthetic retained evidence/);
+    assert.doesNotMatch(await summary.textContent(), /Synthetic retained evidence|Retained Shopify description|write_reviewed_action/);
     const sourcePath = `/api/business-outcomes/versions/${publication.version.versionId}`;
     assert.equal(callCount('GET', sourcePath), 0, 'loading a committed selection does not eagerly hydrate retained evidence');
     const evidenceRead = holdRequest('GET', sourcePath), evidence = summary.locator('[data-outcome-evidence]');
@@ -297,6 +306,8 @@ try {
     assert.equal(callCount('GET', sourcePath), 1, 'repeated evidence clicks coalesce');
     await releaseRequest(evidenceRead);
     await summary.getByText('Original measurement report', { exact: true }).waitFor();
+    await summary.getByText('Exact recorded action input', { exact: true }).waitFor();
+    assert.ok((await summary.textContent()).includes(action.source.input.description), 'the retained action description is complete and untruncated');
     assert.match(await summary.textContent(), /Saved with this result; its current status has not been rechecked/);
     assert.match(await summary.textContent(), /Synthetic retained evidence/);
     assert.equal(await summary.locator('img,script,[onerror]').count(), 0);
@@ -359,7 +370,7 @@ try {
       [`PUT ${savePath}`, 'POST /api/business-outcomes/publish'], 'outcomes never execute commercial/provider actions');
     await context.close();
   }
-  console.log('Business outcome browser checks passed at 320, 390 and 1200 pixels using synthetic measurements and publications.');
+  console.log('Action-linked business outcome browser checks passed at 320, 390 and 1200 pixels using synthetic measurements and publications.');
 } finally {
   if (browser) await browser.close();
   if (server.listening) await new Promise(resolve => server.close(resolve));

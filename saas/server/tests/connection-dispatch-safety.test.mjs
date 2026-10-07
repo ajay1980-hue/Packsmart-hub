@@ -17,6 +17,7 @@ import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary } from
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 import { createExperiment } from '../lib/revenue-engine.mjs';
+import { resolveRecordedActionEvidence, validateReviewedSourceAction, REVIEWED_ACTION_STATE_MAX_BYTES } from '../lib/reviewed-action-evidence.mjs';
 import { inspectShopifyOrderSource } from '../lib/shopify-order-source.mjs';
 
 const WORKSPACE = 'dispatch-safety-fixture';
@@ -1603,4 +1604,98 @@ test('exact source capture stays descriptive across operations, selected outcome
   assert.equal(durableAfter.connectionWrites[0].dispatchClaim, undefined);
   assert.deepEqual(evidence(f.state), before); assert.deepEqual(evidence(durableAfter), durableBefore);
   assert.equal(deriveImpact(f.state, { now: now.toISOString(), outcomeSnapshot }).qualifiedOutcomeGroups[0].amount, '123.456789');
+});
+
+
+test('actual content transport records compact prospective context in the same exact terminal save', async t => {
+  for (const policy of [null, true]) {
+    const f = await fixture(t, { storage: 'mock-supabase', policy });
+    const result = await f.run();
+    assert.equal(result.status, 'completed'); assert.equal(f.mutations.length, 1); assert.equal(f.durableClaims.length, 3);
+    const stored = await f.replica.get(WORKSPACE), source = resolveRecordedActionEvidence(stored, result.id);
+    assert.equal(source.input.description, result.input.description); assert.equal(source.context.approval.id, result.approvalId);
+    assert.equal(source.context.origin, 'owner_manual'); assert.equal(source.context.originatingObjective, null);
+    assert.equal(source.context.policies.length, policy ? 1 : 0); assert.equal(source.context.acknowledged, undefined);
+    assert.equal(result.recordedActionContext.input, undefined); assert.equal(result.recordedActionContext.description, undefined);
+    assert.deepEqual(f.durableClaims[2].connectionWrites.find(w => w.id === result.id).recordedActionContext, result.recordedActionContext);
+    await f.run(); assert.equal(f.mutations.length, 1); assert.equal(f.durableClaims.length, 3);
+  }
+});
+
+test('all applicable policy revisions survive completion context without inventing objective origin', async t => {
+  const f = await fixture(t, { policy: true });
+  installPolicy(f.state, { title: 'Second independent restriction' });
+  // A fresh exact proposal/approval is required for the enlarged restriction set.
+  const w = proposeConnectionWrite(f.state, 'shopify', { requestId:'multiple_policy_request_0001', operation:'product_content', productId:PRODUCT, title:'New approved title', description:'Policy-bound description' }, f.state.users[0].id);
+  const a=f.state.approvals.find(a=>a.id===w.approvalId); Object.assign(a,{status:'approved',decidedBy:f.state.users[0].id,decidedAt:new Date().toISOString()});
+  await f.persist();
+  const result=await executeConnectionWrite(f.state,w.id,f.state.users[0].id,f.service,f.persist,f.options);
+  assert.equal(result.status,'completed'); const source=resolveRecordedActionEvidence(f.state,w.id);
+  assert.equal(source.context.policies.length,2); assert.deepEqual(source.context.policies,w.objectivePolicyProposal.policies);
+  assert.equal(source.context.originatingObjective,null); assert.equal(f.mutations.length,1);
+});
+
+test('optional source and state size failures keep known provider success and never add save or replay', async t => {
+  for (const mode of ['unicode_source', 'near_state_ceiling']) {
+    const f=await fixture(t,{storage:'mock-supabase'});
+    if(mode==='unicode_source') {
+      const input={...f.write.input,description:'雪'.repeat(8000)}; f.write.input=input; f.write.digest=fingerprint(input);
+      const a=f.state.approvals.find(a=>a.id===f.write.approvalId); a.payload.digest=f.write.digest;
+      await f.persist(); f.durableClaims.length=0;
+    } else {
+      const size=Buffer.byteLength(JSON.stringify(f.state)); f.state.padding='x'.repeat(REVIEWED_ACTION_STATE_MAX_BYTES-size-14000);
+      await f.persist(); f.durableClaims.length=0;
+    }
+    const result=await f.run(); assert.equal(result.status,'completed',`${mode}: ${result.errorCode}`); assert.equal(result.result.externalId,PRODUCT);
+    assert.equal(result.recordedActionContext,undefined); assert.equal(f.mutations.length,1); assert.equal(f.durableClaims.length,3);
+    const saved=await f.replica.get(WORKSPACE); assert.equal(saved.connectionWrites[0].status,'completed');
+    assert.throws(()=>resolveRecordedActionEvidence(saved,result.id));
+    await f.run(); assert.equal(f.mutations.length,1); assert.equal(f.durableClaims.length,3);
+  }
+});
+
+test('terminal save acknowledgement loss is never returned as success and never retries the provider', async t => {
+  for(const mode of ['missing','changed','cas_loss']) {
+    const f=await fixture(t,{storage:'mock-supabase'}); let saves=0;
+    const result=await f.observe(async()=>{
+      saves++; if(saves===3 && mode==='cas_loss') throw Object.assign(new Error('Synthetic final CAS conflict'),{code:'STATE_CONFLICT'});
+      const saved=await f.persist();
+      if(saves===3) { if(mode==='missing') return null; const changed=structuredClone(saved); changed.connectionWrites[0].recordedActionContext.snapshotDigest='0'.repeat(64); return changed; }
+      return saved;
+    });
+    assert.ok(result instanceof Error); assert.equal(f.mutations.length,1); assert.equal(saves,3);
+    const stored=await f.replica.get(WORKSPACE);
+    if(mode==='cas_loss') { assert.equal(stored.connectionWrites[0].recordedActionContext,undefined); assert.throws(()=>resolveRecordedActionEvidence(stored,f.write.id)); }
+    else {
+      // Authoritative later read may establish the result really committed;
+      // it never proves the original process received the final acknowledgement.
+      const source=resolveRecordedActionEvidence(stored,f.write.id); assert.equal(source.context.acknowledged,undefined);
+      assert.deepEqual(validateReviewedSourceAction(source,{workspaceId:WORKSPACE}),source);
+    }
+    await f.run(); assert.equal(f.mutations.length,1); assert.equal(saves,3);
+  }
+});
+
+
+test('actual recorded content action linked into an owner-reviewed result cannot unlock profit-first dispatch', async t => {
+  const f=await fixture(t,{storage:'mock-supabase'}), completed=await f.run();
+  assert.equal(completed.status,'completed'); const source=resolveRecordedActionEvidence(f.state,completed.id), now=new Date();
+  const m=prepareExperimentOutcomeMeasurement({expectedRevision:0,amount:'12',currency:'GBP',window:{startsAt:'2026-10-01T00:00:00.000Z',endsAt:'2026-10-06T00:00:00.000Z'},
+    coverage:{status:'complete',observedCount:10,expectedCount:10},method:{kind:'holdout'},observedAt:'2026-10-06T12:00:00.000Z',
+    report:{description:'Synthetic result explicitly associated by the owner',costsComplete:true},actionSelection:{actionId:completed.id}},
+    {workspaceId:WORKSPACE,experimentId:'experiment_linked_safety',actorId:f.state.users[0].id,now,previousMeasurement:null,actionEvidence:source});
+  const row=createBusinessOutcomeCandidate({source:{type:'experiment_measurement',experimentId:m.experimentId,measurementRevision:m.revision,measurementDigest:m.digest},
+    ...Object.fromEntries(['metric','amount','currency','window','coverage','method','provenance','links'].map(k=>[k,m[k]])),
+    verification:{kind:'owner_attestation',actorId:f.state.users[0].id,verifiedAt:now.toISOString(),measurementDigest:m.digest}}, {workspaceId:WORKSPACE,now});
+  const head={schema:'runvara-outcome-head/v1',workspaceId:WORKSPACE,outcomeId:row.outcomeId,revision:1,versionId:row.versionId,digest:row.digest,status:'published',publicationId:'synthetic_linked_publication',committedAt:now.toISOString(),commitRevision:'synthetic_commit'};
+  const publicationBoundary=createOutcomePublicationBoundary({workspaceId:WORKSPACE,snapshotId:'linked_safety',complete:true,expectedOutcomeCount:1,resolveCommittedPublication:()=>({head,version:row})});
+  const outcomeSnapshot={versions:[row],publicationBoundary};
+  const learning=deriveLearning(f.state,{now:now.toISOString(),outcomeSnapshot});
+  assert.deepEqual(learning.priors,[]); assert.equal(learning.qualifiedOutcomeGroups[0].usableForGuidance,false);
+  installPolicy(f.state,{limits:{profitFirst:true}});
+  const w=proposeConnectionWrite(f.state,'shopify',{requestId:'linked_profit_first_0001',operation:'product_content',productId:PRODUCT,title:'Another approved title',description:'Another approved description'},f.state.users[0].id);
+  const a=f.state.approvals.find(a=>a.id===w.approvalId); Object.assign(a,{status:'approved',decidedBy:f.state.users[0].id,decidedAt:now.toISOString()});
+  w.financialEvidence={qualifiedOutcome:row,sourceAction:source,learning}; await f.persist(); const saves=f.durableClaims.length;
+  await assert.rejects(executeConnectionWrite(f.state,w.id,f.state.users[0].id,f.service,f.persist,f.options),{code:'WRITE_POLICY_EVIDENCE_REQUIRED'});
+  assert.equal(f.mutations.length,1); assert.equal(f.durableClaims.length,saves); assert.equal(w.dispatchClaim,undefined);
 });

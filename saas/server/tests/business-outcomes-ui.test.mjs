@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { webcrypto } from 'node:crypto';
+import { actionUiFixture } from './business-outcomes-action-ui-fixture.mjs';
 import { JSDOM, VirtualConsole } from 'jsdom';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate, assessBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
@@ -8,7 +10,7 @@ const html = await fs.readFile(new URL('../../index.html', import.meta.url), 'ut
 const script = await fs.readFile(new URL('../../outcomes-ui.js', import.meta.url), 'utf8');
 const now = '2026-10-06T20:00:00.000Z', workspaceId = 'outcomes-ui', experimentId = 'experiment_one';
 const input = { expectedRevision: 0, amount: '999999999999999999.999999', currency: 'GBP', window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' }, coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' }, observedAt: '2026-10-06T12:00:00.000Z', report: { description: '<img src=x onerror="window.injected=true"> Measured retained facts.', costsComplete: true } };
-const measurement = (body = input, previousMeasurement = null) => prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId, actorId: 'owner_one', now, previousMeasurement });
+const measurement = (body = input, previousMeasurement = null, actionEvidence = null) => prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId, actorId: 'owner_one', now, previousMeasurement, ...(body.actionSelection ? { actionEvidence, reuseVersionId: body.actionSelection.reuseVersionId ?? null } : {}) });
 const assessment = m => assessExperimentOutcomeMeasurement(m, { workspaceId, experimentId, now });
 function publication(m, publicationId = 'publication_one') {
   const version = createBusinessOutcomeCandidate({ source: { type: 'experiment_measurement', experimentId, measurementRevision: m.revision, measurementDigest: m.digest }, metric: m.metric, amount: m.amount, currency: m.currency, window: m.window, coverage: m.coverage, method: m.method, provenance: m.provenance, links: m.links, verification: { kind: 'owner_attestation', actorId: 'owner_one', verifiedAt: now, measurementDigest: m.digest } }, { workspaceId, now });
@@ -36,20 +38,21 @@ async function until(fn) { for (let n = 0; n < 200; n++) { if (fn()) return; awa
 async function harness(t, options = {}) {
   const errors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', e => errors.push(e.message));
   const dom = new JSDOM(html, { url: 'https://runvara.example.test', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole });
-  const w = dom.window, d = w.document; w.AbortController = AbortController; w.HTMLElement.prototype.scrollIntoView = () => {};
+  const w = dom.window, d = w.document; w.TextEncoder = TextEncoder; Object.defineProperty(w.crypto, 'subtle', { value: webcrypto.subtle, configurable: true }); w.AbortController = AbortController; w.HTMLElement.prototype.scrollIntoView = () => {};
   t.after(() => { dom.window.close(); assert.deepEqual(errors, []); });
   const h = { w, d, calls: [], context: { workspaceId, userId: 'owner_one', role: options.role || 'owner', session: {}, view: 'revenue-engine', experiments: [{ id: experimentId, title: 'Recorded experiment' }] } };
+  h.action = options.action || null; h.currentActionAssociation = options.currentActionAssociation;
   h.m = options.measurement || measurement(); h.p = options.publication || null;
   h.detail = () => {
     const detail = { workspaceId, workspaceRevision: 'revision_one', experiment: { id: experimentId, title: 'Recorded experiment', status: 'measured' }, measurement: h.m, assessment: h.m ? assessment(h.m) : null, currentPublication: h.p };
-    return { ...detail, relationships: relationships(detail) };
+    return { ...detail, relationships: relationships(detail), ...(h.action ? { actionLinkContract: 'runvara-reviewed-action/v1', actionChoices: [h.action.choice], currentActionAssociation: h.currentActionAssociation ?? (h.p && h.m?.digest === h.p.version.source.measurementDigest ? h.m.intervention : null) } : {}) };
   };
   h.summary = { workspaceId, current: options.current || [], summary: { groups: options.groups || [], coverage: { complete: true }, exclusions: [] } };
   h.handler = async (path, config) => {
     if (path === '/api/business-outcomes') return structuredClone(h.summary);
-    if (path.endsWith('/measurement')) { const body = JSON.parse(config.body); h.m = measurement(body, h.m); return { workspaceId, workspaceRevision: 'revision_two', measurement: h.m, assessment: assessment(h.m) }; }
+    if (path.endsWith('/measurement')) { const body = JSON.parse(config.body); h.m = measurement(body, h.m, h.action?.source); return { workspaceId, workspaceRevision: 'revision_two', measurement: h.m, assessment: assessment(h.m) }; }
     if (path === '/api/business-outcomes/publish') { const body = JSON.parse(config.body); h.p = publication(h.m, body.publicationId); return { publication: h.p, replayed: false, isCurrent: true }; }
-    if (path.includes('/versions/')) return { publication: h.p, sourceMeasurement: h.m, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' };
+    if (path.includes('/versions/')) return { publication: h.p, sourceMeasurement: options.sourceMeasurement || h.m, sourceAction: h.action?.source ?? null, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' };
     return structuredClone(h.detail());
   };
   w.eval(script); w.RunvaraOutcomes.init({ getContext: () => h.context, request: (path, config = {}) => { h.calls.push({ path, ...config }); return h.handler(path, config); } });
@@ -418,4 +421,198 @@ test('navigation and session replacement cannot revive a cached or late relation
   hold.resolve(oldDetail); await new Promise(r => setTimeout(r, 10));
   assert.match(h.$('business-outcomes-relationship').textContent, /No owner-reviewed result was found/);
   assert.equal(oldRequest.isCurrent(), false); assert.equal(h.writes().length, 0);
+});
+
+test('recorded action choices are optional, explicit, escaped and saved only as selection IDs', async t => {
+  const action = actionUiFixture(workspaceId), h = await harness(t, { action }); await h.open(); await h.load();
+  const select = h.$('business-outcomes-action'), before = h.calls.length;
+  assert.equal(select.value, ''); assert.equal(select.disabled, false); assert.equal(select.options.length, 2);
+  assert.equal(h.form.querySelector('img,script,[onerror]'), null); assert.equal(h.w.actionInjected, undefined);
+  select.value = 'action:' + action.choice.id; select.dispatchEvent(new h.w.Event('change', { bubbles: true }));
+  const text = h.$('business-outcomes-action-details').textContent;
+  for (const expected of [action.choice.id, action.choice.account, action.choice.productId, action.choice.completedAt]) assert.ok(text.includes(expected));
+  assert.match(text, /does not establish a comparison, causality or commercial benefit/);
+  assert.equal(h.calls.length, before, 'selection never fetches a provider, preview or source');
+  h.submit(); h.submit(); await until(() => h.$('business-outcomes-status').textContent.includes('Draft saved'));
+  assert.equal(h.writes().length, 1); assert.deepEqual(JSON.parse(h.writes()[0].body).actionSelection, { actionId: action.choice.id });
+  assert.equal(h.m.schema, 'runvara-experiment-measurement/v2'); assert.equal(select.value, 'saved');
+  h.review('publish');
+  const review = h.$('business-outcomes-review').textContent;
+  for (const expected of [action.choice.id, action.choice.account, action.choice.productId, action.choice.completedAt]) assert.ok(review.includes(expected));
+  assert.match(review, /explicitly associate the recorded action shown above/); assert.equal(h.$('business-outcomes-confirm').disabled, true);
+  assert.equal(h.calls.some(c => c.path.includes('/versions/')), false);
+});
+
+test('missing, unknown, malformed, oversized and duplicate action contracts cannot enable linking', async t => {
+  const action = actionUiFixture(workspaceId), h = await harness(t, { action }); await h.open();
+  for (const mutate of [d => { delete d.actionLinkContract; }, d => { d.actionLinkContract = 'unknown'; },
+    d => { d.actionChoices[0].description = 'NOT ALLOWED'; }, d => { d.actionChoices.push(d.actionChoices[0]); },
+    d => { d.actionChoices = Array(21).fill(d.actionChoices[0]); }, d => { d.actionChoices[0].digest = 'forged'; }]) {
+    h.handler = async () => { const d = structuredClone(h.detail()); mutate(d); return d; };
+    await h.load(); assert.equal(h.$('business-outcomes-action').disabled, true); assert.equal(h.$('business-outcomes-action').value, '');
+    assert.match(h.$('business-outcomes-action-hint').textContent, /linking is unavailable/);
+    const option = h.d.createElement('option'); option.value = 'action:' + action.choice.id; h.$('business-outcomes-action').append(option); h.$('business-outcomes-action').value = option.value;
+    h.submit(); assert.equal(h.writes().length, 0); assert.match(h.$('business-outcomes-status').textContent, /linking is unavailable/);
+  }
+});
+
+test('saved action selection is preserved and cannot silently resolve a changed or removed mutable action', async t => {
+  const action = actionUiFixture(workspaceId), first = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source);
+  const p = publication(first), h = await harness(t, { action, measurement: first, publication: p }); await h.open(); await h.load();
+  assert.equal(h.$('business-outcomes-action').value, 'saved');
+  h.action.choice.digest = 'f'.repeat(64); await h.load(); h.submit();
+  assert.equal(h.writes().length, 0); assert.match(h.$('business-outcomes-status').textContent, /no longer an exact current choice/);
+  const original = h.handler; h.handler = async (path, config) => {
+    if (path.endsWith('/measurement')) return original(path, config);
+    const d = h.detail(); d.actionChoices = []; return d;
+  };
+  await h.load(); assert.equal(h.$('business-outcomes-action').value, 'saved');
+  h.submit(); assert.equal(h.writes().length, 0);
+  h.$('business-outcomes-action').value = 'reuse:' + p.head.versionId;
+  h.$('business-outcomes-action').dispatchEvent(new h.w.Event('change', { bubbles: true }));
+  assert.match(h.$('business-outcomes-action-details').textContent, /write_reviewed_action/);
+  h.submit(); await until(() => h.$('business-outcomes-status').textContent.includes('Draft saved'));
+  assert.deepEqual(JSON.parse(h.writes()[0].body).actionSelection, { reuseVersionId: p.head.versionId });
+  assert.equal(h.m.intervention.action.digest, first.intervention.action.digest); assert.equal(h.m.intervention.reuseVersionId, p.head.versionId);
+  assert.equal(h.$('business-outcomes-action').value, 'saved');
+  h.submit(); await until(() => h.writes().length === 2);
+  assert.deepEqual(JSON.parse(h.writes()[1].body).actionSelection, { reuseVersionId: p.head.versionId });
+  assert.equal(h.calls.some(c => c.path.includes('/versions/')), false, 'reuse is derived only from the selected review snapshot');
+});
+
+test('clearing a saved link explicitly sends null and produces an unlinked next revision', async t => {
+  const action = actionUiFixture(workspaceId), first = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source);
+  const h = await harness(t, { action, measurement: first }); await h.open(); await h.load();
+  h.$('business-outcomes-action').value = ''; h.submit(); await until(() => h.$('business-outcomes-status').textContent.includes('Draft saved'));
+  assert.equal(JSON.parse(h.writes()[0].body).actionSelection, null); assert.equal(h.m.revision, 2); assert.equal(h.m.schema, 'runvara-experiment-measurement/v1');
+  assert.equal(h.m.links.action, null); assert.equal(h.$('business-outcomes-action').value, '');
+});
+
+test('v2 draft review rejects malformed, extra-field, foreign and causality-claiming interventions', async t => {
+  const action = actionUiFixture(workspaceId), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source);
+  const h = await harness(t, { action, measurement: m }); await h.open();
+  for (const mutate of [d => { d.measurement.intervention.comparison = 'proven'; }, d => { d.measurement.intervention.extra = true; },
+    d => { d.measurement.intervention.action.workspaceId = 'foreign'; }, d => { d.measurement.report.facts.intervention.action.digest = 'a'.repeat(64); },
+    d => { d.measurement.links.objective = d.measurement.links.action; }, d => { delete d.measurement.intervention; },
+    d => { d.measurement.intervention.productId = d.measurement.report.facts.intervention.productId = 'gid://shopify/Product/' + '1'.repeat(140); },
+    d => { d.measurement.intervention.approval.revision = d.measurement.report.facts.intervention.approval.revision = d.measurement.links.approval.revision = 2; }]) {
+    h.handler = async () => { const d = structuredClone(h.detail()); mutate(d); return d; };
+    h.$('business-outcomes-experiment').value = experimentId; h.$('business-outcomes-load').click();
+    await until(() => h.$('business-outcomes-status').textContent.includes('Could not load'));
+    assert.equal(h.$('business-outcomes-detail').textContent, ''); assert.equal(h.d.querySelector('[data-outcome-action]'), null); assert.equal(h.writes().length, 0);
+  }
+});
+
+test('linked evidence checks exact source hashes and renders full stored input only after explicit read', async t => {
+  const description = 'Safe prefix <img src=x onerror="window.actionInjected=true">\n' + 'x'.repeat(9000) + ' EXACT END';
+  const action = actionUiFixture(workspaceId, { description }), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(m);
+  const h = await harness(t, { action, measurement: m, publication: p, current: [p] }); await h.open(); await h.load();
+  assert.doesNotMatch(h.$('business-outcomes-summary').textContent, /Safe prefix|Product title|write_reviewed_action/);
+  assert.equal(h.calls.some(c => c.path.includes('/versions/')), false);
+  const button = h.d.querySelector('[data-outcome-source-current]'); button.click(); button.click();
+  await until(() => button.dataset.loaded === 'true');
+  const target = h.$('business-outcomes-current-source'); assert.ok(target.textContent.includes(description)); assert.ok(target.textContent.includes(action.source.input.title));
+  assert.match(target.textContent, /Current status was not checked/); assert.match(target.textContent, /immutable only when the outcome is published/);
+  assert.equal(target.querySelector('img,script,[onerror]'), null); assert.equal(h.w.actionInjected, undefined);
+  assert.equal(h.calls.filter(c => c.path.includes('/versions/')).length, 1);
+});
+
+test('missing or malformed linked evidence fails closed without rendering source or retrying', async t => {
+  const action = actionUiFixture(workspaceId), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(m);
+  for (const mutate of [r => { delete r.sourceAction; }, r => { r.sourceAction = null; }, r => { r.sourceAction.digest = 'f'.repeat(64); },
+    r => { r.sourceAction.input.description = 'TAMPERED'; }, r => { r.sourceAction.context.account = 'foreign.myshopify.com'; },
+    r => { r.sourceAction.context.approval.workspaceId = 'foreign'; }, r => { r.sourceAction.context.originatingObjective = 'invented'; },
+    r => { r.sourceAction.input.extra = 'forged'; }, r => { r.sourceMeasurement.intervention.action.digest = 'f'.repeat(64); },
+    r => { r.sourceAction.context.policies = [{ objectiveId: 'invented', revision: 1, digest: 'a'.repeat(64) }]; }]) {
+    const h = await harness(t, { action, measurement: m, publication: p, current: [p] }); await h.open();
+    h.handler = async () => { const r = structuredClone({ publication: p, sourceMeasurement: m, sourceAction: action.source, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' }); mutate(r); return r; };
+    const button = h.d.querySelector('[data-outcome-evidence]'); button.click();
+    await until(() => h.$('business-outcomes-status').textContent.includes('Could not load'));
+    assert.equal(button.dataset.loaded, undefined); assert.equal(button.nextElementSibling.textContent, '');
+    assert.equal(h.calls.filter(c => c.path.includes('/versions/')).length, 1); assert.equal(h.writes().length, 0);
+  }
+});
+
+test('late source integrity checks cannot render into a closed or replaced session', async t => {
+  const action = actionUiFixture(workspaceId), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(m);
+  for (const transition of ['close', 'navigate', 'session']) {
+    const h = await harness(t, { action, measurement: m, publication: p }); await h.open(); await h.load();
+    const hold = deferred(); let started = false;
+    Object.defineProperty(h.w.crypto, 'subtle', { value: { digest: async (...args) => { started = true; await hold.promise; return webcrypto.subtle.digest(...args); } } });
+    h.d.querySelector('[data-outcome-source-current]').click(); await until(() => started);
+    const target = h.$('business-outcomes-current-source');
+    if (transition === 'close') h.panel.open = false;
+    else if (transition === 'navigate') { h.context.view = 'overview'; h.w.RunvaraOutcomes.pause(); }
+    else { h.context = { ...h.context, session: {} }; h.w.RunvaraOutcomes.reset(); }
+    hold.resolve(); await new Promise(r => setTimeout(r, 30));
+    assert.equal(target.textContent, ''); assert.equal(h.writes().length, 0); assert.equal(h.calls.filter(c => c.path.includes('/versions/')).length, 1);
+  }
+});
+
+test('linked uncertain publications keep the reviewed association and identical retry intent', async t => {
+  const action = actionUiFixture(workspaceId), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source);
+  const h = await harness(t, { action, measurement: m }); await h.open(); await h.load(); h.review('publish');
+  h.handler = async () => { throw new Error('lost acknowledgement'); }; h.confirm();
+  await until(() => h.$('business-outcomes-confirm').textContent.includes('Retry same'));
+  const review = h.$('business-outcomes-review').textContent; assert.match(review, /write_reviewed_action/); assert.match(review, /synthetic-shop.myshopify.com/);
+  assert.equal(h.$('business-outcomes-action').disabled, true); h.confirm(); await until(() => h.writes().length === 2);
+  assert.equal(h.writes()[0].body, h.writes()[1].body); assert.equal(JSON.parse(h.writes()[0].body).expectedMeasurementDigest, m.digest);
+});
+
+test('withdrawal keeps exact historical action evidence while a later unlinked draft stays separate', async t => {
+  const action = actionUiFixture(workspaceId), first = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(first);
+  const later = measurement({ ...input, expectedRevision: 1, amount: '2', actionSelection: null }, first);
+  const h = await harness(t, { action, measurement: later, publication: p, sourceMeasurement: first, currentActionAssociation: first.intervention });
+  await h.open(); await h.load(); assert.equal(h.$('business-outcomes-action').value, '');
+  h.review('withdraw'); assert.match(h.$('business-outcomes-review').textContent, /write_reviewed_action/); assert.match(h.$('business-outcomes-review').textContent, /999999999999999999/);
+  h.$('business-outcomes-cancel').click();
+  h.d.querySelector('[data-outcome-source-current]').click(); await until(() => h.d.querySelector('[data-outcome-source-current]').dataset.loaded === 'true');
+  assert.match(h.$('business-outcomes-current-source').textContent, /Exact recorded action input/); assert.equal(h.m.digest, later.digest); assert.equal(h.writes().length, 0);
+});
+
+test('exact historical source accepts every bounded policy reference without inventing objective origin', async t => {
+  for (const policyCount of [3, 50]) {
+    const action = actionUiFixture(workspaceId, { policyCount }), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(m);
+    const h = await harness(t, { action, measurement: m, publication: p }); await h.open(); await h.load();
+    const button = h.d.querySelector('[data-outcome-source-current]'); button.click(); await until(() => button.dataset.loaded === 'true');
+    assert.match(h.$('business-outcomes-current-source').textContent, /restrictions, not an originating objective/);
+    assert.equal(h.m.links.objective, null); assert.equal(action.source.context.policies.length, policyCount);
+    assert.equal(h.calls.filter(c => c.path.includes('/versions/')).length, 1);
+  }
+});
+
+test('withdrawn linked versions keep their historical source while removing all review and reuse actions', async t => {
+  const action = actionUiFixture(workspaceId), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(m);
+  const version = withdrawBusinessOutcomeCandidate(p.version, { reason: 'incorrect_measurement', verification: p.version.verification }, { workspaceId, now });
+  const withdrawn = { head: { ...p.head, versionId: version.versionId, digest: version.digest, status: 'withdrawn' }, version };
+  const h = await harness(t, { action, measurement: m, publication: withdrawn, currentActionAssociation: m.intervention }); await h.open(); await h.load();
+  assert.match(h.$('business-outcomes-relationship').textContent, /withdrawn and no longer qualifies/); assert.equal(h.d.querySelector('[data-outcome-action]'), null);
+  assert.equal([...h.$('business-outcomes-action').options].some(o => o.value.startsWith('reuse:')), false);
+  const button = h.d.querySelector('[data-outcome-source-current]'); button.click(); await until(() => button.dataset.loaded === 'true');
+  assert.match(h.$('business-outcomes-current-source').textContent, /Exact recorded action input/); assert.equal(h.writes().length, 0);
+});
+
+test('rehashing a changed claim identity cannot make its typed source evidence displayable', async t => {
+  for (const policyCount of [0, 3]) {
+    const action = actionUiFixture(workspaceId, { policyCount }), m = measurement({ ...input, actionSelection: { actionId: action.choice.id } }, null, action.source), p = publication(m);
+    const h = await harness(t, { action, measurement: m, publication: p, current: [p] }); await h.open();
+    h.handler = async () => {
+      const result = structuredClone({ publication: p, sourceMeasurement: m, sourceAction: action.source, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' });
+      result.sourceAction.context.claimIdentity = 'a'.repeat(64);
+      const { digest: oldDigest, ...body } = result.sourceAction;
+      const changedDigest = digestMeasurementValue(body); assert.notEqual(changedDigest, oldDigest);
+      result.sourceAction.digest = changedDigest;
+      // Self-consistent source hashes/refs alone must not override the typed
+      // legacy claim fingerprint, even in an invalid DTO the server would deny.
+      result.sourceMeasurement.intervention.action.digest = changedDigest;
+      result.sourceMeasurement.report.facts.intervention.action.digest = changedDigest;
+      result.sourceMeasurement.links.action.digest = changedDigest;
+      result.publication.version.links.action.digest = changedDigest;
+      return result;
+    };
+    const button = h.d.querySelector('[data-outcome-evidence]'); button.click();
+    await until(() => h.$('business-outcomes-status').textContent.includes('Could not load'));
+    assert.equal(button.dataset.loaded, undefined); assert.equal(button.nextElementSibling.textContent, '');
+    assert.equal(h.calls.filter(c => c.path.includes('/versions/')).length, 1); assert.equal(h.writes().length, 0);
+  }
 });

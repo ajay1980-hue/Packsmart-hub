@@ -169,7 +169,7 @@ test('historical evidence reads require exact tenant/version and never imply cur
   const f = fixture(); let calls = 0;
   await assert.rejects(adapter(async (path, options) => {
     calls++; assert.ok(path.includes(`workspace_id=eq.${WS}&version_id=eq.${f.version.versionId}&`));
-    assert.ok(path.endsWith(',source_measurement&limit=2')); assert.equal(options.maxResponseBytes, 128 * 1024); return [];
+    assert.ok(path.endsWith(',source_measurement,source_action&limit=2')); assert.equal(options.maxResponseBytes, 128 * 1024); return [];
   }).evidence(WS, f.version.versionId), { code: 'OUTCOME_VERSION_NOT_FOUND' });
   assert.equal(calls, 1);
   await assert.rejects(adapter(async () => assert.fail('Invalid ID cannot query')).evidence(WS, '../foreign'), { code: 'OUTCOME_REQUEST_INVALID' });
@@ -400,5 +400,28 @@ test('metered outcome RPC preserves safe rejection codes and never repeats an un
     assert.equal(internal.db.failed, 1);
     assert.equal(internal.db.outcomes[databaseCode === null ? 'invalid_response' : 'http_error'], 1);
     assert.equal(Object.values(internal.db.retries).reduce((sum, value) => sum + value, 0), 0);
+  }
+});
+
+test('old-schema evidence fallback is one bounded read and only permits unlinked v1 data', async () => {
+  const f=fixture(); let calls=0;
+  await assert.rejects(adapter(async (path,options)=>{
+    calls++; assert.equal(options.maxResponseBytes,128*1024);
+    if(calls===1) { assert.ok(path.includes('source_action')); throw Object.assign(new Error('column missing'),{databaseCode:'42703'}); }
+    assert.equal(path.includes('source_action'),false); return [];
+  }).evidence(WS,f.version.versionId),{code:'OUTCOME_VERSION_NOT_FOUND'});
+  assert.equal(calls,2);
+  calls=0;
+  await assert.rejects(adapter(async()=>{calls++; throw Object.assign(new Error('generic missing data'),{databaseCode:'42P01'});}).evidence(WS,f.version.versionId),{code:'OUTCOME_STORAGE_UNAVAILABLE'});
+  assert.equal(calls,1);
+});
+
+test('review compact action choices require exact contract, bounded fields, tenant-scoped source and unique identities', async () => {
+  const base={...reviewResult(null,null),actionLinkContract:'runvara-reviewed-action/v1',actionChoices:[{id:'write_one',account:'synthetic.myshopify.com',productId:'gid://shopify/Product/71',title:'Synthetic action',completedAt:'2026-10-05T00:00:00.000Z',digest:'a'.repeat(64)}],currentActionAssociation:null};
+  const result=await adapter(async()=>base).review(WS,'experiment_1'); assert.equal(result.actionChoices.length,1);
+  for(const change of [v=>v.actionLinkContract='forged',v=>v.actionChoices.push({...v.actionChoices[0]}),v=>v.actionChoices[0].description='body injection',
+    v=>v.actionChoices[0].account='evil.test',v=>v.actionChoices[0].title='x'.repeat(201),v=>v.actionChoices[0].completedAt='2026-02-30T00:00:00.000Z',
+    v=>v.currentActionAssociation={},v=>delete v.actionLinkContract,v=>delete v.currentActionAssociation]) {
+    const value=structuredClone(base); change(value); await assert.rejects(adapter(async()=>value).review(WS,'experiment_1'),{code:'OUTCOME_REVIEW_INVALID'});
   }
 });

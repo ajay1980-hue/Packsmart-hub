@@ -1,3 +1,4 @@
+import { REVIEWED_ACTION_CONTRACT, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
 import { randomUUID } from 'node:crypto';
 import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
 import { assessExperimentOutcomeMeasurement, digestMeasurementValue, validateExperimentOutcomeMeasurement } from './experiment-measurements.mjs';
@@ -16,7 +17,8 @@ const failures = {
   P0O03: ['OUTCOME_OWNER_SESSION_CHANGED', 403], P0O04: ['OUTCOME_WORKSPACE_CONFLICT', 409],
   P0O05: ['OUTCOME_HEAD_CONFLICT', 409], P0O06: ['OUTCOME_PUBLICATION_CONFLICT', 409],
   P0O07: ['OUTCOME_MEASUREMENT_CONFLICT', 409], P0O08: ['OUTCOME_WITHDRAWN_FINAL', 409],
-  P0O09: ['OUTCOME_SOURCE_NOT_FOUND', 404], P0O10: ['OUTCOME_SIZE_LIMIT', 413]
+  P0O09: ['OUTCOME_SOURCE_NOT_FOUND', 404], P0O10: ['OUTCOME_SIZE_LIMIT', 413],
+  P0O11: ['OUTCOME_ACTION_INVALID', 409]
 };
 const failure = (code, status = 503) => Object.assign(new Error(code), { code, status });
 const plain = value => value && typeof value === 'object' && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
@@ -246,7 +248,14 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
     tenant(workspaceId); versionId(requestedVersionId);
     let rows;
     try {
-      rows = await request(`runvara_business_outcome_versions?workspace_id=eq.${encodeURIComponent(workspaceId)}&version_id=eq.${requestedVersionId}&select=${VERSION_COLUMNS},source_measurement&limit=2`, { maxResponseBytes: 128 * 1024 });
+      const path = `runvara_business_outcome_versions?workspace_id=eq.${encodeURIComponent(workspaceId)}&version_id=eq.${requestedVersionId}&select=${VERSION_COLUMNS},source_measurement`;
+      try { rows = await request(path + ',source_action&limit=2', { maxResponseBytes: 128 * 1024 }); }
+      catch (cause) {
+        // One bounded compatibility read for an older installed schema. It can
+        // only return unlinked v1 evidence; linked data below still fails closed.
+        if (!['42703', 'PGRST204'].includes(cause?.databaseCode)) throw cause;
+        rows = await request(path + '&limit=2', { maxResponseBytes: 128 * 1024 });
+      }
     } catch (cause) { throw readError(cause); }
     bounded(rows, 128 * 1024);
     if (!Array.isArray(rows) || rows.length > 1) throw failure('OUTCOME_PUBLICATION_INVALID');
@@ -259,7 +268,16 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
     catch { throw failure('OUTCOME_SOURCE_INVALID'); }
     if (sourceMeasurement.digest !== publication.version.source.measurementDigest
       || sourceMeasurement.revision !== publication.version.source.measurementRevision) throw failure('OUTCOME_SOURCE_INVALID');
-    return { publication, sourceMeasurement, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' };
+    let sourceAction = null;
+    try {
+      const stored = rows[0].source_action ?? null;
+      if (sourceMeasurement.intervention) {
+        sourceAction = validateReviewedSourceAction(stored, { workspaceId });
+        if (digestMeasurementValue(actionIntervention(sourceAction, sourceMeasurement.intervention.reuseVersionId)) !== digestMeasurementValue(sourceMeasurement.intervention)
+          || digestMeasurementValue(publication.version.links) !== digestMeasurementValue(sourceMeasurement.links)) throw failure('OUTCOME_SOURCE_INVALID');
+      } else if (stored !== null || publication.version.links.action !== null || publication.version.links.approval !== null) throw failure('OUTCOME_SOURCE_INVALID');
+    } catch { throw failure('OUTCOME_SOURCE_INVALID'); }
+    return bounded({ publication, sourceMeasurement, sourceAction, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' }, 128 * 1024);
   }
   async function one(workspaceId, experimentId) {
     tenant(workspaceId); identifier(experimentId);
@@ -291,7 +309,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
     }
     bounded(result, 128 * 1024);
     try {
-      exact(result, ['workspaceId', 'workspaceRevision', 'experiment', 'measurement', 'current']);
+      exact(result, ['workspaceId', 'workspaceRevision', 'experiment', 'measurement', 'current', 'actionLinkContract', 'actionChoices', 'currentActionAssociation']);
       exact(result.experiment, ['id', 'title', 'status']);
       if (result.workspaceId !== workspaceId || result.experiment.id !== experimentId
         || (result.experiment.title !== null && (typeof result.experiment.title !== 'string' || result.experiment.title.length > 180))
@@ -308,8 +326,27 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
         if (row.outcome_id !== currentPublication.head.outcomeId || row.version_id !== currentPublication.head.versionId
           || currentPublication.version.source.experimentId !== experimentId) throw failure('OUTCOME_PUBLICATION_INVALID');
       }
-      const review = { workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
-      return { ...review, relationships: projectValidatedSelectedReview(review, at) };
+      let actionLinkContract = null, actionChoices = [], currentActionAssociation = null;
+      if (Object.hasOwn(result, 'actionLinkContract')) {
+        if (result.actionLinkContract !== REVIEWED_ACTION_CONTRACT || !Array.isArray(result.actionChoices) || result.actionChoices.length > 20) throw failure('OUTCOME_REVIEW_INVALID');
+        const ids = new Set();
+        actionChoices = result.actionChoices.map(row => {
+          exact(row, ['id','account','productId','title','completedAt','digest']); identifier(row.id); hash(row.digest);
+          if (ids.has(row.id) || typeof row.account !== 'string' || row.account.length > 253 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(row.account)
+            || typeof row.productId !== 'string' || row.productId.length > 160 || !/^gid:\/\/shopify\/Product\/\d+$/.test(row.productId)
+            || typeof row.title !== 'string' || row.title.length > 200 || !row.title.isWellFormed()
+            || typeof row.completedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(row.completedAt)
+            || !Number.isFinite(Date.parse(row.completedAt)) || new Date(row.completedAt).toISOString() !== row.completedAt) throw failure('OUTCOME_REVIEW_INVALID');
+          ids.add(row.id); return { ...row };
+        });
+        bounded(actionChoices, 16384); actionLinkContract = REVIEWED_ACTION_CONTRACT;
+        if (result.currentActionAssociation !== null) {
+          currentActionAssociation = validateActionIntervention(result.currentActionAssociation, workspaceId);
+          if (!currentPublication || digestMeasurementValue(currentPublication.version.links) !== digestMeasurementValue({ action: currentActionAssociation.action, approval: currentActionAssociation.approval, objective: null, opportunity: null })) throw failure('OUTCOME_REVIEW_INVALID');
+        } else if (currentPublication?.version.links.action !== null && currentPublication?.version.links.action !== undefined) throw failure('OUTCOME_REVIEW_INVALID');
+      } else if (Object.hasOwn(result, 'actionChoices') || Object.hasOwn(result, 'currentActionAssociation') || measurement?.intervention || currentPublication?.version.links.action) throw failure('OUTCOME_REVIEW_INVALID');
+      const review = { actionLinkContract, actionChoices, currentActionAssociation, workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
+      return bounded({ ...review, relationships: projectValidatedSelectedReview(review, at) }, 128 * 1024);
     } catch { throw failure('OUTCOME_REVIEW_INVALID'); }
   }
   return { publish, current, one, evidence, review };

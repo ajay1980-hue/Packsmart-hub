@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { createRecordedActionContext, REVIEWED_ACTION_STATE_MAX_BYTES } from './reviewed-action-evidence.mjs';
 import { connectionError, connectionSettings } from './connection-centre.mjs';
 import { normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
@@ -230,6 +231,8 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   if (recordedContainer && recordedContainer !== containerId) throw blocked('WRITE_REQUEST_CHANGED');
   const credentialIdentity = digest(connection.encryptedCredentials);
   const preparedInput = immutable(structuredClone(write.input));
+  const approvedActionDecision = write.provider === 'shopify' && preparedInput.operation === 'product_content'
+    ? immutable(structuredClone(approval)) : null;
   const identity = digest(writeIdentity(write));
   const workspaceId = state.workspace?.id;
   const config = write.provider === 'shopify' ? { ...integrations.shopifyConfig(state), connection: undefined } : {};
@@ -298,6 +301,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   if (write.dispatchClaim && (write.dispatchClaim.identity !== identity || write.dispatchClaim.authority !== authorityDigest
     || write.dispatchClaim.workspaceId !== workspaceId)) throw blocked('WRITE_CLAIM_CHANGED');
   write.dispatchClaim ||= { id: `write_claim_${crypto.randomUUID()}`, workspaceId, identity, authority: authorityDigest, phases: {} };
+  const executionClaimId = write.dispatchClaim.id;
   if (digest(state.connectionDispatchAdmissions ?? []) !== admissionDigest) throw blocked('WRITE_ADMISSION_UNAVAILABLE');
   admitExecution(state, true);
   admissionDigest = digest(state.connectionDispatchAdmissions);
@@ -377,6 +381,27 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     write.errorCode = /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'WRITE_RESULT_UNKNOWN';
   }
   addAudit(state, { type: 'connection_write_finished', actor, detail: { provider: write.provider, writeId: write.id, status: write.status, errorCode: write.errorCode || null } });
+  // Optional evidence preparation is deliberately outside the provider-result
+  // catch. A size/shape failure cannot erase a known Shopify response, change it
+  // to uncertain, add another save, or replay the provider mutation. The exact
+  // same final save below acknowledges the retained context and terminal result.
+  if (write.status === 'completed' && approvedActionDecision) {
+    try {
+      write.recordedActionContext = createRecordedActionContext({ state, write, preparedInput, actor,
+        approval: approvedActionDecision, objectivePolicy, dispatchRequestDigest: digest(expectedShopifyRequest),
+        claimId: executionClaimId, claimIdentity: identity, apiVersion: config.apiVersion || '2026-07' });
+      // Leave conservative headroom for the existing store's revision/reporting
+      // metadata. No full action text is duplicated in the mutable context.
+      if (Buffer.byteLength(JSON.stringify(state)) >= REVIEWED_ACTION_STATE_MAX_BYTES - 16384) {
+        delete write.recordedActionContext;
+        write.recordedActionUnavailable = 'state_size_limit';
+      }
+    } catch (error) {
+      delete write.recordedActionContext;
+      write.recordedActionUnavailable = error.code === 'OUTCOME_ACTION_TOO_LARGE' ? 'source_size_limit' : 'context_unavailable';
+    }
+    if (write.recordedActionUnavailable && Buffer.byteLength(JSON.stringify(state)) >= REVIEWED_ACTION_STATE_MAX_BYTES - 16384) delete write.recordedActionUnavailable;
+  }
   await saveExact();
   return structuredClone(write);
 }

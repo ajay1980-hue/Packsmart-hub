@@ -68,6 +68,7 @@ import { deriveImpact } from './lib/impact-engine.mjs';
 import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
 import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
+import { REVIEWED_ACTION_CONTRACT, resolveRecordedActionEvidence, validateActionSelection } from './lib/reviewed-action-evidence.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from './lib/experiment-measurements.mjs';
 import { evidenceInWorkspace } from './lib/business-evidence-scope.mjs';
 
@@ -1221,6 +1222,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (source && req.method === 'PUT' && source[2]) {
             requireOwner(auth); consume(outcomeDraftLimiter);
             const id = decodeId(source[1]), body = await jsonBody(req, 16384);
+            const selection = validateActionSelection(body.actionSelection);
+            let reusedAction = null;
+            if (selection) {
+              const compatible = await store.getBusinessOutcomeReview(workspaceId, id);
+              if (compatible.actionLinkContract !== REVIEWED_ACTION_CONTRACT) throw Object.assign(new Error('Reviewed action linking requires the compatible storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
+              if (selection.reuseVersionId) {
+                const evidence = await store.getBusinessOutcomeEvidence(workspaceId, selection.reuseVersionId);
+                if (evidence.publication.version.source.experimentId !== id || !evidence.sourceAction) throw Object.assign(new Error('Selected immutable action is not available for this experiment'), { status: 409, code: 'OUTCOME_ACTION_INVALID' });
+                reusedAction = evidence.sourceAction;
+              }
+            }
             const result = await mutate(auth, async state => {
               const owned = (value, depth = 0) => depth <= 4 && evidenceInWorkspace(value, workspaceId)
                 && ['workspace', 'tenant'].every(key => !value[key] || typeof value[key] !== 'object' || owned(value[key], depth + 1));
@@ -1231,7 +1243,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
               }
               const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
-                actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null });
+                actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null,
+                ...(selection ? { actionEvidence: reusedAction ?? resolveRecordedActionEvidence(state, selection.actionId), reuseVersionId: selection.reuseVersionId ?? null } : {}) });
               matches[0].outcomeMeasurement = measurement;
               const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
               addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,
