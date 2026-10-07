@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { deriveOperations } from './operations.mjs';
+import { hasCataloguePrice } from './profit.mjs';
 import { advanceCampaignCreatives, testMarketingProvider } from './marketing-providers.mjs';
 import { canvaOAuthReady, readCanvaCredentials, refreshCanvaCredentials } from './marketing-oauth.mjs';
 import { decryptCredentials, encryptCredentials } from './security.mjs';
@@ -100,7 +101,8 @@ function eligibleProducts(state) {
     .filter(item => String(item.productStatus || '').toLowerCase() === 'active')
     .filter(item => item.available !== false)
     .filter(item => item.inventory == null || item.inventory >= minInventory)
-    .filter(item => item.complete && Number(item.margin) >= minMargin)
+    .filter(item => item.complete && hasCataloguePrice(item.price) &&
+      Number.isFinite(item.contribution) && Number.isFinite(item.margin) && item.margin >= minMargin)
     .filter(item => item.productImage || item.image)
     .sort((a, b) => {
       const revenue = Number(b.revenue30d || 0) - Number(a.revenue30d || 0);
@@ -111,7 +113,7 @@ function eligibleProducts(state) {
 
 function campaignCopy(product) {
   const title = clean(product.productTitle || product.title, 120);
-  const price = Number.isFinite(Number(product.price)) ? `£${Number(product.price).toFixed(2)}` : null;
+  const price = hasCataloguePrice(product.price) ? `£${Number(product.price).toFixed(2)}` : null;
   const offer = price ? `${title} from ${price}.` : `${title}.`;
   return {
     headline: title,

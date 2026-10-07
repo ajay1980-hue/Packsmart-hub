@@ -70,8 +70,22 @@ export function runSpecialist(agentId, state, options = {}) {
     }
     case 'stock':
       return result(agentId, shopify.status === 'not_configured' ? 'Warning' : metrics.stockRisks ? 'Warning' : 'Idle', metrics.stockRisks ? `${metrics.stockRisks} active variant${metrics.stockRisks === 1 ? '' : 's'} need stock attention; ${metrics.outOfStock} are out of stock.` : 'No low-stock variants detected in available catalogue data.', { lowStock: metrics.stockRiskItems, outOfStock: metrics.outOfStock }, shopify.status === 'connected' ? 0.92 : 0.55, shopify.status === 'not_configured' ? [{ code: 'SHOPIFY_NOT_CONNECTED', severity: 'WARNING' }] : []);
-    case 'pricing':
-      return result(agentId, metrics.negativeMargin || metrics.lowMargin ? 'Warning' : 'Idle', metrics.missingCosts ? `${metrics.missingCosts} variants cannot be priced confidently until costs are completed.` : metrics.lowMargin ? `${metrics.lowMargin} variants are below their margin floor.` : 'Recorded product margins are above their configured floors.', { missingCosts: metrics.missingCostItems, belowFloor: metrics.lowMarginItems, lossMaking: metrics.negativeMarginItems }, metrics.costCoverage === 100 ? 0.94 : Math.max(0.35, metrics.costCoverage / 100), metrics.missingCosts ? [{ code: 'INCOMPLETE_COSTS', severity: 'WARNING' }] : []);
+    case 'pricing': {
+      const knownMargins = metrics.marginCoveredVariants ?? 0;
+      const incompleteMargins = knownMargins < metrics.variants;
+      const finding = metrics.missingCosts ? `${metrics.missingCosts} variants cannot be priced confidently until costs are completed.`
+        : metrics.negativeMargin ? `${metrics.negativeMargin} variants have negative recorded unit contribution.`
+          : metrics.lowMargin ? `${metrics.lowMargin} variants are below their contribution-margin floor.`
+            : knownMargins ? 'Known catalogue contribution margins meet their configured floors.'
+              : 'Catalogue contribution margins are unavailable from the recorded prices and costs.';
+      return result(agentId, metrics.negativeMargin || metrics.lowMargin || metrics.missingCosts || incompleteMargins ? 'Warning' : 'Idle',
+        `${finding} Margin evidence covers ${knownMargins} of ${metrics.variants} catalogue variants.`,
+        { missingCosts: metrics.missingCostItems, belowFloor: metrics.lowMarginItems, lossMaking: metrics.negativeMarginItems,
+          marginCoveredVariants: knownMargins, marginCoverage: metrics.marginCoverage },
+        metrics.marginCoverage === 100 ? 0.94 : Math.max(0.35, (metrics.marginCoverage || 0) / 100),
+        [...(metrics.missingCosts ? [{ code: 'INCOMPLETE_COSTS', severity: 'WARNING' }] : []),
+          ...(incompleteMargins ? [{ code: 'INCOMPLETE_MARGIN_EVIDENCE', severity: 'WARNING' }] : [])]);
+    }
     case 'finance':
       return result(agentId, metrics.last30d.profitCoverage < 100 ? 'Warning' : 'Idle', `Last 30 days: ${money(metrics.last30d.revenue)} revenue; estimated operating contribution ${money(metrics.last30d.operatingProfit)} with ${metrics.last30d.profitCoverage}% profit coverage.`, { today: metrics.today, last7d: metrics.last7d, last30d: metrics.last30d, estimates: true }, metrics.last30d.profitCoverage / 100, metrics.last30d.profitCoverage < 100 ? [{ code: 'LOW_PROFIT_COVERAGE', severity: 'WARNING' }] : []);
     case 'shopify':

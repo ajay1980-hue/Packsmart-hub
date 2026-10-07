@@ -1,15 +1,19 @@
 import crypto from 'node:crypto';
+import { createActivityMeter } from './activity-meter.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { compactDailyBrief, defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
+import { reportingStatusRequest, REPORTING_RESPONSE_MAX_BYTES } from './reporting-status.mjs';
 import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
 import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
+import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
 import { planAutomationRetention, applyAutomationRetention, verifyAutomationArchivePayload,
   AUTOMATION_ARCHIVE_BATCH_SIZE, AUTOMATION_ARCHIVE_BATCH_BYTES, AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES } from './automation-retention.mjs';
 import {
@@ -58,6 +62,91 @@ async function boundedResponseText(response, maxBytes) {
     }
     return Buffer.concat(chunks,total).toString('utf8');
   } finally { reader.releaseLock(); }
+}
+const CONNECTION_WRITE_CONTEXT_MAX_BYTES = 32768;
+const CONNECTION_WRITE_CONTEXT_FIELDS = ['revision', 'provider', 'writeId', 'connectionId', 'actorId', 'approverId', 'approvalId',
+  'writeIndex', 'connectionIndex', 'actorIndex', 'approverIndex', 'approvalIndex'];
+const CONNECTION_WRITE_ROOT_SCOPE = ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id', 'tenant'];
+const contextUnavailable = () => Object.assign(new Error('Connection-write context is unavailable. Review the request and try again.'),
+  { code: 'WRITE_CONTEXT_UNAVAILABLE', status: 503 });
+const contextObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+const contextIdentity = value => typeof value === 'string' && value.length > 0 && value.length <= 256
+  && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+const contextIndex = value => Number.isSafeInteger(value) && value >= 0 && value <= 4095;
+function validateConnectionWriteContextInput(workspaceId, input) {
+  if (!contextIdentity(workspaceId) || !contextObject(input)) throw contextUnavailable();
+  const fields = Reflect.ownKeys(input), descriptors = Object.getOwnPropertyDescriptors(input);
+  if (fields.length !== CONNECTION_WRITE_CONTEXT_FIELDS.length
+    || fields.some(field => !CONNECTION_WRITE_CONTEXT_FIELDS.includes(field) || !Object.hasOwn(descriptors[field], 'value'))
+    || !['shopify', 'meta'].includes(input.provider)
+    || !['revision', 'writeId', 'connectionId', 'actorId', 'approverId'].every(field => contextIdentity(input[field]))
+    || !['writeIndex', 'connectionIndex', 'actorIndex', 'approverIndex'].every(field => contextIndex(input[field]))
+    || (input.actorId === input.approverId) !== (input.actorIndex === input.approverIndex)
+    || !(input.approvalId === null && input.approvalIndex === null
+      || contextIdentity(input.approvalId) && contextIndex(input.approvalIndex))) throw contextUnavailable();
+}
+function assertConnectionContextScope(value, workspaceId, depth = 0) {
+  if (depth > 64) throw contextUnavailable();
+  if (value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertConnectionContextScope(item, workspaceId, depth + 1);
+    return;
+  }
+  if (!contextObject(value)) throw contextUnavailable();
+  for (const key of ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id']) {
+    if (Object.hasOwn(value, key) && value[key] !== workspaceId) throw contextUnavailable();
+  }
+  for (const key of ['workspace', 'tenant']) {
+    if (Object.hasOwn(value, key) && (contextObject(value[key]) ? value[key].id : value[key]) !== workspaceId) throw contextUnavailable();
+  }
+  for (const item of Object.values(value)) assertConnectionContextScope(item, workspaceId, depth + 1);
+}
+function connectionWriteContextResult(rows, workspaceId, input) {
+  const objectFields = ['workspace', 'settings', 'actor', 'approver', 'connection', 'write',
+    ...(input.approvalId === null ? [] : ['approval'])];
+  const fields = ['workspace_id', 'revision', ...CONNECTION_WRITE_ROOT_SCOPE.map(key => `scope_${key}`), ...objectFields];
+  if (!Array.isArray(rows) || rows.length !== 1 || Buffer.byteLength(JSON.stringify(rows)) > CONNECTION_WRITE_CONTEXT_MAX_BYTES) throw contextUnavailable();
+  const row = rows[0];
+  if (!contextObject(row) || Object.keys(row).length !== fields.length || fields.some(field => !Object.hasOwn(row, field))
+    || row.workspace_id !== workspaceId || row.revision !== input.revision
+    || !objectFields.every(field => contextObject(row[field]))
+    || row.workspace.id !== workspaceId || row.actor.id !== input.actorId || row.approver.id !== input.approverId
+    || row.connection.id !== input.connectionId || row.connection.provider !== input.provider
+    || row.write.id !== input.writeId || row.write.provider !== input.provider || row.write.connectionId !== input.connectionId
+    || !contextObject(row.connection.metadata) || !Array.isArray(row.connection.metadata.grantedScopes)
+    || !row.connection.metadata.grantedScopes.every(contextIdentity) || !contextObject(row.write.input)
+    || (input.actorId === input.approverId && !isDeepStrictEqual(row.actor, row.approver))) throw contextUnavailable();
+  // JSON projection maps both absent root properties and JSON null to null.
+  // Their distinction was checked on the caller's full snapshot; revision
+  // equality preserves it here. Selected complete records keep own properties.
+  for (const key of CONNECTION_WRITE_ROOT_SCOPE) {
+    const value = row[`scope_${key}`];
+    if (value !== null && (key === 'tenant' && contextObject(value) ? value.id : value) !== workspaceId) throw contextUnavailable();
+  }
+  for (const key of ['metaPageIds', 'metaCatalogIds']) {
+    if (Object.hasOwn(row.settings, key) && (!Array.isArray(row.settings[key]) || !row.settings[key].every(contextIdentity))) throw contextUnavailable();
+  }
+  if (Object.hasOwn(row.settings, 'consent') && row.settings.consent !== null && !contextObject(row.settings.consent)) throw contextUnavailable();
+  for (const key of ['providerState', 'dispatchClaim']) {
+    if (Object.hasOwn(row.write, key) && row.write[key] !== null && !contextObject(row.write[key])) throw contextUnavailable();
+  }
+  if (input.approvalId === null) {
+    if (row.write.approvalId != null || row.write.requiresApproval !== false || input.provider !== 'shopify'
+      || row.write.input.operation !== 'internal_note' || row.settings.permissionMode !== 'automatic'
+      || !contextObject(row.settings.consent) || row.settings.consent.mode !== 'automatic'
+      || row.settings.consent.actor !== input.approverId) throw contextUnavailable();
+  } else if (row.approval.id !== input.approvalId || row.write.approvalId !== input.approvalId
+    || row.approval.decidedBy !== input.approverId || !contextObject(row.approval.payload)
+    || row.approval.payload.connectionWriteId !== input.writeId) throw contextUnavailable();
+  for (const record of [row.settings, row.approval]) {
+    if (record && Object.hasOwn(record, 'provider') && record.provider !== input.provider) throw contextUnavailable();
+  }
+  assertConnectionContextScope(row, workspaceId);
+  return { _revision: row.revision, workspace: row.workspace,
+    users: input.actorId === input.approverId ? [row.actor] : [row.actor, row.approver],
+    connectionSettings: { [input.provider]: row.settings }, connections: [row.connection],
+    approvals: input.approvalId === null ? [] : [row.approval], connectionWrites: [row.write] };
 }
 const JOB_FIELDS = 'id,workspace_id,type,provider,status,priority,attempts,max_attempts,ai_units,concurrency_limit,idempotency_key,actor,ai_provider,ai_model,ai_tier,available_at,lease_until,worker_id,error_code,created_at,updated_at,completed_at';
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
@@ -273,7 +362,8 @@ export function upgradeState(state, env = process.env) {
 }
 
 class FileStore {
-  constructor(env) {
+  constructor(env, activityOptions = {}) {
+    this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: false });
     const defaultPath = fileURLToPath(new URL('../data/state.json', import.meta.url));
     this.filePath = env.SAAS_STATE_FILE || defaultPath;
     this.agentJobs = [];
@@ -281,6 +371,12 @@ class FileStore {
   }
 
   get provider() { return 'file'; }
+  activitySnapshot(workspaceId) { return this.activityMeter.snapshot(workspaceId); }
+
+  async getConnectionWriteContext() {
+    // File snapshots cannot establish the durable, current dispatch authority.
+    throw contextUnavailable();
+  }
 
   async readAll() {
     try {
@@ -396,6 +492,7 @@ class FileStore {
       status:update.status, result:update.result ?? row.result, error_code:update.errorCode ?? null,
       completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
     });
+    this.activityMeter.observeJob(job.workspace_id, update.status);
     return structuredClone(row);
   }
 
@@ -404,6 +501,7 @@ class FileStore {
     const row = this.agentJobs.find(item => item.id === job.id);
     if (!sameLiveClaim(row, job)) return null;
     Object.assign(row, { status:'queued', error_code:update.errorCode || null, available_at:update.availableAt, lease_until:null, worker_id:null, updated_at:new Date().toISOString() });
+    this.activityMeter.observeJob(job.workspace_id, 'rescheduled');
     return structuredClone(row);
   }
 
@@ -428,6 +526,7 @@ class FileStore {
     if (!row) return null;
     if (!['blocked','dead_letter'].includes(row.status)) return structuredClone(row);
     Object.assign(row, { status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null, error_code:null, completed_at:null, updated_at:new Date().toISOString() });
+    this.activityMeter.observeJob(workspaceId, 'manual_retry');
     return structuredClone(row);
   }
 
@@ -440,6 +539,11 @@ class FileStore {
   async reserveProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
   async settleProviderUsage() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
   async getOperatorBriefContext() { throw providerUsageError('AI_USAGE_DURABLE_STORE_REQUIRED'); }
+  async businessOutcomeSummary() { throw Object.assign(new Error('Outcome publication storage is unavailable'), { code: 'OUTCOME_STORAGE_UNAVAILABLE', status: 503 }); }
+  async getBusinessOutcome() { return this.businessOutcomeSummary(); }
+  async getBusinessOutcomeReview() { return this.businessOutcomeSummary(); }
+  async getBusinessOutcomeEvidence() { return this.businessOutcomeSummary(); }
+  async publishBusinessOutcome() { return this.businessOutcomeSummary(); }
   async providerUsageSummary(workspaceId, admissionMonth) {
     providerUsageMonth(workspaceId, admissionMonth);
     return { available: false, reason: 'AI_USAGE_NOT_CONFIGURED' };
@@ -482,7 +586,8 @@ class FileStore {
 }
 
 class SupabaseStore {
-  constructor(env, fetchImpl) {
+  constructor(env, fetchImpl, activityOptions = {}) {
+    this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: true });
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
     this.mirrorDigests = new Map();
@@ -496,6 +601,8 @@ class SupabaseStore {
     this.requestTimeoutMs = Math.max(20000, Math.min(60000, Number(env.SUPABASE_REQUEST_TIMEOUT_MS) || 30000));
     this.mirrorDeadlineMs = Math.max(12000, Math.min(60000, Number(env.SUPABASE_MIRROR_DEADLINE_MS) || 30000));
     this.automationRetentionEnabled = String(env.AUTOMATION_RETENTION_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+    // Last primary commit outcome; timestamps can tie or wall time can move.
+    this.primaryPersistenceHealthy = true;
     this.telemetry = {
       automationRetentionEnabled: this.automationRetentionEnabled,
       lastSuccessfulReadAt: null,
@@ -527,14 +634,41 @@ class SupabaseStore {
 
   get provider() { return 'supabase'; }
 
+  async getConnectionWriteContext(workspaceId, input) {
+    try {
+      validateConnectionWriteContextInput(workspaceId, input);
+      input = Object.freeze({ ...input });
+      // Only trusted server-selected indexes are accepted. The caller checks
+      // array uniqueness once; an exact revision binds every subsequent read
+      // to that same array membership and order. Never normalize or fall back
+      // to the full workspace snapshot at this dispatch boundary.
+      const select = ['workspace_id', 'revision:state->>_revision', 'workspace:state->workspace',
+        ...CONNECTION_WRITE_ROOT_SCOPE.map(key => `scope_${key}:state->${key}`),
+        `settings:state->connectionSettings->${input.provider}`, `actor:state->users->${input.actorIndex}`,
+        `approver:state->users->${input.approverIndex}`, `connection:state->connections->${input.connectionIndex}`,
+        ...(input.approvalId === null ? [] : [`approval:state->approvals->${input.approvalIndex}`]),
+        `write:state->connectionWrites->${input.writeIndex}`].join(',');
+      const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=eq.${encodeURIComponent(input.revision)}&select=${select}&limit=2`,
+        { maxResponseBytes: CONNECTION_WRITE_CONTEXT_MAX_BYTES });
+      return connectionWriteContextResult(rows, workspaceId, input);
+    } catch { throw contextUnavailable(); }
+  }
+
+  // Separate from diagnostics(): public health must never expose tenant usage.
+  activitySnapshot(workspaceId) { return this.activityMeter.snapshot(workspaceId); }
+
+  scopedRequest(workspaceId, operation, pathname, options = {}, retryKind = null) {
+    return this.request(pathname, options, { workspaceId, operation, retryKind });
+  }
+
   async getOperatorBriefContext(workspaceId, jobId) {
     validateJobIdentity(workspaceId, jobId);
     try {
       // Final pre-dispatch revalidation only. No full snapshot, prompt, user
       // records, credentials, result payloads or usage history are downloaded.
       const [policies, jobs] = await Promise.all([
-        this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=workspace_id,governance:state->aiEconomics->governance,monthly_cost_limit_usd:state->aiEconomics->monthlyCostLimitUsd,agent_ops_enabled:state->agentOps->enabled,agent_ops_paused:state->agentOps->paused,commander_enabled:state->agentSettings->commander->enabled&limit=1`, { maxResponseBytes: 131072 }),
-        this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=id,workspace_id,type,status,worker_id,attempts,lease_until,created_at,ai_provider,ai_model&limit=1`, { maxResponseBytes: 4096 })
+        this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=workspace_id,governance:state->aiEconomics->governance,monthly_cost_limit_usd:state->aiEconomics->monthlyCostLimitUsd,agent_ops_enabled:state->agentOps->enabled,agent_ops_paused:state->agentOps->paused,commander_enabled:state->agentSettings->commander->enabled&limit=1`, { maxResponseBytes: 131072 }),
+        this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=id,workspace_id,type,status,worker_id,attempts,lease_until,created_at,ai_provider,ai_model&limit=1`, { maxResponseBytes: 4096 })
       ]);
       if (!Array.isArray(policies) || policies.length !== 1 || policies[0]?.workspace_id !== workspaceId
         || !Array.isArray(jobs) || jobs.length !== 1 || jobs[0]?.workspace_id !== workspaceId || jobs[0]?.id !== jobId
@@ -547,6 +681,18 @@ class SupabaseStore {
           leaseUntil: row.lease_until, createdAt: row.created_at, provider: row.ai_provider, model: row.ai_model } };
     } catch { throw providerUsageError('AI_USAGE_CONTEXT_UNAVAILABLE'); }
   }
+  businessOutcomePersistence() {
+    return createBusinessOutcomePersistence({ request: (pathname, options) => this.request(pathname, options),
+      invalidate: workspaceId => {
+        this.schedulerCache.delete(workspaceId);
+        this.mirrorRevisions.delete(workspaceId);
+      } });
+  }
+  async businessOutcomeSummary(workspaceId) { return this.businessOutcomePersistence().current(workspaceId); }
+  async getBusinessOutcome(workspaceId, experimentId) { return this.businessOutcomePersistence().one(workspaceId, experimentId); }
+  async getBusinessOutcomeReview(workspaceId, experimentId) { return this.businessOutcomePersistence().review(workspaceId, experimentId); }
+  async getBusinessOutcomeEvidence(workspaceId, versionId) { return this.businessOutcomePersistence().evidence(workspaceId, versionId); }
+  async publishBusinessOutcome(workspaceId, actor, input) { return this.businessOutcomePersistence().publish(workspaceId, actor, input); }
 
   // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
   // DTO validation rejects client overrides, prices, raw bodies and credentials.
@@ -555,7 +701,7 @@ class SupabaseStore {
     let result;
     try {
       // Never retry here: a lost response may represent a committed reservation.
-      result = await this.request('rpc/runvara_reserve_provider_usage', { method: 'POST', body: JSON.stringify(params) });
+      result = await this.scopedRequest(workspaceId, 'provider_usage_reserve', 'rpc/runvara_reserve_provider_usage', { method: 'POST', body: JSON.stringify(params) });
     } catch (error) {
       const reason = providerUsageUnavailableReason(error);
       throw providerUsageError(reason === 'AI_USAGE_UNAVAILABLE' ? 'AI_USAGE_RESERVATION_UNCERTAIN' : reason);
@@ -569,7 +715,7 @@ class SupabaseStore {
     try {
       // A caller may retry the same immutable identity/receipt after a lost reply.
       // Never mint an alternate reservation, fingerprint or receipt on retry.
-      result = await this.request('rpc/runvara_settle_provider_usage', { method: 'POST', body: JSON.stringify(params) });
+      result = await this.scopedRequest(workspaceId, 'provider_usage_settle', 'rpc/runvara_settle_provider_usage', { method: 'POST', body: JSON.stringify(params) });
     } catch (error) {
       const reason = providerUsageUnavailableReason(error);
       throw providerUsageError(reason === 'AI_USAGE_UNAVAILABLE' ? 'AI_USAGE_SETTLEMENT_UNCERTAIN' : reason);
@@ -579,14 +725,22 @@ class SupabaseStore {
 
   async providerUsageSummary(workspaceId, admissionMonth) {
     const windowStart = providerUsageMonth(workspaceId, admissionMonth);
-    let rows;
+    let page;
     try {
-      // One bounded read of materialized counters only. The extra row is a
-      // truncation sentinel; incomplete accounting is unavailable, never zero.
-      rows = await this.request(`runvara_provider_usage_windows?workspace_id=eq.${encodeURIComponent(workspaceId)}&window_start=eq.${windowStart}&select=${USAGE_SUMMARY_COLUMNS}&order=scope_key.asc&limit=${USAGE_SUMMARY_MAX_SCOPES + 1}`);
+      // One compact counter read. An exact count proves completeness even when
+      // PostgREST's configured max_rows is below the requested sentinel limit.
+      page = await this.scopedRequest(workspaceId, 'provider_usage_read', `runvara_provider_usage_windows?workspace_id=eq.${encodeURIComponent(workspaceId)}&window_start=eq.${windowStart}&select=${USAGE_SUMMARY_COLUMNS}&order=scope_key.asc&limit=${USAGE_SUMMARY_MAX_SCOPES + 1}`, {
+        maxResponseBytes: 131072, includeResponseMetadata: true, headers: { Prefer: 'count=exact' }
+      });
     } catch (error) {
       return { available: false, reason: providerUsageUnavailableReason(error) };
     }
+    const rows = page?.data;
+    const range = typeof page?.contentRange === 'string' && /^(0)-(0|[1-9][0-9]*)\/(0|[1-9][0-9]*)$/.exec(page.contentRange);
+    const complete = Array.isArray(rows) && rows.length <= USAGE_SUMMARY_MAX_SCOPES
+      && (rows.length === 0 ? page.contentRange === '*/0' : range && Number.isSafeInteger(Number(range[3]))
+        && Number(range[2]) === rows.length - 1 && Number(range[3]) === rows.length);
+    if (!complete || Buffer.byteLength(JSON.stringify(rows)) > 131072) return { available: false, reason: 'AI_USAGE_RESPONSE_INVALID' };
     return providerUsageSummaryResult(rows, workspaceId, windowStart);
   }
 
@@ -599,10 +753,17 @@ class SupabaseStore {
     };
   }
 
-  async request(pathname, options = {}) {
+  async request(pathname, options = {}, observation = {}) {
     const method = String(options.method || 'GET').toUpperCase();
-    const { maxResponseBytes, ...fetchOptions } = options;
-    let response;
+    const { maxResponseBytes, includeResponseMetadata = false, ...fetchOptions } = options;
+    // Attribution is supplied only by trusted store call sites. Never infer it
+    // from request URLs, payloads, headers or workspace-like client fields.
+    const requestBodyBytes = typeof options.body === 'string' ? Buffer.byteLength(options.body)
+      : Buffer.isBuffer(options.body) ? options.body.byteLength : options.body == null ? 0 : null;
+    const token = this.activityMeter.beginDbAttempt({ workspaceId: observation.workspaceId ?? null,
+      operation: observation.operation || 'other', method, requestBodyBytes, retryKind: observation.retryKind ?? null });
+    let responseBodyBytes = null, response;
+    const finishActivity = outcome => this.activityMeter.finishDbAttempt(token, { outcome, responseBodyBytes });
     try {
       response = await this.fetch(`${this.url}/rest/v1/${pathname}`, {
         ...fetchOptions,
@@ -620,6 +781,7 @@ class SupabaseStore {
       this.telemetry.lastFailureCode = cause?.name === 'TimeoutError' ? 'TIMEOUT' : 'NETWORK_ERROR';
       this.telemetry.lastFailureHttpStatus = null;
       this.telemetry.lastFailureTable = error.table;
+      finishActivity('network_error');
       throw error;
     }
     if (!response.ok) {
@@ -630,7 +792,9 @@ class SupabaseStore {
       error.payloadBytes = Buffer.byteLength(options.body || '');
       // Never log PostgREST messages/details: they can contain row data.
       try {
-        const payload = maxResponseBytes === undefined ? await response.json() : JSON.parse(await boundedResponseText(response, maxResponseBytes));
+        const body = await boundedResponseText(response, maxResponseBytes);
+        responseBodyBytes = Buffer.byteLength(body);
+        const payload = JSON.parse(body);
         if (typeof payload?.code === 'string' && /^(?:[0-9A-Z]{5}|PGRST\d{3})$/.test(payload.code)) {
           error.databaseCode = payload.code;
         }
@@ -639,18 +803,44 @@ class SupabaseStore {
       this.telemetry.lastFailureCode = error.databaseCode || error.code;
       this.telemetry.lastFailureHttpStatus = response.status;
       this.telemetry.lastFailureTable = error.table;
+      finishActivity('http_error');
       throw error;
     }
+    let data = null;
+    try {
+      if (method !== 'HEAD') {
+        const text = response.status === 204 ? '' : await boundedResponseText(response, maxResponseBytes);
+        responseBodyBytes = Buffer.byteLength(text);
+        const prefer = new Headers(options.headers || {}).get('prefer') || '';
+        const permitsEmpty = method !== 'GET' && (prefer.split(',').some(value => value.trim() === 'return=minimal')
+          || pathname.split('?')[0] === 'rpc/runvara_create_workspace');
+        if (!text && !permitsEmpty) throw new Error('Missing JSON response');
+        if (text) data = JSON.parse(text);
+      } else responseBodyBytes = 0;
+    } catch (cause) {
+      // JSON parser/stream errors can embed upstream content. Keep only a fixed
+      // safe code; never claim a decoded read/write or retain that error body.
+      const code = cause?.code === 'SUPABASE_RESPONSE_TOO_LARGE' ? cause.code : 'SUPABASE_RESPONSE_INVALID';
+      const error = Object.assign(new Error('Supabase response could not be verified'), {
+        code, httpStatus: response.status, table: pathname.split('?')[0], payloadBytes: Buffer.byteLength(options.body || '')
+      });
+      this.telemetry.lastFailureAt = new Date().toISOString();
+      this.telemetry.lastFailureCode = code;
+      this.telemetry.lastFailureHttpStatus = response.status;
+      this.telemetry.lastFailureTable = error.table;
+      finishActivity(code === 'SUPABASE_RESPONSE_TOO_LARGE' ? 'oversized_response' : 'invalid_response');
+      throw error;
+    }
+    finishActivity('succeeded');
     const succeededAt = new Date().toISOString();
     if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
     else this.telemetry.lastSuccessfulWriteAt = succeededAt;
-    if (response.status === 204 || method === 'HEAD') return null;
-    const text = await boundedResponseText(response, maxResponseBytes);
-    return text ? JSON.parse(text) : null;
+    // Bounded readers receive cardinality only after the response has decoded.
+    return includeResponseMetadata ? { data, contentRange: response.headers.get('content-range') } : data;
   }
 
   async getIdentity(workspaceId) {
-    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state->workspace,state->users&limit=1`);
+    const rows = await this.scopedRequest(workspaceId, 'identity_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state->workspace,state->users&limit=1`);
     const state = rows?.[0];
     if (!state?.workspace || !Array.isArray(state.users)) return null;
     assertWorkspace(workspaceId, state);
@@ -675,7 +865,7 @@ class SupabaseStore {
   }
 
   async get(workspaceId) {
-    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
+    const rows = await this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
     if (!rows?.[0]?.state) { this.rememberSchedulerState(workspaceId, null); return null; }
     const state = upgradeState(rows[0].state);
     state.storageReady = true;
@@ -686,8 +876,13 @@ class SupabaseStore {
   }
 
   async schedulerRevision(workspaceId) {
-    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=revision:state->>_revision&limit=1`);
-    return rows?.[0]?.revision || null;
+    const rows = await this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=revision:state->>_revision&limit=1`, { maxResponseBytes: REPORTING_RESPONSE_MAX_BYTES });
+    if (!Array.isArray(rows) || rows.length > 1 || (rows.length === 1 &&
+      (rows[0] === null || typeof rows[0] !== 'object' || Array.isArray(rows[0]) || Object.keys(rows[0]).length !== 1 || !Object.hasOwn(rows[0], 'revision')
+        || !(rows[0].revision === null || typeof rows[0].revision === 'string' && rows[0].revision.length > 0)))) {
+      throw Object.assign(new Error('Persistence revision response is invalid'), { status: 503, code: 'SUPABASE_PERSISTENCE_RESPONSE_INVALID' });
+    }
+    return rows[0]?.revision ?? null;
   }
 
   async getForScheduler(workspaceId) {
@@ -714,7 +909,7 @@ class SupabaseStore {
     return this.get(workspaceId);
   }
 
-  async upsert(table, rows, conflict, options = {}) {
+  async upsert(table, rows, conflict, options = {}, observation = {}) {
     if (!rows.length) return;
     const requestOptions = {
       method: 'POST',
@@ -723,13 +918,13 @@ class SupabaseStore {
       ...options
     };
     try {
-      await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, requestOptions);
+      await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, requestOptions, observation);
     } catch (error) {
       if (error.code !== 'SUPABASE_PERSISTENCE_FAILED' || error.httpStatus) throw error;
       // Upserts are idempotent on the declared conflict key, so a single retry is
       // safe when the network outcome is unknown.
       await new Promise(resolve => setTimeout(resolve, 250));
-      await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, requestOptions);
+      await this.request(`${table}?on_conflict=${encodeURIComponent(conflict)}`, requestOptions, { ...observation, retryKind: 'upsert_network' });
     }
   }
 
@@ -757,7 +952,7 @@ class SupabaseStore {
         const changed = fingerprinted.filter(item => previous.get(item.key) !== item.hash);
         if (!changed.length) return;
         if (Date.now() >= deadline) throw Object.assign(new Error('Mirror deferred'), { code: 'MIRROR_DEFERRED' });
-        await this.upsert(table, changed.map(item => item.row), conflict, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+        await this.upsert(table, changed.map(item => item.row), conflict, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) }, { workspaceId, operation: 'reporting_write' });
         // Cache only confirmed writes. Failed mirrors are retried on the next save.
         this.mirrorDigests.set(cacheKey, new Map(fingerprinted.map(item => [item.key, item.hash])));
       } catch (error) {
@@ -825,7 +1020,7 @@ class SupabaseStore {
     let variantsAvailable = true;
     if (products.length) try {
       for (let offset = 0; ; offset += 500) {
-        const rows = await this.request(`variants?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,product_id,external_id&order=id&limit=500&offset=${offset}`, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
+        const rows = await this.scopedRequest(workspaceId, 'other', `variants?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=id,product_id,external_id&order=id&limit=500&offset=${offset}`, { signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())) });
         for (const row of rows || []) existingVariants.set(`${row.product_id}:${row.external_id}`, row.id);
         if ((rows || []).length < 500) break;
       }
@@ -1003,71 +1198,102 @@ class SupabaseStore {
     return errors;
   }
 
-  async commit(workspaceId, state, expectedRevision, existing) {
-    const stateBytes = Buffer.byteLength(JSON.stringify(state));
-    this.telemetry.stateBytes = stateBytes;
-    if (stateBytes >= SUPABASE_STATE_HARD_BYTES) {
-      const error = Object.assign(new Error('Workspace state is too large to persist safely'), {
-        status: 503, code: 'STATE_SIZE_LIMIT', stateBytes
-      });
-      this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
-      throw error;
-    }
-    if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
-      console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
-    }
-    const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
-    if (existing) {
-      const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
-      const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
-      const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
-      let rows;
-      try { rows = await this.request(path, options); }
-      catch (error) {
-        if (error.databaseCode === '57014') {
-          // PostgreSQL cancelled this statement. Retry the same revision-guarded
-          // write once; do not repeat any provider operation or business callback.
+  // Share the same CAS/ambiguous-ack recovery for primary and reporting writes.
+  // Every retry uses the original URL, body and revision fence. No business work
+  // is repeated, and revision reads never hydrate the workspace snapshot.
+  async commitRevision(workspaceId, nextRevision, expectedRevision, path, options, { primary = true } = {}) {
+    const operation = primary ? 'state_commit' : 'reporting_commit';
+    const retryPrefix = primary ? 'primary' : 'reporting';
+    let rows;
+    try { rows = await this.scopedRequest(workspaceId, operation, path, options); }
+    catch (error) {
+      if (error.databaseCode === '57014') {
+        // PostgreSQL cancelled this statement. Retry the same revision-guarded
+        // write once; do not repeat any provider operation or business callback.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        rows = await this.scopedRequest(workspaceId, operation, path, options, `${retryPrefix}_statement_cancelled`);
+      } else if (error.code === 'SUPABASE_PERSISTENCE_FAILED' && !error.httpStatus) {
+        // A network timeout can happen after Postgres has already committed.
+        // Resolve the uncertainty by reading the authoritative revision before
+        // deciding whether to retry, accept success, or surface a conflict.
+        let currentRevision = null;
+        try { currentRevision = await this.schedulerRevision(workspaceId); } catch {}
+        if (currentRevision === nextRevision) {
+          rows = [{ workspace_id: workspaceId }];
+        } else if (currentRevision === expectedRevision || (!expectedRevision && !currentRevision)) {
           await new Promise(resolve => setTimeout(resolve, 250));
-          rows = await this.request(path, options);
-        } else if (error.code === 'SUPABASE_PERSISTENCE_FAILED' && !error.httpStatus) {
-          // A network timeout can happen after Postgres has already committed.
-          // Resolve the uncertainty by reading the authoritative revision before
-          // deciding whether to retry, accept success, or surface a conflict.
-          let currentRevision = null;
-          try { currentRevision = await this.schedulerRevision(workspaceId); } catch {}
-          if (currentRevision === state._revision) {
-            rows = [{ workspace_id: workspaceId }];
-          } else if (currentRevision === expectedRevision || (!expectedRevision && !currentRevision)) {
-            await new Promise(resolve => setTimeout(resolve, 250));
-            try { rows = await this.request(path, options); }
-            catch (retryError) {
-              if (retryError.code !== 'SUPABASE_PERSISTENCE_FAILED' || retryError.httpStatus) throw retryError;
-              let retryRevision = null;
-              try { retryRevision = await this.schedulerRevision(workspaceId); } catch {}
-              if (retryRevision === state._revision) rows = [{ workspace_id: workspaceId }];
-              else throw retryError;
-            }
-          } else if (currentRevision) {
-            throw conflict();
-          } else {
-            throw error;
+          try { rows = await this.scopedRequest(workspaceId, operation, path, options, `${retryPrefix}_network_reconciled`); }
+          catch (retryError) {
+            if (retryError.code !== 'SUPABASE_PERSISTENCE_FAILED' || retryError.httpStatus) throw retryError;
+            let retryRevision = null;
+            try { retryRevision = await this.schedulerRevision(workspaceId); } catch {}
+            if (retryRevision === nextRevision) rows = [{ workspace_id: workspaceId }];
+            else throw retryError;
           }
+        } else if (currentRevision) {
+          throw conflict();
         } else {
           throw error;
         }
-      }
-      if (!rows?.length) throw conflict();
-      this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
-    } else {
-      // Atomically create the FK parent, unique login identity and primary state.
-      try {
-        await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) });
-        this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
-      } catch (error) {
-        this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
-        if (error.databaseCode === '23505') throw conflict();
+      } else {
         throw error;
       }
+    }
+    if (Array.isArray(rows) && rows.length === 0) throw conflict();
+    if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.workspace_id !== workspaceId || Object.keys(rows[0]).length !== 1) {
+      throw Object.assign(new Error('Persistence response is invalid'), { status: 503, code: 'SUPABASE_PERSISTENCE_RESPONSE_INVALID' });
+    }
+  }
+
+  async commitReportingStatus(workspaceId, report, expectedRevision, nextRevision) {
+    const body = reportingStatusRequest(workspaceId, expectedRevision, nextRevision, report, new Date().toISOString());
+    await this.commitRevision(workspaceId, nextRevision, expectedRevision, 'rpc/runvara_commit_reporting_status', {
+      method: 'POST', body, maxResponseBytes: REPORTING_RESPONSE_MAX_BYTES
+    }, { primary: false });
+  }
+
+  async commit(workspaceId, state, expectedRevision, existing, { primary = true } = {}) {
+    try {
+      const stateBytes = Buffer.byteLength(JSON.stringify(state));
+      this.telemetry.stateBytes = stateBytes;
+      this.activityMeter.observeHotState(workspaceId, { bytes: stateBytes, kind: 'attempted' });
+      if (stateBytes >= SUPABASE_STATE_HARD_BYTES) {
+        const error = Object.assign(new Error('Workspace state is too large to persist safely'), {
+          status: 503, code: 'STATE_SIZE_LIMIT', stateBytes
+        });
+        throw error;
+      }
+      if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
+        console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
+      }
+      const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
+      if (existing) {
+        const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
+        const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
+        const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
+        await this.commitRevision(workspaceId, state._revision, expectedRevision, path, options, { primary });
+      } else {
+        // Atomically create the FK parent, unique login identity and primary state.
+        try {
+          await this.scopedRequest(workspaceId, 'state_commit', 'rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) });
+        } catch (error) {
+          if (error.databaseCode === '23505') throw conflict();
+          throw error;
+        }
+      }
+      this.activityMeter.observeHotState(workspaceId, { bytes: stateBytes, kind: 'confirmed' });
+      if (primary) {
+        this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
+        this.primaryPersistenceHealthy = true;
+      }
+    } catch (error) {
+      // Revision conflicts are expected concurrency outcomes. A reporting-status
+      // follow-up cannot revoke or replace the already-confirmed primary commit.
+      if (primary && error.code !== 'STATE_CONFLICT') {
+        this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
+        this.primaryPersistenceHealthy = false;
+      }
+      throw error;
     }
   }
 
@@ -1085,7 +1311,7 @@ class SupabaseStore {
       archived_at: new Date().toISOString()
     }));
     for (let offset = 0; offset < rows.length; offset += 200) {
-      await this.upsert('runvara_history', rows.slice(offset, offset + 200), 'workspace_id,collection,record_id');
+      await this.upsert('runvara_history', rows.slice(offset, offset + 200), 'workspace_id,collection,record_id', {}, { workspaceId, operation: 'archive_write' });
     }
   }
 
@@ -1111,7 +1337,7 @@ class SupabaseStore {
       }
       await this.upsert('runvara_history', rows, 'workspace_id,collection,record_id', {
         headers: { Prefer:'resolution=ignore-duplicates,return=minimal' }
-      });
+      }, { workspaceId: plan.workspaceId, operation: 'archive_write' });
       // A successful immutable insert/ignore confirms this exact content key.
       // A thrown/uncertain batch never acknowledges any candidate in that batch.
       acknowledgedArchives.push(...batch.map(candidate => ({ ...candidate.reference, confirmed:true })));
@@ -1131,7 +1357,7 @@ class SupabaseStore {
           actor: event.actor,
           detail: event.detail || {},
           created_at: event.createdAt
-        })), 'id');
+        })), 'id', {}, { workspaceId, operation: 'archive_write' });
       }
     }
 
@@ -1163,10 +1389,10 @@ class SupabaseStore {
         id: brief.id,
         workspace_id: workspaceId,
         summary: brief.summary || '',
-        metrics: brief.archive ? ((await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(brief.id)}&select=metrics&limit=1`))?.[0]?.metrics || brief) : brief,
+        metrics: brief.archive ? ((await this.scopedRequest(workspaceId, 'archive_read', `operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(brief.id)}&select=metrics&limit=1`))?.[0]?.metrics || brief) : brief,
         logic: brief.logic || 'deterministic-v1',
         created_at: brief.generatedAt || new Date().toISOString()
-      }], 'id');
+      }], 'id', {}, { workspaceId, operation: 'archive_write' });
     }
     state.dailyBriefs = keepBriefs;
     state.audit = audit.slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
@@ -1205,7 +1431,7 @@ class SupabaseStore {
         // Commit the full historical snapshot before replacing it with a pointer.
         // One snapshot per request also avoids the gateway's bulk payload limit.
         await this.upsert('operations_briefs', [{ id: brief.id, workspace_id: workspaceId, summary: brief.summary,
-          metrics: brief, logic: brief.logic || 'deterministic-v1', created_at: brief.generatedAt }], 'id');
+          metrics: brief, logic: brief.logic || 'deterministic-v1', created_at: brief.generatedAt }], 'id', {}, { workspaceId, operation: 'archive_write' });
         briefs.push({ ...compactDailyBrief(brief), archive: { table: 'operations_briefs', id: brief.id, sha256: crypto.createHash('sha256').update(JSON.stringify(brief)).digest('hex') } });
       }
       upgraded.dailyBriefs = briefs;
@@ -1232,7 +1458,7 @@ class SupabaseStore {
     upgraded._revision = crypto.randomUUID();
     let reportingCommitted = false;
     try {
-      await this.commit(workspaceId, upgraded, expected, true);
+      await this.commitReportingStatus(workspaceId, report, expected, upgraded._revision);
       reportingCommitted = true;
       state._revision = upgraded._revision;
       state.integrationStatus = upgraded.integrationStatus;
@@ -1249,7 +1475,8 @@ class SupabaseStore {
       this.mirrorRevisions.delete(workspaceId);
       for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
     }
-    this.rememberSchedulerState(workspaceId, persisted);
+    if (reportingCommitted) this.rememberSchedulerState(workspaceId, persisted);
+    else this.invalidateSchedulerCache(workspaceId);
     return persisted;
   }
 
@@ -1266,7 +1493,7 @@ class SupabaseStore {
     const state = await this.get(workspaceId);
     const brief = state?.dailyBriefs?.find(item => item.id === briefId);
     if (!brief?.archive) return brief || null;
-    const rows = await this.request(`operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=metrics&limit=1`);
+    const rows = await this.scopedRequest(workspaceId, 'archive_read', `operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=metrics&limit=1`);
     if (!rows?.[0]?.metrics) throw Object.assign(new Error('Historical brief is temporarily unavailable'), { status: 503, code: 'BRIEF_ARCHIVE_UNAVAILABLE' });
     return rows[0].metrics;
   }
@@ -1275,7 +1502,7 @@ class SupabaseStore {
     assertAutomationArchiveReference(workspaceId, runId, archiveRef);
     let rows;
     try {
-      rows = await this.request(`runvara_history?workspace_id=eq.${encodeURIComponent(workspaceId)}&collection=eq.automationRuns&record_id=eq.${encodeURIComponent(archiveRef.recordId)}&select=workspace_id,collection,record_id,payload&limit=1`,
+      rows = await this.scopedRequest(workspaceId, 'archive_read', `runvara_history?workspace_id=eq.${encodeURIComponent(workspaceId)}&collection=eq.automationRuns&record_id=eq.${encodeURIComponent(archiveRef.recordId)}&select=workspace_id,collection,record_id,payload&limit=1`,
         { maxResponseBytes:AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES });
       // JSONB/JSON number formatting can expand when parsed and re-serialized.
       if (Buffer.byteLength(JSON.stringify(rows)) > AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES) throw new Error('Archive response too large');
@@ -1295,7 +1522,7 @@ class SupabaseStore {
   async enqueueAgentJob(workspaceId, job) {
     validateObjectiveEnqueue(workspaceId, job);
     const key = encodeURIComponent(job.idempotencyKey);
-    const existing = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
+    const existing = await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
     if (existing?.[0]) return existing[0];
     const row = {
       id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
@@ -1305,39 +1532,43 @@ class SupabaseStore {
       available_at:job.availableAt, created_at:job.createdAt, updated_at:job.updatedAt
     };
     try {
-      const rows = await this.request('runvara_agent_jobs?select=*', { method:'POST', headers:{ Prefer:'return=representation' }, body:JSON.stringify(row) });
+      const rows = await this.scopedRequest(workspaceId, 'job_enqueue', 'runvara_agent_jobs?select=*', { method:'POST', headers:{ Prefer:'return=representation' }, body:JSON.stringify(row) });
       return rows?.[0] || row;
     } catch (error) {
       if (error.httpStatus !== 409 && error.databaseCode !== '23505') throw error;
-      const raced = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
+      const raced = await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&idempotency_key=eq.${key}&select=*&limit=1`);
       if (raced?.[0]) return raced[0];
       throw error;
     }
   }
 
   async claimAgentJobs(workerId, limit = 8, leaseSeconds = 300) {
-    return await this.request('rpc/runvara_claim_agent_jobs', { method:'POST', body:JSON.stringify({ p_worker_id:workerId, p_limit:limit, p_lease_seconds:leaseSeconds }) }) || [];
+    return await this.scopedRequest(null, 'job_claim', 'rpc/runvara_claim_agent_jobs', { method:'POST', body:JSON.stringify({ p_worker_id:workerId, p_limit:limit, p_lease_seconds:leaseSeconds }) }) || [];
   }
 
   async finishAgentJob(job, update) {
     if (job.type === 'objective_prepare' && update.status === 'succeeded') validateObjectiveResult(job, update.result);
-    const rows = await this.request(`runvara_agent_jobs?${jobFence(job)}&select=${JOB_FIELDS}`, {
+    const rows = await this.scopedRequest(job.workspace_id, 'job_finish', `runvara_agent_jobs?${jobFence(job)}&select=${JOB_FIELDS}`, {
       method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
         status:update.status, result:update.result ?? null, error_code:update.errorCode ?? null,
         completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:update.completedAt || new Date().toISOString()
       })
     });
-    return finishedJobRow(rows, job, update.status);
+    const finished = finishedJobRow(rows, job, update.status);
+    if (finished) this.activityMeter.observeJob(job.workspace_id, update.status);
+    return finished;
   }
 
   async rescheduleAgentJob(job, update) {
-    const rows = await this.request(`runvara_agent_jobs?${jobFence(job)}&select=${JOB_FIELDS}`, {
+    const rows = await this.scopedRequest(job.workspace_id, 'job_finish', `runvara_agent_jobs?${jobFence(job)}&select=${JOB_FIELDS}`, {
       method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
         status:'queued', error_code:update.errorCode || null, available_at:update.availableAt,
         lease_until:null, worker_id:null, updated_at:new Date().toISOString()
       })
     });
-    return finishedJobRow(rows, job, 'queued');
+    const rescheduled = finishedJobRow(rows, job, 'queued');
+    if (rescheduled) this.activityMeter.observeJob(job.workspace_id, 'rescheduled');
+    return rescheduled;
   }
 
   async listAgentJobs(workspaceId, limit = 100) {
@@ -1346,8 +1577,8 @@ class SupabaseStore {
     // Explicit list/fleet views only: at most 2*bound rows fetched, bound returned.
     // Preserve legacy result contracts without copying 100 full objective reports.
     const [legacy, objectives] = await Promise.all([
-      this.request(`${base}&type=neq.objective_prepare&select=*`),
-      this.request(`${base}&type=eq.objective_prepare&select=${JOB_FIELDS}`)
+      this.scopedRequest(workspaceId, 'job_read', `${base}&type=neq.objective_prepare&select=*`),
+      this.scopedRequest(workspaceId, 'job_read', `${base}&type=eq.objective_prepare&select=${JOB_FIELDS}`)
     ]);
     return [...(legacy || []).filter(row => row.type !== 'objective_prepare'), ...(objectives || []).filter(row => row.type === 'objective_prepare').map(compactJobRow)]
       .sort((a,b) => Date.parse(b.created_at)-Date.parse(a.created_at) || a.id.localeCompare(b.id)).slice(0, bound);
@@ -1355,7 +1586,7 @@ class SupabaseStore {
 
   async getAgentJob(workspaceId, jobId, { includeReport = false } = {}) {
     validateJobIdentity(workspaceId, jobId);
-    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=${JOB_FIELDS},payload${includeReport ? ',result' : ''}&limit=1`);
+    const rows = await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=${JOB_FIELDS},payload${includeReport ? ',result' : ''}&limit=1`);
     if (!Array.isArray(rows) || rows.length > 1) throw jobError('AGENT_JOB_RESPONSE_INVALID');
     const row = rows[0];
     if (!row) return null;
@@ -1369,19 +1600,22 @@ class SupabaseStore {
   }
 
   async retryAgentJob(workspaceId, jobId) {
-    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&status=in.(blocked,dead_letter)&select=*`, {
+    const rows = await this.scopedRequest(workspaceId, 'job_retry', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&status=in.(blocked,dead_letter)&select=*`, {
       method:'PATCH', headers:{ Prefer:'return=representation' }, body:JSON.stringify({
         status:'queued', attempts:0, available_at:new Date().toISOString(), lease_until:null, worker_id:null,
         error_code:null, completed_at:null, updated_at:new Date().toISOString()
       })
     });
-    if (rows?.[0]) return rows[0];
-    return (await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=*&limit=1`))?.[0] || null;
+    if (rows?.[0]) {
+      if (rows[0].workspace_id === workspaceId && rows[0].id === jobId && rows[0].status === 'queued') this.activityMeter.observeJob(workspaceId, 'manual_retry');
+      return rows[0];
+    }
+    return (await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=*&limit=1`))?.[0] || null;
   }
 
   async agentOpsUsage(workspaceId, day) {
     const next = new Date(`${day}T00:00:00.000Z`); next.setUTCDate(next.getUTCDate()+1);
-    const rows = await this.request(`runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&select=ai_units`);
+    const rows = await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&created_at=gte.${encodeURIComponent(day+'T00:00:00.000Z')}&created_at=lt.${encodeURIComponent(next.toISOString())}&select=ai_units`);
     return (rows || []).reduce((sum,row)=>sum + Number(row.ai_units || 0),0);
   }
 
@@ -1394,11 +1628,11 @@ class SupabaseStore {
       request_id:usage.requestId, occurred_at:usage.occurredAt
     };
     try {
-      const rows=await this.request('runvara_ai_usage?select=*',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify(row)});
+      const rows=await this.scopedRequest(workspaceId, 'other', 'runvara_ai_usage?select=*',{method:'POST',headers:{Prefer:'return=representation'},body:JSON.stringify(row)});
       return rows?.[0]||row;
     } catch(error) {
       if ((error.httpStatus===409 || error.databaseCode==='23505') && usage.requestId) {
-        const rows=await this.request(`runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(usage.provider)}&request_id=eq.${encodeURIComponent(usage.requestId)}&select=*&limit=1`);
+        const rows=await this.scopedRequest(workspaceId, 'usage_read', `runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&provider=eq.${encodeURIComponent(usage.provider)}&request_id=eq.${encodeURIComponent(usage.requestId)}&select=*&limit=1`);
         if(rows?.[0]) return rows[0];
       }
       throw error;
@@ -1406,7 +1640,7 @@ class SupabaseStore {
   }
 
   async aiUsageSummary(workspaceId, startAt, endAt) {
-    const rows=await this.request(`runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&occurred_at=gte.${encodeURIComponent(startAt)}&occurred_at=lt.${encodeURIComponent(endAt)}&select=model,input_tokens,cached_input_tokens,cache_write_tokens,output_tokens,estimated_cost_usd`)||[];
+    const rows=await this.scopedRequest(workspaceId, 'usage_read', `runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&occurred_at=gte.${encodeURIComponent(startAt)}&occurred_at=lt.${encodeURIComponent(endAt)}&select=model,input_tokens,cached_input_tokens,cache_write_tokens,output_tokens,estimated_cost_usd`)||[];
     const byModel={};
     for(const row of rows) {
       const model=row.model||'unknown';
@@ -1441,8 +1675,7 @@ class SupabaseStore {
   }
 
   diagnostics() {
-    const primaryPersistence = !this.telemetry.lastPrimaryFailureAt ||
-      (this.telemetry.lastPrimaryWriteAt && this.telemetry.lastPrimaryWriteAt >= this.telemetry.lastPrimaryFailureAt);
+    const primaryPersistence = this.primaryPersistenceHealthy;
     return {
       ...this.telemetry,
       primaryPersistence,
@@ -1453,7 +1686,7 @@ class SupabaseStore {
   }
 
   async integrityCheck(workspaceId) {
-    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
+    const rows = await this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
     const state = rows?.[0]?.state;
     if (!state) return { workspaceId, healthy: false, code: 'WORKSPACE_STATE_MISSING' };
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
@@ -1466,6 +1699,7 @@ class SupabaseStore {
     const reportingStatus = state.integrationStatus?.reporting?.status || 'unknown';
     this.telemetry.stateBytes = stateBytes;
     this.telemetry.lastIntegrityCheckAt = new Date().toISOString();
+    this.activityMeter.observeHotState(workspaceId, { bytes: stateBytes, kind: 'integrity_read' });
     const healthy = stateBytes < SUPABASE_STATE_HARD_BYTES &&
       embeddedAuditCount <= SUPABASE_EMBEDDED_AUDIT_LIMIT &&
       workRecordCount <= SUPABASE_WORK_RECORD_LIMIT &&
@@ -1503,8 +1737,8 @@ function numericOrNull(value) {
 }
 
 export function createStore(env = process.env, options = {}) {
-  if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) return new SupabaseStore(env, options.fetchImpl || fetch);
-  return new FileStore(env);
+  if (env.SUPABASE_URL && env.SUPABASE_SERVICE_ROLE_KEY) return new SupabaseStore(env, options.fetchImpl || fetch, options.activityOptions);
+  return new FileStore(env, options.activityOptions);
 }
 
 export async function getOrSeed(store, workspaceId, env = process.env, options = {}) {

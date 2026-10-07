@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
-import { seedWorkspaceState } from '../lib/store.mjs';
+import { createStore, seedWorkspaceState } from '../lib/store.mjs';
+import { fakeSupabase } from './fake-supabase.mjs';
 import { createSessionToken, verifySessionToken, decryptCredentials, encryptCredentials } from '../lib/security.mjs';
 import { IntegrationService, mergeSelectedShopify } from '../lib/integrations.mjs';
 import { connectionCentre, connectionDue, saveConnectionSettings, recoveryFor } from '../lib/connection-centre.mjs';
@@ -17,7 +18,7 @@ const SESSION = 'connection-centre-test-session-secret-at-least-thirty-two';
 const KEY = 'connection-centre-test-encryption-key-at-least-thirty-two';
 const TOKEN = 'test-only-shopify-access-token-never-return-to-browser';
 const json = (payload, status = 200) => new Response(JSON.stringify(payload), { status, headers: {'Content-Type':'application/json'} });
-async function fixture(t, extra = {}) {
+async function fixture(t, extra = {}, { storage = 'file' } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(),'runvara-connections-'));
   const calls = [], flags = { invalid:false, delay:null, customerDenied:false, unknownWrite:false };
   const env = { NODE_ENV:'test', APP_PUBLIC_URL:'https://runvara.example.test', SESSION_SECRET:SESSION, CREDENTIALS_KEY:KEY, SAAS_STATE_FILE:path.join(directory,'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED:'false',
@@ -69,7 +70,9 @@ async function fixture(t, extra = {}) {
     if(uri.pathname === '/order/202309/orders/search') return json({code:0,data:{orders:[{id:'tt-order',status:'COMPLETED',create_time:1788220800}]}});
     throw new Error(`Unexpected fixture request: ${uri.origin}${uri.pathname}`);
   };
-  const server = createPacksmartServer(env,{fetchImpl});
+  const database = storage === 'mock-supabase' ? fakeSupabase() : null;
+  const store = database ? createStore({ SUPABASE_URL:'https://connection-tests.supabase.co', SUPABASE_SERVICE_ROLE_KEY:'synthetic-storage-test-key' }, {fetchImpl:database.fetchImpl}) : undefined;
+  const server = createPacksmartServer(env,{fetchImpl,...(store ? {store} : {})});
   const tenants = {};
   for(const name of ['alpha','beta']) {
     const state = seedWorkspaceState({}, {workspaceId:name,email:`${name}@example.test`,passwordHash:'fixture'});
@@ -93,7 +96,7 @@ async function fixture(t, extra = {}) {
   }
   const channel=async(provider='shopify',tenant='alpha')=>(await request('/api/connection-centre',{tenant})).body.channels.find(item=>item.id===provider);
   const connect=async()=>request('/api/connections',{method:'POST',body:{provider:'shopify',credentials:{storeDomain:'alpha.myshopify.com',accessToken:TOKEN}}});
-  return {server,env,request,connect,channel,calls,flags,base,tenants};
+  return {server,env,request,connect,channel,calls,flags,base,tenants,database};
 }
 
 test('Connect → selective sync → confirmed disconnect → reconnect preserves data and tenant isolation',async t=>{
@@ -144,7 +147,7 @@ test('sync schedules validate areas and revisions; turning auto sync off also st
 });
 
 test('write policies require owner consent, enforce exact approval and block financial or replayed writes',async t=>{
-  const f=await fixture(t);await f.connect();await f.request('/api/connections/shopify/test',{method:'POST',body:{}});
+  const f=await fixture(t,{}, {storage:'mock-supabase'});await f.connect();await f.request('/api/connections/shopify/test',{method:'POST',body:{}});
   let channel=await f.channel();
   const body={operation:'product_content',productId:'gid://shopify/Product/1',title:'Approved title',description:'Reviewed description',requestId:'content-request-0001'};
   assert.equal((await f.request('/api/connections/shopify/writes',{method:'POST',body})).status,403);
@@ -164,6 +167,73 @@ test('write policies require owner consent, enforce exact approval and block fin
   const note=(await f.request('/api/connections/shopify/writes',{method:'POST',body:{operation:'internal_note',productId:body.productId,note:'Private note',requestId:'private-note-0001'}})).body.write;assert.equal(note.requiresApproval,false);
   f.flags.unknownWrite=true;assert.equal((await f.request(`/api/connection-writes/${note.id}/execute`,{method:'POST',body:{}})).body.write.status,'uncertain');
   assert.equal((await f.request(`/api/connection-writes/${note.id}/execute`,{method:'POST',body:{}})).status,409);
+});
+
+test('FileStore API dispatch rejects caller-supplied durable storage and actor provenance before provider work', async t => {
+  const f = await fixture(t);
+  assert.equal(f.server.packsmart.store.provider, 'file');
+  assert.equal((await f.connect()).status, 200);
+  assert.equal((await f.request('/api/connections/shopify/test', { method:'POST', body:{} })).status, 200);
+  const channel = await f.channel();
+  assert.equal((await f.request('/api/connections/shopify/settings', { method:'POST', body:{
+    revision:channel.settings.revision, permissionMode:'approval_gated', confirmPermission:'shopify:approval_gated'
+  } })).status, 200);
+  const proposed = await f.request('/api/connections/shopify/writes', { method:'POST', body:{
+    operation:'product_content', productId:'gid://shopify/Product/1', title:'Approved title',
+    description:'Reviewed description', requestId:'file-storage-denial-0001'
+  } });
+  assert.equal(proposed.status, 200);
+  const write = proposed.body.write;
+  assert.equal((await f.request(`/api/approvals/${write.approvalId}/decision`, {
+    method:'POST', body:{decision:'approved', revision:1}
+  })).status, 200);
+  const callsBefore = f.calls.length;
+  const result = await f.request(`/api/connection-writes/${write.id}/execute`, { method:'POST', body:{
+    durableStore:true,
+    actorSession:{workspaceId:'alpha', userId:f.tenants.alpha.users[0].id, sessionVersion:1}
+  } });
+  assert.equal(result.status, 409);
+  assert.equal(result.body.code, 'WRITE_DURABLE_STORE_REQUIRED');
+  assert.equal(f.calls.length, callsBefore, 'Rejected dispatch must not perform credentials or provider preflight requests');
+  assert.equal(f.calls.filter(call => /mutation/.test(call.query)).length, 0);
+  assert.equal((await f.server.packsmart.store.get('alpha')).connectionWrites.find(item => item.id === write.id).status, 'ready');
+});
+
+test('the API rejects an eleventh execution attempt before another full-state read despite body overrides', async t => {
+  const f = await fixture(t,{}, {storage:'mock-supabase'});
+  assert.equal((await f.connect()).status, 200);
+  assert.equal((await f.request('/api/connections/shopify/test', {method:'POST',body:{}})).status, 200);
+  const channel = await f.channel();
+  assert.equal((await f.request('/api/connections/shopify/settings', {method:'POST',body:{
+    revision:channel.settings.revision, permissionMode:'approval_gated', confirmPermission:'shopify:approval_gated'
+  }})).status, 200);
+  const proposal = await f.request('/api/connections/shopify/writes', {method:'POST',body:{
+    operation:'product_content', productId:'gid://shopify/Product/1', title:'Approved title',
+    description:'Reviewed description', requestId:'api-execution-limit-0001'
+  }});
+  assert.equal(proposal.status, 200);
+  const write = proposal.body.write;
+  assert.equal((await f.request(`/api/approvals/${write.approvalId}/decision`, {
+    method:'POST',body:{decision:'approved',revision:1}
+  })).status, 200);
+  const route = `/api/connection-writes/${write.id}/execute`;
+  const fullReads = calls => calls.filter(call => call.method === 'GET'
+    && call.url.pathname.endsWith('/saas_workspace_state') && call.url.searchParams.get('select') === 'state');
+  const beforeFirst = f.database.calls.length;
+  assert.equal((await f.request(route, {method:'POST',body:{}})).status, 200);
+  assert.equal(fullReads(f.database.calls.slice(beforeFirst)).length, 1,
+    'Authentication uses identity-only data; dispatch guards use bounded projections');
+  for (let attempt = 2; attempt <= 10; attempt++) assert.equal((await f.request(route, {method:'POST',body:{}})).status, 200);
+  const beforeRejected = f.database.calls.length, beforeProvider = f.calls.length;
+  const result = await f.request(route, {method:'POST',body:{
+    durableStore:true, connectionDispatchAdmissions:[], executionLimit:1000,
+    actorSession:{workspaceId:'beta',userId:f.tenants.beta.users[0].id,sessionVersion:1}
+  }});
+  assert.equal(result.status, 429);
+  assert.equal(result.body.code, 'WRITE_EXECUTION_RATE_LIMITED');
+  assert.equal(fullReads(f.database.calls.slice(beforeRejected)).length, 0);
+  assert.equal(f.calls.length, beforeProvider);
+  assert.equal(f.calls.filter(call => /mutation/.test(call.query)).length, 1);
 });
 
 test('OAuth validates browser binding, HMAC, expiry, tenant, account and one-time state before saving credentials',async t=>{
@@ -298,8 +368,8 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   assert.match(document.getElementById('global-error').textContent,/Runvara session has expired/);
 });
 
-async function metaFixture(t) {
-  const f=await fixture(t), permissions=['pages_show_list','pages_read_engagement','instagram_basic','catalog_management','business_management','pages_manage_posts','instagram_content_publish'];
+async function metaFixture(t, options = {}) {
+  const f=await fixture(t,{},options), permissions=['pages_show_list','pages_read_engagement','instagram_basic','catalog_management','business_management','pages_manage_posts','instagram_content_publish'];
   f.flags.metaPermissions=permissions;f.flags.mediaStatus='IN_PROGRESS';
   f.flags.metaHandler=(url,options,body)=>{
     const p=url.pathname.replace('/v26.0','');
@@ -371,7 +441,7 @@ test('Meta OAuth uses explicit permissions and encrypted tokens; sync/disconnect
 });
 
 test('Meta stock writes require exact approval even in automatic mode, recheck asset ownership and never replay',async t=>{
-  const f=await metaFixture(t);await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products','inventory']}});await f.metaPolicy('automatic');
+  const f=await metaFixture(t,{storage:'mock-supabase'});await f.request('/api/connections/meta/sync',{method:'POST',body:{areas:['products','inventory']}});await f.metaPolicy('automatic');
   const write=await f.metaPrepare({operation:'catalog_inventory',catalogId:'500',productId:'600',quantity:8,availability:'in stock'});
   assert.equal(write.requiresApproval,true);assert.equal((await f.metaExecute(write)).status,409);
   assert.equal((await f.request(`/api/connection-writes/${write.id}/execute`,{method:'POST',tenant:'beta',body:{}})).status,404);
@@ -384,7 +454,7 @@ test('Meta stock writes require exact approval even in automatic mode, recheck a
 });
 
 test('Meta revoked scopes and expired credentials block writes and show recoverable errors',async t=>{
-  const f=await metaFixture(t);await f.metaPolicy();const write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Approved post'});await f.metaApprove(write);
+  const f=await metaFixture(t,{storage:'mock-supabase'});await f.metaPolicy();const write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Approved post'});await f.metaApprove(write);
   f.flags.metaPermissions=f.flags.metaPermissions.filter(scope=>scope!=='pages_manage_posts');
   assert.equal((await f.metaExecute(write)).body.executedExternally,false);assert.ok(!f.calls.some(item=>item.method==='POST' && item.url.includes('/feed')));
   f.flags.metaInvalid=true;assert.equal((await f.request('/api/connections/meta/test',{method:'POST',body:{}})).status,422);
@@ -393,7 +463,7 @@ test('Meta revoked scopes and expired credentials block writes and show recovera
 });
 
 test('Meta creates hidden drafts, publishes Facebook posts and updates only this app’s workspace posts',async t=>{
-  const f=await metaFixture(t);await f.metaPolicy();
+  const f=await metaFixture(t,{storage:'mock-supabase'});await f.metaPolicy();
   assert.equal((await f.request('/api/connections/meta/writes',{method:'POST',body:{operation:'facebook_update',pageId:'200',postId:'200_999',message:'No',requestId:crypto.randomUUID()}})).status,409);
   const draft=await f.metaPrepare({operation:'catalog_product_create',catalogId:'500',retailerId:'A',name:'Box',description:'Box description',brand:'Runvara',category:'Packaging',url:'https://shop.example.test/box',imageUrl:'https://shop.example.test/box.jpg',priceMinor:599,currency:'GBP'});
   assert.equal(draft.input.visibility,'staging');await f.metaApprove(draft);assert.equal((await f.metaExecute(draft)).body.executedExternally,true);
@@ -402,7 +472,7 @@ test('Meta creates hidden drafts, publishes Facebook posts and updates only this
 });
 
 test('Instagram processing survives multiple checks with one container and one approved publication',async t=>{
-  const f=await metaFixture(t);await f.metaPolicy();const write=await f.metaPrepare({operation:'instagram_publish',pageId:'200',message:'Caption',imageUrl:'https://shop.example.test/photo.jpg'});await f.metaApprove(write);
+  const f=await metaFixture(t,{storage:'mock-supabase'});await f.metaPolicy();const write=await f.metaPrepare({operation:'instagram_publish',pageId:'200',message:'Caption',imageUrl:'https://shop.example.test/photo.jpg'});await f.metaApprove(write);
   assert.equal((await f.metaExecute(write)).body.write.status,'processing');assert.equal((await f.metaExecute(write)).body.write.status,'processing');
   const state=await f.server.packsmart.store.get('alpha');state.connectionWrites[0].providerState.checkAfter=0;await f.server.packsmart.store.save('alpha',state);f.flags.mediaStatus='FINISHED';
   assert.equal((await f.metaExecute(write)).body.executedExternally,true);await f.metaExecute(write);
@@ -410,8 +480,56 @@ test('Instagram processing survives multiple checks with one container and one a
   assert.equal(f.calls.filter(item=>new URL(item.url).pathname==='/v26.0/300/media_publish' && item.method==='POST').length,1);
 });
 
+test('Instagram API and controls preserve a readable status failure and keep the manual progress action', async t => {
+  const f = await metaFixture(t, {storage:'mock-supabase'});
+  await f.metaPolicy();
+  const write = await f.metaPrepare({operation:'instagram_publish',pageId:'200',message:'Caption',imageUrl:'https://shop.example.test/photo.jpg'});
+  await f.metaApprove(write);
+  const originalHandler = f.flags.metaHandler;
+  const raw = 'PRIVATE transient provider diagnostic';
+  f.flags.metaHandler = (url, options, body) => {
+    if (url.pathname === '/v26.0/800') throw new TypeError(raw);
+    return originalHandler(url, options, body);
+  };
+  const initial = await f.metaExecute(write);
+  assert.equal(initial.status, 200);
+  assert.equal(initial.body.write.status, 'processing');
+  assert.equal(initial.body.write.observationErrorCode, 'META_STATUS_UNAVAILABLE');
+  assert.equal(initial.body.executedExternally, false);
+  assert.ok(!JSON.stringify(initial.body).includes(raw));
+  const cooldown = await f.metaExecute(write);
+  assert.equal(cooldown.body.write.observationErrorCode, 'META_STATUS_UNAVAILABLE');
+  const payload = (await f.request('/api/connection-centre')).body;
+  const current = payload.writes.find(item => item.id === write.id);
+  assert.equal(current.status, 'processing');
+  assert.equal(current.observationErrorCode, 'META_STATUS_UNAVAILABLE');
+  assert.ok(!JSON.stringify(payload).includes(raw));
+  assert.equal(f.calls.filter(call => new URL(call.url).pathname === '/v26.0/800').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'POST' && new URL(call.url).pathname === '/v26.0/300/media').length, 1);
+  assert.equal(f.calls.filter(call => call.method === 'POST' && new URL(call.url).pathname === '/v26.0/300/media_publish').length, 0);
+
+  const dom = new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'), {
+    url:'https://runvara.example.test',runScripts:'outside-only'
+  });
+  t.after(() => dom.window.close());
+  const {window} = dom;
+  window.HTMLDialogElement.prototype.showModal = function() { this.open = true; };
+  window.HTMLDialogElement.prototype.close = function() { this.open = false; };
+  window.eval(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'));
+  window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  window.RunvaraConnections.init({request:async()=>payload,escapeHtml:String,date:String,notify:()=>{},reload:async()=>{},setView:()=>{}});
+  window.RunvaraConnections.render({user:{role:'owner'},connectionCentre:payload.channels,connectionWrites:payload.writes});
+  window.RunvaraConnections.open('meta');
+  const card = window.document.querySelector(`[data-write="${write.id}"]`).closest('.connection-write');
+  assert.match(card.textContent, /status could not be verified/i);
+  assert.match(card.textContent, /saved container is retained/i);
+  assert.equal(card.querySelector('[data-connection-action="execute"]').textContent, 'Check publishing progress');
+  assert.ok(!card.textContent.includes(raw));
+  window.RunvaraConnections.endSession();
+});
+
 test('Meta uncertain writes cannot be replayed and request content cannot change after approval',async t=>{
-  const f=await metaFixture(t);await f.metaPolicy();let write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Reviewed'});await f.metaApprove(write);
+  const f=await metaFixture(t,{storage:'mock-supabase'});await f.metaPolicy();let write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Reviewed'});await f.metaApprove(write);
   const state=await f.server.packsmart.store.get('alpha');state.connectionWrites[0].input.message='Tampered';await f.server.packsmart.store.save('alpha',state);assert.equal((await f.metaExecute(write)).status,409);
   write=await f.metaPrepare({operation:'facebook_publish',pageId:'200',message:'Network test'});await f.metaApprove(write);f.flags.metaUnknown=true;
   assert.equal((await f.metaExecute(write)).body.write.status,'uncertain');assert.equal((await f.metaExecute(write)).status,409);
@@ -562,7 +680,7 @@ test('Meta recovers only app-verified granular Page targets and never publishes 
 });
 
 test('Shopify tag actions require approval even in automatic mode and remain tenant bound', async t=>{
-  const f=await fixture(t);await f.connect();await f.request('/api/connections/shopify/test',{method:'POST',body:{}});
+  const f=await fixture(t,{}, {storage:'mock-supabase'});await f.connect();await f.request('/api/connections/shopify/test',{method:'POST',body:{}});
   const channel=await f.channel();await f.request('/api/connections/shopify/settings',{method:'POST',body:{revision:channel.settings.revision,permissionMode:'automatic',confirmPermission:'shopify:automatic'}});
   for(const operation of ['product_tags_add','product_tags_remove']){
     const result=await f.request('/api/connections/shopify/writes',{method:'POST',body:{operation,productId:'gid://shopify/Product/1',tags:'Reviewed, Internal',requestId:`test-${operation}-0001`}});

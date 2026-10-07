@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, sessionCookie } from '../lib/security.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
+import { createActivityMeter } from '../lib/activity-meter.mjs';
 
 const SECRET = 'static-cache-tests-only-session-secret-over-thirty-two-characters';
 const CSP = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
@@ -24,6 +25,8 @@ const ASSETS = [
   ['/app.js', 'app.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/presentation.js', 'presentation.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/control-ui.js', 'control-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
+  ['/outcomes-ui.js', 'outcomes-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
+  ['/activity-ui.js', 'activity-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/connections-ui.js', 'connections-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/styles.css', 'styles.css', 'text/css; charset=utf-8', 'public, max-age=300'],
   ['/favicon.svg', 'favicon.svg', 'image/svg+xml', 'public, max-age=300']
@@ -43,7 +46,10 @@ async function fixture(t) {
       role:state.users[0].role, sessionVersion:state.users[0].sessionVersion
     }, SECRET)).split(';')[0];
   }
-  const store = { provider:'file', get:async workspaceId => { calls.push(workspaceId); return states.get(workspaceId); } };
+  const activity = createActivityMeter({ dbAvailable:false });
+  const store = { provider:'file', get:async workspaceId => { calls.push(workspaceId); return states.get(workspaceId); },
+    activitySnapshot: workspaceId => activity.snapshot(workspaceId),
+    businessOutcomeSummary: async workspaceId => ({ summary:{ workspaceId, groups:[], coverage:{ complete:true } }, publications:[] }) };
   const server = createPacksmartServer({ NODE_ENV:'test', APP_PUBLIC_URL:'https://cache.example.test', SESSION_SECRET:SECRET }, {
     store, integrations:{}, aiProvider:{}, schedulerEnabled:false, agentOpsEnabled:false,
     fetchImpl:async () => { assert.fail('static revalidation must not call a provider'); }
@@ -112,7 +118,7 @@ test('allowlisted assets support conditional GET/HEAD without changing cache pol
   }
   assert.equal(revalidatedBytes, 0);
   assert.deepEqual(calls, [], 'static requests never read tenant state');
-  t.diagnostic(`Seven unique public assets: ${firstLoadBytes} initial body bytes; ${revalidatedBytes} revalidated body bytes. Local HTTP body measurement only.`);
+  t.diagnostic(`${ASSETS.length - 1} unique public assets: ${firstLoadBytes} initial body bytes; ${revalidatedBytes} revalidated body bytes. Local HTTP body measurement only.`);
 });
 
 test('If-None-Match accepts weak/list/wildcard validators and ignores nonmatching or malformed fields', async t => {
@@ -206,7 +212,7 @@ test('API, authenticated tenant data and OAuth callbacks never gain validators o
     const publicApi = await request('/api/auth/signup-options', { headers });
     assert.equal(publicApi.status, 200);
     assertUncached(publicApi);
-    for (const pathname of ['/api/auth/session','/api/connections','/api/app.js']) {
+    for (const pathname of ['/api/auth/session','/api/connections','/api/app.js','/api/activity','/api/business-outcomes']) {
       const anonymous = await request(pathname, { headers });
       assert.equal(anonymous.status, 401);
       assertUncached(anonymous);
@@ -221,6 +227,15 @@ test('API, authenticated tenant data and OAuth callbacks never gain validators o
       assert.equal(business.status, 200);
       assert.equal(JSON.parse(business.body).connections[0].id, `${workspaceId}-connection`);
       assertUncached(business);
+      for (const pathname of ['/api/activity','/api/business-outcomes']) {
+        const privateEvidence = await request(pathname, { headers:authenticatedHeaders });
+        assert.equal(privateEvidence.status, 200);
+        assert.equal(JSON.parse(privateEvidence.body).workspaceId, workspaceId);
+        assertUncached(privateEvidence);
+        const override = await request(`${pathname}?workspaceId=another-tenant`, { headers:authenticatedHeaders });
+        assert.equal(override.status, 400, 'validators cannot bypass a rejected tenant override');
+        assertUncached(override);
+      }
     }
     for (const pathname of ['/api/integrations/shopify/oauth/callback','/api/integrations/ebay/oauth/callback',
       '/api/marketing/providers/canva/oauth/callback']) {

@@ -165,7 +165,7 @@
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="active"><span>Active catalogue</span><strong id="kpi-products">—</strong><small id="kpi-variants">— variants</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="low-stock"><span>Low stock</span><strong id="kpi-stock">—</strong><small id="kpi-out-stock">— out of stock</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="missing-costs"><span>Cost coverage</span><strong id="kpi-coverage">—</strong><small id="kpi-missing-costs">— missing</small></button>
-          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="below-floor"><span>Average margin</span><strong id="kpi-margin">—</strong><small id="kpi-low-margin">— below floor</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="below-floor"><span>Mean known contribution margin</span><strong id="kpi-margin">—</strong><small id="kpi-margin-coverage">— of — catalogue variants · unweighted</small><small id="kpi-low-margin">— below floor</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="loss-making"><span>Loss-making</span><strong id="kpi-loss">—</strong><small>fully costed SKUs</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="active"><span>Stock value at cost</span><strong id="kpi-stock-value">—</strong><small id="kpi-stock-value-coverage">coverage —</small></button>
         </div>
@@ -205,6 +205,32 @@
           <article class="card"><div class="section-head"><div><p class="eyebrow">MARKETING ECONOMICS</p><h2>Advertising performance</h2></div></div><div id="re-advertising" class="status-list"></div></article>
         </div>
         <article class="card"><div class="section-head"><div><p class="eyebrow">CONTROLLED GROWTH</p><h2>Recovery, experiments &amp; loyalty foundations</h2></div><span class="tag good">Approval protected</span></div><p class="muted">Cart and checkout recovery events, experiments, referrals, loyalty rules and customer-facing B2B actions are stored tenant-by-tenant. Significant outbound actions, discounts, pricing and spend remain behind approval controls.</p></article>
+        <details id="business-outcomes-panel" class="card business-outcomes-panel">
+          <summary><span class="eyebrow">MEASURED OUTCOMES</span><h2>Business results</h2><span class="muted">Owner-reviewed measurements, with exact currency and period</span></summary>
+          <p class="muted">Your team records results and the owner reviews them. Currencies and periods stay separate; these are not forecasts or ROI.</p>
+          <button id="business-outcomes-refresh" type="button" class="secondary">Refresh reviewed results</button>
+          <p id="business-outcomes-status" role="status" aria-live="polite" class="muted"></p>
+          <div id="business-outcomes-summary"></div>
+          <div class="outcome-selection"><label for="business-outcomes-experiment">Experiment</label><select id="business-outcomes-experiment"><option value="">Choose an experiment</option></select><button id="business-outcomes-load" type="button" class="secondary">Load experiment</button></div>
+          <div id="business-outcomes-detail"></div>
+          <form id="business-outcomes-form" class="record-form hidden">
+            <h3 class="wide">Record a business result</h3>
+            <p class="muted tiny wide">Blank fields remain unknown. Dates are UTC. Save a draft first, then ask the owner to review it.</p>
+            <label>Exact incremental contribution<input name="amount" type="text" inputmode="decimal" maxlength="26" placeholder="Unknown; zero and negatives allowed" pattern="-?[0-9]{1,18}(\.[0-9]{1,6})?"></label>
+            <label>Currency code<input name="currency" type="text" maxlength="3" pattern="[A-Z]{3}" placeholder="Unknown, e.g. GBP" autocomplete="off"></label>
+            <label>Window starts (UTC)<input name="startsAt" type="datetime-local" step="0.001"></label>
+            <label>Window ends (UTC, exclusive)<input name="endsAt" type="datetime-local" step="0.001"></label>
+            <label>Observed at (UTC)<input name="observedAt" type="datetime-local" step="0.001"></label>
+            <label>Coverage<select name="coverageStatus"><option value="unknown">Unknown</option><option value="partial">Partial</option><option value="complete">Complete</option></select></label>
+            <label>Observed population<input name="observedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
+            <label>Expected population<input name="expectedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
+            <label>Measurement method<select name="method"><option value="unknown">Unknown</option><option value="holdout">Holdout comparison</option><option value="before_after">Before and after</option><option value="reconciled_manual">Reconciled records</option></select></label>
+            <label>All relevant costs included?<select name="costsComplete"><option value="">Unknown</option><option value="false">No, incomplete</option><option value="true">Yes, complete</option></select></label>
+            <label class="wide">Recorded measurement report<textarea name="description" maxlength="1000" required placeholder="Describe the measured facts and cost coverage. Do not include personal data or credentials."></textarea></label>
+            <button type="submit" class="primary">Save measurement draft</button>
+          </form>
+          <section id="business-outcomes-review" class="outcome-review hidden" aria-label="Review business result"></section>
+        </details>
         <div class="grid-2">
           <article class="card">
             <div class="section-head"><div><p class="eyebrow">EXPERIMENT CONTROL</p><h2>Start from a real opportunity</h2></div><span class="tag neutral">Owner controlled</span></div>
@@ -227,7 +253,7 @@
         </div>
         <div class="grid-2">
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">MEASURE RESULT</p><h2>Record observed experiment impact</h2></div><span class="tag warn">Unverified until reviewed</span></div>
+            <div class="section-head"><div><p class="eyebrow">MEASURE RESULT</p><h2>Record legacy experiment impact</h2></div><span class="tag warn">Recorded / unqualified</span></div>
             <form id="re-experiment-measure-form" class="record-form">
               <label class="wide">Experiment<select name="experimentId" id="re-experiment-measure" required><option value="">Choose an active experiment</option></select></label>
               <label>Method<input name="method" maxlength="160" required placeholder="Holdout, before/after, cohort…"></label>
@@ -240,16 +266,17 @@
             </form>
           </article>
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">VERIFY RESULT</p><h2>Promote measured evidence into learning</h2></div><span class="tag good">Approver required</span></div>
+            <div class="section-head"><div><p class="eyebrow">VERIFY RESULT</p><h2>Review a legacy measurement</h2></div><span class="tag good">Approver required</span></div>
+            <p class="muted tiny">Legacy review remains recorded history. It does not publish a qualified business result or establish comparable learning evidence.</p>
             <form id="re-experiment-verify-form" class="record-form">
               <label class="wide">Measured experiment<select name="experimentId" id="re-experiment-verify" required><option value="">Choose a measured experiment</option></select></label>
               <label class="wide">Verification note<textarea name="note" maxlength="500" required placeholder="What source evidence did you check?"></textarea></label>
-              <button class="primary" type="submit">Verify measurement</button>
+              <button class="primary" type="submit">Record legacy review</button>
             </form>
           </article>
         </div>
         <article class="card">
-          <div class="section-head"><div><p class="eyebrow">EXPERIMENT REGISTER</p><h2>Draft → measured → verified</h2></div><span id="re-experiment-count" class="tag neutral">0 experiments</span></div>
+          <div class="section-head"><div><p class="eyebrow">EXPERIMENT REGISTER</p><h2>Recorded experiment history</h2></div><span id="re-experiment-count" class="tag neutral">0 experiments</span></div>
           <div id="re-experiment-list" class="control-list"></div>
         </article>
       </section>
@@ -523,6 +550,13 @@
           <p id="launch-feedback" role="status"></p><label id="invite-link-label" class="hidden">Copy this private invitation link<input id="invite-link" readonly></label><div id="invitation-list" class="control-list"></div>
         </article>
         <div class="grid-2"><article class="card"><p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Your workspace</h2><div id="account-details" class="status-list"></div><div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div><form id="account-password-form" class="auth-form compact-form hidden"><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label><button class="primary" type="submit">Update password</button><p class="form-error" role="alert"></p></form></article><article class="card"><p class="eyebrow">ACCOUNT & ACCESS</p><h2>Subscription</h2><div id="billing-status" class="status-list"></div><div id="plan-grid" class="plan-grid"></div><p class="muted tiny">Beta access does not start a paid subscription. Commercial plans require owner confirmation before charging is enabled.</p></article></div>
+        <details id="workspace-activity-panel" class="card activity-panel hidden">
+          <summary><p class="eyebrow">YOUR WORKSPACE</p><h2>App activity</h2><span class="muted">Database requests, workspace snapshots and job events</span></summary>
+          <p class="muted">Check what Runvara has recorded for this workspace. These observations are not provider charges, physical storage totals or network bills.</p>
+          <button id="workspace-activity-refresh" class="secondary" type="button">Refresh activity</button>
+          <p id="workspace-activity-status" class="muted" role="status" aria-live="polite"></p>
+          <div id="workspace-activity-result" aria-busy="false"></div>
+        </details>
         <article class="card"><div class="section-head"><div><p class="eyebrow">IMMUTABLE HISTORY</p><h2>Audit events</h2></div><button id="refresh-audit" class="secondary" type="button">Refresh</button></div><div id="audit-list" class="audit-list"></div></article>
       </section>
     </main>
@@ -534,6 +568,8 @@
   <script src="/presentation.js?v=6.15.2"></script>
   <script src="/connections-ui.js?v=6.15.2"></script>
   <script src="/control-ui.js?v=6.15.2"></script>
+  <script src="/outcomes-ui.js?v=6.15.2"></script>
+  <script src="/activity-ui.js?v=6.15.2"></script>
   <script src="/app.js?v=6.15.2"></script>
 </body>
 </html>

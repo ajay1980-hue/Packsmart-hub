@@ -185,7 +185,7 @@ test('scheduler persists its claim before reading, limits duplicate work, and re
 });
 
 
-test('verified experiment evidence enriches approval without bypassing owner review', () => {
+test('legacy experiment review stays unqualified and never becomes a future approval benefit', () => {
   const state=business();
   detectOpportunities(state);
   const opportunity=state.opportunities.find(item=>item.kind==='pricing');
@@ -198,9 +198,13 @@ test('verified experiment evidence enriches approval without bypassing owner rev
   }];
   opportunity.experimentId='experiment-verified';
   const approval=requestOpportunityApproval(state,opportunity.id,'owner');
-  assert.equal(approval.financialImpact,42);
+  assert.equal(approval.financialImpact,null);
   assert.equal(approval.payload.experimentId,'experiment-verified');
-  assert.equal(approval.payload.verifiedExperiment,true);
-  assert.ok(approval.evidence.some(item=>item.type==='verified_experiment'));
+  assert.equal(approval.payload.verifiedExperiment,false);
+  assert.equal(approval.payload.legacyReviewRecorded,true);
+  assert.ok(approval.evidence.some(item=>item.type==='legacy_experiment_review'));
   assert.equal(approval.status,'pending');
+  assert.doesNotMatch(approval.evidence.find(item=>item.type==='legacy_experiment_review').detail,/£|42|verified.*result/i);
+  assert.equal(state.revenueEngine.experiments[0].impact.incrementalContribution,42);
+  assert.equal(requestOpportunityApproval(state,opportunity.id,'owner').id,approval.id);
 });

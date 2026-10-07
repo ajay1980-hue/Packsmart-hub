@@ -26,7 +26,10 @@ function fixture(handler = () => granted()) {
     fetchImpl: async (url, options = {}) => {
       calls.push({ url: new URL(url), ...options });
       const result = await handler(calls.at(-1), calls.length);
-      return result instanceof Response ? result : Response.json(result);
+      if (result instanceof Response) return result;
+      const headers = calls.at(-1).url.pathname.endsWith('/runvara_provider_usage_windows') && Array.isArray(result)
+        ? { 'Content-Range': result.length ? `0-${result.length - 1}/${result.length}` : '*/0' } : {};
+      return Response.json(result, { headers });
     }
   });
   return { store, calls };
@@ -220,6 +223,8 @@ test('summary performs exactly one bounded tenant/month read of compact counters
   assert.equal(calls[0].url.searchParams.get('select'), 'workspace_id,scope_key,window_start,currency,held_requests,held_input_tokens,held_output_tokens,held_total_tokens,held_cost_micros,settled_requests,settled_input_tokens,settled_output_tokens,settled_total_tokens,settled_cost_micros');
   assert.equal(calls[0].method, undefined);
   assert.equal(calls[0].body, undefined);
+  assert.equal(calls[0].headers.Prefer, 'count=exact');
+  assert.equal(calls[0].includeResponseMetadata, undefined, 'Local metadata option must not reach fetch');
   assert.deepEqual(result, { available: true, admissionMonth: '2026-10', currency: 'USD', scopes: ['tenant', 'provider:openai'].map(scopeKey => ({ scopeKey,
     held: { requests: 1, inputTokens: 1000, outputTokens: 200, totalTokens: 1200, costMicros: 1800 },
     settled: { requests: 2, inputTokens: 200, outputTokens: 50, totalTokens: 250, costMicros: 350 } })) });
@@ -409,4 +414,36 @@ test('FileStore cannot provide durable operator brief context or fall back to le
   store.readAll = store.get = () => assert.fail('File context must fail before reading any local workspace data');
   await assert.rejects(() => store.getOperatorBriefContext(workspaceId, 'job_one'),
     error => error.code === 'AI_USAGE_DURABLE_STORE_REQUIRED' && error.dispatchAllowed === false);
+});
+
+test('governed scope completeness requires an exact full Content-Range, including lower server row caps', async () => {
+  const rows=[windowRow(),windowRow('provider:openai')];
+  for(const contentRange of [null,'0-1/3','0-1/*','1-2/3','0-0/2','0-1/1','0-1/9007199254740992','0-1/02','*/0','malformed']) {
+    const headers=contentRange===null?{}:{'Content-Range':contentRange};
+    const {store,calls}=fixture(()=>Response.json(rows,{headers}));
+    assert.deepEqual(await store.providerUsageSummary(workspaceId,'2026-10'),{available:false,reason:'AI_USAGE_RESPONSE_INVALID'});
+    assert.equal(calls.length,1,'No pagination, fallback, state or full-ledger reads');
+    assert.equal(calls[0].headers.Prefer,'count=exact');
+  }
+  const capped=fixture(()=>Response.json([windowRow()],{headers:{'Content-Range':'0-0/2'}}));
+  assert.equal((await capped.store.providerUsageSummary(workspaceId,'2026-10')).available,false);
+  const complete=fixture(()=>Response.json(rows,{headers:{'Content-Range':'0-1/2'},status:206}));
+  assert.equal((await complete.store.providerUsageSummary(workspaceId,'2026-10')).available,true);
+  const maximum=Array.from({length:129},(_,i)=>windowRow(i?`provider:custom:p${i}`:'tenant'));
+  const max=fixture(()=>Response.json(maximum,{headers:{'Content-Range':'0-128/129'}}));
+  assert.equal((await max.store.providerUsageSummary(workspaceId,'2026-10')).scopes.length,129);
+});
+
+test('governed scope responses have a byte bound and empty reads remain unavailable rather than zero', async () => {
+  for(const response of [
+    new Response(null,{status:204}), new Response(''), new Response(`invalid private body ${secret}`),
+    Response.json([],{headers:{'Content-Range':'*/0'}}),
+    new Response('[]',{headers:{'Content-Range':'*/0','Content-Length':String(131073)}}),
+    new Response('x'.repeat(131073),{headers:{'Content-Range':'0-0/1'}})
+  ]) {
+    const {store,calls}=fixture(()=>response);
+    const result=await store.providerUsageSummary(workspaceId,'2026-10');
+    assert.equal(result.available,false); assert.equal(result.scopes,undefined); assert.equal(calls.length,1);
+    assert.ok(!JSON.stringify(result).includes(secret));
+  }
 });

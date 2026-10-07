@@ -1,0 +1,44 @@
+name: Business outcome PostgreSQL publication
+on:
+  pull_request:
+    paths:
+      - 'saas/server/**'
+      - '.github/workflows/business-outcome-check.yml'
+  push:
+    paths:
+      - 'saas/server/**'
+      - '.github/workflows/business-outcome-check.yml'
+permissions:
+  contents: read
+jobs:
+  postgres-business-outcomes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-test-password
+          POSTGRES_DB: runvara_outcome_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d runvara_outcome_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      OUTCOME_TEST_DATABASE_URL: postgres://postgres:disposable-test-password@127.0.0.1:5432/runvara_outcome_test
+      OUTCOME_ALLOW_DISPOSABLE_TEST_DB: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: saas/server/tests/atomic-usage/package-lock.json
+      - name: Install locked test-only PostgreSQL driver
+        run: npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts --no-audit --no-fund
+      - name: Verify actual concurrent publication and privilege boundaries
+        run: node --test --test-concurrency=1 saas/server/tests/business-outcome-postgres.mjs

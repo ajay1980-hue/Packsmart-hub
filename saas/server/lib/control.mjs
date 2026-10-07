@@ -3,6 +3,7 @@ import { connectionDue, CONNECTORS } from './connection-centre.mjs';
 import { AUTOMATION_DEFINITIONS, deriveOperations, ebayComparisonAvailable, integrationMatrix, normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
 import { automationEvidenceCount } from './automation-retention.mjs';
+import { evidenceInWorkspace } from './business-evidence-scope.mjs';
 
 const nowIso = () => new Date().toISOString();
 const clean = (value, max = 1000) => String(value ?? '').trim().slice(0, max);
@@ -182,19 +183,18 @@ export function requestOpportunityApproval(state, id, actor) {
   if (!item) throw Object.assign(new Error('Opportunity not found'), { status: 404, code: 'OPPORTUNITY_NOT_FOUND' });
   const existing = state.approvals.find(record => record.payload?.opportunityId === id && record.status === 'pending');
   if (existing) return existing;
-  const experiment = item.experimentId ? state.revenueEngine?.experiments?.find(record => record.id === item.experimentId) : null;
-  const verifiedImpact = experiment?.impact?.verified === true && experiment.status === 'completed' ? experiment.impact : null;
-  const measuredContribution = Number.isFinite(Number(verifiedImpact?.incrementalContribution)) ? Number(verifiedImpact.incrementalContribution) : null;
-  const measuredEvidence = verifiedImpact ? [{
-    type:'verified_experiment',
-    id:experiment.id,
-    detail:`Verified ${experiment.kind || 'experiment'} result using ${verifiedImpact.method || 'recorded method'}; incremental contribution ${measuredContribution === null ? 'not supplied' : '£' + measuredContribution.toFixed(2)}.`
-  }] : [];
-  const approval = normalizeApprovalRequest({ type: item.requiredAction, action: item.title, reason: item.recommendedNextStep, financialImpact: measuredContribution,
-    expectedBenefit: verifiedImpact ? 'Verified experiment evidence is attached for owner review; historical results do not guarantee future performance.' : item.estimatedImpact ? `${item.estimatedImpact.amount} ${item.estimatedImpact.unit}; ${item.estimatedImpact.assumptions}` : 'Impact unquantified until source data is confirmed.',
-    risk: item.risk, evidence: [...(item.evidence || []), ...measuredEvidence], agentId: item.owner, source: 'opportunity-engine', payload: { opportunityId: id, experimentId: experiment?.id || null, verifiedExperiment: Boolean(verifiedImpact) } }, actor);
+  const workspaceId = state.workspace?.id;
+  const matches = evidenceInWorkspace(state.revenueEngine || {}, workspaceId) ? (state.revenueEngine?.experiments || []).filter(record => record.id === item.experimentId && evidenceInWorkspace(record, workspaceId)) : [];
+  const candidate = matches.length === 1 ? matches[0] : null;
+  const experiment = candidate?.opportunityId === item.id && evidenceInWorkspace(candidate.impact || {}, workspaceId) ? candidate : null;
+  const legacyReviewRecorded = experiment?.impact?.verified === true && experiment.status === 'completed';
+  const measuredEvidence = legacyReviewRecorded ? [{ type:'legacy_experiment_review', id:experiment.id,
+    detail:'A historical experiment review is recorded, but its measurement is unqualified. No currency, comparable period or future financial benefit is established.' }] : [];
+  const approval = normalizeApprovalRequest({ type: item.requiredAction, action: item.title, reason: item.recommendedNextStep, financialImpact: null,
+    expectedBenefit: legacyReviewRecorded ? 'Legacy experiment context is attached for owner review. Future benefit remains unknown.' : item.estimatedImpact ? `${item.estimatedImpact.amount} ${item.estimatedImpact.unit}; ${item.estimatedImpact.assumptions}` : 'Impact unquantified until source data is confirmed.',
+    risk: item.risk, evidence: [...(item.evidence || []), ...measuredEvidence], agentId: item.owner, source: 'opportunity-engine', payload: { opportunityId: id, experimentId: experiment?.id || null, verifiedExperiment: false, legacyReviewRecorded } }, actor);
   state.approvals.unshift(approval); item.status = 'requires_approval'; item.approvalId = approval.id;
-  addAudit(state, { type: 'opportunity_approval_requested', actor, detail: { opportunityId: id, approvalId: approval.id, experimentId: experiment?.id || null, verifiedExperiment: Boolean(verifiedImpact) } });
+  addAudit(state, { type: 'opportunity_approval_requested', actor, detail: { opportunityId: id, approvalId: approval.id, experimentId: experiment?.id || null, verifiedExperiment: false, legacyReviewRecorded } });
   return approval;
 }
 
