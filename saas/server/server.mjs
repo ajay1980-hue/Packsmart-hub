@@ -1186,6 +1186,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
         const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
+        const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
         if (auth.user.passwordChangeRequired && !['/api/auth/session', '/api/auth/logout', '/api/auth/change-password'].includes(pathname)) throw Object.assign(new Error('Replace the temporary password before accessing business data'), { status: 403, code: 'PASSWORD_CHANGE_REQUIRED' });
@@ -1194,14 +1195,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+        const consumeOutcome = limiter => {
+          if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
+          limiter.fail(rateKey);
+        };
 
         if (pathname === '/api/business-outcomes' || pathname.startsWith('/api/business-outcomes/')) {
           const workspaceId = auth.session.workspaceId;
           if ([...url.searchParams.keys()].length) throw Object.assign(new Error('Outcome reads do not accept tenant or query overrides'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
-          const consume = limiter => {
-            if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
-            limiter.fail(rateKey);
-          };
+          const consume = consumeOutcome;
           const decodeId = raw => {
             let id;
             try { id = decodeURIComponent(raw); } catch {}
@@ -1425,6 +1427,26 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           // writes, recurring refreshes or caller-selected tenant are permitted.
           const detailed = url.searchParams.get('detail') === 'true';
           const options = { workspaceId: auth.session.workspaceId, ...(detailed ? {nodeLimit:200, edgeLimit:400, recordLimit:50, scanLimit:2000} : {}) };
+          if (url.searchParams.has('outcomes')) {
+            if (url.searchParams.getAll('outcomes').length !== 1 || url.searchParams.get('outcomes') !== 'current'
+              || [...url.searchParams.keys()].some(key => !['outcomes', 'detail'].includes(key))
+              || url.searchParams.getAll('detail').length > 1 || (url.searchParams.has('detail') && !['true', 'false'].includes(url.searchParams.get('detail')))) {
+              throw Object.assign(new Error('Current graph inspection accepts only outcomes=current and an optional detail flag'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+            }
+            consumeOutcome(outcomeReadLimiter);
+            options.inspectCurrentOutcomes = true;
+            options.workspaceSnapshot = { revision: auth.state._revision ?? null, readCompletedAt: workspaceReadCompletedAt };
+            try {
+              options.outcomeSnapshot = await store.businessOutcomeSummary(auth.session.workspaceId);
+              // The existing adapter's generatedAt is captured when its bounded
+              // current-head read completes, not a database commit timestamp.
+              options.outcomeReadCompletedAt = options.outcomeSnapshot.summary?.generatedAt ?? null;
+            } catch (error) {
+              if (error.code === 'WORKSPACE_MISMATCH') throw error;
+              options.outcomeUnavailableReason = ['OUTCOME_STORAGE_UNAVAILABLE', 'OUTCOME_READ_UNAVAILABLE', 'OUTCOME_RESPONSE_TOO_LARGE', 'OUTCOME_PUBLICATION_INVALID', 'OUTCOME_COVERAGE_UNAVAILABLE'].includes(error.code)
+                ? error.code : 'OUTCOME_READ_UNAVAILABLE';
+            }
+          }
           send(res, 200, detailed ? deriveBusinessGraph(auth.state, options) : deriveBusinessGraphSummary(auth.state, options));
           return;
         }

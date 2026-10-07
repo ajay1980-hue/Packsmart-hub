@@ -5,7 +5,7 @@ import { aggregateBusinessOutcomes, createBusinessOutcomeCandidate, correctBusin
 import { businessOutcomePublicationParams, createBusinessOutcomePersistence, OUTCOME_READ_BYTES, SELECTED_OUTCOME_RELATIONSHIPS_MAX_BYTES } from '../lib/business-outcome-store.mjs';
 import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 import { createStore } from '../lib/store.mjs';
-import { deriveBusinessGraph } from '../lib/business-graph.mjs';
+import { deriveBusinessGraph, deriveBusinessGraphSummary } from '../lib/business-graph.mjs';
 
 const NOW = '2026-10-06T20:00:00.000Z', WS = 'tenant-a';
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -125,6 +125,41 @@ test('current outcomes use one tenant-scoped joined snapshot, never generic hist
   assert.throws(() => { result.publications[0].head.digest = digest('forged'); }, TypeError);
   assert.throws(() => { result.versions[0].amount = '999'; }, TypeError);
   assert.equal(result.publications[0].version.amount, '999999999999999999.999999');
+});
+
+test('adapter-minted current graph snapshot accepts unlinked and compact linked payloads without evidence hydration', async () => {
+  for (const linked of [false, true]) {
+    const f = fixture(1, '-0.000001');
+    if (linked) {
+      const input = Object.fromEntries(['source', 'metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'verification'].map(key => [key, f.version[key]]));
+      const version = createBusinessOutcomeCandidate({ ...input, links: { action: { workspaceId: WS, id: 'private_action', revision: 1, digest: digest('action') } } }, { workspaceId: WS, now: NOW });
+      Object.assign(f.row, { payload: version, version_id: version.versionId, digest: version.digest });
+      Object.assign(f.joined, { version_id: version.versionId });
+    }
+    let reads = 0;
+    const snapshot = await adapter(async (path, options) => {
+      reads++; assert.equal(path.includes('source_action'), false); assert.equal(path.includes('source_measurement'), false);
+      assert.equal(options.maxResponseBytes, OUTCOME_READ_BYTES); return [f.joined];
+    }).current(WS);
+    const state = { workspace: { id: WS }, revenueEngine: { experiments: [{ id: 'experiment_1' }] } };
+    const graph = deriveBusinessGraph(state, { inspectCurrentOutcomes: true, outcomeSnapshot: snapshot, now: NOW, outcomeReadCompletedAt: snapshot.summary.generatedAt });
+    assert.equal(reads, 1); assert.equal(graph.reviewedOutcomes.status, 'available');
+    assert.equal(graph.reviewedOutcomes.groups[0].amount, '-0.000001'); assert.equal(graph.reviewedOutcomes.records[0].relationship.status, 'resolved');
+    assert.equal(JSON.stringify(graph).includes('private_action'), false); assert.equal(graph.reviewedOutcomes.safeguards.learningAuthorized, false);
+  }
+});
+
+test('50/51 and server-short current pages retain independent publication and graph coverage', async () => {
+  const rows = Array.from({ length: 51 }, (_, index) => fixture(index + 1).joined);
+  for (const [data, contentRange, complete] of [[rows.slice(0, 50), '0-49/50', true], [rows, '0-50/51', false], [rows.slice(0, 2), '0-1/50', false]]) {
+    let reads = 0;
+    const snapshot = await adapter(async () => { reads++; return { data, contentRange }; }).current(WS);
+    const graph = deriveBusinessGraphSummary({ workspace: { id: WS } }, { inspectCurrentOutcomes: true, outcomeSnapshot: snapshot, now: NOW });
+    assert.equal(reads, 1); assert.equal(graph.reviewedOutcomes.coverage.publicationHeadsComplete, complete);
+    assert.equal(graph.reviewedOutcomes.counts.currentHeadsRead, Math.min(data.length, 50));
+    assert.ok(graph.reviewedOutcomes.counts.projectedRecords <= 8);
+    if (!complete) assert.deepEqual(graph.reviewedOutcomes.groups, []);
+  }
 });
 
 test('server row caps or missing exact count cannot silently turn partial data into a complete total', async () => {

@@ -7,7 +7,7 @@
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
   const state = {
-    csrf: '', session: null, data: null, graphGeneration: 0, objectiveGeneration: 0, objectiveSnapshot: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
+    csrf: '', session: null, data: null, graphGeneration: 0, graphInspectionGeneration: 0, graphTicket: null, objectiveGeneration: 0, objectiveSnapshot: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
     orderFilter: 'all', approvalFilter: 'pending'
   };
@@ -191,6 +191,7 @@
   }
 
   function showLogin() {
+    resetBusinessGraph(true);
     resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     closeWorkspaceSearch();
     $('#commander-result').replaceChildren(); $('#commander-result').classList.add('hidden');
@@ -208,6 +209,7 @@
   }
 
   function showPasswordSetup() {
+    resetBusinessGraph(true);
     resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
@@ -226,7 +228,7 @@
   async function loadSession() {
     try {
       const session = await request('/api/auth/session');
-      state.session = session; state.csrf = session.csrf;
+      resetBusinessGraph(); state.session = session; state.csrf = session.csrf;
       if (session.user && session.user.passwordChangeRequired) { showPasswordSetup(); return false; }
       return true;
     } catch (error) {
@@ -247,12 +249,14 @@
   }
 
   async function loadBootstrap(options) {
+    resetBusinessGraph();
     const config = Object.assign({ migrate: true }, options || {});
     if (config.migrate) {
       try { await migratePilotData(); }
       catch (error) { showMessage('Pilot migration needs attention: ' + error.message, 'error'); }
     }
     const data = await request('/api/bootstrap');
+    resetBusinessGraph();
     if (state.data?.workspace?.id !== data.workspace.id) resetObjectiveForm();
     state.data = data; state.csrf = data.csrf || state.csrf;
     state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
@@ -282,6 +286,7 @@
   }
 
   function setView(view) {
+    if (view !== 'overview') resetBusinessGraph(true);
     if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); }
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
     closeWorkspaceSearch();
@@ -1234,14 +1239,14 @@
     event.preventDefault();const form=event.currentTarget, button=form.querySelector('button');$('#signup-error').textContent='';
     if(form.password.value!==form.confirmPassword.value){$('#signup-error').textContent='The passwords do not match.';return;}
     setBusy(button,true,'Creating your workspace…');
-    try {const payload=await request('/api/auth/signup',{method:'POST',body:JSON.stringify({businessName:form.businessName.value,email:form.email.value,password:form.password.value,invitation:form.invitation.value})});state.session=payload;state.csrf=payload.csrf;form.reset();invitationToken='';await loadBootstrap();setView('channels');}
+    try {const payload=await request('/api/auth/signup',{method:'POST',body:JSON.stringify({businessName:form.businessName.value,email:form.email.value,password:form.password.value,invitation:form.invitation.value})});resetBusinessGraph();state.session=payload;state.csrf=payload.csrf;form.reset();invitationToken='';await loadBootstrap();setView('channels');}
     catch(error){$('#signup-error').textContent=error.message;}
     finally{setBusy(button,false);}
   });
 
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#login-error'); error.textContent = ''; setBusy(button, true, 'Signing in…');
-    try { const payload = await request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: form.email.value, password: form.password.value }) }); state.session = payload; state.csrf = payload.csrf; form.password.value = ''; if (payload.user && payload.user.passwordChangeRequired) showPasswordSetup(); else await loadBootstrap(); }
+    try { const payload = await request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: form.email.value, password: form.password.value }) }); resetBusinessGraph(); state.session = payload; state.csrf = payload.csrf; form.password.value = ''; if (payload.user && payload.user.passwordChangeRequired) showPasswordSetup(); else await loadBootstrap(); }
     catch (loginError) { error.textContent = loginError.message; }
     finally { setBusy(button, false); }
   });
@@ -1250,7 +1255,7 @@
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#password-error'); error.textContent = '';
     if (form.newPassword.value !== form.confirmPassword.value) { error.textContent = 'The two passwords do not match.'; return; }
     setBusy(button, true, 'Securing account…');
-    try { const activation = Boolean(ownerActivationToken); const payload = await request(activation ? '/api/auth/activate-owner' : '/api/auth/change-password', { method: 'POST', body: JSON.stringify(activation ? { token: ownerActivationToken, newPassword: form.newPassword.value } : { newPassword: form.newPassword.value }) }); state.session = payload; state.csrf = payload.csrf; ownerActivationToken = ''; form.reset(); await loadBootstrap(); showMessage('Owner password secured and temporary sessions revoked.'); }
+    try { const activation = Boolean(ownerActivationToken); const payload = await request(activation ? '/api/auth/activate-owner' : '/api/auth/change-password', { method: 'POST', body: JSON.stringify(activation ? { token: ownerActivationToken, newPassword: form.newPassword.value } : { newPassword: form.newPassword.value }) }); resetBusinessGraph(); state.session = payload; state.csrf = payload.csrf; ownerActivationToken = ''; form.reset(); await loadBootstrap(); showMessage('Owner password secured and temporary sessions revoked.'); }
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });
@@ -1496,30 +1501,148 @@
     finally { Array.from(fields).forEach(field => { field.disabled = false; }); setBusy(button, false); }
   });
 
+  function resetBusinessGraph(closePanel = false) {
+    const ticket = state.graphTicket;
+    state.graphTicket = null;
+    state.graphInspectionGeneration++;
+    ticket?.controller.abort();
+    $('#business-graph-result').replaceChildren();
+    const button = $('#load-business-graph');
+    button.disabled = false; button.textContent = 'Inspect reviewed results and links';
+    button.removeAttribute('data-original-text');
+    if (closePanel) $('.business-graph-inspector').open = false;
+  }
+
+  function graphInspectionCurrent(ticket) {
+    clearClosedGraphPanel(graphPanelObserver.takeRecords());
+    return state.graphTicket === ticket && !ticket.controller.signal.aborted &&
+      state.session === ticket.session && state.csrf === ticket.csrf &&
+      state.session?.csrf === ticket.sessionCsrf && state.session?.user?.id === ticket.userId &&
+      state.session?.workspace?.id === ticket.sessionWorkspaceId && state.data?.workspace?.id === ticket.workspaceId &&
+      state.graphGeneration === ticket.generation && state.graphInspectionGeneration === ticket.inspectionGeneration &&
+      state.view === 'overview' && ticket.panel.open && !$('#app-shell').classList.contains('hidden');
+  }
+
+  function renderBusinessGraph(graph) {
+    const summary = graph.summary || {}, coverage = graph.coverage || {};
+    const rows = [
+      ['Recorded entities inspected', countLabel(summary.nodes)],
+      ['Evidence-backed links', countLabel(summary.edges)],
+      ['Missing or ambiguous mappings', countLabel(summary.unknownMappings)],
+      ['Relationship display coverage', coverage.complete === true ? 'Complete within this display' : 'Incomplete within this display'],
+      ...Object.entries(summary.nodesByType || {}).map(([kind,count]) => [statusLabel(kind), countLabel(count)]),
+      ...Object.entries(summary.unknownByReason || {}).slice(0,12).map(([reason,count]) => [statusLabel(reason), countLabel(count)])
+    ];
+    const row = (label, value) => '<div><span>' + escapeHtml(label) + '</span><b>' + escapeHtml(value) + '</b></div>';
+    const reviewed = graph.reviewedOutcomes, counts = reviewed?.counts || {}, completeness = reviewed?.coverage || {};
+    const available = reviewed?.status === 'available' || reviewed?.status === 'incomplete';
+    const records = available && Array.isArray(reviewed.records) ? reviewed.records : [];
+    const groups = available && Array.isArray(reviewed.groups) ? reviewed.groups : [];
+    const currentCount = key => available ? countLabel(counts[key]) : 'Unknown';
+    const outcomeRows = [
+      ['Current reviewed results', available ? (reviewed.status === 'available' ? 'Snapshot available' : 'Incomplete snapshot') : 'Unavailable'],
+      ['Current reviewed results loaded', currentCount('currentHeadsRead')],
+      ['Published results loaded', currentCount('publishedHeads')],
+      ['Withdrawn results loaded', currentCount('withdrawnHeads')],
+      ['Reviewed results shown', countLabel(counts.projectedRecords)],
+      ['Recorded experiment links found', countLabel(counts.resolvedExperimentLinks)],
+      ['Unresolved experiment links', countLabel(counts.unresolvedExperimentLinks)],
+      ['Measurements in descriptive groups', currentCount('qualifiedMeasurements')],
+      ['Reviewed-result read coverage', available && completeness.publicationHeadsComplete === true ? 'Complete current-result read' : 'Incomplete or unavailable'],
+      ['Available relationship records', completeness.retainedGraphComplete === true ? 'Complete within retained records' : 'Incomplete or unavailable'],
+      ['Shown results, links and groups', available && completeness.projectionComplete === true ? 'Complete within this display' : 'Incomplete or unavailable'],
+      ['Reviewed results omitted', countLabel(reviewed?.omitted?.records)],
+      ['Experiment links omitted', countLabel(reviewed?.omitted?.relationships)],
+      ['Measurement groups omitted', countLabel(reviewed?.omitted?.groups)],
+      ['Unresolved link details omitted', countLabel(reviewed?.omitted?.mappings)],
+      ['Visible measurement groups', countLabel(groups.length)]
+    ];
+    const snapshots = reviewed?.snapshots || {};
+    const snapshotRows = [
+      ['Workspace revision reference', snapshots.workspace?.revisionRef || 'Unavailable'],
+      ['Workspace read completed', snapshots.workspace?.readCompletedAt || 'Unavailable'],
+      ['Outcome snapshot reference', snapshots.outcomes?.id || 'Unavailable'],
+      ['Outcome read completed', snapshots.outcomes?.readCompletedAt || 'Unavailable']
+    ];
+    const linkReasons = {
+      missing_reference: 'No experiment reference was recorded',
+      ambiguous_reference: 'More than one experiment matches the reference',
+      target_index_incomplete: 'Available experiment records are incomplete; a unique link cannot be confirmed',
+      unresolved_reference: 'Experiment absent from retained records; deletion is not established',
+      archived_reference: 'The referenced experiment is archived',
+      target_outside_projection: 'The known experiment was omitted by display limits',
+      edge_limit: 'The link was omitted by display limits'
+    };
+    const methodLabels = { reconciled_manual: 'Reconciled records', before_after: 'Before and after', holdout: 'Holdout comparison' };
+    const amountLabels = { measured_sum: 'Measured sum for this currency and window', standalone_observations: 'Separate observations; no combined amount', incomplete_publication_read: 'Results incomplete; amount unavailable' };
+    const labelFrom = (labels, value, fallback) => typeof value === 'string' && Object.hasOwn(labels, value) ? labels[value] : fallback;
+    const recordHtml = records.map((record, index) => {
+      const relation = record.relationship || {};
+      return '<details class="evidence"><summary>Reviewed result ' + (index + 1) + ' · ' +
+        (record.status === 'published' ? 'Published' : record.status === 'withdrawn' ? 'Withdrawn' : 'Unknown status') + '</summary><section class="status-list">' +
+        row('Immutable version reference', record.versionRef || 'Unavailable') +
+        row('Measurement evidence', record.measurementComplete === true ? 'Complete owner-attested measurement' : 'Incomplete or withdrawn measurement') +
+        row('Descriptive group inclusion', record.qualifiedGroupIncluded === true ? 'Included in a descriptive measurement group' : 'Excluded or withheld from groups') +
+        row('Recorded experiment link', relation.status === 'resolved' ? 'Linked to a retained experiment' : 'Unresolved') +
+        (relation.status === 'resolved' ? '' : row('Unresolved reason', labelFrom(linkReasons, relation.reason, 'The experiment link could not be established'))) + '</section></details>';
+    }).join('');
+    const groupHtml = groups.map((group, index) => '<details class="evidence" open><summary>Scoped measurement group ' + (index + 1) + '</summary><section class="status-list">' +
+      row('Metric', group.metric === 'incrementalContribution' ? 'Incremental contribution' : 'Unknown') + row('Currency', group.currency || 'Unknown') +
+      row('Observation window starts', group.window?.startsAt || 'Unknown') + row('Observation window ends (exclusive)', group.window?.endsAt || 'Unknown') +
+      row('Method', labelFrom(methodLabels, group.method, 'Unknown')) + row('Definition', group.definitionVersion || 'Unknown') +
+      row('Measurements in this group', countLabel(group.measuredCount)) +
+      row('Exact scoped amount', completeness.publicationHeadsComplete === true && group.amountStatus === 'measured_sum' ? recordedDecimal(group.amount) : 'Withheld') +
+      row('Amount status', labelFrom(amountLabels, group.amountStatus, 'Amount unavailable')) +
+      row('Known zero / negative / positive observations', countLabel(group.knownZeroCount) + ' / ' + countLabel(group.negativeCount) + ' / ' + countLabel(group.positiveCount)) +
+      '</section></details>').join('');
+    return rows.map(([label,value]) => row(label,value)).join('') +
+      '<p class="muted tiny">Read-only links to existing records. A shared SKU is not proof of the same product, and a campaign link is not proof of revenue attribution.</p>' +
+      outcomeRows.map(([label,value]) => row(label,value)).join('') +
+      (!available ? '<p class="missing-inputs">Proof of current reviewed results is unavailable. This does not establish zero outcomes.</p>' + row('Outcome read reason', statusLabel(reviewed?.unavailableReason || 'publication_snapshot_unavailable')) : '') +
+      '<p class="muted tiny">Current reviewed results only; corrections select the current version. Withdrawn results contribute no measured totals. A resolved experiment relationship does not imply inclusion in a descriptive measurement group.</p>' +
+      recordHtml + groupHtml +
+      (!groups.length ? '<p class="muted tiny">No measurement groups displayed. An empty list or zero shown reviewed results does not establish zero tenant outcomes.</p>' : '') +
+      '<p class="muted tiny">Amounts describe only each exact currency and observation window. No overall amount, ROI, forecast, learning prior, causal attribution or execution authority is established. Full lifetime coverage is not claimed.</p>' +
+      '<details class="evidence"><summary>Independent snapshot details</summary><section class="status-list">' + snapshotRows.map(([label,value]) => row(label,value)).join('') + '</section>' +
+      '<p class="muted tiny">Workspace and outcome reads are independent, not atomic or synchronized. Read times are not commit times or freshness guarantees. Publications can change after either read; select Inspect reviewed results and links for another snapshot.</p></details>' +
+      '<button class="text-button" type="button" data-view-link="revenue-engine">Open Business results in Revenue Engine ↗</button>';
+  }
+
+  const graphPanel = $('.business-graph-inspector');
+  function clearClosedGraphPanel(changes) {
+    // The native toggle event can coalesce a close and reopen in one turn.
+    // Observe the actual open-attribute transitions so an old ticket cannot revive.
+    if (changes.some((change, index) => change.oldValue !== null &&
+      (index + 1 < changes.length ? changes[index + 1].oldValue : graphPanel.getAttribute('open')) === null)) resetBusinessGraph();
+  }
+  const graphPanelObserver = new MutationObserver(clearClosedGraphPanel);
+  graphPanelObserver.observe(graphPanel, { attributes: true, attributeFilter: ['open'], attributeOldValue: true });
+  graphPanel.querySelector('summary').addEventListener('click', () => { if (graphPanel.open) resetBusinessGraph(); });
+  graphPanel.addEventListener('toggle', () => { if (!graphPanel.open) resetBusinessGraph(); });
+  $('#open-reviewed-results').addEventListener('click', () => {
+    graphPanel.open = true;
+    $('#load-business-graph').focus();
+  });
   $('#load-business-graph').addEventListener('click', async event => {
+    clearClosedGraphPanel(graphPanelObserver.takeRecords());
     const button = event.currentTarget;
-    if (button.disabled || !state.data?.workspace?.id) return;
-    const workspaceId = state.data.workspace.id, generation = state.graphGeneration, csrf = state.csrf;
+    if (state.graphTicket || button.disabled || !state.session || !state.data?.workspace?.id || state.view !== 'overview' || !graphPanel.open) return;
+    const ticket = { controller: new AbortController(), session: state.session, csrf: state.csrf, sessionCsrf: state.session.csrf,
+      userId: state.session.user?.id, sessionWorkspaceId: state.session.workspace?.id, workspaceId: state.data.workspace.id,
+      generation: state.graphGeneration, inspectionGeneration: ++state.graphInspectionGeneration, panel: graphPanel };
+    state.graphTicket = ticket;
     const target = $('#business-graph-result');
     setBusy(button, true, 'Inspecting…');
-    target.textContent = 'Reading recorded relationships…';
+    target.textContent = 'Reading current reviewed results and retained relationships…';
     try {
-      const graph = await request('/api/business-graph');
-      if (state.data?.workspace?.id !== workspaceId || state.csrf !== csrf || state.graphGeneration !== generation) return;
-      const summary = graph.summary || {}, coverage = graph.coverage || {};
-      const rows = [
-        ['Recorded entities inspected', summary.nodes || 0],
-        ['Evidence-backed links', summary.edges || 0],
-        ['Missing or ambiguous mappings', summary.unknownMappings || 0],
-        ['Coverage', coverage.truncated ? 'Bounded sample; not the whole business' : 'Retained workspace records only'],
-        ...Object.entries(summary.nodesByType || {}).map(([kind,count]) => [statusLabel(kind), count]),
-        ...Object.entries(summary.unknownByReason || {}).slice(0,12).map(([reason,count]) => [statusLabel(reason), count])
-      ];
-      target.innerHTML = rows.map(([label,value]) => '<div><span>' + escapeHtml(label) + '</span><b>' + escapeHtml(value) + '</b></div>').join('') +
-        '<p class="muted tiny">Read-only links to existing records. A shared SKU is not proof of the same product, and a campaign link is not proof of revenue attribution.</p>';
+      const graph = await request('/api/business-graph?outcomes=current', { signal: ticket.controller.signal, isCurrent: () => graphInspectionCurrent(ticket) });
+      if (!graphInspectionCurrent(ticket)) return;
+      target.innerHTML = renderBusinessGraph(graph);
     } catch(error) {
-      if (state.data?.workspace?.id === workspaceId && state.csrf === csrf && state.graphGeneration === generation) target.textContent = 'Could not inspect relationships: ' + error.message;
-    } finally { setBusy(button, false); }
+      if (graphInspectionCurrent(ticket)) target.textContent = 'Could not inspect relationships: ' + error.message + ' Select Inspect reviewed results and links to try again.';
+    } finally {
+      if (graphInspectionCurrent(ticket)) { state.graphTicket = null; setBusy(button, false); }
+    }
   });
 
   $('#fleet-provider-usage-refresh').addEventListener('click', async event => {
@@ -1929,11 +2052,12 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
+    resetBusinessGraph();
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
-    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
+    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });

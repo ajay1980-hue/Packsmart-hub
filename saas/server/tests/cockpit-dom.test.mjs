@@ -82,13 +82,14 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   const graphButton = document.getElementById('load-business-graph');
   const graphDetails = document.querySelector('.business-graph-inspector');
   assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 0, 'bootstrap never polls the graph');
+  document.querySelector('#main-nav [data-view=overview]').click();
   graphDetails.open = true;
   graphButton.click(); graphButton.click();
   await until(() => !graphButton.disabled);
   assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1, 'repeated clicks coalesce through the disabled button');
   assert.match(document.getElementById('business-graph-result').textContent, /Evidence-backed links/);
   assert.equal(document.getElementById('business-graph-result').querySelector('[onerror]'), null);
-  graphDetails.open = false; graphDetails.open = true;
+  graphDetails.open = false; graphDetails.dispatchEvent(new window.Event('toggle')); graphDetails.open = true;
   assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1, 'close/reopen does not add a provider or graph request');
   const graphFetch = window.fetch;
   window.fetch = async (route, options) => route.startsWith('/api/business-graph') ? Response.json({error:'Temporary graph failure'}, {status:503}) : graphFetch(route, options);
@@ -291,6 +292,8 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   let resolveOldGraph;
   const currentFetch = window.fetch;
   window.fetch = (route, options) => route.startsWith('/api/business-graph') ? new Promise(resolve => { resolveOldGraph = resolve; }) : currentFetch(route, options);
+  document.querySelector('#main-nav [data-view=overview]').click();
+  graphDetails.open = true;
   document.getElementById('load-business-graph').click();
   await until(() => Boolean(resolveOldGraph));
   document.getElementById('logout').click();
@@ -318,4 +321,222 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   assert.equal(document.getElementById('commander-result').classList.contains('hidden'), true);
   document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
   assert.equal(search.open, false, 'a signed-out user cannot open workspace navigation');
+});
+
+test('reviewed-result graph inspection has an explicit, session-scoped request lifecycle', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-graph-dom-'));
+  const secret = 'graph-dom-fixture-session-secret-more-than-32-characters';
+  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
+  const stored = seedWorkspaceState({}, { workspaceId: 'graph-dom', email: 'graph@example.test', passwordHash: 'fixture-only' });
+  await server.packsmart.store.save(stored.workspace.id, stored);
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const token = createSessionToken({ userId: stored.users[0].id, workspaceId: stored.workspace.id, email: stored.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
+  const bootstrapResponse = await fetch(base + '/api/bootstrap', { headers: { Cookie: `packsmart_session=${token}` } });
+  assert.equal(bootstrapResponse.status, 200);
+  const bootstrap = await bootstrapResponse.json();
+  const [html, presentation, app] = await Promise.all(['../../index.html', '../../presentation.js', '../../app.js'].map(file => fs.readFile(new URL(file, import.meta.url), 'utf8')));
+  const graph = () => ({ summary: { nodes: 4, edges: 2, unknownMappings: 1, nodesByType: { reviewed_outcome: 3 }, unknownByReason: { target_not_found: 1 } }, coverage: { complete: true },
+    reviewedOutcomes: { status: 'available', unavailableReason: null,
+      snapshots: { workspace: { revisionRef: 'workspace_revision_one', readCompletedAt: '2026-10-07T12:00:00.000Z' }, outcomes: { id: 'outcome_snapshot_two', readCompletedAt: '2026-10-07T12:00:01.000Z' }, independent: true },
+      counts: { currentHeadsRead: 3, publishedHeads: 2, withdrawnHeads: 1, projectedRecords: 3, resolvedExperimentLinks: 2, unresolvedExperimentLinks: 1, qualifiedMeasurements: 1 },
+      coverage: { publicationHeadsComplete: true, retainedGraphComplete: true, projectionComplete: true, completeLifetimeHistoryClaimed: false },
+      omitted: { records: 0, relationships: 0, groups: 0, mappings: 0 },
+      records: [{ nodeId: 'reviewed_one', versionRef: 'version_one', status: 'published', measurementComplete: true, qualifiedGroupIncluded: true, relationship: { status: 'resolved', reason: null, targetNodeId: 'experiment_one' } },
+        { nodeId: 'reviewed_two', versionRef: 'version_two', status: 'published', measurementComplete: true, qualifiedGroupIncluded: false, relationship: { status: 'resolved', reason: null, targetNodeId: 'experiment_two' } },
+        { nodeId: 'reviewed_three', versionRef: 'version_three', status: 'withdrawn', measurementComplete: false, qualifiedGroupIncluded: false, relationship: { status: 'unresolved', reason: 'unresolved_reference' } }],
+      groups: [{ id: 'group_one', metric: 'incrementalContribution', definitionVersion: 'incremental-contribution/v1', method: 'reconciled_manual', currency: 'GBP',
+        window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' }, measuredCount: 1, knownZeroCount: 0, negativeCount: 1, positiveCount: 0, amount: '-123456789012345678.123456', amountStatus: 'measured_sum' }],
+      limits: { byteLimit: 16384 }, safeguards: { externalWrites: false } } });
+  const harness = async () => {
+    const errors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', error => errors.push(error.message));
+    const dom = new JSDOM(html, { url: base, runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole });
+    const window = dom.window, document = window.document, calls = [], pending = [];
+    let control, login = { user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf }, holdBootstrap, holdLogout, holdPassword;
+    window.Headers = Headers; window.AbortController = AbortController; window.scrollTo = () => {};
+    window.RunvaraControl = { init(api) { control = api; }, render() {}, evidence() { return ''; }, history() { return ''; } };
+    window.fetch = (route, options = {}) => {
+      calls.push({ route, options });
+      if (route.startsWith('/api/business-graph')) return new Promise((resolve, reject) => pending.push({ resolve, reject, signal: options.signal, options }));
+      if (route === '/api/bootstrap' && holdBootstrap) return new Promise(resolve => { holdBootstrap.resolve = resolve; });
+      if (route === '/api/auth/logout' && holdLogout) return new Promise(resolve => { holdLogout.resolve = resolve; });
+      if (route === '/api/auth/change-password' && holdPassword) return new Promise(resolve => { holdPassword.resolve = resolve; });
+      return Promise.resolve(Response.json(route === '/api/bootstrap' ? bootstrap : route === '/api/auth/session' || route === '/api/auth/login' ? login : {}));
+    };
+    const until = async condition => {
+      for (let attempt = 0; attempt < 100; attempt++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+      assert.fail('Graph DOM state did not settle: ' + errors.join('; '));
+    };
+    window.eval(presentation); window.eval(app);
+    await until(() => !document.getElementById('app-shell').classList.contains('hidden'));
+    const panel = document.querySelector('.business-graph-inspector'), button = document.getElementById('load-business-graph'), result = document.getElementById('business-graph-result');
+    const settle = () => new Promise(resolve => setTimeout(resolve, 10));
+    const begin = () => { panel.open = true; button.click(); return pending[pending.length - 1]; };
+    const authenticate = payload => {
+      login = payload;
+      const form = document.getElementById('login-form');
+      for (const name of ['email', 'password']) if (!Object.hasOwn(form, name)) Object.defineProperty(form, name, { value: form.elements[name] });
+      form.elements.email.value = 'graph@example.test'; form.elements.password.value = 'fixture-only';
+      form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    };
+    return { window, document, errors, calls, pending, panel, button, result, begin, settle, until, authenticate, control,
+      holdBootstrap() { holdBootstrap = {}; return holdBootstrap; }, holdLogout() { holdLogout = {}; return holdLogout; }, holdPassword() { holdPassword = {}; return holdPassword; },
+      login: () => login, close: () => dom.window.close() };
+  };
+
+  await t.test('open, focus, repeated click, close and reopen only fetch on explicit inspection', async () => {
+    const h = await harness();
+    try {
+      assert.equal(h.pending.length, 0);
+      h.document.getElementById('open-reviewed-results').click();
+      assert.equal(h.panel.open, true); assert.equal(h.document.activeElement, h.button); assert.equal(h.pending.length, 0);
+      const first = h.begin(); h.button.click(); h.button.dispatchEvent(new h.window.Event('click'));
+      assert.equal(h.pending.length, 1); assert.equal(h.calls.filter(call => call.route.startsWith('/api/business-graph'))[0].route, '/api/business-graph?outcomes=current');
+      assert.equal(first.options.method || 'GET', 'GET'); assert.ok(first.signal); assert.equal(typeof first.options.isCurrent, 'function');
+      first.resolve(Response.json(graph())); await h.until(() => !h.button.disabled);
+      assert.match(h.result.textContent, /Published results loaded2/); assert.match(h.result.textContent, /Withdrawn results loaded1/);
+      assert.match(h.result.textContent, /-123456789012345678.123456/); assert.match(h.result.textContent, /GBP/);
+      assert.match(h.result.textContent, /2026-10-01T00:00:00.000Z/); assert.match(h.result.textContent, /2026-10-06T00:00:00.000Z/);
+      assert.match(h.result.textContent, /Excluded or withheld from groups/); assert.match(h.result.textContent, /Experiment absent from retained records; deletion is not established/);
+      assert.match(h.result.textContent, /independent, not atomic or synchronized/); assert.match(h.result.textContent, /not commit times or freshness guarantees/);
+      h.panel.open = false; h.panel.open = true; await h.settle();
+      assert.equal(h.result.textContent, ''); assert.equal(h.pending.length, 1);
+      const second = h.begin(); assert.match(h.result.textContent, /^Reading current/); assert.doesNotMatch(h.result.textContent, /workspace_revision_one/);
+      second.resolve(Response.json({ error: '<img src=x onerror=alert(1)> failed' }, { status: 503 })); await h.until(() => !h.button.disabled);
+      assert.match(h.result.textContent, /Select Inspect reviewed results and links to try again/); assert.equal(h.result.querySelector('[onerror]'), null);
+      await h.settle(); assert.equal(h.pending.length, 2, 'errors do not retry automatically');
+      const third = h.begin(); third.resolve(Response.json(graph())); await h.until(() => !h.button.disabled);
+      assert.match(h.result.textContent, /Snapshot available/); assert.equal(h.pending.length, 3);
+      assert.equal(h.document.getElementById('hg-value').textContent, '—'); assert.equal(h.document.getElementById('hg-hours').textContent, '—');
+      assert.match(h.document.getElementById('hg-learning').textContent, /do not establish qualified learning priors/);
+      assert.equal(h.calls.some(call => call.route.startsWith('/api/business-outcomes')), false);
+      assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
+
+  for (const outcome of ['success', 'error', '401', 'network failure']) await t.test('close and navigation discard abandoned ' + outcome + ' and its finally callback', async () => {
+    const h = await harness();
+    try {
+      const old = h.begin(); h.panel.open = false; h.panel.open = true; await h.settle();
+      const current = h.begin();
+      assert.equal(old.signal.aborted, true); assert.equal(h.pending.length, 2);
+      if (outcome === 'network failure') old.reject(new TypeError('Abandoned network failure'));
+      else old.resolve(outcome === 'success' ? Response.json(graph()) : Response.json({ code: outcome === '401' ? 'AUTH_REQUIRED' : 'FAILED', error: 'Abandoned failure' }, { status: outcome === '401' ? 401 : 503 }));
+      await h.settle(); assert.equal(h.button.disabled, true); assert.match(h.result.textContent, /^Reading current/);
+      assert.equal(h.document.getElementById('app-shell').classList.contains('hidden'), false);
+      const latest = graph(); latest.reviewedOutcomes.snapshots.workspace.revisionRef = 'new_workspace_snapshot';
+      current.resolve(Response.json(latest)); await h.until(() => !h.button.disabled); assert.match(h.result.textContent, /new_workspace_snapshot/);
+      const navigated = h.begin(); h.control.setView('ai-team'); assert.equal(navigated.signal.aborted, true); assert.equal(h.result.textContent, '');
+      h.control.setView('overview'); h.panel.open = true;
+      navigated.resolve(Response.json(graph())); await h.settle();
+      assert.equal(h.result.textContent, ''); assert.equal(h.pending.length, 3, 'returning to Command never revives or fetches a snapshot');
+      assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
+
+  await t.test('bootstrap resets at request start and does not retain snapshot claims', async () => {
+    const h = await harness();
+    try {
+      const old = h.begin(), blocked = h.holdBootstrap(), loading = h.control.reload({ migrate: false });
+      assert.equal(old.signal.aborted, true); assert.equal(h.result.textContent, '');
+      old.resolve(Response.json(graph())); await h.settle(); assert.equal(h.result.textContent, '');
+      const duringReload = h.begin();
+      blocked.resolve(Response.json(bootstrap)); await loading;
+      assert.equal(duringReload.signal.aborted, true); assert.equal(h.button.disabled, false);
+      duringReload.resolve(Response.json(graph())); await h.settle();
+      assert.equal(h.pending.length, 2); assert.equal(h.result.textContent, '');
+    } finally { h.close(); }
+  });
+
+  for (const replacement of ['same identities', 'different workspace', 'password setup']) await t.test('session replacement invalidates graph work: ' + replacement, async () => {
+    const h = await harness();
+    try {
+      const old = h.begin(), payload = structuredClone(h.login());
+      if (replacement === 'different workspace') { payload.workspace.id = 'replacement-workspace'; payload.user.id = 'replacement-user'; payload.csrf = 'replacement-csrf'; }
+      if (replacement === 'password setup') payload.user.passwordChangeRequired = true;
+      h.authenticate(payload);
+      await h.until(() => old.signal.aborted);
+      old.resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 })); await h.settle();
+      assert.equal(h.result.textContent, ''); assert.equal(h.button.disabled, false);
+      assert.equal(h.document.getElementById('login-screen').classList.contains('hidden'), true, 'stale 401 cannot sign out replacement session');
+      assert.equal(h.document.getElementById('password-screen').classList.contains('hidden'), replacement !== 'password setup');
+      assert.equal(h.pending.length, 1);
+    } finally { h.close(); }
+  });
+
+  await t.test('logout clears and aborts immediately, before its network request completes', async () => {
+    const h = await harness();
+    try {
+      const old = h.begin(), logout = h.holdLogout(); h.document.getElementById('logout').click();
+      assert.equal(old.signal.aborted, true); assert.equal(h.result.textContent, ''); assert.equal(h.panel.open, false);
+      old.resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 })); await h.settle(); assert.equal(h.result.textContent, '');
+      logout.resolve(Response.json({ ok: true })); await h.until(() => !h.document.getElementById('login-screen').classList.contains('hidden'));
+      h.authenticate(structuredClone(h.login())); await h.until(() => !h.document.getElementById('app-shell').classList.contains('hidden'));
+      assert.equal(h.result.textContent, ''); assert.equal(h.pending.length, 1);
+    } finally { h.close(); }
+  });
+
+  await t.test('password change invalidates inspection at submission and when the session context changes', async () => {
+    const h = await harness();
+    try {
+      const old = h.begin(), password = h.holdPassword(), form = h.document.getElementById('account-password-form');
+      for (const name of ['currentPassword', 'newPassword']) Object.defineProperty(form, name, { value: form.elements[name] });
+      form.dispatchEvent(new h.window.Event('submit', { bubbles: true, cancelable: true }));
+      assert.equal(old.signal.aborted, true); assert.equal(h.result.textContent, '');
+      const newer = h.begin(); password.resolve(Response.json({ csrf: 'changed-password-session' }));
+      await h.until(() => newer.signal.aborted); assert.equal(h.button.disabled, false);
+      old.resolve(Response.json(graph())); newer.resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 }));
+      await h.settle(); assert.equal(h.result.textContent, '');
+      assert.equal(h.document.getElementById('app-shell').classList.contains('hidden'), false);
+    } finally { h.close(); }
+  });
+
+  await t.test('abandoned callbacks cannot replace a newer explicit-retry message', async () => {
+    const h = await harness();
+    try {
+      const old = h.begin(); h.control.setView('ai-team'); h.control.setView('overview');
+      const current = h.begin(); current.resolve(Response.json({ error: 'Latest inspection failed' }, { status: 503 }));
+      await h.until(() => !h.button.disabled);
+      old.resolve(Response.json(graph())); await h.settle();
+      assert.match(h.result.textContent, /Latest inspection failed/); assert.match(h.result.textContent, /try again/);
+      assert.equal(h.button.disabled, false);
+    } finally { h.close(); }
+  });
+
+  await t.test('active-session 401 still signs out normally', async () => {
+    const h = await harness();
+    try {
+      h.begin().resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 }));
+      await h.until(() => !h.document.getElementById('login-screen').classList.contains('hidden'));
+      assert.equal(h.result.textContent, ''); assert.equal(h.button.disabled, false);
+    } finally { h.close(); }
+  });
+
+  await t.test('scoped output escapes payload fields and keeps three completeness claims independent', async () => {
+    const h = await harness();
+    try {
+      const payload = graph(), reviewed = payload.reviewedOutcomes, injection = '<img src=x onerror=alert(1)>';
+      reviewed.status = 'incomplete'; reviewed.coverage.retainedGraphComplete = false; reviewed.coverage.projectionComplete = false;
+      reviewed.omitted = { records: 2, relationships: 3, groups: 4, mappings: 5 };
+      reviewed.snapshots.workspace.revisionRef = injection; reviewed.records[0].versionRef = injection;
+      reviewed.records[2].relationship.reason = injection; reviewed.groups[0].currency = injection; reviewed.groups[0].method = injection;
+      reviewed.groups[0].definitionVersion = injection; reviewed.groups[0].window.startsAt = injection;
+      h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+      assert.equal(h.result.querySelector('[onerror]'), null); assert.equal(h.result.querySelector('img'), null);
+      assert.match(h.result.textContent, /Complete current-result read/); assert.match(h.result.textContent, /Available relationship recordsIncomplete or unavailable/);
+      assert.match(h.result.textContent, /Shown results, links and groupsIncomplete or unavailable/);
+      assert.match(h.result.textContent, /Reviewed results omitted2/); assert.match(h.result.textContent, /Experiment links omitted3/); assert.match(h.result.textContent, /Measurement groups omitted4/); assert.match(h.result.textContent, /Unresolved link details omitted5/);
+      assert.match(h.result.textContent, /-123456789012345678.123456/);
+      reviewed.coverage.publicationHeadsComplete = false;
+      h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+      assert.match(h.result.textContent, /Exact scoped amountWithheld/); assert.doesNotMatch(h.result.textContent, /-123456789012345678.123456/);
+      reviewed.status = 'unavailable'; reviewed.unavailableReason = 'OUTCOME_STORAGE_UNAVAILABLE'; reviewed.counts.currentHeadsRead = null;
+      h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+      assert.match(h.result.textContent, /Current reviewed results loadedUnknown/); assert.match(h.result.textContent, /does not establish zero outcomes/);
+      assert.match(h.result.textContent, /An empty list or zero shown reviewed results does not establish zero tenant outcomes/);
+      assert.equal(h.result.querySelectorAll('img').length, 0); assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
 });

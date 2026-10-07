@@ -326,6 +326,54 @@ export function validateBusinessOutcomePublication(value, options) {
   return committedPublication(value, workspace, logicalId, now);
 }
 
+/** Compact descriptive references, never a serializable publication capability.
+ * Resolve through the private adapter boundary and require the supplied current
+ * version even for withdrawals. DTOs and copied summaries cannot establish proof.
+ */
+export function projectCurrentOutcomeReferences(input, options) {
+  exact(options, ['workspaceId', 'now', 'publicationBoundary'], 'current-reference options');
+  const workspace = workspaceId(options.workspaceId), now = nowValue(options.now), boundary = boundaries.get(options.publicationBoundary);
+  if (!boundary) throw fail('Current references require a trusted publication boundary', 'PUBLICATION_PROOF_REQUIRED', 403);
+  if (boundary.workspace !== workspace) throw fail('Publication scope mismatch', 'WORKSPACE_MISMATCH', 403);
+  const supplied = recordedArray(input, 'Outcome versions', BUSINESS_OUTCOME_LIMITS.versions);
+  const versions = new Map(), logicalIds = new Set(), disputed = new Set(), records = [], exclusions = [];
+  let complete = boundary.complete;
+  for (const raw of supplied) {
+    try {
+      const row = validate(raw, workspace, now);
+      versions.set(row.versionId, row); logicalIds.add(row.outcomeId);
+    } catch (error) {
+      if (error.code === 'WORKSPACE_MISMATCH') throw error;
+      complete = false;
+      const identity = plain(raw) ? Object.getOwnPropertyDescriptor(raw, 'outcomeId') : null;
+      if (identity && own(identity, 'value') && typeof identity.value === 'string' && OUTCOME_ID.test(identity.value)) disputed.add(identity.value);
+      exclusions.push({ code: 'INVALID_OUTCOME_VERSION' });
+    }
+  }
+  for (const logicalId of [...logicalIds].sort()) {
+    try {
+      const raw = boundary.resolve(Object.freeze({ workspaceId: workspace, outcomeId: logicalId, snapshotId: boundary.snapshotId }));
+      if (raw == null) { complete = false; exclusions.push({ code: 'UNPUBLISHED_OUTCOME' }); continue; }
+      const { head, version } = committedPublication(raw, workspace, logicalId, now);
+      const suppliedVersion = versions.get(head.versionId);
+      if (disputed.has(logicalId) || !suppliedVersion || suppliedVersion.outcomeId !== logicalId || suppliedVersion.digest !== head.digest || suppliedVersion.revision !== head.revision || suppliedVersion.status !== version.status) {
+        complete = false; exclusions.push({ code: 'CURRENT_VERSION_UNPROVED' }); continue;
+      }
+      const assessment = assessBusinessOutcomeCandidate(version, { workspaceId: workspace, now });
+      records.push({ outcomeId: logicalId, versionId: head.versionId, digest: head.digest, revision: head.revision,
+        status: head.status, source: { ...version.source }, measurementComplete: assessment.measurementComplete });
+    } catch (error) {
+      if (error.code === 'WORKSPACE_MISMATCH') throw error;
+      complete = false; exclusions.push({ code: 'PUBLICATION_UNAVAILABLE' });
+    }
+  }
+  complete = complete && logicalIds.size === boundary.expectedOutcomeCount && records.length === boundary.expectedOutcomeCount;
+  return { records, publicationSnapshotId: boundary.snapshotId,
+    counts: { currentHeadsRead: records.length, publishedHeads: records.filter(row => row.status === 'published').length,
+      withdrawnHeads: records.filter(row => row.status === 'withdrawn').length },
+    coverage: { complete, expectedOutcomeCount: boundary.expectedOutcomeCount, completeLifetimeHistoryClaimed: false }, exclusions };
+}
+
 function comparableKey(row) {
   return canonical({ metric: row.metric, definition: row.method.definitionVersion, method: row.method.kind,
     currency: row.currency, startsAt: row.window.startsAt, endsAt: row.window.endsAt });

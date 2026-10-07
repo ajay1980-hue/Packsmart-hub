@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { unitEconomics } from './profit.mjs';
+import { projectCurrentOutcomeReferences } from './business-outcomes.mjs';
+import { deriveQualifiedOutcomeGroups } from './impact-engine.mjs';
 
 // This is an on-demand projection of the existing tenant snapshot. It does not
 // persist a second graph, migrate records, call providers, or infer identities
@@ -7,6 +9,7 @@ import { unitEconomics } from './profit.mjs';
 const DEFAULTS = Object.freeze({ recordLimit: 100, nestedLimit: 25, scanLimit: 4000, nodeLimit: 600, edgeLimit: 1200, unknownLimit: 100 });
 const MAXIMUMS = Object.freeze({ recordLimit: 500, nestedLimit: 100, scanLimit: 10000, nodeLimit: 2000, edgeLimit: 4000, unknownLimit: 500 });
 const SUMMARY_MAXIMUMS = Object.freeze({ recordLimit: 8, nestedLimit: 5, scanLimit: 250, nodeLimit: 150, edgeLimit: 250, unknownLimit: 20 });
+export const REVIEWED_OUTCOME_GRAPH_BYTES = Object.freeze({ summary: 16 * 1024, detail: 128 * 1024 });
 const CHANNELS = new Set(['shopify', 'ebay', 'meta', 'tiktok_shop', 'pinterest', 'google_youtube', 'whatsapp_business', 'amazon']);
 const STATUSES = new Set(['active', 'inactive', 'archived', 'draft', 'open', 'pending', 'approved', 'rejected', 'dismissed', 'resolved', 'requires_approval', 'requires approval', 'planned', 'in progress', 'running', 'completed', 'measured', 'closed', 'failed', 'blocked', 'prepared', 'awaiting_approval', 'scheduled', 'published', 'unpublished', 'paid', 'refunded', 'partially_refunded', 'unpaid', 'fulfilled', 'unfulfilled', 'succeeded', 'executed', 'not_connected']);
 const METRICS = ['incrementalRevenue', 'incrementalContribution', 'contributionProtected', 'costAvoided', 'minutesSaved'];
@@ -44,9 +47,13 @@ function project(state, options, summaryOnly) {
     for (const value of [record.workspaceId, record.tenantId, record.workspace_id, record.tenant_id, record.workspace?.id]) {
       if (value !== undefined && value !== null && value !== workspaceId) throw scopeError();
     }
+    if (options.inspectCurrentOutcomes === true) for (const key of ['workspace', 'tenant']) {
+      if (record[key] !== undefined && record[key] !== null && (object(record[key]) ? record[key].id : record[key]) !== workspaceId) throw scopeError();
+    }
   };
   assertScope(state);
   assertScope(options);
+  if (options.inspectCurrentOutcomes === true) assertScope(state.workspace);
   for (const value of [state.marketing, state.revenueEngine, state.ebay, state.channelData, state.channelData?.shopify]) assertScope(value);
 
   const limits = limitsFor(options, summaryOnly);
@@ -124,11 +131,12 @@ function project(state, options, summaryOnly) {
     if (!from) return;
     if (!to) { unknown(from, relation, 'target_outside_projection', ref); return; }
     const id = `edge_${digest([workspaceId, from.id, to.id, relation, sourceIdentity(ref)])}`;
-    if (edgeIds.has(id)) return;
+    if (edgeIds.has(id)) return true;
     edgeIds.add(id);
     if (edges.length >= limits.edgeLimit) { droppedEdges++; return; }
     edges.push({ id, from: from.id, to: to.id, relation, provenance: { basis, sourceRef: ref } });
     byRelation[relation] = (byRelation[relation] || 0) + 1;
+    return true;
   }
   const top = {
     products: readArray(state.products, 'products', '/products'),
@@ -225,14 +233,18 @@ function project(state, options, summaryOnly) {
     const collections = { product: ['products'], variant: ['products', 'products.variants'], supplier: ['suppliers'], order: ['orders'], campaign: ['marketing.campaigns'], opportunity: ['opportunities'], approval: ['approvals'], experiment: ['revenueEngine.experiments'], work: ['workRecords'] }[type] || [];
     return collections.every(name => !metadata(name).truncated && !metadata(name).invalid);
   };
-  function reference(node, type, rawId, ref, relation, provider = null, required = false) {
+  function reference(node, type, rawId, ref, relation, provider = null, required = false, relationship = null) {
+    const unresolved = reason => { unknown(node, relation, reason, ref); if (relationship) Object.assign(relationship, { status: 'unresolved', reason }); };
     const id = identifier(rawId);
-    if (!id) { if (required) unknown(node, relation, 'missing_reference', ref); return; }
+    if (!id) { if (required) unresolved('missing_reference'); return; }
     const matches = (indices.get(type)?.get(id) || []).filter(item => !provider || item.provider === provider);
-    if (matches.length > 1) { unknown(node, relation, 'ambiguous_reference', ref); return; }
-    if (!completeIndex(type)) { unknown(node, relation, 'target_index_incomplete', ref); return; }
-    if (!matches.length) { unknown(node, relation, 'unresolved_reference', ref); return; }
-    edge(node, matches[0].node, relation, ref);
+    if (matches.length > 1) { unresolved('ambiguous_reference'); return; }
+    if (!completeIndex(type)) { unresolved('target_index_incomplete'); return; }
+    if (!matches.length) { unresolved('unresolved_reference'); return; }
+    if (relationship && (status(matches[0].row.status) === 'archived' || matches[0].row.archived === true || matches[0].row.archivedAt)) { unresolved('archived_reference'); return; }
+    const added = edge(node, matches[0].node, relation, ref);
+    if (relationship) Object.assign(relationship, added ? { status: 'resolved', reason: null, targetNodeId: matches[0].node.id }
+      : { status: 'unresolved', reason: matches[0].node ? 'edge_limit' : 'target_outside_projection' });
     return matches[0];
   }
   for (const item of listings) {
@@ -352,6 +364,72 @@ function project(state, options, summaryOnly) {
     const parent = [...sources.values()].find(candidate => meta.collection.startsWith(`${candidate.collection}.`) && candidate.truncated);
     if (parent) { meta.totalKnown = false; meta.truncated = true; }
   }
+  const retainedGraphComplete = [...sources.values()].every(item => !item.truncated && !item.invalid)
+    && omittedNodes.size === 0 && droppedEdges === 0 && unknownTotal === unknownMappings.length;
+  const existingNodeCount = nodes.length, existingEdgeCount = edges.length, existingUnknownCount = unknownMappings.length;
+  const existingUnknownTotal = unknownTotal, existingUnknownReasons = { ...unknownByReason };
+  let reviewedOutcomes = null, currentProjection = null;
+  if (options.inspectCurrentOutcomes === true) {
+    const now = options.now || new Date().toISOString();
+    let qualified = null;
+    let unavailableReason = ['OUTCOME_STORAGE_UNAVAILABLE', 'OUTCOME_READ_UNAVAILABLE', 'OUTCOME_RESPONSE_TOO_LARGE', 'OUTCOME_PUBLICATION_INVALID', 'OUTCOME_COVERAGE_UNAVAILABLE'].includes(options.outcomeUnavailableReason)
+      ? options.outcomeUnavailableReason : 'COMMITTED_OUTCOME_PROOF_INVALID_OR_UNAVAILABLE';
+    try {
+      currentProjection = projectCurrentOutcomeReferences(options.outcomeSnapshot?.versions, { workspaceId, now,
+        publicationBoundary: options.outcomeSnapshot?.publicationBoundary });
+      // Qualify the entire selected snapshot before any graph/output truncation.
+      // Otherwise removing a conflicting observation could revive an unsafe sum.
+      qualified = deriveQualifiedOutcomeGroups(workspaceId, { outcomeSnapshot: options.outcomeSnapshot, now });
+    } catch (error) { if (error.code === 'WORKSPACE_MISMATCH') throw error; }
+    const complete = Boolean(currentProjection?.coverage.complete && qualified?.outcomeCoverage.complete);
+    const qualifiedIds = new Set((complete ? qualified.qualifiedOutcomeGroups : []).flatMap(group => group.outcomeIds));
+    const time = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) ? value : null;
+    const revision = identifier(options.workspaceSnapshot?.revision);
+    reviewedOutcomes = {
+      status: currentProjection ? complete ? 'available' : 'incomplete' : 'unavailable',
+      unavailableReason: currentProjection ? complete ? null : 'COMMITTED_OUTCOME_SNAPSHOT_INCOMPLETE' : unavailableReason,
+      snapshots: { workspace: { revisionRef: revision ? `workspace_revision_${digest([workspaceId, revision])}` : null,
+        readCompletedAt: time(options.workspaceSnapshot?.readCompletedAt) },
+      outcomes: { id: currentProjection ? `outcome_snapshot_${digest([workspaceId, currentProjection.publicationSnapshotId])}` : null,
+        readCompletedAt: currentProjection ? time(options.outcomeReadCompletedAt) : null }, independent: true },
+      counts: { currentHeadsRead: currentProjection?.counts.currentHeadsRead ?? null,
+        publishedHeads: currentProjection?.counts.publishedHeads ?? null, withdrawnHeads: currentProjection?.counts.withdrawnHeads ?? null,
+        projectedRecords: 0, resolvedExperimentLinks: 0, unresolvedExperimentLinks: 0, qualifiedMeasurements: complete ? qualified.qualifiedOutcomeCount : null },
+      coverage: { publicationHeadsComplete: complete, retainedGraphComplete, projectionComplete: false, completeLifetimeHistoryClaimed: false },
+      omitted: { records: 0, relationships: 0, groups: 0, mappings: 0 }, records: [],
+      groups: (complete ? qualified.qualifiedOutcomeGroups : []).map(group => ({
+        id: `reviewed_group_${digest([workspaceId, group.id])}`, metric: group.metric, definitionVersion: group.definitionVersion,
+        method: group.method, currency: group.currency, window: { ...group.window }, measuredCount: group.measuredCount,
+        knownZeroCount: group.knownZeroCount, negativeCount: group.negativeCount, positiveCount: group.positiveCount,
+        amount: group.amount, amountStatus: group.amountStatus })),
+      limits: { byteLimit: REVIEWED_OUTCOME_GRAPH_BYTES[summaryOnly ? 'summary' : 'detail'] },
+      safeguards: { causalAttribution: false, forecastingAuthorized: false, learningAuthorized: false, executionAuthorized: false,
+        currentDraftCompared: false, atomicSnapshot: false, continuouslyCurrent: false, lifetimeHistoryClaimed: false }
+    };
+    if (currentProjection) {
+      const rows = currentProjection.records, meta = metadata('reviewedOutcomes.current');
+      meta.available = rows.length;
+      const count = Math.min(rows.length, limits.recordLimit, Math.max(0, limits.scanLimit - scanned));
+      meta.scanned = count; scanned += count; meta.truncated = count < rows.length;
+      for (let index = 0; index < count; index++) {
+        const row = rows[index];
+        const versionRef = `reviewed_version_${digest([workspaceId, row.versionId, row.digest])}`;
+        const ref = { workspaceId, collection: 'runvara_business_outcome_heads', pointer: `/current/${index}`,
+          identityHash: digest([workspaceId, 'reviewed-outcome', row.outcomeId]), snapshotRef: reviewedOutcomes.snapshots.outcomes.id };
+        const qualifiedGroupIncluded = qualifiedIds.has(row.outcomeId);
+        const node = addNode('reviewed_outcome', row.outcomeId, ref, { status: row.status, versionRef,
+          measurementComplete: row.measurementComplete, qualifiedGroupIncluded,
+          qualification: row.status === 'withdrawn' ? 'withdrawn' : row.measurementComplete ? 'owner_attested_measurement' : 'unqualified_measurement' });
+        if (!node) continue;
+        const relationship = { status: 'unresolved', reason: null };
+        reference(node, 'experiment', row.source.experimentId,
+          { ...ref, identityHash: digest([workspaceId, row.outcomeId, row.versionId, row.digest]), field: 'source.experimentId' },
+          'measurement_recorded_for_experiment', null, true, relationship);
+        reviewedOutcomes.records.push({ nodeId: node.id, versionRef, status: row.status, measurementComplete: row.measurementComplete,
+          qualifiedGroupIncluded, relationship });
+      }
+    }
+  }
   const sourceCoverage = [...sources.values()];
   const truncated = sourceCoverage.some(item => item.truncated) || omittedNodes.size > 0 || droppedEdges > 0 || unknownTotal > unknownMappings.length;
   const result = {
@@ -367,6 +445,59 @@ function project(state, options, summaryOnly) {
     limits,
     safeguards: { tenantScope: workspaceId, readOnly: true, externalWrites: false, providerRequests: false, rawSourceRecordsIncluded: false, rawCustomerIdentityIncluded: false, rawRecordIdsIncluded: false, credentialsIncluded: false, promptBodiesIncluded: false, inferredProductEquivalence: false, inferredCampaignAttribution: false, unknownProfitConvertedToZero: false }
   };
+  if (reviewedOutcomes) {
+    result.reviewedOutcomes = reviewedOutcomes;
+    result.persistence.sourceOfTruth = 'existing-workspace-state-and-separate-committed-outcome-heads';
+    result.persistence.note = 'References are rebuilt from independent retained workspace and bounded current-outcome snapshots on explicit inspection. This is neither an atomic snapshot nor complete lifetime history.';
+    result.outcomeCoverage = { publicationProofAvailable: Boolean(currentProjection), complete: reviewedOutcomes.coverage.publicationHeadsComplete,
+      unavailableReason: reviewedOutcomes.unavailableReason, completeLifetimeHistoryClaimed: false,
+      note: 'Current heads are explicitly inspected separately from retained workspace state. Legacy source records remain unqualified; zero projected records does not establish zero tenant outcomes.' };
+    const updateCurrentCoverage = () => {
+      const records = reviewedOutcomes.records;
+      reviewedOutcomes.counts.projectedRecords = records.length;
+      reviewedOutcomes.counts.resolvedExperimentLinks = records.filter(row => row.relationship.status === 'resolved').length;
+      reviewedOutcomes.counts.unresolvedExperimentLinks = records.length - reviewedOutcomes.counts.resolvedExperimentLinks;
+      reviewedOutcomes.omitted.records = (currentProjection?.records.length || 0) - records.length;
+      reviewedOutcomes.omitted.relationships = reviewedOutcomes.omitted.records + records.filter(row => row.relationship.reason === 'edge_limit').length;
+      reviewedOutcomes.omitted.mappings = Math.max(0, unknownTotal - existingUnknownTotal - (unknownMappings.length - existingUnknownCount));
+      reviewedOutcomes.coverage.projectionComplete = Boolean(currentProjection) && Object.values(reviewedOutcomes.omitted).every(value => value === 0);
+      result.summary.nodes = nodes.length; result.summary.edges = edges.length;
+      result.summary.unknownMappings = unknownTotal;
+      result.summary.currentHeadRecordsRead = reviewedOutcomes.counts.currentHeadsRead;
+      result.summary.projectedReviewedOutcomeRecords = records.length;
+      result.coverage.droppedNodes = omittedNodes.size;
+      result.coverage.omittedUnknownMappings = unknownTotal - unknownMappings.length;
+      if (reviewedOutcomes.omitted.records || reviewedOutcomes.omitted.groups) { result.coverage.truncated = true; result.coverage.complete = false; }
+      const meta = sources.get('reviewedOutcomes.current');
+      if (meta && reviewedOutcomes.omitted.records) meta.truncated = true;
+    };
+    // Conservatively account for ALL graph metadata plus the complete added
+    // envelope and added detail rows, including repeated refs and omission counts.
+    // This is an extension bound, not a whole legacy graph response byte cap.
+    const extensionBytes = () => Buffer.byteLength(JSON.stringify({ ...result,
+      ...(summaryOnly ? {} : { nodes: nodes.slice(existingNodeCount), edges: edges.slice(existingEdgeCount), unknownMappings: unknownMappings.slice(existingUnknownCount) }) }), 'utf8');
+    updateCurrentCoverage();
+    while (extensionBytes() > reviewedOutcomes.limits.byteLimit && (reviewedOutcomes.groups.length || reviewedOutcomes.records.length)) {
+      if (reviewedOutcomes.groups.length) { reviewedOutcomes.groups.pop(); reviewedOutcomes.omitted.groups++; }
+      else {
+        const removed = reviewedOutcomes.records.pop();
+        nodes.splice(nodes.findIndex(node => node.id === removed.nodeId), 1); omittedNodes.add(removed.nodeId);
+        byType.reviewed_outcome = reviewedOutcomes.records.length;
+        for (let index = edges.length - 1; index >= existingEdgeCount; index--) if (edges[index].from === removed.nodeId) {
+          byRelation[edges[index].relation]--; edges.splice(index, 1);
+        }
+        for (let index = unknownMappings.length - 1; index >= existingUnknownCount; index--) if (unknownMappings[index].subjectId === removed.nodeId) unknownMappings.splice(index, 1);
+        for (const key of Object.keys(unknownByReason)) delete unknownByReason[key];
+        Object.assign(unknownByReason, existingUnknownReasons); unknownTotal = existingUnknownTotal;
+        for (const row of reviewedOutcomes.records) if (row.relationship.status === 'unresolved' && row.relationship.reason !== 'edge_limit') {
+          unknownTotal++; unknownByReason[row.relationship.reason] = (unknownByReason[row.relationship.reason] || 0) + 1;
+        }
+      }
+      updateCurrentCoverage();
+    }
+    // Bounded fixed metadata remains below the envelope even without row data.
+    if (extensionBytes() > reviewedOutcomes.limits.byteLimit) throw Object.assign(new Error('Reviewed outcome extension exceeded its byte limit'), { code: 'OUTCOME_GRAPH_SIZE_LIMIT', status: 503 });
+  }
   return summaryOnly ? result : { ...result, nodes, edges, unknownMappings };
 }
 

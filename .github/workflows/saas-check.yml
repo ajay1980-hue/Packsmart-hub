@@ -59,7 +59,6 @@ jobs:
           name: runvara-mobile-onboarding
           path: |
             /tmp/runvara-onboarding-mobile.png
-            /tmp/runvara-business-graph-*.png
             /tmp/runvara-business-objectives-*.png
             /tmp/runvara-provider-usage-*.png
             /tmp/runvara-objective-review-*.png
@@ -67,6 +66,13 @@ jobs:
             /tmp/runvara-business-outcomes-*.png
             /tmp/runvara-activity-*.png
             /tmp/runvara-imported-order-*.png
+          if-no-files-found: ignore
+      - name: Upload current outcome graph verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-current-outcome-graph-responsive
+          path: /tmp/runvara-business-graph-*.png
           if-no-files-found: ignore
       - name: Upload legacy usage verification images
         if: always()

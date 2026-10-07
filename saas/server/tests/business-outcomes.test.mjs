@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import {
   createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate,
   validateBusinessOutcomeCandidate, validateBusinessOutcomePublication, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary,
-  aggregateBusinessOutcomes, normalizeOutcomeDecimal, BUSINESS_OUTCOME_LIMITS, BUSINESS_OUTCOME_CURRENCIES, BUSINESS_OUTCOME_CURRENCY_CONTRACT_VERSION
+  aggregateBusinessOutcomes, projectCurrentOutcomeReferences, normalizeOutcomeDecimal, BUSINESS_OUTCOME_LIMITS, BUSINESS_OUTCOME_CURRENCIES, BUSINESS_OUTCOME_CURRENCY_CONTRACT_VERSION
 } from '../lib/business-outcomes.mjs';
 
 const NOW = '2026-10-06T20:00:00.000Z', options = { workspaceId: 'tenant-a', now: NOW };
@@ -33,6 +33,49 @@ function proof(currentRows, settings = {}) {
 function aggregate(rows, boundary = proof(rows)) { return aggregateBusinessOutcomes(rows, { ...options, publicationBoundary: boundary }); }
 function freeze(value) { if (value && typeof value === 'object') { Object.freeze(value); Object.values(value).forEach(freeze); } return value; }
 const code = value => value.exclusions.map(row => row.code);
+
+test('current-reference projector requires private proof and exposes only descriptive source metadata', () => {
+  const row = candidate(), boundary = proof([row]);
+  const result = projectCurrentOutcomeReferences(freeze([row]), { ...options, publicationBoundary: boundary });
+  assert.equal(result.coverage.complete, true); assert.equal(result.counts.publishedHeads, 1);
+  assert.deepEqual(result.records, [{ outcomeId: row.outcomeId, versionId: row.versionId, digest: row.digest,
+    revision: 1, status: 'published', source: row.source, measurementComplete: true }]);
+  for (const forbidden of ['actorId', 'links', 'sourceRefs', 'amount', 'verification']) assert.equal(JSON.stringify(result).includes(forbidden), false);
+  for (const fake of [undefined, {}, structuredClone(boundary), JSON.parse(JSON.stringify(boundary)), result]) {
+    assert.throws(() => projectCurrentOutcomeReferences([row], { ...options, publicationBoundary: fake }), { code: 'PUBLICATION_PROOF_REQUIRED' });
+  }
+  assert.throws(() => aggregateBusinessOutcomes([row], { ...options, publicationBoundary: JSON.parse(JSON.stringify(result)) }), { code: 'PUBLICATION_PROOF_REQUIRED' });
+});
+
+test('current references reject a historical supplied version against published corrections and withdrawals', () => {
+  const first = candidate(), replacement = input({ amount: '-1.000001' });
+  replacement.source.measurementRevision = 2; replacement.source.measurementDigest = H('c'); replacement.verification.measurementDigest = H('c');
+  const corrected = correctBusinessOutcomeCandidate(first, replacement, options);
+  const withdrawn = withdrawBusinessOutcomeCandidate(corrected, { reason: 'incorrect_measurement', verification: corrected.verification }, options);
+  for (const current of [corrected, withdrawn]) {
+    const missing = projectCurrentOutcomeReferences([first], { ...options, publicationBoundary: proof([current]) });
+    assert.deepEqual(missing.records, []); assert.equal(missing.coverage.complete, false);
+    assert.ok(code(missing).includes('CURRENT_VERSION_UNPROVED'));
+    const matched = projectCurrentOutcomeReferences([first, current], { ...options, publicationBoundary: proof([current]) });
+    assert.equal(matched.records.length, 1); assert.equal(matched.records[0].versionId, current.versionId);
+    assert.equal(matched.coverage.complete, true);
+  }
+});
+
+test('current references fail closed on tenant mismatch and describe incomplete or unavailable proof', () => {
+  const row = candidate();
+  for (const versions of [[{ ...row, workspaceId: 'foreign' }], [row]]) {
+    assert.throws(() => projectCurrentOutcomeReferences(versions, { ...options, workspaceId: 'foreign', publicationBoundary: proof([row]) }), { code: 'WORKSPACE_MISMATCH' });
+  }
+  assert.throws(() => projectCurrentOutcomeReferences([{ ...row, workspaceId: 'foreign' }], { ...options, publicationBoundary: proof([row]) }), { code: 'WORKSPACE_MISMATCH' });
+  for (const settings of [{ complete: false }, { expectedOutcomeCount: 2 }]) {
+    const result = projectCurrentOutcomeReferences([row], { ...options, publicationBoundary: proof([row], settings) });
+    assert.equal(result.coverage.complete, false); assert.equal(result.records.length, 1);
+  }
+  const unavailable = projectCurrentOutcomeReferences([row], { ...options, publicationBoundary: proof([row], { resolveCommittedPublication: () => { throw Error('private source text'); } }) });
+  assert.deepEqual(unavailable.records, []); assert.equal(unavailable.coverage.complete, false);
+  assert.equal(JSON.stringify(unavailable).includes('private source text'), false);
+});
 
 test('initial candidate identities are stable, source-scoped and independent of object/reference order', () => {
   const firstInput = input(); firstInput.provenance.sourceRefs.push({ type: 'ledger_snapshot', id: 'ledger_one', digest: H('c') });

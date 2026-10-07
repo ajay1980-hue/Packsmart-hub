@@ -7,6 +7,8 @@ import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, decryptCredentials, sessionCookie } from '../lib/security.mjs';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
+import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
+import { createOutcomePublicationBoundary } from '../lib/business-outcomes.mjs';
 
 const SESSION_SECRET = 'server-integration-session-secret-more-than-thirty-two-characters';
 const BOOTSTRAP_PASSWORD = 'BootstrapOnly!789Abc';
@@ -35,6 +37,119 @@ function requestFactory(base) {
 function cookieValue(setCookie) {
   return String(setCookie).split(';')[0];
 }
+
+test('explicit current graph reads share outcome allowance, keep roles and read each authenticated snapshot once', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-current-graph-'));
+  let providerCalls = 0;
+  const server = createPacksmartServer({ NODE_ENV: 'test', APP_PUBLIC_URL: 'http://localhost:8787',
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SESSION_SECRET,
+    SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', BETA_SIGNUPS_ENABLED: 'false', BILLING_CHECKOUT_ENABLED: 'false' },
+  { schedulerEnabled: false, agentOpsEnabled: false,
+    fetchImpl: async () => { providerCalls++; assert.fail('Graph reads must not call providers or remote networks'); },
+    aiProvider: { enhanceCommander: async () => { providerCalls++; assert.fail('Graph reads must not invoke a model'); } } });
+  t.after(async () => { if (server.listening) await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+  const { store } = server.packsmart;
+  const state = seedWorkspaceState({}, { workspaceId: 'graph-tenant', email: 'graph-owner@example.test' });
+  state.users[0].passwordChangeRequired = false;
+  for (const role of ['admin', 'member', 'viewer']) state.users.push({ ...state.users[0], id: `graph-${role}`, role, email: `graph-${role}@example.test` });
+  await store.save(state.workspace.id, state);
+  const cookieFor = role => {
+    const user = state.users.find(row => row.role === role);
+    return cookieValue(sessionCookie(createSessionToken({ userId: user.id, workspaceId: state.workspace.id, email: user.email, role,
+      sessionVersion: user.sessionVersion }, SESSION_SECRET), { secure: false }));
+  };
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const request = requestFactory(`http://127.0.0.1:${server.address().port}`), owner = cookieFor('owner');
+  let currentReads = 0, stateReads = 0, writes = 0, evidenceReads = 0, reviewReads = 0;
+  const selectedTenants = [];
+  const persistence = createBusinessOutcomePersistence({ request: async (target, options) => {
+    assert.match(target, /^runvara_business_outcome_heads\?workspace_id=eq.graph-tenant&/);
+    assert.match(target, /limit=51$/); assert.equal(target.includes('source_action'), false); assert.equal(target.includes('source_measurement'), false);
+    assert.equal(options.maxResponseBytes, 2 * 1024 * 1024); return { data: [], contentRange: '*/0' };
+  } });
+  let readMode = 'available';
+  store.businessOutcomeSummary = async tenant => {
+    currentReads++; selectedTenants.push(tenant);
+    if (readMode === 'incomplete') return { versions: [], summary: { generatedAt: new Date().toISOString(), coverage: { complete: true } },
+      publicationBoundary: createOutcomePublicationBoundary({ workspaceId: tenant, snapshotId: 'incomplete-read', complete: false,
+        expectedOutcomeCount: 1, resolveCommittedPublication: () => null }) };
+    if (readMode !== 'available') throw Object.assign(new Error('private upstream error'), { code: readMode });
+    return persistence.current(tenant);
+  };
+  await request('/api/bootstrap', { cookie: owner });
+  assert.equal(currentReads, 0, 'bootstrap does not inspect current outcomes');
+  const get = store.get.bind(store); store.get = async (...args) => { stateReads++; return get(...args); };
+  for (const method of ['save', 'publishBusinessOutcome', 'reserveProviderUsage', 'settleProviderUsage', 'enqueueAgentJob']) store[method] = async () => { writes++; assert.fail(`Unexpected write ${method}`); };
+  store.getBusinessOutcomeReview = async () => { reviewReads++; return { selected: true }; };
+  store.getBusinessOutcomeEvidence = async () => { evidenceReads++; return { currentStatus: 'not_checked' }; };
+
+  await t.test('bootstrap and default/detail graph add no outcome calls and preserve fixed bounds', async () => {
+    for (const target of ['/api/bootstrap', '/api/business-graph', '/api/business-graph?detail=true&nodeLimit=999999&workspaceId=foreign']) {
+      const result = await request(target, { cookie: owner }); assert.equal(result.response.status, 200);
+      assert.equal(result.payload.reviewedOutcomes, undefined);
+      if (target.includes('detail')) assert.deepEqual(result.payload.limits, { recordLimit: 50, nestedLimit: 25, scanLimit: 2000, nodeLimit: 200, edgeLimit: 400, unknownLimit: 100 });
+    }
+    assert.equal(currentReads, 0); assert.equal(writes, 0);
+  });
+  await t.test('invalid opt-in and tenant/limit/proof overrides are rejected before outcome access', async () => {
+    const anonymous = await request('/api/business-graph?outcomes=current'); assert.equal(anonymous.response.status, 401);
+    for (const query of ['outcomes=history', 'outcomes=', 'outcomes=current&outcomes=current', 'outcomes=current&workspaceId=foreign',
+      'outcomes=current&nodeLimit=9999', 'outcomes=current&publicationBoundary=forged', 'outcomes=current&detail=maybe', 'outcomes=current&detail=true&detail=false']) {
+      const result = await request(`/api/business-graph?${query}`, { cookie: owner });
+      assert.equal(result.response.status, 400); assert.equal(result.payload.code, 'OUTCOME_REQUEST_INVALID');
+    }
+    assert.equal(currentReads, 0);
+  });
+  await t.test('all authenticated roles get one state and one private head read without evidence hydration', async () => {
+    for (const role of ['owner', 'admin', 'member', 'viewer']) {
+      const before = { currentReads, stateReads };
+      const result = await request('/api/business-graph?outcomes=current&detail=true', { cookie: cookieFor(role) });
+      assert.equal(result.response.status, 200); assert.equal(currentReads, before.currentReads + 1); assert.equal(stateReads, before.stateReads + 1);
+      assert.equal(result.payload.reviewedOutcomes.status, 'available'); assert.equal(result.payload.reviewedOutcomes.counts.currentHeadsRead, 0);
+      assert.equal(result.payload.reviewedOutcomes.coverage.publicationHeadsComplete, true);
+      assert.ok(result.payload.reviewedOutcomes.snapshots.workspace.readCompletedAt <= result.payload.reviewedOutcomes.snapshots.outcomes.readCompletedAt);
+      assert.equal(result.payload.reviewedOutcomes.snapshots.independent, true);
+      assert.equal(result.payload.summary.verifiedOutcomeRecords, 0);
+    }
+    assert.equal(evidenceReads, 0); assert.equal(reviewReads, 0); assert.equal(writes, 0);
+    assert.ok(selectedTenants.every(tenant => tenant === state.workspace.id));
+  });
+  await t.test('existing selected-review and evidence role matrix is unchanged', async () => {
+    for (const role of ['owner', 'admin', 'member', 'viewer']) {
+      const review = await request('/api/business-outcomes/experiments/example', { cookie: cookieFor(role) });
+      assert.equal(review.response.status, ['owner', 'admin'].includes(role) ? 200 : 403);
+      const evidence = await request(`/api/business-outcomes/versions/outcome_version_${'a'.repeat(64)}`, { cookie: cookieFor(role) });
+      assert.equal(evidence.response.status, 200); assert.equal(evidence.payload.currentStatus, 'not_checked');
+    }
+    assert.equal(reviewReads, 2); assert.equal(evidenceReads, 4);
+  });
+  await t.test('incomplete and unavailable storage stay distinct from a complete empty read', async () => {
+    for (const mode of ['incomplete', 'OUTCOME_STORAGE_UNAVAILABLE', 'OUTCOME_COVERAGE_UNAVAILABLE', 'OUTCOME_RESPONSE_TOO_LARGE']) {
+      readMode = mode;
+      const result = await request('/api/business-graph?outcomes=current', { cookie: cookieFor('viewer') });
+      assert.equal(result.response.status, 200); assert.equal(result.payload.reviewedOutcomes.coverage.publicationHeadsComplete, false);
+      assert.equal(result.payload.reviewedOutcomes.status, mode === 'incomplete' ? 'incomplete' : 'unavailable');
+      assert.deepEqual(result.payload.reviewedOutcomes.groups, []);
+      if (mode !== 'incomplete') assert.equal(result.payload.reviewedOutcomes.counts.currentHeadsRead, null);
+      assert.equal(JSON.stringify(result.payload).includes('private upstream error'), false);
+    }
+    readMode = 'available';
+  });
+  await t.test('graph and outcome endpoints consume the same ten-read allowance', async () => {
+    // Owner has used graph + selected review + exact evidence = three reads.
+    for (let index = 0; index < 7; index++) {
+      const result = await request(index % 2 ? '/api/business-outcomes' : '/api/business-graph?outcomes=current', { cookie: owner });
+      assert.equal(result.response.status, 200);
+    }
+    const reads = currentReads;
+    for (const target of ['/api/business-outcomes', '/api/business-graph?outcomes=current', '/api/business-graph?outcomes=current&detail=true']) {
+      const denied = await request(target, { cookie: owner }); assert.equal(denied.response.status, 429); assert.equal(denied.payload.code, 'OUTCOME_RATE_LIMITED');
+    }
+    assert.equal(currentReads, reads);
+    assert.equal((await request('/api/business-graph', { cookie: owner })).response.status, 200);
+    assert.equal(writes, 0); assert.equal(providerCalls, 0);
+  });
+});
 
 test('operator provider usage requires platform-owner auth and stays read-only when durable accounting is unavailable', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-provider-usage-auth-'));

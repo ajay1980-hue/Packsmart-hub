@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { deriveBusinessGraph, deriveBusinessGraphSummary } from '../lib/business-graph.mjs';
+import { deriveBusinessGraph, deriveBusinessGraphSummary, REVIEWED_OUTCOME_GRAPH_BYTES } from '../lib/business-graph.mjs';
+import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate, createOutcomePublicationBoundary } from '../lib/business-outcomes.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 
 const costs = () => ({ landed: 2, packing: 0.2, handling: 0.1, delivery: 1, paymentFee: 0.3, channelFee: 0.4, advertising: 0, otherVariable: 0, supplierId: 's1' });
@@ -44,6 +45,201 @@ function assertIntegrity(graph) {
   }
   for (const mapping of graph.unknownMappings) assert.ok(ids.has(mapping.subjectId));
 }
+
+const OUTCOME_NOW = '2026-10-07T00:00:00.000Z';
+const outcomeHash = value => createHash('sha256').update(value).digest('hex');
+function reviewedInput(experimentId = 'experiment1', patch = {}) {
+  const measurementDigest = outcomeHash(`measurement:${experimentId}`);
+  return { source: { type: 'experiment_measurement', experimentId, measurementRevision: 1, measurementDigest },
+    metric: 'incrementalContribution', amount: '0', currency: 'GBP',
+    window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' },
+    coverage: { status: 'complete', scopeId: `scope_${experimentId}`, observedCount: 10, expectedCount: 10 },
+    method: { kind: 'holdout', definitionVersion: 'incremental-contribution/v1' },
+    provenance: { observationId: `observation_${experimentId}`, sourceRefs: [{ type: 'measurement_report', id: `private_report_${experimentId}`, digest: outcomeHash(`report:${experimentId}`) }], observedAt: '2026-10-06T12:00:00.000Z', aggregation: 'non_overlapping_scopes_attested' },
+    verification: { kind: 'owner_attestation', actorId: 'private_owner', verifiedAt: '2026-10-06T14:00:00.000Z', measurementDigest }, ...patch };
+}
+const reviewedVersion = (experimentId, patch, workspaceId = 'tenant-a') => createBusinessOutcomeCandidate(reviewedInput(experimentId, patch), { workspaceId, now: OUTCOME_NOW });
+function reviewedOptions(rows, { complete = true, versions = rows, ...rest } = {}) {
+  const workspaceId = rows[0]?.workspaceId || 'tenant-a';
+  const pairs = new Map(rows.map(version => [version.outcomeId, { version,
+    head: { schema: 'runvara-outcome-head/v1', workspaceId, outcomeId: version.outcomeId, versionId: version.versionId, digest: version.digest,
+      revision: version.revision, status: version.status === 'withdrawn' ? 'withdrawn' : 'published', publicationId: `publication_${version.revision}`,
+      committedAt: '2026-10-06T20:00:00.000Z', commitRevision: 'private_state_revision' } }]));
+  return { inspectCurrentOutcomes: true, now: OUTCOME_NOW,
+    workspaceSnapshot: { revision: 'private_state_revision', readCompletedAt: '2026-10-06T22:00:00.000Z' },
+    outcomeReadCompletedAt: '2026-10-06T22:00:01.000Z', outcomeSnapshot: { versions,
+      publicationBoundary: createOutcomePublicationBoundary({ workspaceId, snapshotId: 'private_snapshot', complete,
+        expectedOutcomeCount: pairs.size, resolveCommittedPublication: ({ outcomeId }) => pairs.get(outcomeId) }) }, ...rest };
+}
+
+test('opt-in current nodes use exact canonical experiment identities without promoting legacy records', () => {
+  const state = frozen(fixture()), row = reviewedVersion('experiment1', { amount: '-0.000001' });
+  const before = JSON.stringify(state), graph = deriveBusinessGraph(state, reviewedOptions([row]));
+  assert.equal(JSON.stringify(state), before); assertIntegrity(graph);
+  const reviewed = nodesOf(graph, 'reviewed_outcome')[0], experiment = nodeAt(graph, '/revenueEngine/experiments/0', 'experiment');
+  const edge = edgesOf(graph, 'measurement_recorded_for_experiment')[0];
+  assert.equal(edge.from, reviewed.id); assert.equal(edge.to, experiment.id);
+  assert.equal(graph.reviewedOutcomes.records[0].relationship.targetNodeId, experiment.id);
+  assert.equal(graph.reviewedOutcomes.groups[0].amount, '-0.000001');
+  assert.equal(graph.reviewedOutcomes.counts.currentHeadsRead, 1); assert.equal(graph.reviewedOutcomes.counts.projectedRecords, 1);
+  assert.equal(graph.reviewedOutcomes.coverage.publicationHeadsComplete, true);
+  assert.equal(graph.reviewedOutcomes.snapshots.independent, true);
+  assert.notEqual(graph.reviewedOutcomes.snapshots.workspace.readCompletedAt, graph.reviewedOutcomes.snapshots.outcomes.readCompletedAt);
+  assert.equal(graph.summary.verifiedOutcomeRecords, 0);
+  for (const legacy of nodesOf(graph, 'outcome')) assert.equal(legacy.attributes.qualified, false);
+  for (const secret of [row.outcomeId, row.versionId, 'experiment1', 'private_owner', 'private_report', 'private_state_revision', 'private_snapshot', row.source.measurementDigest]) {
+    assert.equal(JSON.stringify(graph.reviewedOutcomes).includes(secret), false, secret);
+  }
+  assert.equal(graph.reviewedOutcomes.safeguards.learningAuthorized, false);
+  assert.equal(graph.reviewedOutcomes.safeguards.executionAuthorized, false);
+});
+
+test('current logical identities survive reorder, correction and withdrawal while version-bound edges advance', () => {
+  const state = fixture(), row = reviewedVersion('experiment1');
+  state.revenueEngine.experiments.push({ id: 'second', status: 'completed' });
+  const initial = deriveBusinessGraph(state, reviewedOptions([row]));
+  state.revenueEngine.experiments.reverse();
+  state.revenueEngine.experiments[1].outcomeMeasurement = { revision: 999, amount: '999999', digest: 'newer draft' };
+  const reordered = deriveBusinessGraph(state, reviewedOptions([row]));
+  assert.equal(nodesOf(initial, 'reviewed_outcome')[0].id, nodesOf(reordered, 'reviewed_outcome')[0].id);
+  assert.equal(edgesOf(initial, 'measurement_recorded_for_experiment')[0].id, edgesOf(reordered, 'measurement_recorded_for_experiment')[0].id);
+  assert.equal(reordered.reviewedOutcomes.groups[0].amount, '0');
+  const replacement = reviewedInput('experiment1', { amount: '-3.123456' });
+  replacement.source.measurementRevision = 2; replacement.source.measurementDigest = outcomeHash('correction'); replacement.verification.measurementDigest = replacement.source.measurementDigest;
+  const correction = correctBusinessOutcomeCandidate(row, replacement, { workspaceId: 'tenant-a', now: OUTCOME_NOW });
+  const corrected = deriveBusinessGraph(state, reviewedOptions([correction]));
+  assert.equal(nodesOf(initial, 'reviewed_outcome')[0].id, nodesOf(corrected, 'reviewed_outcome')[0].id);
+  assert.notEqual(edgesOf(initial, 'measurement_recorded_for_experiment')[0].id, edgesOf(corrected, 'measurement_recorded_for_experiment')[0].id);
+  const withdrawal = withdrawBusinessOutcomeCandidate(correction, { reason: 'incorrect_measurement', verification: correction.verification }, { workspaceId: 'tenant-a', now: OUTCOME_NOW });
+  const withdrawn = deriveBusinessGraph(state, reviewedOptions([withdrawal]));
+  assert.equal(nodesOf(initial, 'reviewed_outcome')[0].id, nodesOf(withdrawn, 'reviewed_outcome')[0].id);
+  assert.notEqual(edgesOf(corrected, 'measurement_recorded_for_experiment')[0].id, edgesOf(withdrawn, 'measurement_recorded_for_experiment')[0].id);
+  assert.equal(withdrawn.reviewedOutcomes.counts.withdrawnHeads, 1); assert.deepEqual(withdrawn.reviewedOutcomes.groups, []);
+  const historical = deriveBusinessGraph(state, reviewedOptions([withdrawal], { versions: [row] }));
+  assert.equal(nodesOf(historical, 'reviewed_outcome').length, 0); assert.equal(historical.reviewedOutcomes.status, 'incomplete');
+});
+
+test('current experiment references stay unresolved for duplicate aliases, incomplete indexes, archival and output caps', () => {
+  const row = reviewedVersion('experiment1');
+  for (const [experiments, limits, reason] of [
+    [[{ id: 'experiment1' }, { id: 'experiment1' }], {}, 'ambiguous_reference'],
+    [[{ id: 'experiment1' }, { id: 'other', externalId: 'experiment1' }], {}, 'ambiguous_reference'],
+    [[{ id: 'experiment1' }, { id: 'experiment1' }], { recordLimit: 1 }, 'target_index_incomplete'],
+    [[{ id: 'experiment1', status: 'archived' }], {}, 'archived_reference'],
+    [[{ id: 'experiment1', archived: true }], {}, 'archived_reference'],
+    [[], {}, 'unresolved_reference']
+  ]) {
+    const graph = deriveBusinessGraph({ workspace: { id: 'tenant-a' }, revenueEngine: { experiments } }, reviewedOptions([row], limits));
+    assert.equal(graph.reviewedOutcomes.records[0].relationship.reason, reason); assert.equal(edgesOf(graph, 'measurement_recorded_for_experiment').length, 0);
+    assert.equal(nodesOf(graph, 'reviewed_outcome').length, 1); assertIntegrity(graph);
+  }
+  // A target omitted by the shared node limit must never become a placeholder.
+  const capped = deriveBusinessGraph({ workspace: { id: 'tenant-a' }, revenueEngine: { experiments: [{ id: 'experiment1' }] } }, reviewedOptions([row], { nodeLimit: 1 }));
+  assert.equal(capped.reviewedOutcomes.counts.projectedRecords, 0); assert.equal(capped.reviewedOutcomes.omitted.records, 1); assertIntegrity(capped);
+  const edgeLimited = deriveBusinessGraph(fixture(), reviewedOptions([row], { edgeLimit: 1 }));
+  assert.equal(edgeLimited.reviewedOutcomes.records[0].relationship.reason, 'edge_limit'); assert.equal(edgeLimited.reviewedOutcomes.coverage.projectionComplete, false);
+});
+
+test('full current snapshot grouping precedes graph limits and never revives overlapping or reused observations', () => {
+  const first = reviewedVersion('experiment1', { amount: '10' });
+  for (const second of [reviewedVersion('experiment2', { amount: '20', coverage: first.coverage }),
+    reviewedVersion('experiment2', { amount: '20', provenance: { ...reviewedInput('experiment2').provenance, sourceRefs: first.provenance.sourceRefs } })]) {
+    const graph = deriveBusinessGraph(fixture(), reviewedOptions([first, second], { recordLimit: 1 }));
+    assert.equal(graph.reviewedOutcomes.counts.currentHeadsRead, 2); assert.equal(graph.reviewedOutcomes.counts.projectedRecords, 1);
+    assert.equal(graph.reviewedOutcomes.records[0].measurementComplete, true); assert.equal(graph.reviewedOutcomes.records[0].qualifiedGroupIncluded, false);
+    assert.deepEqual(graph.reviewedOutcomes.groups, []); assert.equal(graph.reviewedOutcomes.counts.qualifiedMeasurements, 0);
+  }
+  const scoped = [reviewedVersion('experiment1'), reviewedVersion('experiment2', { amount: '-4', currency: 'USD' }),
+    reviewedVersion('experiment3', { amount: '9', window: { startsAt: '2026-10-02T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' } })];
+  const graph = deriveBusinessGraph(fixture(), reviewedOptions(scoped));
+  assert.equal(graph.reviewedOutcomes.groups.length, 3); assert.deepEqual(graph.reviewedOutcomes.groups.map(group => group.amount).sort(), ['-4', '0', '9']);
+  assert.equal(graph.reviewedOutcomes.overallAmount, undefined);
+  const standalone = deriveBusinessGraph(fixture(), reviewedOptions(['experiment1', 'experiment2'].map(id => reviewedVersion(id, {
+    provenance: { ...reviewedInput(id).provenance, aggregation: 'standalone' }
+  }))));
+  assert.equal(standalone.reviewedOutcomes.groups[0].amount, null);
+  assert.equal(standalone.reviewedOutcomes.groups[0].amountStatus, 'standalone_observations');
+  assert.ok(standalone.reviewedOutcomes.records.every(row => row.qualifiedGroupIncluded));
+});
+
+test('forged summaries, DTOs and incomplete snapshots cannot turn graph records into current totals', () => {
+  const row = reviewedVersion('experiment1'), valid = reviewedOptions([row]);
+  const copied = structuredClone(valid);
+  copied.outcomeSnapshot.publications = [{ version: row, head: { verified: true } }];
+  copied.outcomeSnapshot.summary = { coverage: { complete: true }, groups: [{ amount: '999' }] };
+  const unavailable = deriveBusinessGraph(fixture(), copied);
+  assert.equal(unavailable.reviewedOutcomes.status, 'unavailable'); assert.equal(unavailable.reviewedOutcomes.counts.currentHeadsRead, null);
+  assert.equal(unavailable.reviewedOutcomes.counts.publishedHeads, null); assert.deepEqual(unavailable.reviewedOutcomes.groups, []);
+  const incompleteOptions = reviewedOptions([row], { complete: false });
+  incompleteOptions.outcomeSnapshot.summary = copied.outcomeSnapshot.summary;
+  const incomplete = deriveBusinessGraph(fixture(), incompleteOptions);
+  assert.equal(incomplete.reviewedOutcomes.counts.currentHeadsRead, 1); assert.equal(incomplete.reviewedOutcomes.coverage.publicationHeadsComplete, false);
+  assert.equal(incomplete.reviewedOutcomes.status, 'incomplete'); assert.deepEqual(incomplete.reviewedOutcomes.groups, []);
+  const absent = deriveBusinessGraph(fixture(), { inspectCurrentOutcomes: true, outcomeUnavailableReason: 'OUTCOME_STORAGE_UNAVAILABLE' });
+  assert.equal(absent.reviewedOutcomes.unavailableReason, 'OUTCOME_STORAGE_UNAVAILABLE');
+  const baseline = deriveBusinessGraph(fixture());
+  assert.equal(baseline.reviewedOutcomes, undefined);
+  assert.deepEqual(deriveBusinessGraph(fixture(), { outcomeSnapshot: valid.outcomeSnapshot }), baseline, 'existing default remains unchanged');
+});
+
+test('opt-in graph rejects foreign root, target and private-capability scope markers', () => {
+  const row = reviewedVersion('experiment1');
+  for (const marker of [{ tenant: 'foreign' }, { tenant: { id: 'foreign' } }, { workspace: 'foreign' }, { workspaceId: 'foreign' }, { tenant_id: 'foreign' }]) {
+    const state = fixture(); Object.assign(state.revenueEngine.experiments[0], marker);
+    assert.throws(() => deriveBusinessGraph(state, reviewedOptions([row])), { code: 'WORKSPACE_MISMATCH' });
+  }
+  const state = fixture(); state.workspace.tenantId = 'foreign';
+  assert.throws(() => deriveBusinessGraph(state, reviewedOptions([row])), { code: 'WORKSPACE_MISMATCH' });
+  assert.throws(() => deriveBusinessGraph(fixture(), reviewedOptions([reviewedVersion('experiment1', {}, 'foreign')])), { code: 'WORKSPACE_MISMATCH' });
+});
+
+test('current rows consume shared record, scan, node and UTF-8 extension budgets with explicit omissions', () => {
+  const workspaceId = '界'.repeat(250);
+  const rows = Array.from({ length: 50 }, (_, index) => reviewedVersion(`experiment_${index}`, {
+    amount: '999999999999999999.999999', method: { kind: ['holdout', 'before_after', 'reconciled_manual'][index % 3], definitionVersion: 'incremental-contribution/v1' },
+    window: { startsAt: `2026-09-${String(1 + index % 28).padStart(2, '0')}T00:00:00.000Z`, endsAt: '2026-10-06T00:00:00.000Z' }
+  }, workspaceId));
+  const state = { workspace: { id: workspaceId }, revenueEngine: { experiments: rows.map(row => ({ id: row.source.experimentId })) } };
+  for (const derive of [deriveBusinessGraph, deriveBusinessGraphSummary]) {
+    const graph = derive(state, reviewedOptions(rows)), current = graph.reviewedOutcomes;
+    assert.equal(current.counts.currentHeadsRead, 50);
+    assert.ok(current.counts.projectedRecords <= graph.limits.recordLimit);
+    const { nodes = [], edges = [], unknownMappings = [], ...metadata } = graph;
+    const added = { ...metadata, ...(graph.mode === 'summary' ? {} : {
+      nodes: nodes.filter(node => node.type === 'reviewed_outcome'),
+      edges: edges.filter(edge => edge.relation === 'measurement_recorded_for_experiment'),
+      unknownMappings: unknownMappings.filter(row => row.subjectId.startsWith('reviewed_outcome_')) }) };
+    assert.ok(Buffer.byteLength(JSON.stringify(added), 'utf8') <= REVIEWED_OUTCOME_GRAPH_BYTES[graph.mode]);
+    assert.ok(current.omitted.groups > 0 || current.omitted.records > 0);
+    assert.equal(current.coverage.projectionComplete, false);
+    if (graph.mode === 'detail') assertIntegrity(graph);
+  }
+  const scanLimited = deriveBusinessGraph(state, reviewedOptions(rows, { scanLimit: 1 }));
+  assert.equal(scanLimited.coverage.scannedRecords, 1); assert.equal(scanLimited.reviewedOutcomes.counts.projectedRecords, 0);
+  assert.equal(scanLimited.reviewedOutcomes.omitted.records, 50); assertIntegrity(scanLimited);
+});
+
+test('byte node removal preserves mapping counts when retained unknown output is already saturated', () => {
+  const workspaceId = '界'.repeat(256);
+  const rows = Array.from({ length: 50 }, (_, index) => reviewedVersion(`experiment_${index}`, {}, workspaceId));
+  const state = { workspace: { id: workspaceId }, products: [{ id: 'p', variants: [{ id: 'v' }] }],
+    revenueEngine: { experiments: rows.slice(0, 45).map(row => ({ id: row.source.experimentId })) } };
+  const baseline = deriveBusinessGraph(state, { unknownLimit: 1 });
+  assert.ok(baseline.summary.unknownMappings > baseline.unknownMappings.length);
+  const graph = deriveBusinessGraph(state, reviewedOptions(rows, { unknownLimit: 1 }));
+  assert.ok(graph.reviewedOutcomes.omitted.records > 0, 'byte cap removes nodes, not merely group rows');
+  assert.ok(graph.reviewedOutcomes.counts.projectedRecords > 0);
+  assert.equal(graph.reviewedOutcomes.omitted.records, rows.length - graph.reviewedOutcomes.records.length);
+  const unknown = graph.reviewedOutcomes.records.filter(row => row.relationship.status === 'unresolved');
+  assert.equal(graph.summary.unknownMappings, baseline.summary.unknownMappings + unknown.length);
+  const reasons = { ...baseline.summary.unknownByReason };
+  for (const row of unknown) reasons[row.relationship.reason] = (reasons[row.relationship.reason] || 0) + 1;
+  assert.deepEqual(graph.summary.unknownByReason, reasons);
+  assert.equal(graph.reviewedOutcomes.omitted.mappings, unknown.length);
+  assert.deepEqual(graph.unknownMappings, baseline.unknownMappings);
+  assert.equal(graph.coverage.omittedUnknownMappings, graph.summary.unknownMappings - graph.unknownMappings.length);
+  assertIntegrity(graph);
+});
 
 test('graph uses the existing persisted commerce, control, marketing and measurement schemas', () => {
   const state = fixture();
