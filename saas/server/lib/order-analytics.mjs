@@ -1,4 +1,4 @@
-import { inspectImportedOrderEvidence, LEGACY_ORDER_FIELD_PROVENANCE } from './imported-order-evidence.mjs';
+import { inspectImportedOrderEvidence, LEGACY_ORDER_FIELD_PROVENANCE, summarizeOrderSourceObservations } from './imported-order-evidence.mjs';
 
 export const ORDER_ANALYTICS_PROVIDERS = Object.freeze(['shopify', 'ebay', 'meta', 'tiktok_shop', 'pinterest', 'google_youtube', 'whatsapp_business', 'amazon']);
 const DAY = 86400000;
@@ -29,8 +29,8 @@ export function compactOrderEvidence(source) {
     schema: source.schema, period: source.period, providers: source.providers, counts: source.counts,
     completeness: { ...source.completeness, outputComplete: source.completeness.outputComplete && !clipped,
       retainedCohortComplete: source.completeness.retainedCohortComplete && !clipped },
-    provenance: { ...LEGACY_ORDER_FIELD_PROVENANCE, amounts: 'normalized recorded fields; may include importer defaults or rounding', currency: 'unverified recorded code; no currency inference or FX', costNumbers: 'numeric availability only; historical assignment unverified' },
-    sourcePeriods: source.sourcePeriods, financialStatusCohorts: source.financialStatusCohorts,
+    provenance: { ...LEGACY_ORDER_FIELD_PROVENANCE, amounts: source.provenance.amounts, sourceCapture: source.provenance.sourceCapture, currency: 'recorded code; source captures require matching per-field currencies; no currency inference or FX', costNumbers: 'numeric availability only; historical assignment unverified' },
+    sourcePeriods: source.sourcePeriods, sourceObservations: source.sourceObservations, financialStatusCohorts: source.financialStatusCohorts,
     groups: groups.map(group => ({ ...group,
       recordedAmounts: Object.fromEntries(Object.entries(group.recordedAmounts).map(([key, metric]) => [key, suppress(metric)])),
       costNumbers: { ...group.costNumbers, completeCohort: group.costNumbers.completeCohort && !clipped,
@@ -79,7 +79,7 @@ export function compactOrderPeriod(period) {
   const metric = value => clipped ? { ...value, complete: false, completeCohortTotal: null } : value;
   return { ...period, numericCostCoverage: { ...period.numericCostCoverage, completeCohort: period.numericCostCoverage?.completeCohort === true && !clipped }, importedOrderEvidence: {
     schema: source.schema, period: source.period, providers: source.providers, counts: source.counts,
-    sourcePeriods: source.sourcePeriods, provenance: source.provenance,
+    sourcePeriods: source.sourcePeriods, sourceObservations: source.sourceObservations, provenance: source.provenance,
     completeness: { ...source.completeness, outputComplete: source.completeness.outputComplete && !clipped, retainedCohortComplete: source.completeness.retainedCohortComplete && !clipped },
     groups: groups.map(group => ({ ...group, recordedAmounts: { netTotal: metric(group.recordedAmounts.netTotal), refunds: metric(group.recordedAmounts.refunds) },
       costNumbers: { ...group.costNumbers, completeCohort: group.costNumbers.completeCohort && !clipped, coveredNetTotal: metric(group.costNumbers.coveredNetTotal), netTotalCoverage: clipped ? null : group.costNumbers.netTotalCoverage } })),
@@ -125,8 +125,9 @@ export function orderFinancialView(inspection, row = null) {
     const source = inspection.evidence;
     const group = source.groups.find(item => item.provider === row.provider && item.currency === row.currency && item.financialStatus === row.financialStatus && item.cancelled === row.cancelled);
     if (group) importedOrderEvidence = {
-      schema: source.schema, period: source.period, providers: [row.provider], completeness: source.completeness, scope: 'one retained order; completeness describes the bounded source inspection', provenance: { ...LEGACY_ORDER_FIELD_PROVENANCE, amounts: 'normalized recorded fields', currency: 'unverified recorded code' },
+      schema: source.schema, period: source.period, providers: [row.provider], completeness: source.completeness, scope: 'one retained order; completeness describes the bounded source inspection', provenance: { ...LEGACY_ORDER_FIELD_PROVENANCE, amounts: source.provenance.amounts, sourceCapture: source.provenance.sourceCapture, currency: 'recorded code; source captures require matching per-field currencies' },
       sourcePeriods: source.sourcePeriods.filter(item => item.provider === row.provider),
+      sourceObservations: summarizeOrderSourceObservations([row]),
       groups: [{ ...group, orders: 1,
         recordedAmounts: Object.fromEntries(Object.entries(row.recordedAmounts).map(([key, value]) => [key, { knownCount: value === null ? 0 : 1, unknownCount: value === null ? 1 : 0, knownSubtotal: row.currency ? value : null, completeCohortTotal: source.completeness.retainedCohortComplete && row.currency ? value : null, complete: Boolean(source.completeness.retainedCohortComplete && row.currency && value !== null) }])),
         costNumbers: { completeOrders: row.costNumbersComplete ? 1 : 0, incompleteOrders: row.costNumbersComplete ? 0 : 1, orderCoverage: { numerator: row.costNumbersComplete ? 1 : 0, denominator: 1 }, basis: 'numeric_availability_only_not_historical_financial_qualification' }

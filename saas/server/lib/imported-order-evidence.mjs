@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { evidenceInWorkspace } from './business-evidence-scope.mjs';
+import { inspectShopifyOrderSource } from './shopify-order-source.mjs';
 
 // A projection of the authoritative workspace snapshot, not a new accounting
 // ledger. No current importer records a trusted order-period or cost-basis
@@ -31,6 +32,21 @@ const hash = parts => createHash('sha256').update(JSON.stringify(parts)).digest(
 // or financial support. Keep unknown codes separate without a guessed allowlist.
 const currency = value => typeof value === 'string' && /^[A-Za-z]{3}$/.test(value) ? value.toUpperCase() : null;
 const currencyStatus = value => value === null ? 'missing_or_malformed' : 'unverified_recorded_code';
+
+// Availability of a read descriptor says nothing about source-period coverage,
+// settlement, or historical cost assignment. Do not expose descriptor contents.
+export function summarizeOrderSourceObservations(rows) {
+  const summary = { scope: 'retained_orders', legacyOrders: 0, capturedOrders: 0, invalidOrders: 0,
+    retainedManifests: 0, unavailableManifests: 0, invalidManifests: 0,
+    basis: 'source_read_metadata_only_not_period_coverage_or_financial_proof' };
+  for (const row of rows) {
+    const source = row.sourceObservation;
+    summary[source?.format === 'source' ? 'capturedOrders' : source?.format === 'invalid' ? 'invalidOrders' : 'legacyOrders']++;
+    const field = { retained: 'retainedManifests', unavailable: 'unavailableManifests', invalid: 'invalidManifests' }[source?.manifestStatus];
+    if (field) summary[field]++;
+  }
+  return summary;
+}
 
 function inWorkspace(record, workspaceId, depth = 0) {
   if (depth > 4 || !evidenceInWorkspace(record, workspaceId)) return false;
@@ -161,8 +177,15 @@ function inspect(state, options = {}) {
     return result;
   }
 
-  function normalize(order, index, provider, sourceId, sourceIdField) {
-    const values = Object.fromEntries(MONEY_FIELDS.map(field => [field, decimal(order[field])]));
+  function normalize(order, index, provider, sourceId, sourceIdField, source) {
+    const normalizedCurrency = currency(order.currency), createdAt = instant(order.createdAt);
+    // A captured amount belongs to its own selected shopMoney currency. Missing
+    // or mismatched pairs cannot inherit an order currency during consumption.
+    // Invalid source metadata must never reactivate legacy monetary fallbacks.
+    const money = (value, field) => source.format === 'legacy' ? decimal(value)
+      : source.format === 'source' && source.manifestStatus !== 'invalid' && normalizedCurrency !== null
+        && source.currencyFor(field) === normalizedCurrency ? decimal(value) : null;
+    const values = Object.fromEntries(MONEY_FIELDS.map(field => [field, money(order[field], field)]));
     const netTotal = values.currentTotal !== null ? values.currentTotal
       : (order.currentTotal === null || order.currentTotal === undefined) && values.total !== null && values.refunds !== null ? values.total - values.refunds : null;
     // Original tax is not silently promoted to current tax after a refund.
@@ -170,7 +193,6 @@ function inspect(state, options = {}) {
     values.netTotalExCurrentTax = netTotal !== null && values.currentTax !== null ? netTotal - values.currentTax : null;
     const normalizedStatus = typeof order.financialStatus === 'string' && order.financialStatus.length <= 40 ? order.financialStatus.toUpperCase() : 'UNKNOWN';
     const financialStatus = STATUSES.includes(normalizedStatus) ? normalizedStatus : 'UNKNOWN';
-    const normalizedCurrency = currency(order.currency), createdAt = instant(order.createdAt);
     const recordedFulfillment = typeof order.fulfillmentStatus === 'string' && order.fulfillmentStatus.length <= 40 ? order.fulfillmentStatus.toUpperCase() : 'UNKNOWN';
     const fulfillmentStatus = ['FULFILLED', 'UNFULFILLED', 'PARTIAL', 'PARTIALLY_FULFILLED', 'RESTOCKED', 'IN_PROGRESS', 'ON_HOLD', 'OPEN', 'SCHEDULED'].includes(recordedFulfillment) ? recordedFulfillment : 'UNKNOWN';
     const cancelled = order.cancelledAt !== null && order.cancelledAt !== undefined && order.cancelledAt !== '';
@@ -188,20 +210,21 @@ function inspect(state, options = {}) {
       const lineId = id(line.id), sku = id(line.sku);
       if (lineId && lineIds.has(lineId)) linesComplete = false;
       if (lineId) lineIds.add(lineId);
-      lines.push({ id: lineId, sku, quantity: decimal(line.quantity), gross: decimal(line.gross), net: decimal(line.net), scopeValid: inWorkspace(line, workspaceId) });
+      lines.push({ id: lineId, sku, quantity: decimal(line.quantity), gross: money(line.gross, `lineItems/${lineIndex}/gross`), net: money(line.net, `lineItems/${lineIndex}/net`), scopeValid: inWorkspace(line, workspaceId) });
     }
     const overrides = Object.fromEntries(Object.entries(ORDER_COSTS).map(([field, key]) => [field, decimal(order[key])]));
     const overrideNumbersValid = Object.values(ORDER_COSTS).every(key => order[key] === undefined || order[key] === null || decimal(order[key]) !== null);
     const overrideScopeValid = !own(order, 'costOverrides') || order.costOverrides === null || inWorkspace(order.costOverrides, workspaceId);
     // Compare only normalized evidence fields; customer/name/raw payloads never
     // affect identity. An unscanned tail cannot establish an identical duplicate.
-    const signature = count < rawLines.length ? null : hash([
-      createdAt, cancelled, financialStatus, fulfillmentStatus, normalizedCurrency, Object.values(values).map(spelling),
+    const signature = count < rawLines.length || (source.format !== 'legacy' && !source.fingerprint) ? null : hash([
+      createdAt, cancelled, financialStatus, fulfillmentStatus, normalizedCurrency, source.format, source.fingerprint, Object.values(values).map(spelling),
       Object.values(overrides).map(spelling), overrideNumbersValid, overrideScopeValid, linesComplete, scopeValid,
       lines.map(line => JSON.stringify([line.invalid || false, line.id, line.sku, spelling(line.quantity ?? null), spelling(line.gross ?? null), spelling(line.net ?? null), line.scopeValid])).sort()
     ]);
     return { index, provider, sourceId, sourceIdField, identityHash: hash([workspaceId, provider, sourceId]), createdAt, cancelled, financialStatus, fulfillmentStatus, currency: normalizedCurrency,
-      values, overrides, overrideNumbersValid, overrideScopeValid, lines, linesComplete, linesScannedFully: count === rawLines.length, scopeValid, signature, occurrences: 1, conflict: false };
+      values, overrides, overrideNumbersValid, overrideScopeValid, lines, linesComplete, linesScannedFully: count === rawLines.length, scopeValid, signature, occurrences: 1, conflict: false,
+      sourceObservation: { format: source.format, manifestStatus: source.manifestStatus } };
   }
 
   // Identity reconciliation precedes date, cancellation and status filtering: an
@@ -215,13 +238,14 @@ function inspect(state, options = {}) {
     counts.selectedProviderRows++;
     const sourceIdField = own(order, 'externalId') ? 'externalId' : 'id';
     const sourceId = id(order[sourceIdField]);
-    if (!inWorkspace(order, workspaceId)) {
+    const source = inspectShopifyOrderSource(state, order, workspaceId);
+    if (!inWorkspace(order, workspaceId) || !source.scopeValid) {
       counts.invalidScopeRows++; unresolvedEligibility = true;
       if (sourceId) scopeTainted.add(JSON.stringify([order.provider, sourceId]));
       continue;
     }
     if (!sourceId) { counts.missingIdentityRows++; unresolvedEligibility = true; continue; }
-    const row = normalize(order, index, order.provider, sourceId, sourceIdField);
+    const row = normalize(order, index, order.provider, sourceId, sourceIdField, source);
     const key = JSON.stringify([row.provider, sourceId]);
     const previous = identities.get(key);
     if (previous) {
@@ -260,7 +284,7 @@ function inspect(state, options = {}) {
     if (!row.currency) counts.unknownCurrencyOrders++;
     reference('orders', `/orders/${row.index}`, row.identityHash, row.provider, row.sourceIdField);
     const costsComplete = numericCosts(row);
-    retainedRows.push({ order: orders[row.index], pointer: `/orders/${row.index}`, identityHash: row.identityHash, provider: row.provider, sourceIdField: row.sourceIdField, createdAt: row.createdAt, financialStatus: row.financialStatus, fulfillmentStatus: row.fulfillmentStatus, cancelled: row.cancelled, currency: row.currency, recordedAmounts: Object.fromEntries(Object.entries(row.values).map(([key, value]) => [key, spelling(value)])), costNumbersComplete: costsComplete, costOverrideScopeValid: row.overrideScopeValid });
+    retainedRows.push({ order: orders[row.index], pointer: `/orders/${row.index}`, identityHash: row.identityHash, provider: row.provider, sourceIdField: row.sourceIdField, createdAt: row.createdAt, financialStatus: row.financialStatus, fulfillmentStatus: row.fulfillmentStatus, cancelled: row.cancelled, currency: row.currency, recordedAmounts: Object.fromEntries(Object.entries(row.values).map(([key, value]) => [key, spelling(value)])), costNumbersComplete: costsComplete, costOverrideScopeValid: row.overrideScopeValid, sourceObservation: row.sourceObservation });
     const key = JSON.stringify([row.provider, row.currency, row.financialStatus, row.cancelled]);
     if (!groups.has(key)) {
       if (groups.size === limits.groups) { truncated.groups = true; continue; }
@@ -303,7 +327,8 @@ function inspect(state, options = {}) {
       scope: 'workspace snapshot; all explicit tenant markers must match',
       dates: 'normalized createdAt; importer may have supplied a fallback',
       currency: 'normalized order.currency; importer may have supplied a fallback; three-letter recorded code only; recognition and source provenance unverified; no workspace inference or FX',
-      amounts: 'normalized recorded fields; importer may have defaulted, derived or rounded amounts',
+      amounts: 'legacy normalized recorded fields may include defaults, derivation or rounding; source captures retain selected decimal strings and per-field currencies within arithmetic bounds',
+      sourceCapture: 'retained source-read metadata is observation availability only; missing or invalid descriptors do not establish period coverage or financial qualification',
       netTotal: 'currentTotal, else total minus explicit refunds; no clamp; missing stays unknown',
       netTotalExCurrentTax: 'netTotal minus explicit currentTax; original tax is not substituted',
       cash: 'financial status and normalized totals do not establish collected cash',
@@ -311,6 +336,7 @@ function inspect(state, options = {}) {
       advertising: 'order allocation belongs inside variable costs; channel advertising is never subtracted here'
     },
     sourcePeriods: providers.map(provider => ({ provider, status: 'unverified', reason: 'no_trusted_order_period_contract' })),
+    sourceObservations: summarizeOrderSourceObservations(retainedRows),
     financialStatusCohorts: STATUSES.map(financialStatus => ({ financialStatus, orders: cohorts[financialStatus], cancelledOrders: cancelledCohorts[financialStatus], recordedPaidOrRefunded: PAID_OR_REFUNDED.has(financialStatus), collectedCash: null })),
     groups: [...groups.values()].map(group => {
       const monetary = group.currency !== null, net = group.values.netTotal, covered = group.costCoveredNet;

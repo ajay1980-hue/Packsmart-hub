@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { AGENT_DEFINITIONS, recordAgentRun, runCommander } from './agents.mjs';
-import { CONNECTORS } from './connection-centre.mjs';
+import { CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadHold, orderReadHeld, shopifyOrderReadBudgetExhausted } from './connection-centre.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { addAudit, recordWork } from './events.mjs';
 import { marketingPlannerCycle } from './marketing.mjs';
@@ -168,6 +168,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   let timer = null, running = false, stopped = false, started = false, wakePending = false;
   const status = { workerId, running:false, lastTickAt:null, lastError:null, processed:0, failed:0, deadLettered:0,
     pollCalls:0, emptyPolls:0, pollErrors:0, backoffMs:baseIntervalMs, nextPollAt:null };
+  const claimNotAdmitted = Symbol('claimNotAdmitted');
 
   function clearPoll() {
     if (timer !== null) cancelTimeout(timer);
@@ -344,8 +345,35 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     return queued;
   }
 
+  async function admitClaim(job) {
+    // Use only the authoritative claim fields. Invalid fence values must never
+    // reach tenant state, credential decoding, or a conditional job update.
+    if (!job || typeof job !== 'object' || Array.isArray(job) || job.status !== 'running' || job.worker_id !== workerId
+      || typeof job.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(job.id)
+      || typeof job.workspace_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(job.workspace_id)
+      || !Number.isSafeInteger(job.attempts) || job.attempts < 1
+      || typeof job.lease_until !== 'string' || !Number.isFinite(Date.parse(job.lease_until)) || Date.parse(job.lease_until) <= now()) {
+      status.lastError = 'AGENT_JOB_CLAIM_INVALID';
+      return false;
+    }
+    const validMax = Number.isSafeInteger(job.max_attempts) && job.max_attempts >= 1 && job.max_attempts <= 10;
+    if (validMax && job.attempts <= job.max_attempts) return true;
+    const code = validMax ? 'AGENT_LEASE_ATTEMPTS_EXHAUSTED' : 'AGENT_JOB_CLAIM_INVALID';
+    status.lastError = code;
+    try {
+      // Older stores may reclaim expired leases beyond the attempt ceiling.
+      // Close only this live claim; null/uncertain writes prove no completion.
+      const finished = await store.finishAgentJob(job, { status:'dead_letter', result:job.result ?? null,
+        errorCode:code, completedAt:new Date(now()).toISOString() });
+      if (finished) { status.failed++; status.deadLettered++; }
+    } catch { /* Leave an uncertain closure for durable lease recovery. */ }
+    return false;
+  }
+
   async function execute(job) {
     return withWorkspaceLock(job.workspace_id || job.workspaceId, async () => {
+      // A claim can expire while waiting behind another workspace operation.
+      if (!await admitClaim(job)) return claimNotAdmitted;
       const workspaceId = job.workspace_id || job.workspaceId;
       const state = await store.get(workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { code:'WORKSPACE_NOT_FOUND' });
@@ -389,10 +417,37 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         result = { runId:run.id, status:run.status, workStatus:run.workStatus, approvalId:run.approvalId || null, routedAgents:run.routedAgents || [], ai:run.ai, externalWrites:false };
       } else if (job.type === 'connection_sync') {
         const provider = job.provider || payload.provider;
-        const sync = await monitoredSync(state, integrations, provider, { automatic:true, retry:false, areas:Array.isArray(payload.areas) ? payload.areas : undefined });
+        const previousHold = shopifyOrderReadHold(state, provider, integrations);
+        let sync;
+        try {
+          sync = await monitoredSync(state, integrations, provider, { automatic:true, retry:false, areas:Array.isArray(payload.areas) ? payload.areas : undefined });
+        } catch (error) {
+          if (!isShopifyOrderSourceFailure(provider, error.code)) throw error;
+          const hold = shopifyOrderReadHold(state, provider, integrations);
+          let outcome = { status: 'configuration_changed', durable: false };
+          if (hold && previousHold?.code === hold.code && JSON.stringify(previousHold.binding) === JSON.stringify(hold.binding)) outcome = { status: 'already_held', durable: true };
+          else if (hold) {
+            try {
+              const leaseUntil = Date.parse(job.lease_until);
+              if (job.status !== 'running' || job.worker_id !== workerId || !Number.isFinite(leaseUntil) || leaseUntil <= now()) throw Object.assign(new Error('Job lease is no longer current'), { code: 'AGENT_JOB_LEASE_EXPIRED' });
+              // Only a newly established structural hold gets this one failure
+              // save. The successful path keeps its existing single save.
+              await store.save(workspaceId, state);
+              outcome = { status: 'persisted', durable: true };
+            } catch (persistenceError) {
+              outcome = { status: 'not_confirmed', durable: false, persistenceErrorCode: safeCode(persistenceError),
+                limitation: 'The order-read hold could not be confirmed saved. This job will not retry the provider; automatic checks in other workers are not confirmed paused.' };
+              status.lastError = 'SHOPIFY_ORDER_HOLD_PERSISTENCE_UNCONFIRMED';
+            }
+          }
+          throw Object.assign(error, { nonRetryable: true, orderReadHoldOutcome: outcome });
+        }
         result = { provider, status:sync.status, failedAreas:sync.failedAreas || [], externalWrites:false };
       } else if (job.type === 'connection_doctor') {
         result = await runConnectionDoctor(state, { integrations, readSync:monitoredSync, save:()=>store.save(workspaceId,state), now:new Date() });
+        // The job's fenced completion is enough evidence for an unchanged held
+        // check. Do not turn its no-op into another full workspace save.
+        if (!result.changed && (orderReadHeld(state, 'shopify', undefined, integrations) || shopifyOrderReadBudgetExhausted(state, integrations))) return result;
       } else if (job.type === 'marketing_plan') {
         const plan = marketingPlannerCycle(state, { now:new Date(), source:'agent-ops' });
         result = { created:Boolean(plan.created), campaignId:plan.campaign?.id || null, reason:plan.reason || null, externalWrites:false };
@@ -407,15 +462,29 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   }
 
   async function process(job) {
-    if (job.type === 'objective_prepare') return processObjective(job);
+    if (job?.type === 'objective_prepare') return processObjective(job);
+    if (!await admitClaim(job)) return;
     try {
       const result = await execute(job);
+      if (result === claimNotAdmitted) return;
       await store.finishAgentJob(job, { status:'succeeded', result, errorCode:null, completedAt:nowIso() });
       status.processed++;
     } catch (error) {
       const code = safeCode(error);
       const attempts = Number(job.attempts || 0);
-      if (blocked(error)) {
+      if (job.type === 'connection_sync' && isShopifyOrderSourceFailure(job.provider || job.payload?.provider, code)) {
+        let finished;
+        try {
+          finished = await store.finishAgentJob(job, { status: 'dead_letter', errorCode: code, completedAt: nowIso(),
+            result: { provider: 'shopify', externalWrites: false, orderReadHold: error.orderReadHoldOutcome || { status: 'not_confirmed', durable: false } } });
+        } catch { /* An uncertain close cannot authorize a retry or a success claim. */ }
+        if (!finished) {
+          status.lastError = 'SHOPIFY_ORDER_HOLD_JOB_CLOSURE_UNCONFIRMED';
+          console.warn(JSON.stringify({ event: 'agent_job_closure_unconfirmed', jobId: job.id, workspaceId: job.workspace_id || job.workspaceId, code: status.lastError }));
+          return;
+        }
+        status.deadLettered++;
+      } else if (blocked(error)) {
         await store.finishAgentJob(job, { status:'blocked', errorCode:code, completedAt:nowIso() });
       } else if (transient(error) && attempts < Number(job.max_attempts || job.maxAttempts || 3)) {
         const backoff = 15000 * 2 ** Math.max(0, attempts - 1);

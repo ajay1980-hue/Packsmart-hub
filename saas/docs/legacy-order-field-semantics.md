@@ -1,8 +1,12 @@
 # Legacy order field semantics correction
 
 Prepared locally above PR81 commit `8bdb685296fbe43a3edffcb55fb374180223a390`.
-No ingestion, source-data migration, database schema, reporting mirror,
-permissions, recurring work or production request is changed.
+This document records that correction and its then-deferred design. The later
+bounded source-capture implementation is specified and measured in
+[shopify-order-source-capture.md](shopify-order-source-capture.md); its final
+encoding supersedes the preliminary storage estimates below.
+That correction did not change ingestion, source-data migration, database
+schema, reporting mirrors, permissions, recurring work or production requests.
 
 ## Correction
 
@@ -144,5 +148,6 @@ second bootstrap. Independent review cleared the CSV/documentation findings
 and found no remaining actionable source issue.
 
 No live PostgreSQL, browser screenshot, container, remote CI or deployment check
-was run or claimed. The ingestion design above remains unimplemented and needs
-separate scope review.
+was run or claimed for that correction. Its preliminary ingestion design was
+deferred for separate scope review; the later implementation is documented in
+the linked source-capture specification.

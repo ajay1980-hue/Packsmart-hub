@@ -14,6 +14,10 @@ import { deriveImpact } from '../lib/impact-engine.mjs';
 import { deriveLearning } from '../lib/learning-engine.mjs';
 import { deriveBusinessGraph } from '../lib/business-graph.mjs';
 import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary } from '../lib/business-outcomes.mjs';
+import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
+import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
+import { createExperiment } from '../lib/revenue-engine.mjs';
+import { inspectShopifyOrderSource } from '../lib/shopify-order-source.mjs';
 
 const WORKSPACE = 'dispatch-safety-fixture';
 const PRODUCT = 'gid://shopify/Product/71';
@@ -1449,4 +1453,154 @@ test('a genuinely qualified historical outcome stays separate from legacy graph 
   assert.equal(result.code, 'WRITE_POLICY_EVIDENCE_REQUIRED'); assertBlocked(result, f.mutations);
   assert.equal(f.calls.length, 0); assert.equal(f.write.dispatchClaim, undefined);
   assert.equal(deriveImpact(f.state, { now, outcomeSnapshot }).qualifiedOutcomeGroups[0].amount, '123.456789', 'blocking a forecast does not erase qualified descriptive history');
+});
+
+test('exact source capture stays descriptive across operations, selected outcome review and profit-first dispatch', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase', policy: { limits: { profitFirst: true, currency: 'GBP' } } });
+  const now = new Date(), at = offset => new Date(now.getTime() + offset).toISOString(), day = 86400000;
+  const experiment = createExperiment(f.state, { kind: 'holdout', title: 'Independent historical contribution measurement' }, f.state.users[0].id);
+  experiment.status = 'completed';
+  const measurement = prepareExperimentOutcomeMeasurement({ expectedRevision: 0, amount: '123.456789', currency: 'GBP',
+    window: { startsAt: at(-7 * day), endsAt: at(-2 * day) },
+    coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'holdout' },
+    observedAt: at(-day), report: { description: 'Separately retained historical measurement report', costsComplete: true }
+  }, { workspaceId: WORKSPACE, experimentId: experiment.id, actorId: f.state.users[0].id, now: at(-3600000), previousMeasurement: null });
+  experiment.outcomeMeasurement = measurement;
+  const outcome = createBusinessOutcomeCandidate({
+    source: { type: 'experiment_measurement', experimentId: experiment.id, measurementRevision: measurement.revision, measurementDigest: measurement.digest },
+    ...Object.fromEntries(['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'links'].map(key => [key, measurement[key]])),
+    verification: { kind: 'owner_attestation', actorId: f.state.users[0].id, verifiedAt: at(-1800000), measurementDigest: measurement.digest }
+  }, { workspaceId: WORKSPACE, now: now.toISOString() });
+  const head = { schema: 'runvara-outcome-head/v1', workspaceId: WORKSPACE, outcomeId: outcome.outcomeId, revision: outcome.revision,
+    versionId: outcome.versionId, digest: outcome.digest, status: 'published', publicationId: 'source-review-publication',
+    committedAt: at(-900000), commitRevision: 'source-review-commit' };
+  const publication = { head, version: outcome };
+  const publicationBoundary = createOutcomePublicationBoundary({ workspaceId: WORKSPACE, snapshotId: 'source-review-snapshot', complete: true,
+    expectedOutcomeCount: 1, resolveCommittedPublication: ({ workspaceId, outcomeId }) => workspaceId === WORKSPACE && outcomeId === outcome.outcomeId ? publication : null });
+  const outcomeSnapshot = { versions: [outcome], publicationBoundary };
+  const independentEvidence = structuredClone({ measurement, publication });
+
+  f.state.products[0].variants = [{ id: 'source-review-variant', sku: 'SOURCE-REVIEW', price: 100, inventory: 80 }];
+  f.state.economics = { 'SOURCE-REVIEW': { landed: 10, packing: 0, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 } };
+  const money = amount => ({ shopMoney: { amount, currencyCode: 'GBP' } });
+  f.hooks.fetch = async call => {
+    assert.equal(call.mutation, false, 'This interaction must never mutate a provider');
+    assert.match(call.body.query, /query PacksmartOpsOrders/);
+    return Response.json({ data: { orders: { nodes: [{ id: 'gid://shopify/Order/source-review', name: '#source-review',
+      createdAt: at(-60000), updatedAt: at(-60000), cancelledAt: null, displayFinancialStatus: 'PAID', displayFulfillmentStatus: 'FULFILLED',
+      totalPriceSet: money('100.000001'), currentTotalPriceSet: money('90.125000'), currentTotalTaxSet: money('10.125000'),
+      currentTotalDiscountsSet: money('9.875001'), currentShippingPriceSet: money('0.000000'),
+      lineItems: { nodes: [{ id: 'gid://shopify/LineItem/source-review', name: 'Recorded source line', sku: 'SOURCE-REVIEW', quantity: 1,
+        originalTotalSet: money('100.000001'), discountedTotalSet: money('90.125000') }], pageInfo: { hasNextPage: false } }
+    }], pageInfo: { hasNextPage: false, endCursor: null } } } }, { headers: { 'X-Shopify-API-Version': '2026-07' } });
+  };
+  const sync = await f.service.syncShopify(f.state, { areas: ['orders'] });
+  assert.equal(sync.status, 'connected'); assert.equal(sync.orderReadAttempt.status, 'complete'); assert.equal(sync.orderReadHold, null);
+  assert.equal(f.calls.length, 1); assert.equal(f.mutations.length, 0);
+  const callsAfterCapture = f.calls.length;
+  assert.equal(f.state.orders.length, 1);
+  const captured = f.state.orders[0];
+  assert.equal(captured.total, '100.000001'); assert.equal(captured.currentTotal, '90.125000');
+  assert.equal(captured.currentTax, '10.125000'); assert.equal(captured.tax, null); assert.equal(captured.refunds, null);
+  assert.equal(captured.discounts, '9.875001'); assert.equal(captured.shippingCharged, '0.000000');
+  assert.equal(captured.lineItems[0].gross, '100.000001'); assert.equal(captured.lineItems[0].net, '90.125000');
+  const source = inspectShopifyOrderSource(f.state, captured, WORKSPACE);
+  assert.equal(source.format, 'source'); assert.equal(source.scopeValid, true); assert.equal(source.manifestStatus, 'retained');
+  for (const field of ['total', 'currentTotal', 'currentTax', 'discounts', 'shippingCharged', 'lineItems/0/gross', 'lineItems/0/net']) assert.equal(source.currencyFor(field), 'GBP');
+  const manifests = f.state.channelData.shopify.orderReads.manifests, manifest = manifests[captured.sourceReadRef];
+  assert.equal(Object.keys(manifests).length, 1); assert.equal(manifest.ordersRead, 1); assert.equal(manifest.linesRead, 1);
+  assert.equal(manifest.pages.length, 1); assert.equal(manifest.pages[0].apiVersion, '2026-07');
+  assert.equal(manifest.queryExhaustion, 'observed_exhausted'); assert.equal(manifest.allReturnedLinePagesExhausted, true);
+  assert.equal(manifest.sourcePeriod, 'unverified');
+  assert.deepEqual({ measurement: experiment.outcomeMeasurement, publication }, independentEvidence, 'capture cannot supply or replace a historical measurement');
+
+  const operations = deriveOperations(f.state, { now }), report = operations.last30d.importedOrderEvidence;
+  assert.equal(operations.averageMargin, 90, 'complete catalogue costs can look favorable without historical financial qualification');
+  assert.equal(report.groups.length, 1);
+  const group = report.groups[0];
+  assert.equal(group.recordedAmounts.netTotal.knownSubtotal, '90.125');
+  assert.equal(group.recordedAmounts.netTotalExCurrentTax.knownSubtotal, '80');
+  assert.equal(group.recordedAmounts.refunds.knownCount, 0); assert.equal(group.recordedAmounts.refunds.unknownCount, 1);
+  assert.equal(group.recordedAmounts.refunds.completeCohortTotal, null, 'the original/current difference is not a recorded refund');
+  assert.equal(group.costNumbers.completeOrders, 1); assert.equal(group.costNumbers.completeCohort, true);
+  assert.equal(group.financialQualification.qualifiedOrders, 0);
+  assert.equal(group.financialQualification.collectedCash, null); assert.equal(group.financialQualification.contributionProfit, null);
+  assert.equal(operations.last30d.revenue, null); assert.equal(operations.last30d.operatingProfit, null);
+  assert.equal(report.completeness.sourcePeriod, 'unverified');
+  assert.equal(report.sourceObservations.capturedOrders, 1); assert.equal(report.sourceObservations.retainedManifests, 1);
+  assert.equal(operations.last30d.refundedOrders, 0);
+
+  // Even plausible exact source amounts copied into reviewed legacy flags do
+  // not create a causal result or replace the independent typed publication.
+  experiment.impact = { verified: true, qualified: true, realised: true,
+    incrementalRevenue: captured.currentTotal, incrementalContribution: group.recordedAmounts.netTotalExCurrentTax.knownSubtotal };
+  const impact = deriveImpact(f.state, { now: now.toISOString(), outcomeSnapshot });
+  const learning = deriveLearning(f.state, { now: now.toISOString(), outcomeSnapshot });
+  assert.equal(impact.qualifiedOutcomeCount, 1); assert.equal(impact.qualifiedOutcomeGroups[0].amount, '123.456789');
+  assert.equal(impact.verified.incrementalContribution, null);
+  assert.deepEqual(learning.priors, []); assert.equal(learning.qualifiedOutcomeGroups[0].usableForGuidance, false);
+  const graph = deriveBusinessGraph(f.state), legacyOutcomes = graph.nodes.filter(row => row.type === 'outcome');
+  assert.equal(graph.summary.legacyReviewedOutcomeRecords, 1); assert.equal(graph.summary.verifiedOutcomeRecords, 0);
+  assert.equal(legacyOutcomes.length, 1);
+  assert.deepEqual(Object.fromEntries(['qualification', 'verified', 'qualified', 'realised'].map(key => [key, legacyOutcomes[0].attributes[key]])),
+    { qualification: 'legacy_unqualified', verified: false, qualified: false, realised: false });
+  const outcomeEdges = graph.edges.filter(edge => edge.from === legacyOutcomes[0].id || edge.to === legacyOutcomes[0].id);
+  assert.equal(outcomeEdges.length, 1); assert.equal(outcomeEdges[0].relation, 'has_recorded_outcome');
+  assert.equal(graph.nodes.find(node => node.id === outcomeEdges[0].from).type, 'experiment');
+  assert.equal(outcomeEdges[0].to, legacyOutcomes[0].id, 'no source/order-to-outcome relationship is inferred');
+  await f.persist();
+
+  let reviewCalls = 0;
+  const reviewStore = createBusinessOutcomePersistence({ now: () => now, request: async (pathname, options) => {
+    reviewCalls++;
+    assert.equal(pathname, 'rpc/runvara_read_business_outcome_review'); assert.equal(options.method, 'POST');
+    assert.equal(options.maxResponseBytes, 128 * 1024);
+    assert.deepEqual(JSON.parse(options.body), { p_workspace_id: WORKSPACE, p_experiment_id: experiment.id });
+    const persisted = f.database.states.get(WORKSPACE), selected = persisted.revenueEngine.experiments.find(row => row.id === experiment.id);
+    return structuredClone({ workspaceId: WORKSPACE, workspaceRevision: persisted._revision,
+      experiment: { id: selected.id, title: selected.title, status: selected.status }, measurement: selected.outcomeMeasurement,
+      current: { workspace_id: WORKSPACE, outcome_id: head.outcomeId, version_id: head.versionId,
+        version: { workspace_id: WORKSPACE, outcome_id: head.outcomeId, revision: outcome.revision, version_id: head.versionId,
+          digest: outcome.digest, status: outcome.status, payload: outcome, publication_id: head.publicationId,
+          intent_digest: fingerprint('source-review-intent'), committed_at: head.committedAt, commit_revision: head.commitRevision } } });
+  } });
+  // An explicit test inspection of the existing review RPC, not new app I/O.
+  const selected = await reviewStore.review(WORKSPACE, experiment.id), projection = selected.relationships;
+  assert.equal(reviewCalls, 1); assert.equal(f.calls.length, callsAfterCapture);
+  assert.deepEqual(selected.measurement, independentEvidence.measurement);
+  assert.deepEqual(selected.currentPublication, independentEvidence.publication);
+  assert.equal(selected.currentPublication.version.amount, '123.456789');
+  assert.equal(projection.publication.versionDigest, outcome.digest); assert.equal(projection.publication.draftDigest, measurement.digest);
+  assert.equal(projection.publication.draftRelationship, 'matches_publication');
+  assert.equal(projection.publication.qualification, 'owner_attested_measurement');
+  assert.deepEqual(projection.nodes.map(node => node.type), ['experiment_reference', 'published_measurement_reference']);
+  assert.deepEqual(projection.edges.map(({ from, to, relation, basis }) => ({ from, to, relation, basis })), [{
+    from: projection.nodes[1].id, to: projection.nodes[0].id, relation: 'measurement_recorded_for_experiment', basis: 'same_review_snapshot'
+  }]);
+  assert.ok(projection.nodes.every(node => node.canonicalGraphRef.status === 'unresolved' && node.canonicalGraphRef.reason === 'separate_graph_not_resolved'));
+  assert.ok(projection.nodes.every(node => !graph.nodes.some(canonical => canonical.id === node.id)));
+  assert.equal(projection.scope, 'selected_experiment_only');
+  assert.deepEqual(projection.coverage, { selectedExperimentConfirmed: true, currentHeadChecked: true, wholeGraphSynchronized: false,
+    otherOutcomesChecked: false, crossOutcomeComparabilityChecked: false });
+  assert.deepEqual(projection.safeguards, { causalAttribution: false, forecastingAuthorized: false, learningAuthorized: false,
+    executionAuthorized: false, rawIdentifiersIncluded: false, amountsIncluded: false });
+  for (const sourceId of [captured.id, captured.sourceReadRef, f.write.id, f.state.businessObjectives[0].id]) assert.equal(JSON.stringify(projection).includes(JSON.stringify(sourceId)), false);
+
+  f.write.financialEvidence = { verified: true, grossMarginPercent: operations.averageMargin, contributionProfitDelta: 80,
+    importedOrderEvidence: report, selectedOutcomeRelationships: projection, qualifiedOutcomeGroups: impact.qualifiedOutcomeGroups };
+  f.state.approvals[0].financialImpact = 80;
+  await f.persist();
+  const evidence = state => ({ orders: state.orders, economics: state.economics, orderReads: state.channelData.shopify.orderReads,
+    policy: state.businessObjectives, measurement: state.revenueEngine.experiments.find(row => row.id === experiment.id).outcomeMeasurement,
+    publication, selected });
+  const before = structuredClone(evidence(f.state)), durableBefore = structuredClone(evidence(await f.replica.get(WORKSPACE)));
+  const savesBeforeDispatch = f.durableClaims.length;
+  const result = await f.observe();
+  assert.equal(result.code, 'WRITE_POLICY_EVIDENCE_REQUIRED'); assertBlocked(result, f.mutations);
+  assert.equal(f.calls.length, callsAfterCapture); assert.equal(reviewCalls, 1);
+  assert.equal(f.write.dispatchClaim, undefined); assert.equal(f.durableClaims.length, savesBeforeDispatch);
+  const durableAfter = await f.replica.get(WORKSPACE);
+  assert.equal(durableAfter.connectionWrites[0].dispatchClaim, undefined);
+  assert.deepEqual(evidence(f.state), before); assert.deepEqual(evidence(durableAfter), durableBefore);
+  assert.equal(deriveImpact(f.state, { now: now.toISOString(), outcomeSnapshot }).qualifiedOutcomeGroups[0].amount, '123.456789');
 });

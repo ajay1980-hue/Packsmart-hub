@@ -210,7 +210,7 @@ export function modifyApproval(state, id, body, actor) {
   return item;
 }
 
-export function dueRules(state, now = new Date()) {
+export function dueRules(state, now = new Date(), integrations = null) {
   ensureControl(state);
   if (!state.autopilot.enabled) return [];
   return AUTOMATION_DEFINITIONS.filter(rule => {
@@ -227,14 +227,14 @@ export function dueRules(state, now = new Date()) {
     if (runs.filter(item => item.startedAt.slice(0, 10) === now.toISOString().slice(0, 10)).length >= policy.maxRunsPerDay) return false;
     const last = runs[0];
     if (rule.id === 'channelSync' && state.connectionSettings && Object.keys(state.connectionSettings).length) {
-      return Object.keys(CONNECTORS).some(provider => connectionDue(state, provider, now) && (state.connections?.some(item => item.provider === provider || (provider === 'ebay' && item.provider === 'ebay_oauth')) || state.integrationStatus?.[provider]?.lastSyncAt));
+      return Object.keys(CONNECTORS).some(provider => connectionDue(state, provider, now, integrations) && (state.connections?.some(item => item.provider === provider || (provider === 'ebay' && item.provider === 'ebay_oauth')) || state.integrationStatus?.[provider]?.lastSyncAt));
     }
     return !last || now.getTime() - Date.parse(last.startedAt) >= policy.intervalMinutes * 60000;
   });
 }
 
-export function claimAutomation(state, ruleId, now = new Date()) {
-  const rule = dueRules(state, now).find(item => item.id === ruleId);
+export function claimAutomation(state, ruleId, now = new Date(), integrations = null) {
+  const rule = dueRules(state, now, integrations).find(item => item.id === ruleId);
   if (!rule) return null;
   const run = { id: `automation_${crypto.randomUUID()}`, ruleId, status: 'IN PROGRESS', startedAt: now.toISOString(),
     leaseUntil: new Date(now.getTime() + 10 * 60000).toISOString(), risk: 'low', spend: 0, evidence: [] };

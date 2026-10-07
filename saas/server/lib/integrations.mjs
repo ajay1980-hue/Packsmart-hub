@@ -5,7 +5,9 @@ import { decryptCredentials } from './security.mjs';
 import { connectorMethods } from './connector-oauth.mjs';
 import { dispatchConnectionMutation } from './connection-dispatch.mjs';
 import { metaMethods } from './meta-commerce.mjs';
-import { connectionSettings, connectionError } from './connection-centre.mjs';
+import { connectionSettings, connectionError, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, completeShopifyOrderReadBudget } from './connection-centre.mjs';
+import { assertShopifySourceScope, captureShopifyOrderMoney, inspectShopifyOrderPage, prepareShopifyOrderRead,
+  recordShopifyOrderReadFailure, shopifyOrderSourceError, sourceResponseVersion, stageShopifyOrderRead, validateRetainedShopifyOrderState } from './shopify-order-source.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -211,7 +213,9 @@ function customerEmailHash(value) {
   return normalized ? crypto.createHash('sha256').update(normalized).digest('hex') : null;
 }
 
-function mapOrder(order) {
+// Used only to measure the pre-cutover encoding budget; never persisted for a
+// newly captured source read. Source values below retain their exact spelling.
+function legacyOrderEncoding(order) {
   const originalTotal = order.totalPriceSet?.shopMoney || order.currentTotalPriceSet?.shopMoney || {};
   const currentTotal = order.currentTotalPriceSet?.shopMoney || originalTotal;
   const gross = Number(originalTotal.amount || 0);
@@ -260,6 +264,10 @@ export function mergeProviderRecords(existing = [], provider, incoming = []) {
     seen.add(item.id);
     const old = previous.get(item.id);
     const merged = { ...old, ...item };
+    // Refreshes without a newly captured read cannot inherit an old source
+    // label. Owner cost edits use their separate allowlisted route.
+    if (!Object.hasOwn(item, 'sourceReadRef')) delete merged.sourceReadRef;
+    if (!Object.hasOwn(item, 'sourceReadRef') || !Object.hasOwn(item, 'sourceCurrencyOverrides')) delete merged.sourceCurrencyOverrides;
     // An API window is not a deletion feed. Preserve older orders and explicitly
     // entered business costs; source order totals/status still refresh normally.
     for (const field of ['actualShippingCost', 'paymentFees', 'channelFees', 'advertisingCost', 'otherVariableCosts']) {
@@ -356,9 +364,41 @@ function mapEbayOAuthListing(item, offer, adByListingId) {
   };
 }
 
-async function responseJson(response, label) {
+async function orderSourceResponseJson(response) {
+  const maximum = 2097152;
+  const declared = response.headers?.get?.('content-length');
+  if (declared && /^\d+$/.test(declared) && Number(declared) > maximum) {
+    try { await response.body?.cancel?.(); } catch {}
+    throw shopifyOrderSourceError('RESPONSE_LIMIT');
+  }
+  let encoded;
+  if (response.body?.getReader) {
+    const reader = response.body.getReader(), chunks = [];
+    let size = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > maximum) { try { await reader.cancel(); } catch {} throw shopifyOrderSourceError('RESPONSE_LIMIT'); }
+        chunks.push(Buffer.from(value));
+      }
+      encoded = Buffer.concat(chunks, size).toString('utf8');
+    } finally { reader.releaseLock(); }
+  } else {
+    encoded = await response.text();
+    if (Buffer.byteLength(encoded) > maximum) throw shopifyOrderSourceError('RESPONSE_LIMIT');
+  }
+  try { return JSON.parse(encoded); }
+  catch { if (!response.ok) return {}; throw shopifyOrderSourceError('RESPONSE_INVALID'); }
+}
+async function responseJson(response, label, sourceRead = false) {
   let data;
-  try { data = await response.json(); } catch { throw integrationError(`${label} returned an invalid response`); }
+  try { data = sourceRead ? await orderSourceResponseJson(response) : await response.json(); }
+  catch (error) {
+    if (sourceRead) { if (error.nonRetryable) throw error; throw shopifyOrderSourceError('RESPONSE_INVALID'); }
+    throw integrationError(`${label} returned an invalid response`);
+  }
   if (!response.ok) {
     const message = response.status === 401 || response.status === 403
       ? `${label} authentication failed`
@@ -530,7 +570,7 @@ export class IntegrationService {
     }
   }
 
-  async shopifyGraphql(query, variables, config, { dispatch } = {}) {
+  async shopifyGraphql(query, variables, config, { dispatch, onReadResponse } = {}) {
     const version = String(config.apiVersion || '2026-07');
     if (!/^20\d\d-(01|04|07|10)$/.test(version)) throw integrationError('Invalid Shopify API version', 503, 'SHOPIFY_CONFIG_INVALID');
     const mutation = !/^\s*query\b/.test(query);
@@ -548,11 +588,28 @@ export class IntegrationService {
       signal: AbortSignal.timeout(20000)
     });
     const response = mutation ? await dispatchConnectionMutation(dispatch, { provider: 'shopify', phase: 'shopify_mutation', method: 'POST', url, body }, submit) : await submit();
-    const payload = await responseJson(response, 'Shopify');
+    const payload = await responseJson(response, 'Shopify', !mutation && Boolean(onReadResponse));
+    if (!mutation && onReadResponse) {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload) || (payload.errors !== undefined && !Array.isArray(payload.errors))) throw shopifyOrderSourceError('RESPONSE_INVALID');
+      assertShopifySourceScope(payload, config.workspaceId);
+    }
     if (Array.isArray(payload.errors) && payload.errors.length) {
-      const denied = payload.errors.some(error => error.extensions?.code === 'ACCESS_DENIED' || /access denied|permission/i.test(error.message || ''));
+      if (!mutation && onReadResponse) {
+        const codes = payload.errors.map(error => error?.extensions?.code);
+        if (codes.includes('MAX_COST_EXCEEDED')) throw shopifyOrderSourceError('QUERY_COST_LIMIT');
+        // Only explicit documented transient codes enter existing bounded
+        // retry paths. A throttle, including a mixed known-transient response,
+        // schedules a later retry rather than repeating the read in this call.
+        if (codes.every(code => ['THROTTLED', 'INTERNAL_SERVER_ERROR'].includes(code))) {
+          if (codes.includes('THROTTLED')) throw Object.assign(integrationError('Shopify order read is rate limited', 502, 'CONNECTION_RATE_LIMITED'), { upstreamStatus: 429, retryAfterMs: 60000 });
+          throw Object.assign(integrationError('Shopify order read encountered a temporary provider error', 502, 'SHOPIFY_GRAPHQL_TRANSIENT_ERROR'), { upstreamStatus: 503 });
+        }
+      }
+      const denied = payload.errors.some(error => error?.extensions?.code === 'ACCESS_DENIED' || /access denied|permission/i.test(error?.message || ''));
+      if (!mutation && onReadResponse && !denied) throw shopifyOrderSourceError('GRAPHQL_INCOMPLETE');
       throw integrationError('Shopify could not complete the requested read', 502, denied ? 'SHOPIFY_PERMISSION_REQUIRED' : 'SHOPIFY_GRAPHQL_ERROR');
     }
+    if (!mutation && onReadResponse) onReadResponse({ apiVersion: sourceResponseVersion(response.headers.get('x-shopify-api-version')) });
     return payload.data;
   }
 
@@ -572,19 +629,31 @@ export class IntegrationService {
   }
 
   async fetchShopifyOrders(config) {
-    const orders = [];
+    assertShopifySourceScope(config, config.workspaceId);
+    const orders = [], legacy = [], pages = [], identities = new Set(), cursors = new Set();
     let after = null;
+    const startedAt = new Date().toISOString();
     const cutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
+    const query = `created_at:>=${cutoff}`;
     for (let page = 0; page < 10; page += 1) {
-      const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query: `created_at:>=${cutoff}` }, config);
-      const connection = data?.orders;
-      if ((connection?.nodes || []).some(order => order.lineItems?.pageInfo?.hasNextPage)) throw integrationError('Order line coverage is incomplete; existing orders retained', 502, 'SHOPIFY_ORDER_LINE_COVERAGE_LIMIT');
-      orders.push(...(connection?.nodes || []).map(mapOrder));
-      if (!connection?.pageInfo?.hasNextPage) break;
-      if (page === 9) throw integrationError('Order coverage limit reached; existing orders retained', 502, 'SHOPIFY_ORDER_COVERAGE_LIMIT');
-      after = connection.pageInfo.endCursor;
+      let apiVersion = null;
+      const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query }, config, { onReadResponse: metadata => { apiVersion = metadata.apiVersion; } });
+      const connection = inspectShopifyOrderPage(data, config.workspaceId, after, cursors);
+      for (const raw of connection.nodes) {
+        const money = captureShopifyOrderMoney(raw, config.workspaceId);
+        if (identities.has(raw.id)) throw shopifyOrderSourceError('DUPLICATE_ORDER');
+        identities.add(raw.id);
+        const baseline = legacyOrderEncoding(raw);
+        legacy.push(baseline);
+        orders.push({ ...baseline, ...money.values, lineItems: baseline.lineItems.map((line, index) => ({ ...line, ...money.lines[index] })),
+          ...(money.sourceCurrencyOverrides ? { sourceCurrencyOverrides: money.sourceCurrencyOverrides } : {}) });
+      }
+      pages.push({ rows: connection.nodes.length, hasNextPage: connection.hasNextPage, cursorDigest: connection.cursorDigest, apiVersion });
+      if (!connection.hasNextPage) break;
+      if (page === 9) throw shopifyOrderSourceError('PAGE_LIMIT');
+      after = connection.cursor;
     }
-    return orders;
+    return prepareShopifyOrderRead(config, orders, pages, { query, startedAt, legacyBytes: Buffer.byteLength(JSON.stringify(legacy)) });
   }
 
   async fetchPublicShopifyProducts(state) {
@@ -619,41 +688,70 @@ export class IntegrationService {
 
   async syncShopify(state, { areas = connectionSettings(state, 'shopify').areas } = {}) {
     if (state?.connectionSettings?.shopify?.disconnected) throw connectionError('Reconnect Shopify before syncing.', 'CONNECTION_DISCONNECTED', 409);
+    const orderReadBinding = areas.includes('orders') ? shopifyOrderReadBinding(state, this) : null;
+    const recordReadFailure = error => {
+      if (orderReadBinding) error.orderReadBinding = orderReadBinding;
+      if (isShopifyOrderReadBindingCurrent(state, orderReadBinding, this)) recordShopifyOrderReadFailure(state, error, new Date().toISOString(), orderReadBinding);
+    };
+    if (areas.includes('orders')) {
+      try { validateRetainedShopifyOrderState(state); }
+      catch (error) { recordReadFailure(error); throw error; }
+    }
     const now = new Date().toISOString();
     if (this.shopifyConfigured(state)) {
       const config = this.shopifyConfig(state);
       if (config.mode === 'oauth') config.accessToken = (await this.connectorCredentials(state, 'shopify')).accessToken;
       const catalogue = areas.some(area => ['products', 'variants', 'inventory', 'prices'].includes(area));
-      const [products, orders, customers] = await Promise.all([
-        catalogue ? this.fetchShopifyProducts(config) : null,
-        areas.includes('orders') ? this.fetchShopifyOrders(config) : null,
-        areas.includes('customers') ? this.fetchShopifyCustomers(config) : null
-      ]);
-      if (products) state.products = mergeSelectedShopify(state.products || [], products, areas);
-      if (orders) state.orders = mergeProviderRecords(state.orders, 'shopify', orders);
-      if (customers) state.channelData = { ...state.channelData, shopify: { ...state.channelData?.shopify, customers } };
-      if (config.connection) {
-        config.connection.status = 'connected';
-        config.connection.lastSyncAt = now;
-        config.connection.lastError = null;
-        config.connection.metadata = {
-          ...(config.connection.metadata || {}),
-          shopDomain: config.domain,
-          itemCount: state.products.length
-        };
-      }
-      state.integrationStatus = {
-        ...(state.integrationStatus || {}),
-        shopify: {
-          ...state.integrationStatus?.shopify,
-          status: 'connected',
-          detail: `${areas.join(', ')} synced successfully.`,
-          source: 'admin-graphql',
-          lastSyncAt: now,
-          lastError: null
+      try {
+        const [products, orderRead, customers] = await Promise.all([
+          catalogue ? this.fetchShopifyProducts(config) : null,
+          areas.includes('orders') ? this.fetchShopifyOrders(config) : null,
+          areas.includes('customers') ? this.fetchShopifyCustomers(config) : null
+        ]);
+        if (orderRead && !isShopifyOrderReadBindingCurrent(state, orderReadBinding, this)) throw shopifyOrderSourceError('CONFIGURATION_CHANGED');
+        // No successful/partial candidate is installed before detached admission.
+        const candidate = structuredClone(state);
+        if (products) candidate.products = mergeSelectedShopify(candidate.products || [], products, areas);
+        if (orderRead) candidate.orders = mergeProviderRecords(candidate.orders, 'shopify', orderRead.orders);
+        if (customers) candidate.channelData = { ...candidate.channelData, shopify: { ...candidate.channelData?.shopify, customers } };
+        const candidateConnection = config.connection ? candidate.connections[state.connections.indexOf(config.connection)] : null;
+        if (config.connection) {
+          candidateConnection.status = 'connected';
+          candidateConnection.lastSyncAt = now;
+          candidateConnection.lastError = null;
+          candidateConnection.metadata = {
+            ...(candidateConnection.metadata || {}),
+            shopDomain: config.domain,
+            itemCount: (candidate.products || []).length
+          };
         }
-      };
-      return state.integrationStatus.shopify;
+        candidate.integrationStatus = {
+          ...(candidate.integrationStatus || {}),
+          shopify: {
+            ...candidate.integrationStatus?.shopify,
+            status: 'connected',
+            detail: `${areas.join(', ')} synced successfully.`,
+            source: 'admin-graphql',
+            lastSyncAt: now,
+            lastError: null,
+            ...(orderRead ? { orderReadHold: null, orderReadAttempt: { status: 'complete', at: orderRead.manifest.finishedAt, retryable: false } } : {})
+          }
+        };
+        if (orderRead) stageShopifyOrderRead(candidate, orderRead, state);
+        if (products) state.products = candidate.products;
+        if (orderRead) state.orders = candidate.orders;
+        if (customers || orderRead) state.channelData = candidate.channelData;
+        if (config.connection) Object.assign(config.connection, candidateConnection);
+        state.integrationStatus = candidate.integrationStatus;
+        // The same existing caller save commits admitted source orders and
+        // releases their consumed budget; uncertain completion retains the
+        // prior durable charge. Product/public-catalogue reads cannot reset it.
+        if (orderRead) completeShopifyOrderReadBudget(state, this, orderReadBinding);
+        return state.integrationStatus.shopify;
+      } catch (error) {
+        recordReadFailure(error);
+        throw error;
+      }
     }
 
     const publicCatalogueUrl = this.shopifyPublicCatalogueUrl(state);

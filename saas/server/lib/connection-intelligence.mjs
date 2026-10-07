@@ -1,4 +1,4 @@
-import { CONNECTORS, connectionCentre, connectionSettings } from './connection-centre.mjs';
+import { CONNECTORS, connectionCentre, connectionSettings, isShopifyOrderSourceFailure, shopifyOrderReadHold, recoveryFor } from './connection-centre.mjs';
 import { META_READ_SCOPES, META_CATALOG_SCOPES } from './meta-capabilities.mjs';
 
 export const customerChannels = ['shopify', 'ebay', 'meta', 'tiktok_shop', 'google_youtube', 'pinterest'];
@@ -34,14 +34,21 @@ export function expectedReadScopes(provider, areas) {
   return []; // eBay/TikTok grants are checked by their existing read adapters.
 }
 
-export function classifyConnectionIssue(state, provider, now = new Date(), record = recordFor(state, provider)) {
+export function classifyConnectionIssue(state, provider, now = new Date(), record = recordFor(state, provider), integrations = null) {
   const status = state.integrationStatus?.[provider] || {};
-  const code = String(state.connectionAuthAttention?.[provider]?.code || status.lastError || record?.lastError || '');
+  const hold = shopifyOrderReadHold(state, provider, integrations);
+  const currentCode = value => !hold && isShopifyOrderSourceFailure(provider, value) ? '' : value;
+  const code = String(currentCode(state.connectionAuthAttention?.[provider]?.code) || currentCode(status.lastError) || currentCode(record?.lastError) || '');
   const first = state.connectionFirstSync?.[provider];
-  const failures = Object.values(first?.failures || {});
+  const originalFailures = Object.values(first?.failures || {});
+  const failures = originalFailures.filter(item => hold || !isShopifyOrderSourceFailure(provider, item.code));
   const combined = [code, ...failures.map(item => item.code)].join(' ');
   const name = CONNECTORS[provider].name;
   const issue = (kind, severity, message, action = null, repair = null) => ({ kind, severity, message, action, repair });
+  if (hold) {
+    const recovery = recoveryFor(provider, { ...status, lastError: 'SHOPIFY_ORDER_SOURCE_REVIEW_REQUIRED' });
+    return issue('order_source_review', 'important', recovery.message, { action: recovery.action, label: recovery.label });
+  }
   if (/ACCOUNT_MISMATCH|ACCOUNT_UNCONFIRMED/.test(combined)) return issue('account_mismatch', 'critical', `The selected ${name} account could not be verified. Existing data is safe.`, { action: 'reconnect', label: `Reconnect the expected ${name} account` });
   if (/AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED|ACCESS_DENIED/.test(combined) || status.status === 'auth_expired') return issue('reconnect_required', 'critical', `${name} access needs renewing. Previously imported data is safe.`, { action: 'reconnect', label: `Reconnect ${name}` });
   if (provider === 'ebay' && state.ebay?.coverage?.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')) return issue('provider_restriction', 'important', 'eBay has not enabled Promoted Listings for this seller. Available commerce reads can continue; reconnecting will not remove this restriction.', { action: 'open', label: 'Review available eBay data' });
@@ -57,7 +64,7 @@ export function classifyConnectionIssue(state, provider, now = new Date(), recor
   if (/RATE_LIMIT/.test(combined) || upstream === 429) return issue('rate_limit', 'important', `${name} is limiting requests. Runvara will wait before retrying. Your data is safe.`, null, 'read');
   if (upstream >= 500) return issue('provider_unavailable', 'important', `${name} returned a temporary service error. Runvara will retry; your existing data is safe.`, null, 'read');
   if (status.transient || failures.some(f => f.transient) || /TIMEOUT|ETIMEDOUT|ECONNRESET/.test(combined)) return issue('temporary_read_failure', 'important', 'A read was temporarily interrupted. Runvara will retry safely.', null, 'read');
-  if (code || first?.status === 'partial' || first?.status === 'failed') return issue('read_failure', 'important', 'Some selected data could not be refreshed. Successful imports and previous data are retained.', { action: 'sync', label: 'Retry selected data' });
+  if (code || (first?.status === 'partial' || first?.status === 'failed') && (failures.length || !originalFailures.length)) return issue('read_failure', 'important', 'Some selected data could not be refreshed. Successful imports and previous data are retained.', { action: 'sync', label: 'Retry selected data' });
   return null;
 }
 
@@ -87,7 +94,7 @@ function readFreshnessEvidence(state, channel, now) {
     selectedAreaEvidence: measured && measured === areas.length ? 'all_recorded' : measured ? 'some_recorded' : 'none_recorded', areas };
 }
 
-export function connectionHealth(state, channel, readiness, { now = new Date(), persistence = {}, scheduler = {}, connectionRecord = recordFor(state, channel.id) } = {}) {
+export function connectionHealth(state, channel, readiness, { now = new Date(), persistence = {}, scheduler = {}, connectionRecord = recordFor(state, channel.id), integrations = null } = {}) {
   const record = connectionRecord, settings = channel.settings;
   const expected = expectedReadScopes(channel.id, settings.areas);
   const granted = record?.metadata?.grantedScopes;
@@ -100,7 +107,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
   const accessExpiry = !expiry.at ? 'unknown' : Date.parse(expiry.at) <= now.getTime() ? 'expired'
     : Date.parse(expiry.at) - now.getTime() < 24 * 3600000 ? 'expiring' : 'not_expiring';
   const expiresSoon = accessExpiry === 'expiring';
-  const issue = classifyConnectionIssue(state, channel.id, now, record);
+  const issue = classifyConnectionIssue(state, channel.id, now, record, integrations);
   const authIssue = issue && ['reconnect_required', 'account_mismatch', 'missing_scope'].includes(issue.kind);
   // Read failures must not hide a separate saved authorization failure. Keep
   // this precedence local to the projection; the recovery classifier is shared.
@@ -145,7 +152,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
     lastFailedSyncAt: timestampEvidence(channel.lastFailedSyncAt, now).at, dataFreshness, freshnessEvidence,
     activeReads: channel.history.filter(r => r.status === 'running').length,
     failedAreas: Object.keys(state.connectionFirstSync?.[channel.id]?.failures || {}),
-    nextRetryAt: settings.autoSync === true && !settings.disconnected ? timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at : null, webhookHealth: 'not_monitored',
+    nextRetryAt: settings.autoSync === true && !settings.disconnected && issue?.kind !== 'order_source_review' ? timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at : null, webhookHealth: 'not_monitored',
     persistenceHealth: persistence.primaryPersistence === false ? 'degraded' : persistence.primaryPersistence ? 'healthy' : 'not_measured',
     schedulerHealth: scheduler.lastError ? 'attention' : scheduler.lastTickAt ? 'running' : 'not_measured', schedulerLastTickAt: scheduler.lastTickAt || null };
 }
@@ -169,7 +176,7 @@ export function intelligentConnections(state, integrations, context = {}) {
   return connectionCentre(state, integrations).map(channel => {
     const readiness = registry.find(r => r.id === channel.id);
     const connectionRecord = channel.id === 'ebay' ? integrations.ebayConnection?.(state) : recordFor(state, channel.id);
-    return { ...channel, readiness, health: connectionHealth(state, channel, readiness, { ...context, connectionRecord }), firstSync: state.connectionFirstSync?.[channel.id] || null };
+    return { ...channel, readiness, health: connectionHealth(state, channel, readiness, { ...context, connectionRecord, integrations }), firstSync: state.connectionFirstSync?.[channel.id] || null };
   });
 }
 

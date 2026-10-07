@@ -46,7 +46,7 @@ import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
-import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
+import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
@@ -2223,7 +2223,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             if (action === 'writes') return { write: proposeConnectionWrite(state, provider, body, auth.user.id) };
             try {
               if (action === 'sync') {
-                state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
+                // A products-only retry cannot erase the budget of an uncertain
+                // automatic orders read. Validate explicit scope before reset.
+                const protectedOrderBudget = provider === 'shopify' && state.connectionDoctor?.shopify?.orderReadBinding;
+                const firstSync = state.connectionFirstSync?.[provider];
+                const retryFirstSync = firstSync && firstSync.status !== 'completed' && !body.areas;
+                const requestedAreas = protectedOrderBudget ? body.areas === undefined
+                  ? retryFirstSync ? Object.keys(firstSync.areas).filter(area => firstSync.areas[area] !== 'completed') : connectionSettings(state, provider).areas
+                  : validateAreas(provider, body.areas) : null;
+                if (!protectedOrderBudget || requestedAreas.includes('orders')) state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
                 if (state.connectionFirstSync?.[provider] && state.connectionFirstSync[provider].status !== 'completed' && !body.areas) {
                   const firstSync = await runFirstSync(state,provider,{integrations,readSync:monitoredSync,save:()=>store.save(auth.session.workspaceId,state),retryFailedOnly:true});
                   return {status:state.integrationStatus?.[provider],firstSync};
@@ -2294,6 +2302,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               return { status: result, error: null };
             } catch (error) {
               const failedStatus = {
+                ...state.integrationStatus?.shopify,
                 status: state.products?.length ? 'degraded' : 'error',
                 detail: 'The live Shopify read connection could not be verified; last known catalogue data was retained.',
                 lastSyncAt: state.integrationStatus?.shopify?.lastSyncAt || null,

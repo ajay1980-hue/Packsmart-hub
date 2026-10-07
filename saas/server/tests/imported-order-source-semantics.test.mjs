@@ -15,7 +15,7 @@ function frozen(value) {
   return value;
 }
 
-test('actual Shopify mapping retains a derived refund field and current-tax alias without conferring refund authority', async () => {
+test('new Shopify capture leaves refunds/original tax unknown while older normalized fields remain unqualified', async () => {
   const calls = [];
   const service = new IntegrationService({}, { fetchImpl: async (url, options) => {
     calls.push({ url, query: JSON.parse(options.body).query });
@@ -28,11 +28,13 @@ test('actual Shopify mapping retains a derived refund field and current-tax alia
       lineItems: { nodes: [{ id: `line-${id}`, sku: 'A', quantity: 1, originalTotalSet: money('100.00'), discountedTotalSet: money('100.00') }], pageInfo: { hasNextPage: false } }
     })), pageInfo: { hasNextPage: false, endCursor: null } } } });
   } });
-  const orders = await service.fetchShopifyOrders({ workspaceId, domain: 'fixture-shop.myshopify.com', apiVersion: '2026-07', accessToken: 'synthetic-test-only-token' });
+  const read = await service.fetchShopifyOrders({ workspaceId, domain: 'fixture-shop.myshopify.com', apiVersion: '2026-07', accessToken: 'synthetic-test-only-token' });
   assert.equal(calls.length, 1);
   assert.ok(calls.every(call => !/\bmutation\b/.test(call.query)));
-  assert.equal(orders[0].refunds, 20, 'existing mapper derives the field from totals');
-  assert.equal(orders[0].tax, orders[0].currentTax, 'existing tax field repeats current tax');
+  assert.equal(read.orders[0].refunds, null, 'a total difference is not a provider refund');
+  assert.equal(read.orders[0].tax, null, 'current tax is not original tax');
+  // Keep coverage of the persisted pre-cutover shape without backfilling it.
+  const orders = read.orders.map(({ sourceReadRef, sourceCurrencyOverrides, ...order }, index) => ({ ...order, refunds: index === 0 ? 20 : 0, tax: 20 }));
   const state = frozen({ ...seedWorkspaceState({}, { workspaceId }), orders });
   const before = JSON.stringify(state);
   const evidence = projectImportedOrderEvidence(state, { workspaceId, period, providers: ['shopify'] });

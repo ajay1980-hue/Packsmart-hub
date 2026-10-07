@@ -14,6 +14,7 @@ import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
 import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
+import { orderFinancialMirrorRow, orderReportingCurrency } from './shopify-order-source.mjs';
 import { planAutomationRetention, applyAutomationRetention, verifyAutomationArchivePayload,
   AUTOMATION_ARCHIVE_BATCH_SIZE, AUTOMATION_ARCHIVE_BATCH_BYTES, AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES } from './automation-retention.mjs';
 import {
@@ -1144,34 +1145,14 @@ class SupabaseStore {
       financial_status: order.financialStatus || 'UNKNOWN',
       fulfillment_status: order.fulfillmentStatus || 'UNKNOWN',
       total: numericOrNull(order.total) ?? 0,
-      currency: order.currency || 'GBP',
+      currency: orderReportingCurrency(order),
       ordered_at: order.createdAt,
       source_updated_at: order.updatedAt || order.createdAt,
       cancelled_at: order.cancelledAt || null,
       updated_at: new Date().toISOString()
     })), 'workspace_id,id');
 
-    await mirror('order_financials', (state.orders || []).map(order => ({
-      workspace_id: workspaceId,
-      order_id: order.id,
-      provider: order.provider || 'shopify',
-      financial_data: {
-        currentTotal: order.currentTotal,
-        discounts: order.discounts,
-        refunds: order.refunds,
-        tax: order.tax,
-        currentTax: order.currentTax,
-        shippingCharged: order.shippingCharged,
-        actualShippingCost: order.actualShippingCost,
-        paymentFees: order.paymentFees,
-        channelFees: order.channelFees,
-        advertisingCost: order.advertisingCost,
-        otherVariableCosts: order.otherVariableCosts,
-        paymentGatewayNames: order.paymentGatewayNames || []
-      },
-      line_items: order.lineItems || [],
-      updated_at: order.updatedAt || new Date().toISOString()
-    })), 'workspace_id,order_id');
+    await mirror('order_financials', (state.orders || []).map(order => orderFinancialMirrorRow(workspaceId, order)), 'workspace_id,order_id');
 
     await mirror('advertising_costs', (state.advertisingCosts || []).map(record => ({
       id: record.id,

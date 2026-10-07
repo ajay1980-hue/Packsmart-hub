@@ -127,7 +127,7 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
           quantity: 1,
           originalTotalSet: { shopMoney: { amount: '10.50', currencyCode: 'GBP' } },
           discountedTotalSet: { shopMoney: { amount: '9.50', currencyCode: 'GBP' } }
-        }] }
+        }], pageInfo: { hasNextPage: false } }
       }],
       pageInfo: { hasNextPage: false, endCursor: null }
     } } });
@@ -146,11 +146,12 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
   assert.equal(state.products[0].variants[0].sku, 'TAPE-BROWN');
   assert.equal(state.products[0].variants[0].inventory, 42);
   assert.equal(state.products[0].variants[0].image, 'https://cdn.shopify.com/product.jpg');
-  assert.equal(state.orders[0].total, 12.99);
-  assert.equal(state.orders[0].currentTotal, 9.99);
-  assert.equal(state.orders[0].refunds, 3);
-  assert.equal(state.orders[0].tax, 1.67);
-  assert.equal(state.orders[0].shippingCharged, 3.49);
+  assert.equal(state.orders[0].total, '12.99');
+  assert.equal(state.orders[0].currentTotal, '9.99');
+  assert.equal(state.orders[0].refunds, null);
+  assert.equal(state.orders[0].tax, null);
+  assert.equal(state.orders[0].currentTax, '1.67');
+  assert.equal(state.orders[0].shippingCharged, '3.49');
   assert.equal(state.orders[0].lineItems[0].sku, 'TAPE-BROWN');
   assert.ok(requests.every(request => request.options.method === 'POST'));
   assert.ok(requests.every(request => !/\bmutation\b/i.test(request.body.query)));

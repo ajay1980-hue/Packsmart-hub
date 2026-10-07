@@ -25,6 +25,73 @@ export function connectionSettings(state, provider) {
   const definition = connector(provider), saved = state.connectionSettings?.[provider] || {};
   return { revision: 0, disconnected: false, autoSync: true, frequencyMinutes: 30, areas: definition.defaults.slice(), permissionMode: 'read_only', ...saved };
 }
+export const isShopifyOrderSourceFailure = (provider, code) => provider === 'shopify' && /^SHOPIFY_ORDER_SOURCE_[A-Z0-9_]+$/.test(String(code || ''));
+// Bind the failure to the stable source contract. Bump sourcePolicy when query
+// or admission semantics change; token rotation and the moving cutoff are not
+// a new source and must not release a structural hold.
+export function shopifyOrderReadBinding(state, integrations = null, config = undefined) {
+  if (config === undefined && integrations?.shopifyConfig) {
+    try { config = integrations.shopifyConfig(state); } catch { return null; }
+  }
+  const connection = config && Object.hasOwn(config, 'connection') ? config.connection : (state.connections || []).find(item => item.provider === 'shopify');
+  const text = value => value === undefined || value === null ? '' : typeof value === 'string' && value.length <= 300 && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+  const binding = { schema: 'shopify-order-hold/v1', workspaceId: text(state.workspace?.id), provider: 'shopify',
+    domain: text(config?.domain || connection?.metadata?.shopDomain || integrations?.env?.SHOPIFY_STORE_DOMAIN)?.toLowerCase() ?? null,
+    connectionId: text(connection?.id), accountId: text(connection?.metadata?.shopId || connection?.metadata?.accountId),
+    apiVersion: text(config?.apiVersion || integrations?.env?.SHOPIFY_ADMIN_API_VERSION || '2026-07'),
+    sourcePolicy: 'shopify-orders-v1:90-day-created:10-pages:50-orders:100-lines' };
+  return binding.workspaceId && Object.values(binding).every(value => value !== null) ? Object.freeze(binding) : null;
+}
+export function isShopifyOrderReadBindingCurrent(state, binding, integrations = null) {
+  if (!binding || binding.schema !== 'shopify-order-hold/v1' || binding.provider !== 'shopify') return false;
+  const current = shopifyOrderReadBinding(state, integrations);
+  if (!current) return false;
+  if (Object.keys(binding).length !== Object.keys(current).length || Object.keys(binding).some(key => !Object.hasOwn(current, key))) return false;
+  const keys = integrations?.shopifyConfig ? Object.keys(current) : ['schema', 'workspaceId', 'provider', 'connectionId', 'accountId', 'sourcePolicy', ...(current.domain ? ['domain'] : []), ...(integrations?.env ? ['apiVersion'] : [])];
+  return keys.every(key => current[key] === binding[key]);
+}
+function validShopifyOrderReadBinding(binding) {
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding)) return false;
+  const keys = ['schema', 'workspaceId', 'provider', 'domain', 'connectionId', 'accountId', 'apiVersion', 'sourcePolicy'];
+  if (Reflect.ownKeys(binding).length !== keys.length || !keys.every(key => Object.hasOwn(binding, key))) return false;
+  const fields = Object.getOwnPropertyDescriptors(binding);
+  if (!keys.every(key => Object.hasOwn(fields[key], 'value') && typeof fields[key].value === 'string'
+    && fields[key].value.length <= 300 && !/[\u0000-\u001f\u007f]/.test(fields[key].value))) return false;
+  return binding.schema === 'shopify-order-hold/v1' && binding.provider === 'shopify' && Boolean(binding.workspaceId);
+}
+export function shopifyOrderReadHold(state, provider, integrations = null) {
+  if (provider !== 'shopify') return null;
+  const status = state.integrationStatus?.shopify || {};
+  return isShopifyOrderSourceFailure(provider, status.orderReadHold?.code) && isShopifyOrderReadBindingCurrent(state, status.orderReadHold.binding, integrations) ? status.orderReadHold : null;
+}
+export function orderReadHeld(state, provider, areas = connectionSettings(state, provider).areas, integrations = null) {
+  return Boolean(areas.includes('orders') && shopifyOrderReadHold(state, provider, integrations));
+}
+export function connectionDoctorState(state, provider, integrations = null) {
+  const doctor = state.connectionDoctor?.[provider] || {};
+  // A source replacement gets its own read budget; refresh-token rotation is
+  // deliberately outside the stable binding and cannot release consumed work.
+  // Losing/enriching an identity field is not proof of a different source.
+  const previous = doctor.orderReadBinding;
+  const current = provider === 'shopify' && validShopifyOrderReadBinding(previous) ? shopifyOrderReadBinding(state, integrations) : null;
+  const replacementFields = ['domain', 'connectionId', 'accountId', 'sourcePolicy', ...(integrations?.shopifyConfig || integrations?.env ? ['apiVersion'] : [])];
+  const replaced = validShopifyOrderReadBinding(current) && previous.workspaceId === current.workspaceId
+    && replacementFields.some(key => previous[key] && current[key] && previous[key] !== current[key]);
+  if (replaced) {
+    return { ...doctor, attempts: 0, exhausted: false, nextRetryAt: null, orderReadBinding: null };
+  }
+  return doctor;
+}
+export function completeShopifyOrderReadBudget(state, integrations, admittedBinding) {
+  const doctor = state.connectionDoctor?.shopify;
+  if (!doctor?.orderReadBinding || !isShopifyOrderReadBindingCurrent(state, admittedBinding, integrations) || shopifyOrderReadHold(state, 'shopify', integrations)) return;
+  Object.assign(doctor, { attempts: 0, exhausted: false, nextRetryAt: null });
+  delete doctor.orderReadBinding;
+}
+export function shopifyOrderReadBudgetExhausted(state, integrations) {
+  const doctor = connectionDoctorState(state, 'shopify', integrations);
+  return Boolean(doctor.orderReadBinding && (doctor.exhausted === true || !Number.isSafeInteger(doctor.attempts) || doctor.attempts < 0 || doctor.attempts >= 5));
+}
 export function validateAreas(provider, value) {
   const areas = connector(provider).areas;
   if (!Array.isArray(value) || !value.length || value.length > areas.length || value.some(item => !areas.includes(item))) throw connectionError('Choose at least one supported sync area.', 'SYNC_AREAS_INVALID');
@@ -87,8 +154,10 @@ export function disconnectConnection(state, provider, body, actor, integrations)
   integrations?.clearConnectionCache?.(state, provider);
   addAudit(state, { type: 'connection_disconnected', actor, detail: { provider, importedDataRetained: true, existingManagerPreserved: provider === 'ebay' } });
 }
-export function recoveryFor(provider, status = {}, coverage = {}) {
+export function recoveryFor(provider, status = {}, coverage = {}, orderHold = undefined) {
   const name = connector(provider).name, code = String(status.lastError || '');
+  if (orderHold === null && isShopifyOrderSourceFailure(provider, code)) return null;
+  if (isShopifyOrderSourceFailure(provider, (orderHold === undefined ? status.orderReadHold : orderHold)?.code) || orderHold === undefined && isShopifyOrderSourceFailure(provider, code)) return { message: 'Shopify order data could not be accepted because its structure or size needs review. Existing data is retained. Automatic order reads are paused; review the source and retry orders manually when ready.', action: 'sync', label: 'Retry orders after review' };
   if (provider === 'meta' && code === 'META_ASSET_REQUIRED') return { message: 'Choose your Pages and catalogues in this panel, then try syncing again.', action: 'open', label: 'Review selected assets' };
   if (provider === 'ebay' && coverage.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')) return { message: 'eBay says this account is not currently eligible for Promoted Listings. Check your seller level and recent sales activity in eBay Seller Hub. If you believe you qualify, contact eBay support. Reconnecting will not resolve this eligibility restriction. Order imports can continue; automatic marketing retries are paused.', action: 'sync', label: 'Check again after eBay review' };
   if (provider === 'ebay' && coverage.readDiagnostics?.marketing?.stage === 'ads') return { message: 'Campaigns were imported, but eBay could not return adverts for every campaign. Other sync areas keep their own status. Review affected campaigns in eBay and retry; reconnecting is only needed if access has expired.', action: 'sync', label: 'Retry marketing reads' };
@@ -101,8 +170,9 @@ export function recoveryFor(provider, status = {}, coverage = {}) {
   if (provider === 'ebay' && coverage.fullCatalogueAvailable === false) return { message: 'Orders are connected. Some older eBay listings are managed separately, so Runvara cannot compare your complete catalogue yet. Open your existing eBay Manager to manage those listings.', action: 'manager', label: 'Open existing Manager' };
   return null;
 }
-export function beginConnectionSync(state, provider, { areas, automatic = false, actor = 'system' } = {}) {
+export function beginConnectionSync(state, provider, { areas, automatic = false, actor = 'system', integrations = null } = {}) {
   const selected = validateAreas(provider, areas || connectionSettings(state, provider).areas);
+  if (automatic && orderReadHeld(state, provider, selected, integrations)) throw Object.assign(connectionError('Shopify order source needs review. Existing data is retained.', shopifyOrderReadHold(state, provider, integrations).code, 422), { nonRetryable: true });
   state.connectionSyncs ||= [];
   const now = Date.now();
   for (const run of state.connectionSyncs.filter(item => item.provider === provider && item.status === 'running')) {
@@ -124,12 +194,14 @@ export function finishConnectionSync(state, run, result, error) {
   }
   addAudit(state, { type: 'connection_sync_finished', actor: run.actor, detail: { provider: run.provider, runId: run.id, areas: run.areas, status: run.status, errorCode: run.errorCode } });
 }
-export function connectionDue(state, provider, now = new Date()) {
+export function connectionDue(state, provider, now = new Date(), integrations = null) {
   const settings = connectionSettings(state, provider), status = state.integrationStatus?.[provider] || {};
+  if (orderReadHeld(state, provider, settings.areas, integrations)) return false;
   if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;
-  const doctor = state.connectionDoctor?.[provider];
+  const doctor = connectionDoctorState(state, provider, integrations);
   if (state.connectionAuthAttention?.[provider]) return false;
-  if (doctor?.exhausted || Date.parse(doctor?.nextRetryAt) > now.getTime() || Date.parse(status.retryAt) > now.getTime()) return false;
+  if (doctor?.exhausted || provider === 'shopify' && doctor.orderReadBinding && (!Number.isSafeInteger(doctor.attempts) || doctor.attempts < 0 || doctor.attempts >= 5)
+    || Date.parse(doctor?.nextRetryAt) > now.getTime() || Date.parse(status.retryAt) > now.getTime()) return false;
   const recent = (state.connectionSyncs || []).find(run => run.provider === provider);
   if (recent?.status === 'running' && Date.parse(recent.leaseUntil) > now.getTime()) return false;
   const at = Date.parse(recent?.startedAt || status.lastAttemptAt || status.lastSyncAt || '');
@@ -140,7 +212,7 @@ export function connectionCentre(state, integrations) {
     const settings = connectionSettings(state, id), health = state.integrationStatus?.[id] || {};
     const record = id === 'ebay' ? integrations.ebayConnection?.(state) : (state.connections || []).find(item => item.provider === id);
     const configured = !settings.disconnected && (id === 'shopify' ? integrations.shopifyConfigured?.(state) : id === 'ebay' ? integrations.ebayConfigured?.(state) : Boolean(record?.encryptedCredentials));
-    const recovery = recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {});
+    const recovery = recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {}, id === 'shopify' ? shopifyOrderReadHold(state, id, integrations) : undefined);
     const status = settings.disconnected ? 'disconnected' : !configured ? 'not_configured' : recovery?.action === 'reconnect' ? 'action_required' : recovery ? 'degraded' : ['connected', 'configured'].includes(health.status || record?.status) ? (health.status === 'connected' ? 'connected' : 'action_required') : 'action_required';
     const history = (state.connectionSyncs || []).filter(run => run.provider === id).slice(0, 30).map(run => ({ ...run, ...(run.status === 'running' && Date.parse(run.leaseUntil) <= Date.now() ? { status: 'failed', stage: 'Interrupted — retry sync', errorCode: 'WORKER_INTERRUPTED' } : {}) }));
     const products = id === 'shopify' ? (state.products || []).filter(product => product.provider === 'shopify') : id === 'ebay' ? state.ebay?.listings || [] : [];

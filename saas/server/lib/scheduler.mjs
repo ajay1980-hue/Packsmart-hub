@@ -1,7 +1,7 @@
 import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensureControl, finishAutomation } from './control.mjs';
 import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
-import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS } from './connection-centre.mjs';
+import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, orderReadHeld } from './connection-centre.mjs';
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
@@ -48,10 +48,13 @@ function summarizeCycleEffects(runs) {
 
 export async function monitoredSync(state, integrations, provider, { automatic = false, retry = true, areas, run } = {}) {
   const previous = state.integrationStatus?.[provider] || {};
+  const previousOrderHold = shopifyOrderReadHold(state, provider, integrations);
+  const orderBinding = provider === 'shopify' ? shopifyOrderReadBinding(state, integrations) : null;
   const now = new Date().toISOString();
+  if (automatic && orderReadHeld(state, provider, run?.areas || areas || connectionSettings(state, provider).areas, integrations)) throw Object.assign(new Error('Shopify order source needs review. Existing data is retained.'), { code: previousOrderHold.code, status: 422, nonRetryable: true });
   if (automatic && authFailure(previous.lastError)) throw Object.assign(new Error('Owner must repair authentication'), { code: 'AUTH_REPAIR_REQUIRED' });
   if (automatic && !connectionSettings(state, provider).autoSync) return previous;
-  run ||= beginConnectionSync(state, provider, { automatic, areas });
+  run ||= beginConnectionSync(state, provider, { automatic, areas, integrations });
   areas = run.areas;
   let attempts = 0;
   while (true) {
@@ -59,23 +62,33 @@ export async function monitoredSync(state, integrations, provider, { automatic =
     try {
       const result = integrations.syncProvider ? await integrations.syncProvider(state, provider, { automatic, areas }) : await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic, areas });
       const status = { ...previous, ...result, failedAreas:result.failedAreas || [], transient: Boolean(result.transient), upstreamStatus: result.upstreamStatus || null, retryAt: null, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
+      // Only a successful explicit orders read may clear an order-source hold.
+      if (provider === 'shopify' && !areas.includes('orders') && previousOrderHold && isShopifyOrderReadBindingCurrent(state, previousOrderHold.binding, integrations)) status.orderReadHold = previousOrderHold;
       state.integrationStatus = { ...state.integrationStatus, [provider]: status };
       finishConnectionSync(state, run, status);
       return status;
     } catch (error) {
-      const transient = error.upstreamStatus === 429 || error.upstreamStatus >= 500 || ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name);
+      const sourceFailure = isShopifyOrderSourceFailure(provider, error.code);
+      const nonRetryable = sourceFailure;
+      const transient = !nonRetryable && (error.upstreamStatus === 429 || error.upstreamStatus >= 500 || ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name));
       // Rate limits are durable scheduled retries, never a tight retry loop.
-      const rateLimited = error.upstreamStatus === 429 || /RATE_LIMIT/.test(error.code || '');
+      const rateLimited = !nonRetryable && (error.upstreamStatus === 429 || /RATE_LIMIT/.test(error.code || ''));
       if (retry && attempts < 2 && transient && !rateLimited && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
       const code = safeCode(error);
+      const failedBinding = error.orderReadBinding === undefined ? orderBinding : error.orderReadBinding;
+      if (sourceFailure && !isShopifyOrderReadBindingCurrent(state, failedBinding, integrations)) {
+        finishConnectionSync(state, run, null, { code });
+        throw Object.assign(new Error('Shopify configuration changed during the failed read; no hold was installed.'), { code, status: 422, nonRetryable: true, holdDisposition: 'configuration_changed' });
+      }
       state.integrationStatus = { ...state.integrationStatus, [provider]: { ...previous, status: authFailure(error) ? 'auth_expired' : 'error',
         detail: 'Read sync failed; last known data was retained.', lastSyncAt: previous.lastSyncAt || null, lastFailureAt: now, lastAttemptAt: now, lastError: code, attempts,
+        ...(sourceFailure ? { orderReadHold: { code, at: now, binding: failedBinding }, orderReadAttempt: { status: 'incomplete', code, at: now, retryable: false } } : {}),
         transient: transient || rateLimited, upstreamStatus: error.upstreamStatus || null,
         retryAt: rateLimited ? new Date(Date.now() + Math.max(60000, Math.min(86400000, Number(error.retryAfterMs) || 60000))).toISOString() : null } };
       const connection = provider === 'shopify' ? integrations.shopifyConnection?.(state) : provider === 'ebay' ? integrations.ebayConnection?.(state) : state.connections?.find(c => c.provider === provider);
       if (connection) { connection.status = state.integrationStatus[provider].status; connection.lastError = code; }
       finishConnectionSync(state, run, null, { code });
-      throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus, retryAfterMs: error.retryAfterMs, name: error.name });
+      throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus, retryAfterMs: error.retryAfterMs, name: error.name, ...(sourceFailure ? { status: 422, orderReadBinding: failedBinding } : {}), ...(nonRetryable ? { nonRetryable: true } : {}) });
     }
   }
 }
@@ -95,22 +108,26 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
         const effects = providerEffectRule(run.ruleId) ? recordCreativeEffects(run, run.effects) : null;
         finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true, evidence: [{ type: 'expired_lease', id: run.id, detail: 'No completion evidence before the worker lease expired.', ...(effects ? { effects: { ...effects } } : {}) }] });
       }
-      const rules = dueRules(state, now);
+      let rules = dueRules(state, now, integrations);
+      const providers = [];
+      if (rules.some(rule => rule.id === 'channelSync')) {
+        for (const provider of Object.keys(CONNECTORS)) {
+          const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(integrations.syncProvider && state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
+          const legacyFirstRun = !state.connectionSettings?.[provider] && !state.connectionSyncs?.some(item => item.provider === provider);
+          const exhaustedOrderBudget = provider === 'shopify' && shopifyOrderReadBudgetExhausted(state, integrations);
+          if (configured && !orderReadHeld(state, provider, undefined, integrations) && !exhaustedOrderBudget && (legacyFirstRun || connectionDue(state, provider, now, integrations))) providers.push(provider);
+        }
+      }
+      // A legacy workspace can have no saved per-channel settings. Do not claim
+      // and save a recurring no-op cycle solely because held orders are due.
+      if (!providers.length && (orderReadHeld(state, 'shopify', undefined, integrations) || shopifyOrderReadBudgetExhausted(state, integrations))) rules = rules.filter(rule => rule.id !== 'channelSync');
       if (!rules.length) {
         if (expired.length) await store.save(workspaceId, state);
         return { skipped: true, reason: state.autopilot.enabled ? 'FREQUENCY_OR_PERMISSION_LIMIT' : 'AUTOPILOT_OFF' };
       }
-      const runs = rules.map(rule => claimAutomation(state, rule.id, now));
+      const runs = rules.map(rule => claimAutomation(state, rule.id, now, integrations));
       for (const run of runs) if (providerEffectRule(run.ruleId)) recordCreativeEffects(run);
-      const providers = [];
-      if (runs.some(run => run.ruleId === 'channelSync')) {
-        for (const provider of Object.keys(CONNECTORS)) {
-          const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(integrations.syncProvider && state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
-          const legacyFirstRun = !state.connectionSettings?.[provider] && !state.connectionSyncs?.some(item => item.provider === provider);
-          if (configured && (legacyFirstRun || connectionDue(state, provider, now))) providers.push(provider);
-        }
-      }
-      const syncRuns = new Map(providers.map(provider => [provider, beginConnectionSync(state, provider, { automatic: true, actor: 'autopilot' })]));
+      const syncRuns = new Map(providers.map(provider => [provider, beginConnectionSync(state, provider, { automatic: true, actor: 'autopilot', integrations })]));
       // Commit the claim before any work. PostgREST compare-and-save allows only
       // one replica to acquire this workspace's due runs, including at redeploy.
       await store.save(workspaceId, state);
