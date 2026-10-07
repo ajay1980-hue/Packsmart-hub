@@ -73,7 +73,7 @@ test('unresolved transport failure and malformed primary acknowledgements remain
   assert.equal(network.diagnostics().primaryPersistence,false); assert.ok(network.diagnostics().lastPrimaryFailureAt);
   for (const value of [null,{},'not rows',[{workspace_id:'other'}]]) {
     const store=factory(async()=>Response.json(value));
-    await assert.rejects(store.commit('tenant-one',state(),'old',true),{code:'SUPABASE_RESPONSE_INVALID'});
+    await assert.rejects(store.commit('tenant-one',state(),'old',true),{code:'SUPABASE_PERSISTENCE_RESPONSE_INVALID'});
     assert.equal(store.diagnostics().primaryPersistence,false);
   }
 });
@@ -95,14 +95,15 @@ test('duplicate new workspace identity is a conflict, not a persistence outage',
 
 test('mirror errors and deferred reporting-status commit preserve the successful primary commit', async () => {
   for (const failure of ['mirror','reporting']) {
-    let patches=0;
+    let reportingFailures=0;
     const fake=fakeSupabase({fault:({table,method})=>failure==='mirror'&&table==='workspaces'&&method==='POST'
-      ? {status:500,code:'XX000'} : failure==='reporting'&&table==='saas_workspace_state'&&method==='PATCH'&&++patches===1 ? {status:500,code:'XX000'}:null});
+      ? {status:500,code:'XX000'} : failure==='reporting'&&table==='runvara_commit_reporting_status'&&method==='POST'&&++reportingFailures===1 ? {status:500,code:'XX000'}:null});
     const store=factory(fake.fetchImpl), s=seedWorkspaceState();
-    await store.save(s.workspace.id,s);
+    const result=await store.save(s.workspace.id,s);
     const d=store.diagnostics(); assert.ok(d.lastPrimaryWriteAt); assert.equal(d.lastPrimaryFailureAt,null); assert.equal(d.primaryPersistence,true);
     assert.ok(fake.states.has(s.workspace.id));
     if(failure==='mirror')assert.ok(d.reportingFailures>0);
+    else { assert.equal(reportingFailures,1); assert.equal(result.integrationStatus.reporting.lastError,'REPORTING_STATUS_DEFERRED'); }
   }
 });
 

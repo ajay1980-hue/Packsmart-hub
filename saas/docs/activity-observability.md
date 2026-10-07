@@ -28,13 +28,13 @@ Each invocation of the Supabase request boundary records one API request attempt
 
 Tenant attribution comes from a separate trusted store-call context. URLs, payload fields, response rows and headers cannot assign attribution. Scoped identity/state reads, primary/reporting commits, governed-counter reads/reserve/settle calls, known job reads/writes and archive/reporting operations provide context. Global queue claims, account lookup, workspace enumeration, pings and any uninstrumented direct request remain unattributed. There is no provider attribution guessed from a table name or request URL.
 
-Known retry categories are `upsert_network`, `primary_statement_cancelled` and `primary_network_reconciled`. A retry is another API attempt with another body-byte observation. A read used to reconcile a write is a read, not a retry. Explicit user retries, SDK/internal retries and provider-side retries are not inferred. Instrumentation does not add or alter retries.
+Known retry categories are `upsert_network`, `primary_statement_cancelled`, `primary_network_reconciled`, `reporting_statement_cancelled` and `reporting_network_reconciled`. Primary full-state writes and narrow reporting-status writes retain separate operation and retry counters. A retry is another API attempt with another body-byte observation. A read used to reconcile a write is a read, not a retry. Explicit user retries, SDK/internal retries and provider-side retries are not inferred. Instrumentation does not add or alter retries.
 
 Body fields contain `{bytes, knownObservations, unknownObservations}`. Request strings are measured as UTF-8; fully consumed response text is measured after HTTP decoding. Headers, TLS, compression effects and other network overhead are excluded. Empty permitted responses and HEAD have known zero body bytes. Interrupted or oversized responses have unknown body length; partial consumed bytes are not guessed. Only integer sizes are retained, never request/response content.
 
 Job values count matched, acknowledged finish/reschedule/manual-retry transitions observed by this instance. They are not unique-job totals, queue depth, lifetime failures or a full durable transition history. Global lease-recovery transitions are not inferred from claim results. FileStore does not report database request totals.
 
-Hot-state samples contain `{bytes, previousBytes, deltaBytes, observedAt, observations}`. Attempted save payloads are separate from acknowledged committed payloads. A failed or conflicting write cannot update `confirmed`. `integrityRead` comes only from an existing full saved-state integrity read. Delta compares two serialized samples of the same kind, including metadata/compaction changes. It is not archive growth, physical storage, continuous growth rate or a forecast.
+Hot-state samples contain `{bytes, previousBytes, deltaBytes, observedAt, observations}`. Attempted save payloads are separate from acknowledged committed payloads. A failed or conflicting write cannot update `confirmed`. `integrityRead` comes only from an existing full saved-state integrity read. Delta compares two serialized samples of the same kind, including metadata/compaction changes. The narrow reporting-status RPC does not create a full hot-state sample: its compact request bytes belong only to request-body observations. It is not archive growth, physical storage, continuous growth rate or a forecast.
 
 ## Bounds and volume
 
@@ -44,7 +44,7 @@ The endpoint admits at most 10 GET inspection attempts per signed-session worksp
 
 The stress test with 64 tenant records and 128 inflight tokens measured a largest tenant DTO of approximately 3.2 KiB; all tenant DTOs plus the internal diagnostic DTO were approximately 202 KiB serialized. These are serialization measurements, not heap measurements. The structural caps bound retained state; no physical memory-byte claim is made.
 
-A representative unchanged Supabase save still performs its existing three requests: two state CAS writes and the existing variants read. Activity capture adds zero requests or storage writes. Reporting/archive POST bodies retain their existing batching and limits.
+A representative unchanged Supabase save still performs three requests: one full primary state CAS, one narrow reporting-status CAS RPC and the existing variants read. Activity capture adds zero requests or storage writes. Reporting/archive POST bodies retain their existing batching and limits.
 
 ## Anomalies and incomplete coverage
 

@@ -2,7 +2,7 @@
 
 This is a scope ledger, not a completion claim. Stages 1–9 have recorded exact production health evidence. Stage 10 is deployed at `3ebc1c75370b6a8b843da3829bc1b7af59f0a867`; its functional health remains blocked by a dismissed cloud-browser permission check. No alternative route was used to bypass an access restriction or the failed permission check. Further production changes remain held.
 
-The owner approved PR74's reviewed tables/functions at 05:26 UTC on 2026-10-07. That authorization is recorded separately from execution: this recovery applied no SQL, migration, merge or deployment. The live health gate still blocks rollout. The original OS is incomplete and the successor universal-commerce/MCP/RAG/voice blueprint is untouched.
+The owner approved PR74's reviewed tables/functions at 05:26 UTC on 2026-10-07. That authorization is recorded separately from execution: no production SQL, migration, merge or deployment was applied by these integration rehearsals. The live health gate still blocks rollout. The original OS is incomplete and the successor universal-commerce/MCP/RAG/voice blueprint is untouched.
 
 The table below retains the original scope ledger from 2026-10-06. Its remaining items are not all new implementation defects: subsequently prepared PR75–81 and the local recovery evidence are described below. None of their local test results is a production acceptance claim.
 
@@ -56,3 +56,30 @@ Remaining gates: exact-head CI on Node 22, real PostgreSQL publication/concurren
 Activity coverage remains explicitly partial: outcome persistence and dispatch-context calls without trusted observation context are counted only as internal unattributed attempts. URL filters, RPC payloads and response identities do not create tenant attribution. Imported totals remain recorded cohort evidence; qualified owner outcomes remain separate descriptive results, not forecast or execution authority.
 
 Only locked existing npm dependencies were installed with scripts disabled; no dependency files changed and node_modules is untracked/ignored. Source patches and explicit recovery test/document files were committed locally with command-scoped Runvara engineering identity. The eight feature PRs remain the incremental release path. The unmerged recovery branch preserves this combined tree and its extra tests; it must not be treated as a production release or merged wholesale without the required review gates.
+
+
+## Separate reporting repair integrated locally, 2026-10-07 07:31 UTC
+
+PR74–81 remain the **eight held original feature PRs**. [PR82](https://github.com/ajay1980-hue/Packsmart-hub/pull/82) is a separate bandwidth repair prepared directly on current production main. Its reported remote head `41b05aead6188ad12333a1be4b3fe12d990a2ab9` has all five PR CI workflows green. Those checks apply to that standalone draft head, not to this combined integration tree. Fresh exact-tree CI must be run before treating the combined branch as verified remotely.
+
+The reporting implementation source `b8d42f2246045e925a5343bccedb33ca02b0885b` was replayed locally onto recovery base `d999248` on `codex/runvara-reporting-integration`. The resulting local rehearsal retains every held-stage dispatch, outcome, activity, catalogue, imported-evidence, static-asset, objective and responsive workflow hook. It is not a new production release path or permission to merge the held features wholesale.
+
+Compatibility resolutions:
+
+- The shared revision-fenced commit helper retains PR76 primary-health behavior and strict response decoding. A reporting success or failure cannot clear, replace or create a primary-health observation. Invalid commit acknowledgements now use the shared safe `SUPABASE_PERSISTENCE_RESPONSE_INVALID` code; the existing health regression still requires rejection and failed primary health.
+- The compact revision reader keeps PR82's 4 KiB response cap and exact one-row/one-field validation while using PR77's trusted `state_read` observation context. An initial conflict-resolution omission of this method was caught by both the combined suite and independent review, restored, and verified by fresh passing runs.
+- Every primary/reporting transport attempt is metered once through `scopedRequest`. Reporting retries use the fixed `reporting_statement_cancelled` and `reporting_network_reconciled` keys; they do not increment primary retry categories or infer a tenant from payloads, URLs or responses. The activity UI renders these categories separately.
+- The narrow reporting RPC retains its 16 KiB request and 4 KiB response bounds, exact acknowledgement, original body/revision fence on permitted retries, no full-state fallback, and scheduler/mirror-cache invalidation on unconfirmed status.
+- Compact reporting DTOs never update full hot-state attempted/confirmed size samples. Primary snapshot sizes stay distinct from observed reporting request-body bytes; neither is physical storage or growth accounting.
+- Reporting failure injection now targets the new RPC and asserts that it actually fired and produced deferred status. No test was removed. Package syntax checks are the held-stage union plus `reporting-status.mjs`; fake-Supabase still preserves held projection/revision semantics.
+
+Fresh verification on this combined tree:
+
+- **1,088 Node tests passed, 0 failed, 0 skipped**, using Node **22.23.3**.
+- Full syntax checks, SaaS security guards and whitespace checks passed.
+- **73 actual PostgreSQL 17.6 reporting tests passed, 0 failed, 0 skipped**, using a fresh local disposable cluster and independent physical sessions. The cluster was stopped. Production SQL was not executed.
+- New integration regressions prove reporting-only retry attribution, exact attempt/body-byte accounting, retained full primary snapshots, no false primary-health repair, and distinct activity UI retry labels. An independent review accepted the fixes and passed 75 focused Node22 checks before the additional UI regression; the final full suite includes that regression.
+
+PR82's specific function approval was requested at 07:26 UTC and remains pending. PR74's existing owner approval is conditional on clearing live health and does not authorize PR82's function. The dismissed cloud-browser permission check still blocks production functional health. No remote mutation, production request, migration or deployment occurred in this integration task. No browser installation or Docker workaround was attempted. The known local security-advisor TLS limitation was not retried; exact role/RLS/invoker checks passed in PostgreSQL.
+
+Remaining combined gates are fresh exact-head CI, the other database suites, all responsive Chromium workflows, container health, the existing live health check, and the separate PR82 function approval. The original OS remains incomplete and the successor blueprint remains untouched.

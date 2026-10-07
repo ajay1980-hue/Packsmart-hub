@@ -10,6 +10,7 @@ export const ACTIVITY_OPERATIONS = Object.freeze([
 export const ACTIVITY_METHODS = Object.freeze(['GET', 'HEAD', 'POST', 'PATCH', 'PUT', 'DELETE']);
 export const ACTIVITY_RETRY_KINDS = Object.freeze([
   'upsert_network', 'primary_statement_cancelled', 'primary_network_reconciled',
+  'reporting_statement_cancelled', 'reporting_network_reconciled',
 ]);
 export const ACTIVITY_OUTCOMES = Object.freeze([
   'succeeded', 'http_error', 'network_error', 'invalid_response', 'oversized_response',
