@@ -66,6 +66,8 @@ import { deriveImpact } from './lib/impact-engine.mjs';
 import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
 import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
+import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from './lib/experiment-measurements.mjs';
+import { evidenceInWorkspace } from './lib/business-evidence-scope.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.15.2';
@@ -77,6 +79,7 @@ const STATIC_FILES = new Map([
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
+  ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
@@ -327,6 +330,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const outcomeReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const outcomeDraftLimiter = new SlidingWindowLimiter({ limit: 5, windowMs: 60000, blockMs: 60000 });
+  const outcomePublicationLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
   let healthPending;
@@ -399,7 +405,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(200, {
         ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
@@ -1127,7 +1133,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { identityOnly: pathname.startsWith('/api/business-outcomes') || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1137,6 +1143,73 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+
+        if (pathname === '/api/business-outcomes' || pathname.startsWith('/api/business-outcomes/')) {
+          const workspaceId = auth.session.workspaceId;
+          if ([...url.searchParams.keys()].length) throw Object.assign(new Error('Outcome reads do not accept tenant or query overrides'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+          const consume = limiter => {
+            if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
+            limiter.fail(rateKey);
+          };
+          const decodeId = raw => {
+            let id;
+            try { id = decodeURIComponent(raw); } catch {}
+            if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(id)) throw Object.assign(new Error('Invalid outcome source identifier'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+            return id;
+          };
+          if (req.method === 'GET' && pathname === '/api/business-outcomes') {
+            consume(outcomeReadLimiter);
+            const result = await store.businessOutcomeSummary(workspaceId);
+            send(res, 200, { workspaceId, summary: result.summary, current: result.publications }); return;
+          }
+          const source = pathname.match(/^\/api\/business-outcomes\/experiments\/([^/]+)(\/measurement)?$/);
+          if (source && req.method === 'GET' && !source[2]) {
+            requireOwner(auth); consume(outcomeReadLimiter);
+            const result = await store.getBusinessOutcomeReview(workspaceId, decodeId(source[1]));
+            send(res, 200, result); return;
+          }
+          if (source && req.method === 'PUT' && source[2]) {
+            requireOwner(auth); consume(outcomeDraftLimiter);
+            const id = decodeId(source[1]), body = await jsonBody(req, 16384);
+            const result = await mutate(auth, async state => {
+              const owned = (value, depth = 0) => depth <= 4 && evidenceInWorkspace(value, workspaceId)
+                && ['workspace', 'tenant'].every(key => !value[key] || typeof value[key] !== 'object' || owned(value[key], depth + 1));
+              const actors = (state.users || []).filter(user => user.id === auth.user.id);
+              const matches = Array.isArray(state.revenueEngine?.experiments) ? state.revenueEngine.experiments.filter(item => item?.id === id) : [];
+              if (!owned(state) || !owned(state.workspace) || !owned(state.revenueEngine) || matches.length !== 1 || !owned(matches[0])
+                || actors.length !== 1 || !owned(actors[0]) || actors[0].passwordChangeRequired) {
+                throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
+              }
+              const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
+                actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null });
+              matches[0].outcomeMeasurement = measurement;
+              const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
+              addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,
+                detail: { experimentId: id, revision: measurement.revision, measurementDigest: measurement.digest, published: false } });
+              return { measurement, assessment, committedState: state };
+            });
+            send(res, 200, { workspaceId, workspaceRevision: result.committedState._revision,
+              measurement: result.measurement, assessment: result.assessment }); return;
+          }
+          if (req.method === 'POST' && pathname === '/api/business-outcomes/publish') {
+            requireApprover(auth); consume(outcomePublicationLimiter);
+            if (String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() !== 'true') {
+              throw Object.assign(new Error('Outcome publication is paused; existing results remain available'), { status: 503, code: 'OUTCOME_PUBLICATION_PAUSED' });
+            }
+            const input = await jsonBody(req, 4096);
+            const result = await withWorkspaceLock(workspaceId, () => store.publishBusinessOutcome(workspaceId,
+              { id: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) }, input));
+            // Publication owns its atomic state/ledger/audit transaction. Never
+            // follow it with a stale generic state.save or auto-retry callback.
+            send(res, 200, result); return;
+          }
+          const version = pathname.match(/^\/api\/business-outcomes\/versions\/(outcome_version_[a-f0-9]{64})$/);
+          if (req.method === 'GET' && version) {
+            consume(outcomeReadLimiter);
+            send(res, 200, await store.getBusinessOutcomeEvidence(workspaceId, version[1])); return;
+          }
+          throw Object.assign(new Error('Outcome route not found'), { status: 404, code: 'NOT_FOUND' });
+        }
 
         if (pathname === '/api/admin/launch' || pathname === '/api/admin/invitations') {
           requireLaunchAdmin(auth, env);

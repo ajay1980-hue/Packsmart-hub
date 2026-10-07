@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence, deriveIntentRecovery, deriveSalesPipeline, deriveGrowthPlan, ensureRevenueEngine, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from '../lib/revenue-engine.mjs';
+import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence, deriveIntentRecovery, deriveSalesPipeline, deriveGrowthPlan, ensureRevenueEngine, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement, revenueEngineSnapshot } from '../lib/revenue-engine.mjs';
 
 const now = new Date('2026-10-01T12:00:00.000Z');
 function order(id, customer, createdAt, lines, total=120) {
@@ -70,7 +70,7 @@ test('intent recovery, B2B pipeline and commander keep outbound actions approval
 });
 
 
-test('experiment lifecycle separates measurement from verification before learning or impact can trust it', () => {
+test('legacy experiment lifecycle separates owner review from financial qualification', () => {
   const state={workspace:{id:'tenant-loop'},economics:{},orders:[],revenueEngine:{}};
   const experiment=createExperiment(state,{kind:'retention',title:'Win-back test',hypothesis:'A targeted reminder improves contribution.'},'owner-1');
   assert.equal(experiment.status,'draft');
@@ -79,6 +79,8 @@ test('experiment lifecycle separates measurement from verification before learni
   const measured=recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalRevenue:300,incrementalContribution:90},'analyst-1');
   assert.equal(measured.status,'measured');
   assert.equal(measured.impact.verified,false);
+  assert.equal(measured.impact.legacyReviewed,false);
+  assert.equal(measured.impact.financiallyQualified,false);
   assert.equal(measured.impact.incrementalContribution,90);
 
   const verified=verifyExperimentMeasurement(state,experiment.id,{note:'Matched holdout reviewed against settled orders.'},'owner-1');
@@ -86,6 +88,10 @@ test('experiment lifecycle separates measurement from verification before learni
   assert.equal(verified.impact.verified,true);
   assert.equal(verified.impact.status,'verified');
   assert.equal(verified.impact.verifiedBy,'owner-1');
+  assert.equal(verified.impact.legacyReviewed,true);
+  assert.equal(verified.impact.financiallyQualified,false);
+  assert.equal(verified.evidenceQualification,'legacy_unqualified');
+  assert.equal(verified.verifiedContributionValue,null);
 });
 
 test('experiment verification requires a measured result and an explicit verification note', () => {
@@ -108,17 +114,31 @@ test('opportunity experiment links the existing opportunity without authorising 
 });
 
 
-test('verified experiment refreshes linked opportunity decision posture using contribution, not revenue', () => {
+test('legacy owner review preserves measured values and history without qualifying linked opportunity posture', () => {
   const state={workspace:{id:'tenant-posture'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
-  const opportunity={id:'opportunity-1',kind:'retention',title:'Retention test',status:'open'};
+  const opportunity={id:'opportunity-1',kind:'retention',title:'Retention test',status:'open',evidenceVerified:true,verifiedContributionValue:999,financiallyQualified:true};
   state.opportunities.push(opportunity);
   const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
-  recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalRevenue:500,incrementalContribution:75},'analyst-1');
+  const values={incrementalRevenue:500,incrementalContribution:75,contributionProtected:10,costAvoided:20,minutesSaved:30};
+  recordExperimentMeasurement(state,experiment.id,{method:'holdout',...values},'analyst-1');
+  const measuredAt=experiment.impact.measuredAt;
   const verified=verifyExperimentMeasurement(state,experiment.id,{note:'Settled order contribution checked.'},'owner-1');
-  assert.equal(verified.decisionPosture.status,'ready-for-owner-review');
-  assert.equal(verified.decisionPosture.verifiedContributionValue,75);
-  assert.equal(opportunity.evidenceDecision,'ready-for-owner-review');
-  assert.equal(opportunity.verifiedContributionValue,75);
+  for(const [key,value] of Object.entries(values)) assert.equal(verified.impact[key],value);
+  assert.equal(verified.impact.method,'holdout');
+  assert.equal(verified.impact.measuredAt,measuredAt);
+  assert.equal(verified.impact.recordedBy,'analyst-1');
+  assert.equal(verified.impact.verifiedBy,'owner-1');
+  assert.equal(verified.impact.verificationNote,'Settled order contribution checked.');
+  assert.equal(verified.impact.verifiedAt,verified.completedAt);
+  assert.equal(verified.decisionPosture.status,'needs-more-evidence');
+  assert.equal(verified.decisionPosture.verifiedContributionValue,null);
+  assert.equal(verified.decisionPosture.financiallyQualified,false);
+  assert.equal(opportunity.evidenceDecision,'needs-more-evidence');
+  assert.equal(opportunity.verifiedContributionValue,null);
+  assert.equal(opportunity.evidenceVerified,false);
+  assert.equal(opportunity.financiallyQualified,false);
+  assert.equal(opportunity.legacyReviewRecorded,true);
+  assert.equal(opportunity.evidenceQualification,'legacy_unqualified');
 });
 
 test('revenue-only verification cannot make an opportunity approval-ready', () => {
@@ -129,16 +149,127 @@ test('revenue-only verification cannot make an opportunity approval-ready', () =
   recordExperimentMeasurement(state,experiment.id,{method:'before-after',incrementalRevenue:1000},'analyst-1');
   verifyExperimentMeasurement(state,experiment.id,{note:'Revenue confirmed; contribution not established.'},'owner-1');
   assert.equal(opportunity.evidenceDecision,'needs-more-evidence');
-  assert.equal(opportunity.verifiedContributionValue,0);
+  assert.equal(opportunity.verifiedContributionValue,null);
 });
 
-test('negative verified contribution deprioritises the linked opportunity', () => {
+test('negative legacy review remains unqualified rather than conferring a financial ranking', () => {
   const state={workspace:{id:'tenant-negative'},economics:{},orders:[],opportunities:[],revenueEngine:{}};
   const opportunity={id:'opportunity-3',kind:'pricing',title:'Pricing test',status:'open'};
   state.opportunities.push(opportunity);
   const experiment=createOpportunityExperiment(state,opportunity,{},'owner-1');
   recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalContribution:-20},'analyst-1');
   verifyExperimentMeasurement(state,experiment.id,{note:'Contribution loss confirmed.'},'owner-1');
-  assert.equal(opportunity.evidenceDecision,'deprioritise');
-  assert.equal(opportunity.verifiedContributionValue,-20);
+  assert.equal(experiment.impact.incrementalContribution,-20);
+  assert.equal(opportunity.evidenceDecision,'needs-more-evidence');
+  assert.equal(opportunity.verifiedContributionValue,null);
+});
+
+test('explicit legacy zero is preserved as an observed value rather than qualified zero contribution', () => {
+  const state={workspace:{id:'tenant-zero'},economics:{},orders:[],revenueEngine:{}};
+  const experiment=createExperiment(state,{kind:'pricing',title:'Zero result'},'owner-1');
+  recordExperimentMeasurement(state,experiment.id,{method:'holdout',incrementalContribution:0},'analyst-1');
+  verifyExperimentMeasurement(state,experiment.id,{note:'Explicit zero was reviewed.'},'owner-1');
+  assert.equal(experiment.impact.incrementalContribution,0);
+  assert.equal(experiment.impact.legacyReviewed,true);
+  assert.equal(experiment.decisionPosture.status,'needs-more-evidence');
+  assert.equal(experiment.decisionPosture.verifiedContributionValue,null);
+});
+
+test('remeasurement clears stale legacy review and financial posture in the returned record', () => {
+  const experiment={id:'old-result',status:'completed',impact:{verified:true,status:'verified',incrementalContribution:100},
+    legacyReviewRecorded:true,evidenceVerified:true,financiallyQualified:true,qualified:true,verifiedContributionValue:100,
+    decisionPosture:{status:'ready-for-owner-review',verifiedContributionValue:100}};
+  const state={revenueEngine:{experiments:[experiment]}};
+  const measured=recordExperimentMeasurement(state,experiment.id,{method:'new holdout',incrementalContribution:-10},'analyst-2');
+  assert.equal(measured.impact.incrementalContribution,-10);
+  assert.equal(measured.impact.legacyReviewed,false);
+  assert.equal(measured.legacyReviewRecorded,false);
+  assert.equal(measured.evidenceVerified,false);
+  assert.equal(measured.financiallyQualified,false);
+  assert.equal(measured.qualified,false);
+  assert.equal(measured.decisionPosture.status,'needs-more-evidence');
+  assert.equal(measured.verifiedContributionValue,null);
+  assert.equal(measured.decisionPosture.verifiedContributionValue,null);
+});
+
+function deepFreeze(value) {
+  if(value && typeof value==='object' && !Object.isFrozen(value)) {
+    for(const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+test('raw snapshots normalize stored positive, zero and negative legacy flags without rewriting audit history', () => {
+  const flags=[{verified:true,status:'verified'},{verified:true,status:'measured'},{verified:false,status:'verified'}];
+  const experiments=[];
+  for(const [index,flag] of flags.entries()) for(const value of [75,0,-20]) experiments.push({
+    id:`stored-${index}-${value}`,status:'completed',completedAt:'2026-09-30T12:00:00.000Z',
+    outcomeMeasurement:{schema:'typed-measurement-preserved',amount:String(value)},
+    impact:{...flag,incrementalContribution:value,incrementalRevenue:500,contributionProtected:10,costAvoided:5,minutesSaved:30,
+      method:'holdout',measuredAt:'2026-09-29T12:00:00.000Z',recordedBy:'analyst-1',
+      verifiedAt:'2026-09-30T12:00:00.000Z',verifiedBy:'owner-1',verificationNote:'Historical owner review',
+      financiallyQualified:true,qualified:true,qualification:'qualified'},
+    decisionPosture:{status:value>0?'ready-for-owner-review':value<0?'deprioritise':'needs-more-evidence',
+      verifiedContributionValue:value,reason:'Previously trusted legacy sum',readyToScale:true},
+    evidenceVerified:true,financiallyQualified:true,qualified:true,verifiedContributionValue:value
+  });
+  const state=deepFreeze({workspace:{id:'tenant-history'},economics:{},orders:[],revenueEngine:{
+    workspace_id:'tenant-history',experiments,updatedAt:'2026-09-30T12:00:00.000Z'}});
+  const before=structuredClone(state);
+  const snapshot=revenueEngineSnapshot(state);
+  assert.deepEqual(state,before);
+  assert.notEqual(snapshot.experiments,state.revenueEngine.experiments);
+  for(const [index,row] of snapshot.experiments.entries()) {
+    const stored=state.revenueEngine.experiments[index];
+    assert.notEqual(row,stored);
+    assert.notEqual(row.impact,stored.impact);
+    assert.equal(row.impact.incrementalContribution,stored.impact.incrementalContribution);
+    for(const field of ['incrementalRevenue','contributionProtected','costAvoided','minutesSaved','method','measuredAt','recordedBy','verified','status','verifiedAt','verifiedBy','verificationNote']) assert.equal(row.impact[field],stored.impact[field]);
+    assert.deepEqual(row.outcomeMeasurement,stored.outcomeMeasurement);
+    assert.equal(row.impact.legacyReviewed,true);
+    assert.equal(row.impact.financiallyQualified,false);
+    assert.equal(row.impact.qualified,false);
+    assert.equal(row.impact.qualification,'legacy_unqualified');
+    assert.equal(row.evidenceVerified,false);
+    assert.equal(row.financiallyQualified,false);
+    assert.equal(row.qualified,false);
+    assert.equal(row.legacyReviewRecorded,true);
+    assert.equal(row.evidenceQualification,'legacy_unqualified');
+    assert.equal(row.verifiedContributionValue,null);
+    assert.equal(row.decisionPosture.status,'needs-more-evidence');
+    assert.equal(row.decisionPosture.verifiedContributionValue,null);
+    assert.equal(row.decisionPosture.financiallyQualified,false);
+    assert.equal(row.decisionPosture.readyToScale,undefined);
+    assert.equal(row.decisionPosture.reason.includes('Previously trusted'),false);
+  }
+});
+
+test('raw snapshot leaves absent revenue storage untouched and never invents a legacy owner review', () => {
+  const empty=deepFreeze({orders:[],economics:{}});
+  assert.deepEqual(revenueEngineSnapshot(empty).experiments,[]);
+  assert.equal(Object.hasOwn(empty,'revenueEngine'),false);
+  const state=deepFreeze({orders:[],economics:{},revenueEngine:{experiments:[{
+    id:'measured',status:'measured',impact:{verified:false,status:'measured',incrementalContribution:100},
+    decisionPosture:{status:'ready-for-owner-review',verifiedContributionValue:100}
+  }]}});
+  const row=revenueEngineSnapshot(state).experiments[0];
+  assert.equal(row.impact.verified,false);
+  assert.equal(row.impact.legacyReviewed,false);
+  assert.equal(row.legacyReviewRecorded,false);
+  assert.equal(row.decisionPosture.status,'needs-more-evidence');
+  assert.equal(row.verifiedContributionValue,null);
+});
+
+test('growth plans do not infer qualified impact, forecasts, GBP or ROI from legacy experiment review', () => {
+  const baseline=deriveGrowthPlan({orders:[],economics:{}});
+  const state={orders:[],economics:{},revenueEngine:{experiments:[75,0,-20].map(value=>({
+    id:`legacy-${value}`,status:'completed',impact:{verified:true,status:'verified',incrementalContribution:value,incrementalRevenue:999999},
+    decisionPosture:{status:'ready-for-owner-review',verifiedContributionValue:value}
+  }))}};
+  const result=deriveGrowthPlan(state);
+  assert.deepEqual(result.opportunities,baseline.opportunities);
+  assert.equal(result.opportunities.every(row=>row.estimatedImpact===null),true);
+  assert.equal(/£|GBP|\bROI\b|ready-for-owner-review|deprioritise/.test(JSON.stringify(result)),false);
+  assert.match(result.note,/Legacy experiment review does not establish qualified contribution or future benefit/);
 });
