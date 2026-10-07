@@ -6,10 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
-import { seedWorkspaceState } from '../lib/store.mjs';
+import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { detectExceptions, detectOpportunities } from '../lib/control.mjs';
 import { buildDailyBrief } from '../lib/operations.mjs';
 import { createSessionToken } from '../lib/security.mjs';
+import { fakeSupabase } from './fake-supabase.mjs';
+import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 
 // Frozen pre-version cache contract. This deliberately does not use the current
 // signature helper: the fixture must remain a cache written by the old logic.
@@ -28,11 +30,13 @@ function legacySignature(state) {
   })).digest('hex').slice(0, 32);
 }
 
-test('bootstrap invalidates legacy same-input analysis once while retaining briefs, exception history and agent runs', async t => {
+for (const storage of ['file', 'mock-supabase']) test(`${storage}: bootstrap invalidates legacy same-input analysis once while retaining briefs, exception history and agent runs`, async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-brief-version-'));
   const secret = 'brief-version-fixture-session-secret-over-32-characters';
+  const database = storage === 'mock-supabase' ? fakeSupabase() : null;
+  const store = database ? createStore({ SUPABASE_URL: 'https://brief-version.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, { fetchImpl: database.fetchImpl }) : null;
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: 'brief-version-fixture-credential-key-over-32-characters',
-    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, { schedulerEnabled: false, agentOpsEnabled: false });
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, { schedulerEnabled: false, agentOpsEnabled: false, ...(store ? { store } : {}) });
   t.after(async () => { if (server.listening) await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
   const state = seedWorkspaceState({}, { workspaceId: 'brief-version-fixture', email: 'owner@brief-version.test', passwordHash: 'test-only' });
   const now = new Date().toISOString();
@@ -41,6 +45,13 @@ test('bootstrap invalidates legacy same-input analysis once while retaining brie
     variants: [{ id: 'missing', sku: 'MISSING', price: null, inventory: 50 }, { id: 'stock', sku: 'STOCK', price: 10, inventory: 1 }] }];
   const costs = { landed: 6, packing: 0, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 };
   state.economics = { MISSING: { ...costs }, STOCK: { ...costs } };
+  state.revenueEngine.experiments = [{ id: 'historical-owner-measurement', title: 'Owner recorded contribution', status: 'measured',
+    outcomeMeasurement: prepareExperimentOutcomeMeasurement({ expectedRevision: 0, amount: '12.000001', currency: 'GBP',
+      window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' },
+      coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' },
+      observedAt: '2026-10-06T12:00:00.000Z', report: { description: 'Synthetic owner evidence independent of catalogue calculations.', costsComplete: true }
+    }, { workspaceId: state.workspace.id, experimentId: 'historical-owner-measurement', actorId: state.users[0].id,
+      now: '2026-10-06T16:00:00.000Z', previousMeasurement: null }) }];
   detectExceptions(state, 'fixture'); detectOpportunities(state, 'fixture');
   const acknowledged = state.exceptions.find(row => row.kind === 'stock');
   acknowledged.status = 'acknowledged';
@@ -60,6 +71,13 @@ test('bootstrap invalidates legacy same-input analysis once while retaining brie
   state.agentRuns = [{ id: 'legacy-agent-run', completedAt: now, status: 'Completed', summary: '1 variant is below its margin floor.',
     results: [{ agentId: 'pricing', status: 'Warning', finding: '1 variant is below its margin floor.', confidence: 0.94, issues: [] }] }];
   await server.packsmart.store.save(state.workspace.id, state);
+  if (store) {
+    // Model an old cache over an already healthy saved Supabase snapshot.
+    // Initial persistence establishes its ordinary reporting status first.
+    state.controlSignature = legacySignature(state);
+    state.dailyBriefs[0].sourceSignature = state.controlSignature;
+    await store.save(state.workspace.id, state);
+  }
   const before = await server.packsmart.store.get(state.workspace.id);
   assert.equal(before.controlSignature, legacySignature(before), 'The old implementation would skip reconciliation for these exact persisted inputs');
   assert.equal(before.dailyBriefs[0].sourceSignature, before.controlSignature);
@@ -67,6 +85,8 @@ test('bootstrap invalidates legacy same-input analysis once while retaining brie
   const preservedBrief = structuredClone(before.dailyBriefs[0]);
   const preservedException = structuredClone(before.exceptions.find(row => row.id === oldException.id));
   const preservedAgentRuns = structuredClone(before.agentRuns);
+  const preservedMeasurements = structuredClone(before.revenueEngine.experiments);
+  const preservedNormalizedBrief = database ? structuredClone(database.tables.get('operations_briefs').find(row => row.id === preservedBrief.id)) : null;
   const preservedAcknowledgement = structuredClone(before.exceptions.find(row => row.id === acknowledged.id).history);
   let providerCalls = 0;
   server.packsmart.integrations.syncAll = async () => { providerCalls++; assert.fail('Cache reconciliation must not call providers'); };
@@ -77,6 +97,8 @@ test('bootstrap invalidates legacy same-input analysis once while retaining brie
     assert.equal(response.status, 200);
     return response.json();
   };
+  const activityBefore = store?.activitySnapshot(state.workspace.id);
+  const callsBefore = database?.calls.length;
   const first = await bootstrap();
   assert.notEqual(first.brief.id, preservedBrief.id, 'Changed calculation semantics must invalidate a same-day cache');
   assert.equal(first.dashboard.lowMargin, 0);
@@ -92,10 +114,42 @@ test('bootstrap invalidates legacy same-input analysis once while retaining brie
   assert.deepEqual(after.exceptions.find(row => row.id === oldException.id), { ...preservedException, present: false });
   assert.deepEqual(after.exceptions.find(row => row.id === acknowledged.id).history, preservedAcknowledgement);
   assert.deepEqual(after.agentRuns, preservedAgentRuns);
+  assert.deepEqual(after.revenueEngine.experiments, preservedMeasurements, 'cache-version changes do not rewrite typed owner evidence');
+  if (database) {
+    const calls = database.calls.slice(callsBefore);
+    const primary = calls.filter(call => call.method === 'PATCH' && call.url.pathname.endsWith('/saas_workspace_state'));
+    const reporting = calls.filter(call => call.url.pathname.endsWith('/rpc/runvara_commit_reporting_status'));
+    const mirroredBriefs = calls.filter(call => call.method === 'POST' && call.url.pathname.endsWith('/operations_briefs'))
+      .flatMap(call => JSON.parse(call.body));
+    assert.equal(primary.length, 1, 'the calculation-version change causes exactly one primary reconciliation');
+    assert.equal(reporting.length, 1);
+    assert.ok(Buffer.byteLength(reporting[0].body) <= 16384);
+    assert.equal(Object.hasOwn(JSON.parse(reporting[0].body), 'state'), false);
+    assert.ok(preservedNormalizedBrief);
+    assert.deepEqual(database.tables.get('operations_briefs').find(row => row.id === preservedBrief.id), preservedNormalizedBrief);
+    assert.equal(mirroredBriefs.some(row => row.id === preservedBrief.id), false, 'unchanged historical normalized briefs are not rewritten');
+    assert.ok(calls.every(call => !call.url.pathname.includes('business_outcome')), 'cache reconciliation cannot publish or rewrite outcome history');
+    const observed = store.activitySnapshot(state.workspace.id);
+    assert.equal(observed.db.operations.state_commit - activityBefore.db.operations.state_commit, 1);
+    assert.equal(observed.db.operations.reporting_commit - activityBefore.db.operations.reporting_commit, 1);
+    assert.equal(observed.hotState.confirmed.observations - activityBefore.hotState.confirmed.observations, 1);
+    assert.equal(observed.hotState.confirmed.bytes, Buffer.byteLength(JSON.stringify(JSON.parse(primary[0].body).state)));
+  }
+  const secondCallsBefore = database?.calls.length;
+  const secondActivityBefore = store?.activitySnapshot(state.workspace.id);
   const second = await bootstrap();
   const unchanged = await server.packsmart.store.get(state.workspace.id);
   assert.equal(second.brief.id, first.brief.id, 'The new cache is reusable without another calculation-version invalidation');
   assert.equal(unchanged._revision, after._revision, 'Unchanged reads do not introduce additional saves');
   assert.deepEqual(unchanged.dailyBriefs, after.dailyBriefs);
+  assert.deepEqual(unchanged.revenueEngine.experiments, preservedMeasurements);
+  if (database) {
+    assert.ok(database.calls.slice(secondCallsBefore).every(call => call.method === 'GET'), 'unchanged bootstrap must not issue a primary, reporting or metadata write');
+    const observed = store.activitySnapshot(state.workspace.id);
+    assert.equal(observed.db.operations.state_commit, secondActivityBefore.db.operations.state_commit);
+    assert.equal(observed.db.operations.reporting_commit, secondActivityBefore.db.operations.reporting_commit);
+    assert.deepEqual(observed.hotState, secondActivityBefore.hotState);
+    assert.deepEqual(database.tables.get('operations_briefs').find(row => row.id === preservedBrief.id), preservedNormalizedBrief);
+  }
   assert.equal(providerCalls, 0);
 });

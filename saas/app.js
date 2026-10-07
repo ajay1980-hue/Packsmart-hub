@@ -92,7 +92,7 @@
     } catch (cause) {
       throw Object.assign(new Error(cause.name === 'TimeoutError' || cause.name === 'AbortError' ? 'The request took too long. Check connection activity before retrying; it may still be running.' : 'Runvara could not be reached. Check your internet connection and connection activity before retrying any change.'), { code: 'REQUEST_UNAVAILABLE' });
     } finally { clearTimeout(timeout); config.signal?.removeEventListener('abort', cancel); }
-    if (response.status === 401 && state.session === originatingSession && state.csrf === originatingCsrf && !path.endsWith('/login') && !path.endsWith('/activate-owner') && !path.endsWith('/signup-options')) {
+    if (response.status === 401 && !config.signal?.aborted && (typeof config.isCurrent !== 'function' || config.isCurrent()) && state.session === originatingSession && state.csrf === originatingCsrf && !path.endsWith('/login') && !path.endsWith('/activate-owner') && !path.endsWith('/signup-options')) {
       state.session = null; state.data = null; state.csrf = ''; showLogin();
     }
     if (!response.ok) {
@@ -103,7 +103,7 @@
   }
 
   function showLogin() {
-    resetObjectiveReview(); resetAutomationHistory();
+    resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     closeWorkspaceSearch();
     $('#commander-result').replaceChildren(); $('#commander-result').classList.add('hidden');
     $('#loading-screen')?.classList.add('hidden');
@@ -120,7 +120,7 @@
   }
 
   function showPasswordSetup() {
-    resetObjectiveReview(); resetAutomationHistory();
+    resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
@@ -167,7 +167,7 @@
     const data = await request('/api/bootstrap');
     if (state.data?.workspace?.id !== data.workspace.id) resetObjectiveForm();
     state.data = data; state.csrf = data.csrf || state.csrf;
-    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory();
+    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     $('#business-graph-result').replaceChildren();
     $('#business-objectives-list').replaceChildren();
     $('#fleet-provider-usage-result').replaceChildren();
@@ -194,6 +194,7 @@
   }
 
   function setView(view) {
+    if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); }
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
     closeWorkspaceSearch();
     state.view = view;
@@ -393,8 +394,9 @@
     $('#re-experiment-count').textContent = experiments.length + ' experiment' + (experiments.length === 1 ? '' : 's');
     $('#re-experiment-list').innerHTML = experiments.slice(0,20).map(item => {
       const verified = item.impact?.verified === true;
-      const contribution = Number.isFinite(Number(item.impact?.incrementalContribution)) ? money(item.impact.incrementalContribution) + ' contribution' : 'contribution not verified';
-      return '<div class="control-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown')) + ' · ' + escapeHtml(item.metric || 'incremental_contribution') + '</small><small>' + escapeHtml(verified ? 'Verified · ' + contribution : statusLabel(item.status || 'draft')) + '</small></div><span class="tag ' + (verified ? 'good' : item.status === 'measured' ? 'warn' : 'neutral') + '">' + escapeHtml(verified ? 'Verified' : statusLabel(item.status || 'draft')) + '</span></div>';
+      const rawContribution = item.impact?.incrementalContribution;
+      const contribution = rawContribution !== null && rawContribution !== undefined && rawContribution !== '' ? String(rawContribution) + ' recorded contribution (currency/period unqualified)' : 'contribution unknown';
+      return '<div class="control-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown')) + ' · ' + escapeHtml(item.metric || 'incremental_contribution') + '</small><small>' + escapeHtml('Legacy recorded / unqualified · ' + contribution) + '</small></div><span class="tag ' + (verified ? 'good' : item.status === 'measured' ? 'warn' : 'neutral') + '">' + escapeHtml(verified ? 'Legacy reviewed' : statusLabel(item.status || 'draft')) + '</span></div>';
     }).join('') || '<div class="empty-state">No experiments yet. Start from a recorded opportunity above.</div>';
     const capacityForm = $('#re-growth-capacity-form');
     if (capacityForm) {
@@ -491,9 +493,14 @@
     const experiments = state.data.revenueEngine?.experiments || [];
     const portfolio = hg.portfolio || { portfolio:[], allocation:{}, coverage:{} };
     const executionPlan = hg.executionPlan || { sequence:[], blocked:[], summary:{} };
-    const verified = impact.verified || {};
-    $('#hg-value').textContent = money(verified.verifiedValue);
-    $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
+    const countLabel = value => Number.isSafeInteger(value) && value >= 0 ? String(value) : 'Unknown';
+    const legacyCount = countLabel(impact.legacy?.recordedEvents), legacyReviewed = countLabel(impact.legacy?.reviewedEvents);
+    $('#hypergrowth-title').textContent = 'Next actions. Measured evidence.';
+    $('#hg-value').previousElementSibling.textContent = 'Unscoped value';
+    $('#hg-value').nextElementSibling.textContent = 'Use Business results for exact currency and window';
+    $('#hg-hours').nextElementSibling.textContent = 'Qualified time-savings evidence unavailable';
+    $('#hg-value').textContent = '—';
+    $('#hg-hours').textContent = '—';
     $('#hg-coverage').textContent = String(business.profitability?.profitCoveragePercent ?? 0) + '%';
     $('#hg-coverage-note').textContent = String(business.profitability?.profitCoveredOrders ?? 0) + ' profit-covered orders';
     const recommended = council.commander?.recommended?.length || 0;
@@ -502,8 +509,8 @@
     $('#hg-council').textContent = String(recommended + approvals + evidence);
     $('#hg-council-note').textContent = recommended + ' ready · ' + approvals + ' approval · ' + evidence + ' evidence';
     $('#hg-opportunity-count').textContent = String(queue.summary?.total || 0) + ' detected';
-    $('#hypergrowth-evidence-badge').textContent = (impact.activity?.verifiedImpactEvents || 0) + ' verified impact events';
-    $('#hypergrowth-evidence-badge').className = 'tag ' + ((impact.activity?.verifiedImpactEvents || 0) ? 'good' : 'neutral');
+    $('#hypergrowth-evidence-badge').textContent = legacyCount + ' legacy records · unqualified';
+    $('#hypergrowth-evidence-badge').className = 'tag neutral';
     $('#hg-opportunities').innerHTML = (queue.opportunities || []).slice(0,5).map((item,index) => {
       const learned = item.learning ? ' · learned from ' + item.learning.samples + ' verified result' + (item.learning.samples === 1 ? '' : 's') + ' · ' + item.learning.positiveRatePercent + '% positive' : '';
       const posture = item.evidenceDecision === 'ready-for-owner-review' ? 'Ready for owner review' : item.evidenceDecision === 'deprioritise' ? 'Deprioritise' : item.evidenceDecision === 'needs-more-evidence' ? 'Needs more evidence' : item.score !== null ? money(item.score) : item.learning ? 'Learned signal' : 'Needs evidence';
@@ -520,11 +527,13 @@
       ['External writes authorised', council.commander?.externalWrites ? 'Yes':'No', council.commander?.externalWrites ? 'bad':'good']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
     $('#hg-impact').innerHTML = [
-      ['Incremental revenue', money(verified.incrementalRevenue), 'neutral'],
-      ['Incremental contribution', money(verified.incrementalContribution), 'good'],
-      ['Contribution protected', money(verified.contributionProtected), 'good'],
-      ['Costs avoided', money(verified.costAvoided), 'good'],
-      ['Verified ROI', impact.roi?.multiple == null ? '—' : Number(impact.roi.multiple).toFixed(2) + '×', impact.roi?.multiple > 1 ? 'good':'neutral']
+      ['Unscoped incremental revenue', '—', 'neutral'],
+      ['Unscoped contribution', '—', 'neutral'],
+      ['Contribution protected', '—', 'neutral'],
+      ['Costs avoided', '—', 'neutral'],
+      ['ROI unavailable', '—', 'neutral'],
+      ['Legacy recorded measurements', legacyCount, 'neutral'],
+      ['Legacy reviews (unqualified)', legacyReviewed, 'neutral']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
     const connectionIssues = (business.connections || []).filter(item => !item.healthy).length;
     $('#hg-controls').innerHTML = [
@@ -535,20 +544,16 @@
       ['Profit truth policy', 'Unknown stays unknown', 'good']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
 
-    const usable = Number(learning.summary?.domainsUsableForGuidance || 0);
-    const learningEvents = Number(learning.summary?.verifiedLearningEvents || 0);
-    $('#hg-learning-badge').textContent = usable ? usable + ' learned domain' + (usable === 1 ? '' : 's') : 'Learning safely';
-    $('#hg-learning-badge').className = 'tag ' + (usable ? 'good' : 'neutral');
-    $('#hg-learning').innerHTML = (learning.priors || []).slice(0,5).map(item =>
-      '<div class="learning-row"><div><b>' + escapeHtml(statusLabel(item.kind)) + '</b><small>' + escapeHtml(item.samples + ' verified outcomes · ' + (item.positiveRatePercent == null ? 'positive rate unknown' : item.positiveRatePercent + '% positive')) + '</small></div><span class="tag ' + (item.usableForGuidance ? 'good' : 'neutral') + '">' + escapeHtml(item.usableForGuidance ? statusLabel(item.confidence) + ' guidance' : 'More evidence') + '</span></div>'
-    ).join('') || '<div class="empty-state">Runvara will learn here after repeated verified experiment or work outcomes. Forecasts and unverified results never count.</div>';
-    if (!learningEvents && learning.priors?.length) $('#hg-learning').insertAdjacentHTML('beforeend','<p class="muted tiny">No verified learning events are currently counted.</p>');
+    $('.command-learning h2').textContent = 'Descriptive measurement history';
+    $('#hg-learning-badge').textContent = 'Guidance unavailable';
+    $('#hg-learning-badge').className = 'tag neutral';
+    $('#hg-learning').innerHTML = '<p class="muted">' + escapeHtml(countLabel(learning.legacy?.recordedEvents)) + ' legacy measurements; ' + escapeHtml(countLabel(learning.legacy?.reviewedEvents)) + ' recorded reviews. These do not establish qualified learning priors.</p><p class="muted tiny">Qualified groups are descriptive. Future guidance requires immutable action, domain and comparability evidence.</p><button class="text-button" type="button" data-view-link="revenue-engine">Find Business results in Revenue Engine</button><p class="muted tiny">Open the collapsed Business results panel to load committed measurements on demand.</p>';
 
     const statusTone = status => status === 'completed' ? 'good' : status === 'measured' ? 'warn' : status === 'running' ? 'neutral' : 'neutral';
     $('#hg-experiments').innerHTML = experiments.slice(0,6).map(item => {
-      const impactState = item.impact?.verified ? 'Verified result' : item.status === 'measured' ? 'Awaiting verification' : 'No verified result yet';
+      const impactState = item.impact?.verified ? 'Legacy reviewed / unqualified' : item.status === 'measured' ? 'Recorded / unqualified' : 'No legacy measurement yet';
       const contribution = item.impact?.incrementalContribution;
-      return '<div class="experiment-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown') + ' · ' + impactState + (Number.isFinite(Number(contribution)) ? ' · ' + money(contribution) + ' contribution' : '')) + '</small></div><span class="tag ' + statusTone(String(item.status || '').toLowerCase()) + '">' + escapeHtml(statusLabel(item.status || 'draft')) + '</span></div>';
+      return '<div class="experiment-row"><div><b>' + escapeHtml(item.title || statusLabel(item.kind || 'Experiment')) + '</b><small>' + escapeHtml(statusLabel(item.kind || 'unknown') + ' · ' + impactState + (contribution !== null && contribution !== undefined && contribution !== '' && Number.isFinite(Number(contribution)) ? ' · ' + String(contribution) + ' recorded contribution (currency/window unqualified)' : ' · contribution unknown')) + '</small></div><span class="tag ' + statusTone(String(item.status || '').toLowerCase()) + '">' + escapeHtml(statusLabel(item.status || 'draft')) + '</span></div>';
     }).join('') || '<div class="empty-state">No experiments yet. Create one from the Revenue Engine when there is a measurable hypothesis worth testing.</div>';
 
     const nextPound = portfolio.allocation?.nextPound;
@@ -1664,7 +1669,7 @@
     setBusy(button,true,'Recording…');
     try {
       await request('/api/revenue-engine/experiments/'+encodeURIComponent(id)+'/measure',{method:'POST',body:JSON.stringify(payload)});
-      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Measurement recorded. It will not influence learning until explicitly verified.');
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Legacy measurement recorded. It remains unqualified for business results and comparable learning.');
     } catch(error){ showMessage(error.message,'error'); }
     finally{ setBusy(button,false); }
   });
@@ -1676,7 +1681,7 @@
     setBusy(button,true,'Verifying…');
     try {
       await request('/api/revenue-engine/experiments/'+encodeURIComponent(id)+'/verify',{method:'POST',body:JSON.stringify({note:form.elements.note.value})});
-      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Experiment verified. Runvara can now use the realised result as learning evidence.');
+      form.reset(); await loadBootstrap({migrate:false}); setView('revenue-engine'); showMessage('Legacy review recorded. Use Business results to prepare and publish a qualified measurement.');
     } catch(error){ showMessage(error.message,'error'); }
     finally{ setBusy(button,false); }
   });
@@ -1865,7 +1870,7 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
@@ -1919,6 +1924,8 @@
     try{await request('/api/admin/invitations',{method:'DELETE',body:JSON.stringify({id:button.dataset.revokeInvite})});await loadLaunch();}catch(error){$('#launch-feedback').textContent=error.message;}
   });
 
+  window.RunvaraOutcomes?.init({ request, getContext: () => ({ session: state.session, workspaceId: state.data?.workspace?.id, userId: state.session?.user?.id, role: state.data?.user?.role, view: state.view, experiments: state.data?.revenueEngine?.experiments || [] }) });
+  window.RunvaraActivity?.init({ request, getContext: () => ({ session:state.session, workspaceId:state.data?.workspace?.id, role:state.data?.user?.role, view:state.view }) });
   window.RunvaraControl.init({ request, reload: loadBootstrap, notify: showMessage, setView, money, date, escapeHtml });
   window.RunvaraConnections?.init({ request, reload: loadBootstrap, notify: showMessage, setView, date, escapeHtml });
 

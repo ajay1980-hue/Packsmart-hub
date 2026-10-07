@@ -5,7 +5,6 @@ const round = (value, digits = 2) => value !== null && value !== undefined && va
 const clean = (value, max = 180) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 const rows = value => Array.isArray(value) ? value : [];
 const finiteNumber = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value)) ? Number(value) : null;
-const amount = value => round(finiteNumber(value));
 const bound = (value, fallback, maximum) => Number.isFinite(Number(value)) ? Math.max(0, Math.min(maximum, Math.floor(Number(value)))) : fallback;
 const identity = value => typeof value === 'string' && value === value.trim() && value.length <= 180 ? value : '';
 const workspaceIdentity = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value) ? value : '';
@@ -20,20 +19,14 @@ function opportunityEvidence(value, workspaceId) {
 }
 
 function verifiedPosture(experiment) {
-  const empty = { evidenceVerified:false, evidenceDecision:null, verifiedContributionValue:null, evidenceDecisionReason:null, evidenceUpdatedAt:null };
+  const empty = { evidenceVerified:false, evidenceDecision:null, verifiedContributionValue:null, evidenceDecisionReason:null, evidenceUpdatedAt:null,
+    legacyReviewRecorded:false, evidenceQualification:'none' };
   if (!experiment || experiment.status !== 'completed' || experiment.impact?.verified !== true) return empty;
-  const values = ['incrementalContribution', 'contributionProtected', 'costAvoided'].map(key => amount(experiment.impact[key])).filter(value => value !== null);
-  const value = values.length ? amount(values.reduce((sum, entry) => sum + entry, 0)) : null;
-  const decision = value !== null && value > 0 ? 'ready-for-owner-review' : value !== null && value < 0 ? 'deprioritise' : 'needs-more-evidence';
-  return {
-    evidenceVerified:true,
-    evidenceDecision:decision,
-    verifiedContributionValue:value,
-    evidenceDecisionReason:decision === 'ready-for-owner-review' ? 'Verified realised contribution evidence is positive.'
-      : decision === 'deprioritise' ? 'Verified realised contribution evidence is negative.'
-        : value === null ? 'Verified measurement does not establish contribution impact.' : 'No positive verified contribution evidence has been established.',
-    evidenceUpdatedAt:clean(experiment.impact.verifiedAt || experiment.completedAt, 80) || null
-  };
+  // A hot-state verified flag does not establish a committed measurement or a
+  // comparable intervention. Neither its sign nor amount can rank future work.
+  return { ...empty, evidenceDecision:'needs-more-evidence', legacyReviewRecorded:true, evidenceQualification:'legacy_unqualified',
+    evidenceDecisionReason:'Legacy review is recorded but unqualified. A committed measurement and immutable action/domain comparability evidence are required.',
+    evidenceUpdatedAt:clean(experiment.impact.verifiedAt || experiment.completedAt, 80) || null };
 }
 
 // This is a read-only projection of the existing durable collection, not a new

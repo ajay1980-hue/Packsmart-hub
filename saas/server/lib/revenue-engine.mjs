@@ -46,6 +46,10 @@ function dominant(values) {
 export function ensureRevenueEngine(state) {
   const current = state.revenueEngine && typeof state.revenueEngine === 'object' ? state.revenueEngine : {};
   state.revenueEngine = {
+    // Normalization must not erase a conflicting source scope before readers
+    // or owner publication checks can reject it. Never relabel foreign data.
+    ...Object.fromEntries(['workspaceId', 'workspace_id', 'tenantId', 'tenant_id', 'workspace', 'tenant']
+      .filter(key => Object.hasOwn(current, key)).map(key => [key, current[key]])),
     intentEvents: Array.isArray(current.intentEvents) ? current.intentEvents : [],
     leads: Array.isArray(current.leads) ? current.leads : [],
     quotes: Array.isArray(current.quotes) ? current.quotes : [],
@@ -266,7 +270,7 @@ export function deriveGrowthPlan(state, { targetProfit = null } = {}) {
   if(baskets.recommendations.length) opportunities.push({kind:'aov',title:'Test evidence-backed cross-sell bundles',evidence:baskets.recommendations[0].evidence,estimatedImpact:null,confidence:'medium',risk:'Association does not prove uplift; use controlled experiments.',approvalRequired:true});
   if(pipeline.summary.overdueFollowUps) opportunities.push({kind:'b2b',title:`Resolve ${pipeline.summary.overdueFollowUps} overdue B2B follow-ups`,evidence:`Open pipeline value is £${Number(pipeline.summary.openPipeline||0).toFixed(2)}.`,estimatedImpact:null,confidence:'high',risk:'Quote terms and customer-facing messages need owner review.',approvalRequired:true});
   if(attribution.coverage.sourceCoveragePercent<80) opportunities.push({kind:'attribution',title:'Increase source attribution coverage',evidence:`${attribution.coverage.sourceCoveragePercent}% of retained settled orders currently have confirmed traffic-source evidence.`,estimatedImpact:null,confidence:'high',risk:'Do not optimise spend from channel-only attribution.',approvalRequired:false});
-  return {targetProfit: Number.isFinite(Number(targetProfit))?Number(targetProfit):null, opportunities, generatedAt:nowIso(), note:'Estimated impact remains null where Runvara lacks defensible uplift evidence. The plan prioritises measurable actions without inventing financial certainty.'};
+  return {targetProfit: Number.isFinite(Number(targetProfit))?Number(targetProfit):null, opportunities, generatedAt:nowIso(), note:'Estimated impact remains null where Runvara lacks defensible uplift evidence. Legacy experiment review does not establish qualified contribution or future benefit. The plan prioritises measurable actions without inventing financial certainty.'};
 }
 
 
@@ -322,7 +326,7 @@ export function recordExperimentMeasurement(state, experimentId, body = {}, acto
   const method=clean(body.method,160);
   if(!method) throw Object.assign(new Error('Measurement method is required'),{status:400,code:'VALIDATION_FAILED'});
   const numbers=['incrementalRevenue','incrementalContribution','contributionProtected','costAvoided','minutesSaved'];
-  const impact={verified:false,status:'measured',method,measuredAt:nowIso(),recordedBy:actor};
+  const impact={verified:false,status:'measured',legacyReviewed:false,financiallyQualified:false,qualification:'legacy_unqualified',method,measuredAt:nowIso(),recordedBy:actor};
   let hasMetric=false;
   for(const field of numbers) {
     if(body[field]===null || body[field]===undefined || body[field]==='') continue;
@@ -335,16 +339,31 @@ export function recordExperimentMeasurement(state, experimentId, body = {}, acto
   experiment.impact=impact;
   experiment.status='measured';
   experiment.updatedAt=impact.measuredAt;
+  Object.assign(experiment,legacyExperimentView(experiment));
   engine.updatedAt=impact.measuredAt;
   return experiment;
 }
 
 function experimentDecisionPosture(impact = {}) {
-  const contribution = ['incrementalContribution','contributionProtected','costAvoided']
-    .reduce((sum, field) => sum + (Number.isFinite(Number(impact[field])) ? Number(impact[field]) : 0), 0);
-  if (contribution > 0) return { status:'ready-for-owner-review', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is positive.' };
-  if (contribution < 0) return { status:'deprioritise', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is negative.' };
-  return { status:'needs-more-evidence', verifiedContributionValue:0, reason:'No positive verified contribution evidence has been established.' };
+  // The legacy review flow has no committed typed measurement, currency,
+  // observation window or resolved source proof. Keep its review history, but
+  // never derive financial qualification or future ranking from its amounts.
+  return { status:'needs-more-evidence', verifiedContributionValue:null,
+    legacyReviewRecorded:impact.verified === true || String(impact.status || '').toLowerCase() === 'verified',
+    evidenceVerified:false, financiallyQualified:false, evidenceQualification:'legacy_unqualified',
+    reason:'Legacy measurement and owner review are unqualified context. Committed typed evidence and immutable action/domain comparability are required for a financial decision.' };
+}
+
+function legacyExperimentView(experiment) {
+  if (!experiment || typeof experiment !== 'object' || Array.isArray(experiment)) return experiment;
+  const impact=experiment.impact && typeof experiment.impact === 'object' && !Array.isArray(experiment.impact) ? experiment.impact : null;
+  const posture=experimentDecisionPosture(impact || {});
+  return { ...experiment,
+    ...(impact ? { impact:{ ...impact, legacyReviewed:posture.legacyReviewRecorded, qualified:false,
+      financiallyQualified:false, qualification:'legacy_unqualified' } } : {}),
+    decisionPosture:posture, evidenceVerified:false, evidenceDecision:posture.status,
+    verifiedContributionValue:null, legacyReviewRecorded:posture.legacyReviewRecorded,
+    financiallyQualified:false, qualified:false, evidenceQualification:'legacy_unqualified' };
 }
 
 export function verifyExperimentMeasurement(state, experimentId, body = {}, actor = 'system') {
@@ -359,13 +378,17 @@ export function verifyExperimentMeasurement(state, experimentId, body = {}, acto
   experiment.status='completed';
   experiment.completedAt=now;
   experiment.updatedAt=now;
-  const posture=experimentDecisionPosture(experiment.impact);
-  experiment.decisionPosture=posture;
+  Object.assign(experiment,legacyExperimentView(experiment));
+  const posture=experiment.decisionPosture;
   if (experiment.opportunityId) {
     const opportunity=(state.opportunities || []).find(item=>item.id===experiment.opportunityId);
     if (opportunity) {
       opportunity.experimentId=experiment.id;
       opportunity.experimentStatus='completed';
+      opportunity.evidenceVerified=false;
+      opportunity.financiallyQualified=false;
+      opportunity.legacyReviewRecorded=posture.legacyReviewRecorded;
+      opportunity.evidenceQualification=posture.evidenceQualification;
       opportunity.evidenceDecision=posture.status;
       opportunity.verifiedContributionValue=posture.verifiedContributionValue;
       opportunity.evidenceDecisionReason=posture.reason;
@@ -377,6 +400,10 @@ export function verifyExperimentMeasurement(state, experimentId, body = {}, acto
 }
 
 export function revenueEngineSnapshot(state) {
+  // Normalize a read-only view, including already-stored legacy financial
+  // postures. Reading must not rewrite historical measurements/review records.
+  state={...state,revenueEngine:{...state.revenueEngine,
+    experiments:(Array.isArray(state.revenueEngine?.experiments) ? state.revenueEngine.experiments : []).map(legacyExperimentView)}};
   ensureRevenueEngine(state);
   return {
     customers: deriveCustomerIntelligence(state),

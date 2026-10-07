@@ -67,6 +67,8 @@ import { deriveImpact } from './lib/impact-engine.mjs';
 import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
 import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
+import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from './lib/experiment-measurements.mjs';
+import { evidenceInWorkspace } from './lib/business-evidence-scope.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.15.2';
@@ -78,6 +80,8 @@ const STATIC_FILES = new Map([
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
+  ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
+  ['/activity-ui.js', ['saas/activity-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
@@ -325,9 +329,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   const locks = new Map();
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
+  const activityReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
+  const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const outcomeReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const outcomeDraftLimiter = new SlidingWindowLimiter({ limit: 5, windowMs: 60000, blockMs: 60000 });
+  const outcomePublicationLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
   let healthPending;
@@ -400,7 +409,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(200, {
         ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
@@ -462,14 +471,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   }
 
-  async function mutate(auth, callback) {
+  async function mutate(auth, callback, { persist = true } = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
       const state = await store.get(auth.session.workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status: 404, code: 'WORKSPACE_NOT_FOUND' });
       const currentUser = state.users.find(item => item.id === auth.user.id);
       if (!currentUser || currentUser.active === false || currentUser.role !== auth.user.role || Number(currentUser.sessionVersion || 1) !== Number(auth.session.sessionVersion || 1)) throw Object.assign(new Error('Session changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
       const result = await callback(state);
-      await store.save(auth.session.workspaceId, state);
+      if (persist) await store.save(auth.session.workspaceId, state);
       return result;
     });
   }
@@ -1129,7 +1138,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        if (req.method === 'GET' && pathname === '/api/activity') {
+          // This verified-session precheck can only deny. Every admitted request
+          // still performs fresh identity, role and session checks below.
+          const signedSession = sessionFrom(req);
+          if (signedSession) {
+            const activityScope = signedSession.workspaceId;
+            if (!activityReadLimiter.check(activityScope).allowed) throw Object.assign(new Error('Activity request limit reached'), { status: 429, code: 'ACTIVITY_RATE_LIMITED' });
+            activityReadLimiter.fail(activityScope);
+          }
+        }
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1139,6 +1158,73 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+
+        if (pathname === '/api/business-outcomes' || pathname.startsWith('/api/business-outcomes/')) {
+          const workspaceId = auth.session.workspaceId;
+          if ([...url.searchParams.keys()].length) throw Object.assign(new Error('Outcome reads do not accept tenant or query overrides'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+          const consume = limiter => {
+            if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
+            limiter.fail(rateKey);
+          };
+          const decodeId = raw => {
+            let id;
+            try { id = decodeURIComponent(raw); } catch {}
+            if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(id)) throw Object.assign(new Error('Invalid outcome source identifier'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+            return id;
+          };
+          if (req.method === 'GET' && pathname === '/api/business-outcomes') {
+            consume(outcomeReadLimiter);
+            const result = await store.businessOutcomeSummary(workspaceId);
+            send(res, 200, { workspaceId, summary: result.summary, current: result.publications }); return;
+          }
+          const source = pathname.match(/^\/api\/business-outcomes\/experiments\/([^/]+)(\/measurement)?$/);
+          if (source && req.method === 'GET' && !source[2]) {
+            requireOwner(auth); consume(outcomeReadLimiter);
+            const result = await store.getBusinessOutcomeReview(workspaceId, decodeId(source[1]));
+            send(res, 200, result); return;
+          }
+          if (source && req.method === 'PUT' && source[2]) {
+            requireOwner(auth); consume(outcomeDraftLimiter);
+            const id = decodeId(source[1]), body = await jsonBody(req, 16384);
+            const result = await mutate(auth, async state => {
+              const owned = (value, depth = 0) => depth <= 4 && evidenceInWorkspace(value, workspaceId)
+                && ['workspace', 'tenant'].every(key => !value[key] || typeof value[key] !== 'object' || owned(value[key], depth + 1));
+              const actors = (state.users || []).filter(user => user.id === auth.user.id);
+              const matches = Array.isArray(state.revenueEngine?.experiments) ? state.revenueEngine.experiments.filter(item => item?.id === id) : [];
+              if (!owned(state) || !owned(state.workspace) || !owned(state.revenueEngine) || matches.length !== 1 || !owned(matches[0])
+                || actors.length !== 1 || !owned(actors[0]) || actors[0].passwordChangeRequired) {
+                throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
+              }
+              const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
+                actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null });
+              matches[0].outcomeMeasurement = measurement;
+              const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
+              addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,
+                detail: { experimentId: id, revision: measurement.revision, measurementDigest: measurement.digest, published: false } });
+              return { measurement, assessment, committedState: state };
+            });
+            send(res, 200, { workspaceId, workspaceRevision: result.committedState._revision,
+              measurement: result.measurement, assessment: result.assessment }); return;
+          }
+          if (req.method === 'POST' && pathname === '/api/business-outcomes/publish') {
+            requireApprover(auth); consume(outcomePublicationLimiter);
+            if (String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() !== 'true') {
+              throw Object.assign(new Error('Outcome publication is paused; existing results remain available'), { status: 503, code: 'OUTCOME_PUBLICATION_PAUSED' });
+            }
+            const input = await jsonBody(req, 4096);
+            const result = await withWorkspaceLock(workspaceId, () => store.publishBusinessOutcome(workspaceId,
+              { id: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) }, input));
+            // Publication owns its atomic state/ledger/audit transaction. Never
+            // follow it with a stale generic state.save or auto-retry callback.
+            send(res, 200, result); return;
+          }
+          const version = pathname.match(/^\/api\/business-outcomes\/versions\/(outcome_version_[a-f0-9]{64})$/);
+          if (req.method === 'GET' && version) {
+            consume(outcomeReadLimiter);
+            send(res, 200, await store.getBusinessOutcomeEvidence(workspaceId, version[1])); return;
+          }
+          throw Object.assign(new Error('Outcome route not found'), { status: 404, code: 'NOT_FOUND' });
+        }
 
         if (pathname === '/api/admin/launch' || pathname === '/api/admin/invitations') {
           requireLaunchAdmin(auth, env);
@@ -1799,6 +1885,24 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
           send(res, 202, { job }); return;
         }
+        if (pathname === '/api/activity') {
+          requireOwner(auth);
+          if (req.method !== 'GET') throw Object.assign(new Error('Activity is read only'), { status: 405, code: 'ACTIVITY_READ_ONLY' });
+          if ([...url.searchParams.keys()].length || Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding']) {
+            throw Object.assign(new Error('Activity scope comes from the signed-in workspace'), { status: 400, code: 'ACTIVITY_REQUEST_INVALID' });
+          }
+          const observed = store.activitySnapshot?.(auth.session.workspaceId);
+          if (!observed || observed.schema !== 'runvara-activity/v1' || observed.workspaceId !== auth.session.workspaceId) {
+            throw Object.assign(new Error('Activity observations are unavailable'), { status: 503, code: 'ACTIVITY_UNAVAILABLE' });
+          }
+          // Explicit projection keeps internal instance/unattributed counters out
+          // of a tenant-admin response, even if later diagnostics grow fields.
+          const fields = ['schema','workspaceId','instanceId','instanceStartedAt','observedSince','snapshotAt','coverage','db','hotState','jobs','rateWindow','anomalies'];
+          const result = Object.fromEntries(fields.map(key => [key, observed[key]]));
+          if (Buffer.byteLength(JSON.stringify(result)) > 32768) throw Object.assign(new Error('Activity observations exceed the response bound'), { status: 503, code: 'ACTIVITY_UNAVAILABLE' });
+          send(res, 200, result); return;
+        }
+
         if (req.method === 'GET' && pathname === '/api/operator/provider-usage') {
           requireLaunchAdmin(auth, env);
           const workspaceId = text(url.searchParams.get('workspaceId') || auth.session.workspaceId, 256);
@@ -2102,7 +2206,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const executeWrite = pathname.match(/^\/api\/connection-writes\/([a-z0-9_-]+)\/execute$/i);
         if (req.method === 'POST' && executeWrite) {
           requireApprover(auth);
-          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state)));
+          const executionRate = connectionWriteLimiter.check(auth.session.workspaceId);
+          if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
+          connectionWriteLimiter.fail(auth.session.workspaceId);
+          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), durableStore: store.provider === 'supabase',
+            actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write, executedExternally: write.status === 'completed' }); return;
         }
 
