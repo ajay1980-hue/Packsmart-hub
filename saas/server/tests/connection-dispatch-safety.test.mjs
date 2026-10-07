@@ -1014,6 +1014,46 @@ test('an unverifiable reporting reply after the phase claim cannot permit mutati
   });
 });
 
+test('undecodable final dispatch proof neither advances read success nor permits the claimed provider mutation', async t => {
+  const failures={
+    empty:()=>new Response(null,{status:204}),
+    malformed:()=>new Response('private malformed dispatch proof'),
+    oversized:()=>new Response('x'.repeat(32769)),
+    stream:()=>new Response(new ReadableStream({start(controller){controller.error(new Error('private interrupted proof'));}}))
+  };
+  for(const [kind,response] of Object.entries(failures)) await t.test(kind,async t=>{
+    const f=await fixture(t,{storage:'mock-supabase'}),originalFetch=f.store.fetch;
+    let proofReads=0,diagnosticsAtRejection;
+    f.store.fetch=async(url,options={})=>{
+      const select=new URL(url).searchParams.get('select')||'';
+      if(select.includes('scope_workspaceId:')&&++proofReads===2)return response();
+      return originalFetch(url,options);
+    };
+    const result=await f.observe(f.persist,{...f.options,loadFreshState:async context=>{
+      const sentinel='2026-01-01T00:00:00.000Z';
+      if(proofReads===1)f.store.telemetry.lastSuccessfulReadAt=sentinel;
+      try{return await f.store.getConnectionWriteContext(WORKSPACE,context);}
+      catch(error){diagnosticsAtRejection=f.store.diagnostics();throw error;}
+    }});
+    assertBlocked(result,f.mutations);
+    assert.equal(result.errorCode,'WRITE_CONTEXT_UNAVAILABLE');
+    assert.equal(proofReads,2);
+    assert.equal(diagnosticsAtRejection.lastSuccessfulReadAt,'2026-01-01T00:00:00.000Z');
+    assert.equal(diagnosticsAtRejection.lastFailureCode,kind==='oversized'?'SUPABASE_RESPONSE_TOO_LARGE':'SUPABASE_RESPONSE_INVALID');
+    assert.equal(diagnosticsAtRejection.primaryPersistence,true,'failed evidence reads do not revoke an acknowledged primary state commit');
+    assert.doesNotMatch(JSON.stringify(diagnosticsAtRejection),/private malformed dispatch proof|private interrupted proof/);
+    const durable=await f.replica.get(WORKSPACE);
+    assert.equal(durable.connectionWrites[0].dispatchClaim.phases.shopify_mutation.status,'dispatching');
+    assert.equal(durable.connectionWrites[0].status,'failed');
+    const before=f.database.calls.length;
+    const retry=await executeConnectionWrite(durable,f.write.id,durable.users[0].id,f.service,()=>f.replica.save(WORKSPACE,durable),{
+      ...f.options,loadFreshState:context=>f.replica.getConnectionWriteContext(WORKSPACE,context)
+    }).catch(error=>error);
+    assertBlocked(retry,f.mutations);assert.equal(retry.code,'WRITE_ALREADY_ATTEMPTED');
+    assert.equal(f.database.calls.length,before);
+  });
+});
+
 test('Instagram status observation failures retain the acknowledged container through cooldown and later publish once', async t => {
   const raw = 'PRIVATE provider diagnostic with synthetic credentials';
   const cases = {

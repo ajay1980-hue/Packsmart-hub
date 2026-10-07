@@ -594,6 +594,8 @@ class SupabaseStore {
     this.requestTimeoutMs = Math.max(20000, Math.min(60000, Number(env.SUPABASE_REQUEST_TIMEOUT_MS) || 30000));
     this.mirrorDeadlineMs = Math.max(12000, Math.min(60000, Number(env.SUPABASE_MIRROR_DEADLINE_MS) || 30000));
     this.automationRetentionEnabled = String(env.AUTOMATION_RETENTION_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+    // Last primary commit outcome; timestamps can tie or wall time can move.
+    this.primaryPersistenceHealthy = true;
     this.telemetry = {
       automationRetentionEnabled: this.automationRetentionEnabled,
       lastSuccessfulReadAt: null,
@@ -709,14 +711,22 @@ class SupabaseStore {
 
   async providerUsageSummary(workspaceId, admissionMonth) {
     const windowStart = providerUsageMonth(workspaceId, admissionMonth);
-    let rows;
+    let page;
     try {
-      // One bounded read of materialized counters only. The extra row is a
-      // truncation sentinel; incomplete accounting is unavailable, never zero.
-      rows = await this.request(`runvara_provider_usage_windows?workspace_id=eq.${encodeURIComponent(workspaceId)}&window_start=eq.${windowStart}&select=${USAGE_SUMMARY_COLUMNS}&order=scope_key.asc&limit=${USAGE_SUMMARY_MAX_SCOPES + 1}`);
+      // One compact counter read. An exact count proves completeness even when
+      // PostgREST's configured max_rows is below the requested sentinel limit.
+      page = await this.request(`runvara_provider_usage_windows?workspace_id=eq.${encodeURIComponent(workspaceId)}&window_start=eq.${windowStart}&select=${USAGE_SUMMARY_COLUMNS}&order=scope_key.asc&limit=${USAGE_SUMMARY_MAX_SCOPES + 1}`, {
+        maxResponseBytes: 131072, includeResponseMetadata: true, headers: { Prefer: 'count=exact' }
+      });
     } catch (error) {
       return { available: false, reason: providerUsageUnavailableReason(error) };
     }
+    const rows = page?.data;
+    const range = typeof page?.contentRange === 'string' && /^(0)-(0|[1-9][0-9]*)\/(0|[1-9][0-9]*)$/.exec(page.contentRange);
+    const complete = Array.isArray(rows) && rows.length <= USAGE_SUMMARY_MAX_SCOPES
+      && (rows.length === 0 ? page.contentRange === '*/0' : range && Number.isSafeInteger(Number(range[3]))
+        && Number(range[2]) === rows.length - 1 && Number(range[3]) === rows.length);
+    if (!complete || Buffer.byteLength(JSON.stringify(rows)) > 131072) return { available: false, reason: 'AI_USAGE_RESPONSE_INVALID' };
     return providerUsageSummaryResult(rows, workspaceId, windowStart);
   }
 
@@ -771,14 +781,33 @@ class SupabaseStore {
       this.telemetry.lastFailureTable = error.table;
       throw error;
     }
+    let data = null;
+    try {
+      if (method !== 'HEAD') {
+        const text = response.status === 204 ? '' : await boundedResponseText(response, maxResponseBytes);
+        const prefer = new Headers(options.headers || {}).get('prefer') || '';
+        const permitsEmpty = method !== 'GET' && (prefer.split(',').some(value => value.trim() === 'return=minimal')
+          || pathname.split('?')[0] === 'rpc/runvara_create_workspace');
+        if (!text && !permitsEmpty) throw new Error('Missing JSON response');
+        if (text) data = JSON.parse(text);
+      }
+    } catch (cause) {
+      // JSON parser/stream errors can embed upstream content. Keep only a fixed
+      // safe code; never claim a decoded read/write or retain that error body.
+      const code = cause?.code === 'SUPABASE_RESPONSE_TOO_LARGE' ? cause.code : 'SUPABASE_RESPONSE_INVALID';
+      const error = Object.assign(new Error('Supabase response could not be verified'), {
+        code, httpStatus: response.status, table: pathname.split('?')[0], payloadBytes: Buffer.byteLength(options.body || '')
+      });
+      this.telemetry.lastFailureAt = new Date().toISOString();
+      this.telemetry.lastFailureCode = code;
+      this.telemetry.lastFailureHttpStatus = response.status;
+      this.telemetry.lastFailureTable = error.table;
+      throw error;
+    }
     const succeededAt = new Date().toISOString();
     if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
     else this.telemetry.lastSuccessfulWriteAt = succeededAt;
-    if (response.status === 204 || method === 'HEAD') return includeResponseMetadata ? { data: null, contentRange: response.headers.get('content-range') } : null;
-    const text = await boundedResponseText(response, maxResponseBytes);
-    const data = text ? JSON.parse(text) : null;
-    // Only explicit bounded readers request cardinality metadata. No raw
-    // response headers or credentials are exposed to their callers.
+    // Bounded readers receive cardinality only after the response has decoded.
     return includeResponseMetadata ? { data, contentRange: response.headers.get('content-range') } : data;
   }
 
@@ -1193,36 +1222,46 @@ class SupabaseStore {
     });
   }
 
-  async commit(workspaceId, state, expectedRevision, existing) {
-    const stateBytes = Buffer.byteLength(JSON.stringify(state));
-    this.telemetry.stateBytes = stateBytes;
-    if (stateBytes >= SUPABASE_STATE_HARD_BYTES) {
-      const error = Object.assign(new Error('Workspace state is too large to persist safely'), {
-        status: 503, code: 'STATE_SIZE_LIMIT', stateBytes
-      });
-      this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
-      throw error;
-    }
-    if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
-      console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
-    }
-    const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
-    if (existing) {
-      const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
-      const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
-      const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
-      await this.commitRevision(workspaceId, state._revision, expectedRevision, path, options);
-      this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
-    } else {
-      // Atomically create the FK parent, unique login identity and primary state.
-      try {
-        await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) });
-        this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
-      } catch (error) {
-        this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
-        if (error.databaseCode === '23505') throw conflict();
+  async commit(workspaceId, state, expectedRevision, existing, { primary = true } = {}) {
+    try {
+      const stateBytes = Buffer.byteLength(JSON.stringify(state));
+      this.telemetry.stateBytes = stateBytes;
+      if (stateBytes >= SUPABASE_STATE_HARD_BYTES) {
+        const error = Object.assign(new Error('Workspace state is too large to persist safely'), {
+          status: 503, code: 'STATE_SIZE_LIMIT', stateBytes
+        });
         throw error;
       }
+      if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
+        console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
+      }
+      const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
+      if (existing) {
+        const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
+        const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
+        const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
+        await this.commitRevision(workspaceId, state._revision, expectedRevision, path, options);
+      } else {
+        // Atomically create the FK parent, unique login identity and primary state.
+        try {
+          await this.request('rpc/runvara_create_workspace', { method: 'POST', body: JSON.stringify({ p_state: state }) });
+        } catch (error) {
+          if (error.databaseCode === '23505') throw conflict();
+          throw error;
+        }
+      }
+      if (primary) {
+        this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
+        this.primaryPersistenceHealthy = true;
+      }
+    } catch (error) {
+      // Revision conflicts are expected concurrency outcomes. A reporting-status
+      // follow-up cannot revoke or replace the already-confirmed primary commit.
+      if (primary && error.code !== 'STATE_CONFLICT') {
+        this.telemetry.lastPrimaryFailureAt = new Date().toISOString();
+        this.primaryPersistenceHealthy = false;
+      }
+      throw error;
     }
   }
 
@@ -1597,8 +1636,7 @@ class SupabaseStore {
   }
 
   diagnostics() {
-    const primaryPersistence = !this.telemetry.lastPrimaryFailureAt ||
-      (this.telemetry.lastPrimaryWriteAt && this.telemetry.lastPrimaryWriteAt >= this.telemetry.lastPrimaryFailureAt);
+    const primaryPersistence = this.primaryPersistenceHealthy;
     return {
       ...this.telemetry,
       primaryPersistence,

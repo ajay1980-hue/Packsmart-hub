@@ -235,3 +235,26 @@ test('review refuses foreign identities, copied current records and malformed so
   await assert.rejects(adapter(async () => { throw Object.assign(new Error('missing private source'), { databaseCode: 'P0O09' }); })
     .review(WS, 'experiment_1'), { code: 'OUTCOME_SOURCE_NOT_FOUND' });
 });
+
+test('strict shared transport preserves outcome cardinality and withholds read success for undecodable evidence', async () => {
+  const joined=fixture().joined;
+  let contentRange='0-0/1',invalid=false,calls=0;
+  const store=createStore({NODE_ENV:'test',SUPABASE_URL:'https://outcome-fixture.invalid',SUPABASE_SERVICE_ROLE_KEY:'synthetic-only'}, {
+    fetchImpl:async(_url,options)=>{
+      calls++;assert.equal(Object.hasOwn(options,'includeResponseMetadata'),false);assert.equal(options.headers.Prefer,'count=exact');
+      assert.equal(options.method,undefined,'outcome inspection remains read-only');
+      return new Response(invalid?'private invalid outcome evidence':JSON.stringify([joined]),{headers:{'content-range':contentRange}});
+    }
+  });
+  const complete=await store.businessOutcomeSummary(WS);
+  assert.equal(complete.summary.coverage.complete,true);assert.equal(complete.summary.groups[0].amount,'10');
+  contentRange='0-0/2';
+  const partial=await store.businessOutcomeSummary(WS);
+  assert.equal(partial.summary.coverage.complete,false);assert.equal(partial.summary.coverage.totalCurrentHeads,2);
+  assert.equal(partial.summary.groups[0].amount,null);
+  store.telemetry.lastSuccessfulReadAt='2026-01-01T00:00:00.000Z';invalid=true;
+  await assert.rejects(store.businessOutcomeSummary(WS),{code:'OUTCOME_READ_UNAVAILABLE'});
+  assert.equal(store.telemetry.lastSuccessfulReadAt,'2026-01-01T00:00:00.000Z');
+  assert.equal(store.telemetry.lastFailureCode,'SUPABASE_RESPONSE_INVALID');
+  assert.equal(calls,3);assert.doesNotMatch(JSON.stringify(store.diagnostics()),/private invalid outcome evidence/);
+});

@@ -1,10 +1,10 @@
 # Runvara original blueprint acceptance, 2026-10-06
 
-This remains a scope ledger, not a completion claim. PR82's reporting repair and PR74's outcome stage are merged on actual main `b98eb10cf0077fce5bf6696cb234350b8d1f7924`. PR74 merged after its six exact-head CI workflows passed. The next incremental PR75 dispatch-safety stage is prepared locally above that main. Its release remains held until PR74's exact deployed revision passes fresh postdeployment health.
+This remains a scope ledger, not a completion claim. PR82 reporting, PR74 outcomes and PR75 dispatch safety are merged on actual main `f3471331062cfb626a5a941d12dab61bd8cd88d3`. The next incremental PR76 store-health repair is prepared locally above that main. Its release remains held until PR75 is deployed and its exact revision passes fresh postdeployment health.
 
-The owner-approved PR74 migration is applied and aligned as `20261007100823`; its catalog and predecessor-health provenance remain below. This local worker performed no production operation. PR75 is the only next-stage feature added; PR76–81 health/activity, catalogue, analytics and static-revalidation features remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
+The approved outcome/reporting migrations and their recorded catalog provenance remain below. This worker performed no production operation. PR76 is the only next-stage feature added; PR77–81 activity, catalogue, analytics and static-revalidation features remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
 
-The table and earlier dated sections preserve historical scope/preparation checkpoints. The final PR75 section records the current local stage and release gates. Previous preparation-head test results do not substitute for the new stage's exact-head CI or production health.
+The table and earlier sections preserve historical scope/preparation checkpoints. The final PR76 section records the current local stage and release gates. Prior stage test results do not substitute for the new stage's exact-head CI or production health.
 
 | Original requirement | Evidence delivered | Remaining acceptance |
 |---|---|---|
@@ -78,3 +78,16 @@ Two interaction regressions cover reporting at dispatch boundaries with four exp
 Fresh local verification: **920 Node22.23.3 tests passed**, **25 outcome PostgreSQL17.6 cases passed**, and **73 reporting PostgreSQL17.6 cases passed**, all with zero failures/skips. Syntax, SaaS security guards, whitespace and independent source/interaction review passed. Each PostgreSQL suite used a fresh disposable cluster and both stopped afterward. No new migration is introduced; predecessor SQL bytes remain unchanged. This does not claim live provider execution or real PostgreSQL dispatch concurrency beyond the documented test contracts.
 
 No remote write, production request, migration, merge or deployment occurred in this worker. The actual-main fetch was read-only. PR74's six green CI workflows establish its own release checks, not PR75's. Remaining gates: PR74 exact-deployment postrelease health, fresh exact-head PR75 CI including responsive browser/container and required database checks, then authorized PR75 release and its own postdeployment health. The full OS and later successor blueprint are not complete.
+
+
+## Incremental store-health preparation after PR75, 2026-10-07
+
+Actual base: `f3471331062cfb626a5a941d12dab61bd8cd88d3`. Published PR76 source: `72310bc02e420de9867a3aeebf126862c71058b4`, directly above `3ebc1c75370b6a8b843da3829bc1b7af59f0a867`. The five-file source diff and ancestry were inspected before applying it to `codex/runvara-store-health-after-dispatch`. Actual main was fetched read-only; no later feature patches were imported.
+
+Only `store.mjs` conflicted. Resolution keeps PR82's shared revision-fenced commit helper, strict 4 KiB revision/acknowledgement bounds, narrow reporting RPC, and unconfirmed-cache invalidation unchanged. It adds PR76's decode-before-success transport handling, explicit last-primary-outcome health flag, and exact bounded governed-usage cardinality. PR74 outcome metadata is emitted after the same verified decode; PR75 indexed dispatch proof/owner/session/approval/no-replay boundaries remain unchanged. The more specific existing PR82 invalid-acknowledgement-shape code is retained; the source test expectation was adjusted without weakening rejection or health assertions.
+
+The prior reporting-failure fixture now targets the actual RPC and asserts deferred status plus the injected failure count. New interaction coverage proves that reporting decode failures cannot claim decoded-write success, reporting success/failure cannot alter primary health, outcome readers keep exact cardinality and partial totals unknown, and empty/malformed/oversized/interrupted final dispatch proofs cannot advance read success or authorize mutation/replay. This introduces no schema, permissions, polling, provider calls or extra persistence operations.
+
+Fresh verification: **940 full Node22.23.3 tests passed**, **25 outcome PostgreSQL17.6 cases passed**, **73 reporting PostgreSQL17.6 cases passed**, with zero failures or skips. Full syntax, SaaS security guards, whitespace and independent source/interaction review passed. Both disposable PostgreSQL clusters stopped. Outcome/reporting migrations and unrelated feature modules are unchanged. The database results protect predecessor contracts; no production or browser result is inferred from them.
+
+No remote mutation, production request, migration or deployment occurred. Local Chromium remains absent; no browser install or Docker workaround was attempted. Remaining release gates are PR75 deployment plus fresh exact-revision health, fresh exact-head PR76 CI including required database/browser/container checks, then authorized PR76 release and its own postdeployment health. The full original OS and successor blueprint are not complete.
