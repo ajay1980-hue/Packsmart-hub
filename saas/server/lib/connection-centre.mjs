@@ -91,9 +91,21 @@ export function connectionDoctorState(state, provider, integrations = null) {
   const previous = doctor.orderReadBinding;
   const current = provider === 'shopify' && validShopifyOrderReadBinding(previous) ? shopifyOrderReadBinding(state, integrations) : null;
   if (shopifyOrderSourceReplaced(previous, current, integrations)) {
-    return { ...doctor, attempts: 0, exhausted: false, nextRetryAt: null, orderReadBinding: null };
+    const { pendingReadAttempts, ...replaced } = doctor;
+    return { ...replaced, attempts: 0, exhausted: false, nextRetryAt: null, orderReadBinding: null };
   }
   return doctor;
+}
+// Pending reads share the existing five-attempt ceiling, including any protected
+// order debt. They are not a separate retry allowance. Keep order-bound attempts
+// untouched until an actual order read spends or releases that source budget.
+export function connectionReadAttempts(doctor) {
+  const counts = [doctor.attempts ?? 0, ...(Object.hasOwn(doctor, 'pendingReadAttempts') ? [doctor.pendingReadAttempts] : [])];
+  return counts.every(value => Number.isSafeInteger(value) && value >= 0) ? Math.max(...counts) : Infinity;
+}
+export function pendingConnectionReadExhausted(state, provider, integrations = null) {
+  const doctor = connectionDoctorState(state, provider, integrations);
+  return Object.hasOwn(doctor, 'pendingReadAttempts') && connectionReadAttempts(doctor) >= 5;
 }
 export function completeShopifyOrderReadBudget(state, integrations, admittedBinding) {
   const doctor = state.connectionDoctor?.shopify;
@@ -107,7 +119,8 @@ function unknownShopifyOrderReadPolicy(doctor) {
 }
 // An unrecognized persisted contract cannot authorize automatic orders, even
 // with attempts left. Keep the original budget intact for explicit recovery;
-// products-only work and token refresh do not spend or release that budget.
+// Products-only reads and successful token refreshes do not spend or release
+// that budget. Failed refreshes retain the existing shared Doctor failure count.
 export function shopifyOrderReadPolicyBlocked(state, integrations, areas = connectionSettings(state, 'shopify').areas) {
   return areas.includes('orders') && unknownShopifyOrderReadPolicy(connectionDoctorState(state, 'shopify', integrations));
 }
@@ -225,7 +238,7 @@ export function connectionDue(state, provider, now = new Date(), integrations = 
   if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;
   const doctor = connectionDoctorState(state, provider, integrations);
   if (state.connectionAuthAttention?.[provider]) return false;
-  if (doctor?.exhausted || provider === 'shopify' && shopifyOrderReadBudgetExhausted(state, integrations, settings.areas)
+  if (pendingConnectionReadExhausted(state, provider, integrations) || doctor?.exhausted || provider === 'shopify' && shopifyOrderReadBudgetExhausted(state, integrations, settings.areas)
     || Date.parse(doctor?.nextRetryAt) > now.getTime() || Date.parse(status.retryAt) > now.getTime()) return false;
   const recent = (state.connectionSyncs || []).find(run => run.provider === provider);
   if (recent?.status === 'running' && Date.parse(recent.leaseUntil) > now.getTime()) return false;

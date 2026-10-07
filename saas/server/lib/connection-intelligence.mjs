@@ -1,4 +1,4 @@
-import { CONNECTORS, connectionCentre, connectionSettings, isShopifyOrderSourceFailure, shopifyOrderReadHold, recoveryFor } from './connection-centre.mjs';
+import { CONNECTORS, pendingConnectionReadExhausted, connectionCentre, connectionSettings, isShopifyOrderSourceFailure, shopifyOrderReadHold, recoveryFor } from './connection-centre.mjs';
 import { META_READ_SCOPES, META_CATALOG_SCOPES } from './meta-capabilities.mjs';
 
 export const customerChannels = ['shopify', 'ebay', 'meta', 'tiktok_shop', 'google_youtube', 'pinterest'];
@@ -51,12 +51,16 @@ export function classifyConnectionIssue(state, provider, now = new Date(), recor
   }
   if (/ACCOUNT_MISMATCH|ACCOUNT_UNCONFIRMED/.test(combined)) return issue('account_mismatch', 'critical', `The selected ${name} account could not be verified. Existing data is safe.`, { action: 'reconnect', label: `Reconnect the expected ${name} account` });
   if (/AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED|ACCESS_DENIED/.test(combined) || status.status === 'auth_expired') return issue('reconnect_required', 'critical', `${name} access needs renewing. Previously imported data is safe.`, { action: 'reconnect', label: `Reconnect ${name}` });
-  if (provider === 'ebay' && state.ebay?.coverage?.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')) return issue('provider_restriction', 'important', 'eBay has not enabled Promoted Listings for this seller. Available commerce reads can continue; reconnecting will not remove this restriction.', { action: 'open', label: 'Review available eBay data' });
+  if (provider === 'ebay' && state.ebay?.coverage?.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')) {
+    if (pendingConnectionReadExhausted(state, provider, integrations)) return issue('provider_restriction', 'important', 'eBay has not enabled Promoted Listings for this seller. Automatic commerce reads are also paused because earlier results could not be confirmed. Retry available data manually; reconnecting will not remove the marketing restriction.', { action: 'sync', label: 'Retry this connection' });
+    return issue('provider_restriction', 'important', 'eBay has not enabled Promoted Listings for this seller. Available commerce reads can continue; reconnecting will not remove this restriction.', { action: 'open', label: 'Review available eBay data' });
+  }
   if (/ELIGIB|REGION|VERIFICATION|PROVIDER_APPROVAL|RESTRICTED|POLICY/.test(combined)) return issue('provider_restriction', 'important', `${name} has restricted this account or feature. Your data is safe. Runvara cannot override the provider’s eligibility rules.`, { action: 'open', label: 'Review available features' });
   if (/PERMISSION|SCOPE/.test(combined)) return issue('missing_scope', 'important', `${name} has not granted access to some selected data. Your existing data is safe.`, { action: 'reconnect', label: `Review ${name} access` });
   if (/ASSET_REQUIRED/.test(combined)) return issue('missing_asset', 'important', 'Choose an authorised Page or catalogue before reading this data.', { action: 'open', label: 'Choose your account assets' });
   if (first?.validation?.problemAreas?.includes('channels')) return issue('missing_asset','important','Google sign-in succeeded, but no authorised YouTube channel was returned.',{action:'reconnect',label:'Connect the account with your YouTube channel'});
   if (first?.validation?.problemAreas?.includes('accounts')) return issue('missing_asset','important','Facebook sign-in succeeded, but no business Page was returned. Existing data is safe.',{action:'reconnect',label:'Reconnect and select your Facebook Page'});
+  if (pendingConnectionReadExhausted(state, provider, integrations)) return issue('read_retry_exhausted', 'important', 'Automatic read retries are paused because earlier results could not be confirmed. Your existing data is safe. Retry this connection manually when ready.', { action: 'sync', label: 'Retry this connection' });
   const runs = (state.connectionSyncs || []).filter(r => r.provider === provider);
   if (runs.some(r => r.status === 'running' && Date.parse(r.leaseUntil) <= now.getTime()) || code === 'WORKER_INTERRUPTED') return issue('interrupted', 'important', 'A previous read was interrupted. Your imported data is safe; Runvara can resume it.', null, 'read');
   const diagnostics = provider === 'ebay' ? Object.values(state.ebay?.coverage?.readDiagnostics || {}) : [];
@@ -140,7 +144,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
   else if (freshnessEvidence.mode === 'manual') { status = 'Attention needed'; message = 'Automatic syncing is off. Freshness is not assessed against a schedule; refresh selected data when needed.'; action = {action:'sync',label:'Refresh your data'}; }
   else if (dataFreshness === 'not_measured') { status = 'Attention needed'; message = channel.progress ? 'Runvara is reading selected data. Freshness is not yet confirmed for every selected area.' : 'Freshness is unknown for some selected data. A saved sync time does not confirm that every selected area was read.'; action = channel.progress ? null : {action:'sync',label:'Refresh selected data'}; }
   const doctor = state.connectionDoctor?.[channel.id];
-  if (doctor?.exhausted && issue?.repair && authentication !== 'attention' && !expiresSoon) { status = 'Attention needed'; message = 'Repeated safe retries could not restore this read. Your existing data is safe.'; action = {action:'sync',label:'Retry this connection'}; }
+  if ((doctor?.exhausted && issue?.repair || issue?.kind === 'read_retry_exhausted') && authentication !== 'attention' && !expiresSoon) { status = 'Attention needed'; message = issue.kind === 'read_retry_exhausted' ? issue.message : 'Repeated safe retries could not restore this read. Your existing data is safe.'; action = {action:'sync',label:'Retry this connection'}; }
   if (persistence.primaryPersistence === false) { status = 'Degraded'; message = 'Runvara cannot confirm that recent changes are saved. Existing saved data is retained; support needs to restore storage.'; action = {action:'open',label:'Check again shortly'}; }
   else if (channel.configured && scheduler.lastError && status === 'Healthy') { status = 'Attention needed'; message = 'Automatic checks need attention. Your saved data is safe; you can refresh it manually while Runvara recovers.'; action = {action:'sync',label:'Refresh your data'}; }
   return { status, message, action, severity: status === 'Healthy' ? 'informational' : issue?.severity || 'important',
@@ -152,7 +156,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
     lastFailedSyncAt: timestampEvidence(channel.lastFailedSyncAt, now).at, dataFreshness, freshnessEvidence,
     activeReads: channel.history.filter(r => r.status === 'running').length,
     failedAreas: Object.keys(state.connectionFirstSync?.[channel.id]?.failures || {}),
-    nextRetryAt: settings.autoSync === true && !settings.disconnected && issue?.kind !== 'order_source_review' ? timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at : null, webhookHealth: 'not_monitored',
+    nextRetryAt: settings.autoSync === true && !settings.disconnected && !pendingConnectionReadExhausted(state, channel.id, integrations) && issue?.kind !== 'order_source_review' ? timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at : null, webhookHealth: 'not_monitored',
     persistenceHealth: persistence.primaryPersistence === false ? 'degraded' : persistence.primaryPersistence ? 'healthy' : 'not_measured',
     schedulerHealth: scheduler.lastError ? 'attention' : scheduler.lastTickAt ? 'running' : 'not_measured', schedulerLastTickAt: scheduler.lastTickAt || null };
 }

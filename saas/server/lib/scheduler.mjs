@@ -1,7 +1,7 @@
 import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensureControl, finishAutomation } from './control.mjs';
 import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
-import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, isShopifyOrderReadAdmissionCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
+import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, pendingConnectionReadExhausted, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, isShopifyOrderReadAdmissionCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
@@ -116,12 +116,12 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(integrations.syncProvider && state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
           const legacyFirstRun = !state.connectionSettings?.[provider] && !state.connectionSyncs?.some(item => item.provider === provider);
           const exhaustedOrderBudget = provider === 'shopify' && shopifyOrderReadBudgetExhausted(state, integrations);
-          if (configured && !orderReadHeld(state, provider, undefined, integrations) && !exhaustedOrderBudget && (legacyFirstRun || connectionDue(state, provider, now, integrations))) providers.push(provider);
+          if (configured && !pendingConnectionReadExhausted(state, provider, integrations) && !orderReadHeld(state, provider, undefined, integrations) && !exhaustedOrderBudget && (legacyFirstRun || connectionDue(state, provider, now, integrations))) providers.push(provider);
         }
       }
       // A legacy workspace can have no saved per-channel settings. Do not claim
       // and save a recurring no-op cycle solely because held orders are due.
-      if (!providers.length && (orderReadHeld(state, 'shopify', undefined, integrations) || shopifyOrderReadBudgetExhausted(state, integrations))) rules = rules.filter(rule => rule.id !== 'channelSync');
+      if (!providers.length && (Object.keys(CONNECTORS).some(provider => pendingConnectionReadExhausted(state, provider, integrations)) || orderReadHeld(state, 'shopify', undefined, integrations) || shopifyOrderReadBudgetExhausted(state, integrations))) rules = rules.filter(rule => rule.id !== 'channelSync');
       if (!rules.length) {
         if (expired.length) await store.save(workspaceId, state);
         return { skipped: true, reason: state.autopilot.enabled ? 'FREQUENCY_OR_PERMISSION_LIMIT' : 'AUTOPILOT_OFF' };

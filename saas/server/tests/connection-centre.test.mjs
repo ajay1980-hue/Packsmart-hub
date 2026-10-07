@@ -837,3 +837,32 @@ test('customer wizard renders provider pending, optional settings and real stage
   assert.equal(window.document.querySelector('#journey-recommended').disabled,false);
   window.RunvaraConnections.endSession();
 });
+
+test('explicit product retry releases generic pending debt without touching protected orders; invalid scopes never reset it', async t => {
+  const f = await fixture(t);
+  await f.connect();
+  assert.equal((await f.request('/api/connections/shopify/test', { method: 'POST', body: {} })).status, 200);
+  const { shopifyOrderReadBinding } = await import('../lib/connection-centre.mjs');
+  for (const protectedOrders of [false, true]) {
+    const state = await f.server.packsmart.store.get('alpha');
+    state.connectionSettings.shopify = { ...state.connectionSettings.shopify, areas: ['products'] };
+    delete state.connectionFirstSync?.shopify;
+    const binding = protectedOrders ? { ...shopifyOrderReadBinding(state), sourcePolicy: 'unknown-policy' } : null;
+    const budget = { attempts: 2, exhausted: false, pendingReadAttempts: 5, ...(binding ? { orderReadBinding: binding } : {}) };
+    state.connectionDoctor = { shopify: budget };
+    await f.server.packsmart.store.save('alpha', state);
+    const requests = f.calls.length;
+    for (const areas of [null, [], ['unsupported']]) {
+      const result = await f.request('/api/connections/shopify/sync', { method: 'POST', body: { areas } });
+      assert.equal(result.status, 400); assert.equal(result.body.code, 'SYNC_AREAS_INVALID');
+      assert.deepEqual((await f.server.packsmart.store.get('alpha')).connectionDoctor.shopify, budget);
+    }
+    assert.equal(f.calls.length, requests);
+    const result = await f.request('/api/connections/shopify/sync', { method: 'POST', body: { areas: ['products'] } });
+    assert.equal(result.status, 200);
+    const recovered = (await f.server.packsmart.store.get('alpha')).connectionDoctor.shopify;
+    assert.equal(recovered.pendingReadAttempts, undefined);
+    if (protectedOrders) { assert.equal(recovered.attempts, 2); assert.equal(recovered.exhausted, false); assert.deepEqual(recovered.orderReadBinding, binding); }
+    else assert.deepEqual(recovered, {});
+  }
+});

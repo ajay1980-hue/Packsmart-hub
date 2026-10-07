@@ -41,8 +41,11 @@ source values within the same workspace.
 
 An admitted successful orders result clears the budget together with the
 existing result save. If that save is uncertain, the previously stored charge
-remains authoritative. Products-only success, token refresh and ambiguous
-connected results cannot clear it. Existing authenticated, CSRF-checked manual
+remains authoritative. Products-only success, successful token refresh and
+ambiguous connected results cannot clear it. The inherited failed-refresh path
+still increments the shared Doctor failure counter, including a bound order
+counter; the [existing-read repair](connection-read-admission.md) leaves that
+non-read behavior unchanged. Existing authenticated, CSRF-checked manual
 order retry/reconnection remains the explicit recovery path. Products-only
 manual retries cannot erase uncertain order charges.
 An implicit first-sync retry uses the actual unfinished areas when deciding

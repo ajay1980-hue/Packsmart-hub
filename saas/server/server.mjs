@@ -2241,10 +2241,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 const protectedOrderBudget = provider === 'shopify' && state.connectionDoctor?.shopify?.orderReadBinding;
                 const firstSync = state.connectionFirstSync?.[provider];
                 const retryFirstSync = firstSync && firstSync.status !== 'completed' && !body.areas;
-                const requestedAreas = protectedOrderBudget ? body.areas === undefined
+                const requestedAreas = body.areas === undefined
                   ? retryFirstSync ? Object.keys(firstSync.areas).filter(area => firstSync.areas[area] !== 'completed') : connectionSettings(state, provider).areas
-                  : validateAreas(provider, body.areas) : null;
+                  : validateAreas(provider, body.areas);
                 if (!protectedOrderBudget || requestedAreas.includes('orders')) state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
+                else if (requestedAreas.some(area => ['products','variants','inventory','prices'].includes(area))) delete state.connectionDoctor[provider].pendingReadAttempts;
                 if (state.connectionFirstSync?.[provider] && state.connectionFirstSync[provider].status !== 'completed' && !body.areas) {
                   const firstSync = await runFirstSync(state,provider,{integrations,readSync:monitoredSync,save:()=>store.save(auth.session.workspaceId,state),retryFailedOnly:true});
                   return {status:state.integrationStatus?.[provider],firstSync};

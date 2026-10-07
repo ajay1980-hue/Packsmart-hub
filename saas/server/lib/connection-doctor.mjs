@@ -1,4 +1,4 @@
-import { CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
+import { CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, connectionReadAttempts, pendingConnectionReadExhausted, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { addAudit } from './events.mjs';
 import { classifyConnectionIssue, recordFor, safeFailureCode } from './connection-intelligence.mjs';
 
@@ -10,11 +10,19 @@ function event(state, provider, type, detail = {}) {
 function orderBudgetExhausted(doctor) {
   return doctor.exhausted === true || doctor.orderReadBinding && (!Number.isSafeInteger(doctor.attempts) || doctor.attempts < 0 || doctor.attempts >= 5);
 }
-function reserveOrderAttempt(state, integrations) {
+function reserveReadAttempt(state, provider, integrations) {
+  const doctor = connectionDoctorState(state, provider, integrations), attempts = connectionReadAttempts(doctor);
+  if (doctor.exhausted || attempts >= 5) throw connectionError('Automatic connection reads need review before another attempt.', 'CONNECTION_RETRY_EXHAUSTED', 409);
+  doctor.pendingReadAttempts = attempts + 1;
+  state.connectionDoctor = { ...state.connectionDoctor, [provider]: doctor };
+}
+const boundedRead = (provider, areas) => ['ebay', 'pinterest'].includes(provider) || provider === 'shopify' && areas.some(area => ['products', 'variants', 'inventory', 'prices'].includes(area));
+function reserveOrderAttempt(state, integrations, readAttemptCharged = false) {
   const doctor = connectionDoctorState(state, 'shopify', integrations);
-  const binding = shopifyOrderReadBinding(state, integrations), attempts = doctor.attempts ?? 0;
-  if (!binding || !Number.isSafeInteger(attempts) || attempts < 0 || attempts >= 5 || doctor.exhausted || shopifyOrderReadPolicyBlocked(state, integrations, ['orders'])) throw connectionError('Automatic Shopify order reads need review before another attempt.', 'SHOPIFY_ORDER_RETRY_EXHAUSTED', 409);
-  Object.assign(doctor, { attempts: attempts + 1, exhausted: attempts + 1 >= 5, orderReadBinding: binding });
+  const binding = shopifyOrderReadBinding(state, integrations), attempts = connectionReadAttempts(doctor);
+  const reserved = readAttemptCharged ? attempts : attempts + 1;
+  if (!binding || !Number.isSafeInteger(attempts) || attempts < 0 || reserved > 5 || doctor.exhausted || shopifyOrderReadPolicyBlocked(state, integrations, ['orders'])) throw connectionError('Automatic Shopify order reads need review before another attempt.', 'SHOPIFY_ORDER_RETRY_EXHAUSTED', 409);
+  Object.assign(doctor, { attempts: reserved, exhausted: reserved >= 5, orderReadBinding: binding });
   state.connectionDoctor = { ...state.connectionDoctor, shopify: doctor };
 }
 
@@ -78,18 +86,23 @@ function readGroups(provider, areas) {
   return areas.map(area => [area]);
 }
 
-export async function runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly = false, automatic = false, onOrderAttempt = null }) {
+export async function runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly = false, automatic = false, onOrderAttempt = null, onReadAttempt = null }) {
   const first = state.connectionFirstSync?.[provider];
   if (!first || !first.identityVerifiedAt || connectionSettings(state, provider).disconnected) return;
   const areas = Object.keys(first.areas).filter(a => !retryFailedOnly || first.areas[a] !== 'completed');
-  if (automatic && orderReadHeld(state, provider, areas, integrations)) return first;
+  if (automatic && (orderReadHeld(state, provider, areas, integrations) || pendingConnectionReadExhausted(state, provider, integrations))) return first;
+  let readAttemptCharged = false;
   if (automatic && provider === 'shopify' && areas.includes('orders') && (orderBudgetExhausted(connectionDoctorState(state, provider, integrations)) || shopifyOrderReadPolicyBlocked(state, integrations, areas))) return first;
   first.status = 'running';
   await save();
   for (const group of readGroups(provider, areas)) {
     if (!group.length) continue;
     const orderAttempt = automatic && provider === 'shopify' && group.includes('orders');
-    if (orderAttempt) { reserveOrderAttempt(state, integrations); onOrderAttempt?.(); }
+    if (automatic && !readAttemptCharged && boundedRead(provider, group)) {
+      reserveReadAttempt(state, provider, integrations);
+      readAttemptCharged = true; onReadAttempt?.();
+    }
+    if (orderAttempt) { reserveOrderAttempt(state, integrations, readAttemptCharged); onOrderAttempt?.(); }
     for (const area of group) first.areas[area] = 'running';
     const run = beginConnectionSync(state, provider, { areas: group, automatic, actor: first.actor || 'connection-doctor', integrations });
     await save(); // durable lease before any read; CAS and the workspace lock protect it
@@ -120,6 +133,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
   const failed = Object.keys(first.failures);
   first.status = failed.length || !first.validation.ok ? successful.length ? 'partial' : 'failed' : 'completed';
   first.completedAt = iso();
+  if (automatic && first.status === 'completed') delete state.connectionDoctor?.[provider]?.pendingReadAttempts;
   const previous = state.integrationStatus?.[provider] || {};
   if (failed.length) {
     const priority = Object.values(first.failures).find(f => /AUTH|CREDENTIAL|ACCOUNT_MISMATCH/.test(f.code)) || Object.values(first.failures)[0];
@@ -141,7 +155,7 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     if (settings.disconnected || !record?.encryptedCredentials || !CONNECTORS[provider].areas.length) continue;
     // The durable source hold is already sufficient evidence. Merely seeing it
     // again must not claim repairs, contact providers, or write another save.
-    if (orderReadHeld(state, provider, settings.areas, integrations)) continue;
+    if (orderReadHeld(state, provider, settings.areas, integrations) || pendingConnectionReadExhausted(state, provider, integrations)) continue;
     const orderHold = shopifyOrderReadHold(state, provider, integrations);
     const doctor = connectionDoctorState(state, provider, integrations);
     // The already-durable final admission is enough evidence to stop. Repeated
@@ -178,7 +192,9 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     const action = refresh ? 'refresh' : resume ? 'first_sync' : 'read';
     const firstRead = first && first.status !== 'completed' && !commerceOnly && !orderHold;
     let orderAttemptCharged = provider === 'shopify' && !refresh && !firstRead && settings.areas.includes('orders');
+    let readAttemptCharged = !refresh && !firstRead && !orderAttemptCharged && boundedRead(provider, settings.areas);
     if (orderAttemptCharged) reserveOrderAttempt(state, integrations);
+    else if (readAttemptCharged) reserveReadAttempt(state, provider, integrations);
     doctor.leaseUntil = new Date(now.getTime() + 10 * 60000).toISOString();
     doctor.lastAttemptAt = now.toISOString();
     event(state, provider, 'repair_attempted', { action });
@@ -192,7 +208,7 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
         if (oldStatus.lastError) state.integrationStatus[provider] = oldStatus;
       } else {
         if (issue?.kind === 'interrupted') for (const run of state.connectionSyncs || []) if (run.provider === provider && run.status === 'running' && Date.parse(run.leaseUntil) <= now.getTime()) Object.assign(run, { status:'failed', completedAt:now.toISOString(), errorCode:'WORKER_INTERRUPTED' });
-        if (firstRead) await runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly: true, automatic: true, onOrderAttempt: () => { orderAttemptCharged = true; } });
+        if (firstRead) await runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly: true, automatic: true, onOrderAttempt: () => { orderAttemptCharged = true; }, onReadAttempt: () => { readAttemptCharged = true; } });
         else {
           const areas = commerceOnly ? settings.areas.filter(a => a !== 'promotions') : settings.areas;
           if (!areas.length) continue;
@@ -204,6 +220,7 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
       }
       const recoveredOutage = doctor.issue === 'provider_unavailable';
       const protectedOrderBudget = provider === 'shopify' && doctor.orderReadBinding;
+      if (!refresh) delete doctor.pendingReadAttempts;
       Object.assign(doctor, { ...(!protectedOrderBudget ? { attempts:0, exhausted:false } : {}), nextRetryAt:null, lastSuccessAt:iso(), issue: refresh || commerceOnly || unaffectedRead ? doctor.issue : null });
       event(state, provider, 'repair_success', { action, message: (issue && !commerceOnly && !unaffectedRead) || refresh ? `Runvara detected and repaired your ${CONNECTORS[provider].name} connection. No action required.` : null });
       if (recoveredOutage && !refresh) event(state, provider, 'provider_recovery', { message:`${CONNECTORS[provider].name} reads recovered. No action required.` });
@@ -221,9 +238,13 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
         event(state, provider, 'user_action_required', { priority:'important', message:classifyConnectionIssue(state, provider, now, recordFor(state, provider), integrations).message });
         continue;
       }
-      if (!orderAttemptCharged || !doctor.orderReadBinding) doctor.attempts = (doctor.attempts || 0) + 1;
-      doctor.exhausted = doctor.attempts >= 5;
-      const backoff = Math.min(3600000, 60000 * 2 ** (doctor.attempts - 1));
+      if (readAttemptCharged) {
+        // A grouped pass spends one shared admission, even if a later order
+        // source succeeds and releases its own binding before this failure.
+        if (!doctor.orderReadBinding) doctor.attempts = connectionReadAttempts(doctor);
+      } else if (!orderAttemptCharged || !doctor.orderReadBinding) doctor.attempts = (doctor.attempts || 0) + 1;
+      if (!readAttemptCharged || !doctor.orderReadBinding || orderAttemptCharged) doctor.exhausted = doctor.attempts >= 5;
+      const backoff = Math.min(3600000, 60000 * 2 ** (connectionReadAttempts(doctor) - 1));
       doctor.nextRetryAt = new Date(now.getTime() + Math.max(backoff, Math.min(86400000, Number(error.retryAfterMs) || 0), Date.parse(state.integrationStatus?.[provider]?.retryAt) - now.getTime() || 0)).toISOString();
       event(state, provider, 'repair_failure', { action, code:safeFailureCode(error), nextRetryAt:doctor.nextRetryAt });
       if (refresh) state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], lastError:safeFailureCode(error), upstreamStatus:error.upstreamStatus || null, transient:transient(error, provider) } };
