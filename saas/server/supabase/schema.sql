@@ -283,6 +283,39 @@ alter table public.saas_workspace_state enable row level security;
 revoke all on all tables in schema public from anon, authenticated;
 grant select, insert, update, delete on all tables in schema public to service_role;
 
+-- Optional ledgers retain their already-approved mutation boundaries. The
+-- blanket legacy grant above must never reopen append-only usage, immutable
+-- reservation identity/pricing, or fixed-purpose outcome publication writes.
+-- These resets and the blanket grant commit atomically in this transaction.
+do $$
+begin
+  if to_regclass('public.runvara_ai_usage') is not null then
+    revoke all on public.runvara_ai_usage from public,anon,authenticated,service_role;
+    grant select,insert on public.runvara_ai_usage to service_role;
+  end if;
+  if to_regclass('public.runvara_provider_usage_windows') is not null then
+    revoke all on public.runvara_provider_usage_windows from public,anon,authenticated,service_role;
+    grant select,insert,update on public.runvara_provider_usage_windows to service_role;
+  end if;
+  if to_regclass('public.runvara_provider_usage_reservations') is not null then
+    revoke all on public.runvara_provider_usage_reservations from public,anon,authenticated,service_role;
+    grant select,insert on public.runvara_provider_usage_reservations to service_role;
+    grant update (status,observed_input_tokens,observed_cached_input_tokens,observed_cache_write_tokens,
+      observed_output_tokens,observed_total_tokens,accounted_cost_micros,provider_request_id,
+      settlement_fingerprint,error_code,updated_at,settled_at)
+      on public.runvara_provider_usage_reservations to service_role;
+  end if;
+  if to_regclass('public.runvara_business_outcome_versions') is not null then
+    revoke all on public.runvara_business_outcome_versions from public,anon,authenticated,service_role;
+    grant select on public.runvara_business_outcome_versions to service_role;
+  end if;
+  if to_regclass('public.runvara_business_outcome_heads') is not null then
+    revoke all on public.runvara_business_outcome_heads from public,anon,authenticated,service_role;
+    grant select on public.runvara_business_outcome_heads to service_role;
+  end if;
+end
+$$;
+
 -- Supabase's optional automatic-RLS project setting creates this helper in the
 -- public schema. Keep the event trigger, but prevent browser roles from calling
 -- its SECURITY DEFINER function directly.

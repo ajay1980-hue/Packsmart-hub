@@ -22,16 +22,19 @@ export function queueFirstSync(state, provider, actor) {
   state.connectionDoctor = { ...state.connectionDoctor, [provider]: {} };
 }
 
-export function validateImportedData(state, provider) {
-  const groups = provider === 'shopify' ? { products: (state.products || []).filter(p => p.provider === provider), orders: (state.orders || []).filter(o => o.provider === provider) }
-    : provider === 'ebay' ? { listings: state.ebay?.listings || [], orders: (state.orders || []).filter(o => o.provider === provider) }
+export function validateImportedData(state, provider, { areas = null } = {}) {
+  const groups = provider === 'shopify' ? { products: (state.products || []).filter(p => p.provider === provider), orders: (Array.isArray(state.orders) ? state.orders : []).filter(o => o?.provider === provider) }
+    : provider === 'ebay' ? { listings: state.ebay?.listings || [], orders: (Array.isArray(state.orders) ? state.orders : []).filter(o => o?.provider === provider) }
     : state.channelData?.[provider] || {};
   const counts = {}, problems = [];
+  const ordersUnavailable = ['shopify', 'ebay'].includes(provider) && (!Array.isArray(state.orders) || state.orders.some(row => !row || typeof row !== 'object' || Array.isArray(row)));
+  if (ordersUnavailable) problems.push('orders');
   for (const [area, rows] of Object.entries(groups)) {
     if (!Array.isArray(rows)) continue;
     counts[area] = rows.length;
     const seen = new Set();
     for (const row of rows) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) { problems.push(area); break; }
       const id = row.id ?? row.externalId;
       // Older eBay bridge records can be SKU-keyed. Never delete historical data.
       const key = id ?? row.sku;
@@ -46,7 +49,12 @@ export function validateImportedData(state, provider) {
     if (ids.some(id => id == null || id === '') || new Set(ids).size !== ids.length) problems.push('variants');
   }
   if (provider === 'shopify') counts.variants = groups.products.reduce((sum, p) => sum + (p.variants?.length || 0), 0);
-  return { ok: problems.length === 0, counts, problemAreas: [...new Set(problems)], checkedAt: iso() };
+  if (ordersUnavailable) counts.orders = null;
+  // Missing or malformed retained orders remain unknown diagnostics, but cannot
+  // fail a first sync that did not request orders. General validation still
+  // checks every area when no explicit read scope was supplied.
+  const problemAreas = [...new Set(problems)].filter(area => area !== 'orders' || !Array.isArray(areas) || areas.includes('orders'));
+  return { ok: problemAreas.length === 0, counts, unavailableAreas: ordersUnavailable ? ['orders'] : [], problemAreas, checkedAt: iso() };
 }
 
 function readGroups(provider, areas) {
@@ -86,7 +94,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
     }
     await save();
   }
-  first.validation = validateImportedData(state, provider);
+  first.validation = validateImportedData(state, provider, { areas: Object.keys(first.areas) });
   const successful = Object.keys(first.areas).filter(area => first.areas[area] === 'completed');
   const failed = Object.keys(first.failures);
   first.status = failed.length || !first.validation.ok ? successful.length ? 'partial' : 'failed' : 'completed';

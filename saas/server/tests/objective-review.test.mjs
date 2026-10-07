@@ -178,7 +178,8 @@ test('unknown objective periods, gross margin, stock cover, currency and forecas
   assert.equal(report.metricEvidence.currency.measured, null);
   const row = report.proposals[0];
   for (const field of ['grossMarginPercent', 'stockCoverDays', 'currency', 'monthlyAdSpend', 'forecastContribution', 'observedAt']) assert.equal(row.evidence[field], null, field);
-  assert.equal(row.evidence.historicalContribution, 100);
+  assert.equal(row.evidence.historicalContribution, null, 'legacy verification cannot qualify historical money even when a number was recorded');
+  assert.equal(f.state.revenueEngine.experiments[0].impact.incrementalContribution, 100, 'stored legacy measurement remains intact');
   for (const code of ['TIME_BOUNDS_UNKNOWN', 'EVIDENCE_TIME_UNKNOWN', 'EVIDENCE_UNKNOWN', 'COST_EVIDENCE_INCOMPLETE', 'CURRENCY_UNKNOWN', 'STOCK_COVER_UNKNOWN', 'PROFIT_IMPACT_UNKNOWN', 'AD_SPEND_UNKNOWN']) assert.ok(codes(row).includes(code), code);
   assert.ok(report.metricEvidence.blockers.some(row => row.code === 'GROSS_MARGIN_UNRESOLVED'));
   assert.ok(run(fixture('stock_cover_days')).metricEvidence.blockers.some(row => row.code === 'STOCK_COVER_UNRESOLVED'));

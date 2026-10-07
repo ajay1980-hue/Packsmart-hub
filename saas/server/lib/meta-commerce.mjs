@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { dispatchConnectionMutation } from './connection-dispatch.mjs';
 import { connectionError, connectionSettings, validateAreas } from './connection-centre.mjs';
 
 import { META_VERSION, META_READ_SCOPES, META_CATALOG_SCOPES, META_PUBLISH_SCOPES, META_WRITES, META_ORDER_RESTRICTION } from './meta-capabilities.mjs';
@@ -69,11 +70,14 @@ export function prepareMetaWrite(state, body) {
 }
 
 export const metaMethods = {
-  async metaRequest(path, token, { method = 'GET', query = {}, body } = {}) {
+  async metaRequest(path, token, { method = 'GET', query = {}, body, dispatch, phase = 'meta_mutation' } = {}) {
     if (!/^\/(?:me|debug_token|\d{1,32}(?:_\d{1,32})?)(?:\/[a-z_]+)?$/.test(path)) throw connectionError('This Meta operation is unavailable.', 'META_PATH_INVALID');
     const url = new URL(`https://graph.facebook.com/${META_VERSION}${path}`);
     url.search = new URLSearchParams({ ...query, appsecret_proof: crypto.createHmac('sha256', this.env.META_CLIENT_SECRET || '').update(token).digest('hex') }).toString();
-    const response = await this.fetch(url.toString(), { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) });
+    if (method !== 'GET' && Object.keys(query).length) throw connectionError('Mutation query parameters are not approved.', 'WRITE_REQUEST_CHANGED', 409);
+    const address = url.toString(), serialized = body ? JSON.stringify(body) : undefined;
+    const submit = () => this.fetch(address, { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(serialized ? { body: serialized } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) });
+    const response = method === 'GET' ? await submit() : await dispatchConnectionMutation(dispatch, { provider: 'meta', phase, method, path, body: serialized }, submit);
     let value; try { value = await response.json(); } catch { throw connectionError('Meta did not confirm the result. Check the channel before repeating a change.', 'META_RESULT_UNKNOWN', 422); }
     if (!response.ok || value.error) {
       const code = Number(value.error?.code), auth = code === 190 || response.status === 401, permission = [10, 200].includes(code) || response.status === 403;
@@ -184,8 +188,9 @@ export const metaMethods = {
     Object.assign(record, { status: 'connected', lastSyncAt: now, lastError: null, metadata: { ...record.metadata, grantedScopes: granted, assets: { pages: assets.pages, catalogs: assets.catalogs }, discovery: assets.discovery } });
     return (state.integrationStatus.meta = { ...state.integrationStatus.meta, status: 'connected', lastSyncAt: now, lastError: null, detail: 'Selected Meta data synced successfully.' });
   },
-  async executeMetaWrite(state, write, persistClaim) {
-    const input = write.input, credentials = await this.connectorCredentials(state, 'meta'), granted = await this.metaPermissions(credentials);
+  async executeMetaWrite(state, write, persistClaim, { dispatch, credentials, input, recordResult } = {}) {
+    if (!input || !credentials || typeof recordResult !== 'function') throw connectionError('A prepared connection-write dispatch is required.', 'WRITE_DISPATCH_REQUIRED', 409);
+    const granted = await this.metaPermissions(credentials);
     requireMetaScopes(granted, metaWriteScopes(input.operation));
     const assets = await this.metaAssets(credentials, granted), settings = connectionSettings(state, 'meta');
     let result;
@@ -197,27 +202,39 @@ export const metaMethods = {
       }
       const body = input.operation === 'catalog_visibility' ? { visibility: input.visibility } : input.operation === 'catalog_inventory' ? { inventory: input.quantity, availability: input.availability } : { name: input.name, description: input.description };
       if (input.operation === 'catalog_product_create') Object.assign(body, { retailer_id: input.retailerId, brand: input.brand, category: input.category, url: input.url, image_url: input.imageUrl, price: input.priceMinor, currency: input.currency, availability: input.availability, condition: input.condition, visibility: input.visibility });
-      result = await this.metaRequest(input.operation === 'catalog_product_create' ? `/${input.catalogId}/products` : `/${input.productId}`, credentials.accessToken, { method: 'POST', body });
+      result = await this.metaRequest(input.operation === 'catalog_product_create' ? `/${input.catalogId}/products` : `/${input.productId}`, credentials.accessToken, { method: 'POST', body, dispatch });
     } else {
       const page = assets.pages.find(item => item.id === input.pageId), token = assets.pageTokens[input.pageId];
       if (!settings.metaPageIds?.includes(input.pageId) || !page || !token) throw connectionError('This Page is no longer selected or authorised.', 'META_PERMISSION_REQUIRED', 403);
       if (input.operation === 'instagram_publish') {
         if (page.instagram?.id !== input.instagramId) throw connectionError('The linked Instagram account changed. Prepare a new request.', 'META_ASSET_MISMATCH', 403);
         if (write.providerState?.publishStartedAt) throw connectionError('Check Instagram before creating another request. This publication will not be repeated.', 'META_RESULT_UNKNOWN', 409);
-        if (write.providerState?.checkAfter && Date.now() < write.providerState.checkAfter) return { pending: true };
+        if (write.providerState?.checkAfter && Date.now() < write.providerState.checkAfter) return { pending: true, observationError: write.observationErrorCode || null };
         if (!write.providerState?.containerId) {
           const limit = await this.metaRequest(`/${input.instagramId}/content_publishing_limit`, token, { query: { fields: 'quota_usage,config' } });
           if (limit.data?.some(item => Number(item.quota_usage) >= Number(item.config?.quota_total || 100))) throw connectionError('Instagram’s publishing limit has been reached. Try later with a new approved request.', 'META_RATE_LIMITED', 429);
-          const container = await this.metaRequest(`/${input.instagramId}/media`, token, { method: 'POST', body: { image_url: input.imageUrl, caption: input.caption } });
+          const container = await this.metaRequest(`/${input.instagramId}/media`, token, { method: 'POST', body: { image_url: input.imageUrl, caption: input.caption }, dispatch, phase: 'instagram_container' });
           if (!numericId(container.id)) throw connectionError('Instagram did not confirm the media container.', 'META_RESULT_UNKNOWN', 422);
-          write.providerState = { containerId: String(container.id), createdAt: new Date().toISOString() }; await persistClaim();
+          write.providerState = { containerId: String(container.id), createdAt: new Date().toISOString() };
+          recordResult('instagram_container', write.providerState.containerId);
+          await persistClaim();
         }
-        const status = await this.metaRequest(`/${write.providerState.containerId}`, token, { query: { fields: 'status_code' } });
-        if (status.status_code === 'IN_PROGRESS') { write.providerState.checkAfter = Date.now() + 60000; return { pending: true }; }
+        let status;
+        try { status = await this.metaRequest(`/${write.providerState.containerId}`, token, { query: { fields: 'status_code' } }); }
+        catch (error) {
+          // A failed observation is not a failed/uncertain mutation. Keep the
+          // acknowledged container and allow only the existing manual check.
+          write.providerState.checkAfter = Date.now() + 60000;
+          return { pending: true, observationError: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'META_STATUS_UNAVAILABLE' };
+        }
+        if (!['IN_PROGRESS', 'FINISHED', 'ERROR', 'EXPIRED', 'PUBLISHED'].includes(status?.status_code)) {
+          write.providerState.checkAfter = Date.now() + 60000;
+          return { pending: true, observationError: 'META_STATUS_UNVERIFIED' };
+        }
+        if (status.status_code === 'IN_PROGRESS') { write.providerState.checkAfter = Date.now() + 60000; return { pending: true, observationError: null }; }
         if (status.status_code !== 'FINISHED') throw connectionError('Instagram could not confirm that this image is ready. Check Instagram before creating another request.', 'META_MEDIA_NOT_READY', 422);
-        write.providerState.publishStartedAt = new Date().toISOString(); await persistClaim();
-        result = await this.metaRequest(`/${input.instagramId}/media_publish`, token, { method: 'POST', body: { creation_id: write.providerState.containerId } });
-      } else result = await this.metaRequest(input.operation === 'facebook_publish' ? `/${input.pageId}/feed` : `/${input.postId}`, token, { method: 'POST', body: { message: input.message, ...(input.link ? { link: input.link } : {}) } });
+        result = await this.metaRequest(`/${input.instagramId}/media_publish`, token, { method: 'POST', body: { creation_id: write.providerState.containerId }, dispatch, phase: 'instagram_publish' });
+      } else result = await this.metaRequest(input.operation === 'facebook_publish' ? `/${input.pageId}/feed` : `/${input.postId}`, token, { method: 'POST', body: { message: input.message, ...(input.link ? { link: input.link } : {}) }, dispatch });
     }
     if (!result?.id && result?.success !== true) throw connectionError('Meta did not confirm this change. Check the channel before repeating it.', 'META_RESULT_UNKNOWN', 422);
     return { externalId: String(result.id || input.productId || input.postId), confirmed: true };

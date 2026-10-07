@@ -17,6 +17,10 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: 'ui-test-only-credential-key-more-than-32-characters', SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
   const state = seedWorkspaceState({}, { workspaceId: 'ui-test', email: 'ui@example.test', passwordHash: await hashPasswordAsync('GraphSessionTest!2026') });
   state.products = [{ id: 'p1', title: '<img src=x onerror=alert(1)>', status: 'active', variants: [{ id: 'v1', sku: 'SKU-1', price: 10, inventory: 1, available: true }] }];
+  state.products[0].variants.push({ id: 'known-margin', sku: 'KNOWN-MARGIN', price: 10, inventory: 50 }, { id: 'missing-price', sku: 'MISSING-PRICE', price: null, inventory: 50 });
+  const completeCosts = { landed: 6, packing: 0, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 };
+  state.economics['KNOWN-MARGIN'] = { ...completeCosts };
+  state.economics['MISSING-PRICE'] = { ...completeCosts };
   state.revenueEngine.quotes = [{ id: 'q1', status: 'draft', lines: [{ sku: 'SKU-1', quantity: 20, unitPrice: 12 }] }];
   detectOpportunities(state);
   const evidencedOpportunity = state.opportunities[0];
@@ -46,11 +50,30 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   };
   for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
+  assert.equal(document.querySelector('#kpi-margin').textContent, '40.0%');
+  assert.match(document.querySelector('#kpi-margin-coverage').textContent, /1 of 3 catalogue variants · unweighted/);
+  assert.match(document.querySelector('#kpi-margin').parentElement.textContent, /Mean known contribution margin/);
+  assert.equal(document.querySelector('#kpi-low-margin').textContent, '0 below floor');
+  const missingPriceRow = document.querySelector('.economics-row[data-sku="MISSING-PRICE"]');
+  assert.match(missingPriceRow.textContent, /Missing Price/);
+  assert.doesNotMatch(document.querySelector('#best-products').textContent, /MISSING-PRICE/);
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
   const investigate = document.querySelector('[data-investigate-opportunity="' + evidencedOpportunity.id + '"]');
   assert.ok(investigate, 'Command links the original durable opportunity');
-  assert.match(investigate.closest('li').textContent, /Ready for owner review/);
-  assert.match(investigate.closest('li').textContent, /verified contribution £12.34/);
+  assert.match(investigate.closest('li').textContent, /Needs evidence/);
+  assert.doesNotMatch(investigate.closest('li').textContent, /Ready for owner review|verified contribution|£12.34/);
+  assert.match(document.querySelector('#re-experiment-list').textContent, /Legacy recorded \/ unqualified/);
+  assert.match(document.querySelector('#re-experiment-list').textContent, /12.34 recorded contribution/);
+  assert.equal((await server.packsmart.store.get('ui-test')).revenueEngine.experiments[0].impact.incrementalContribution,12.34);
+  assert.match(document.querySelector('#hypergrowth-evidence-badge').textContent,/1 legacy records · unqualified/);
+  assert.match(document.querySelector('#hg-impact').textContent,/ROI unavailable/);
+  assert.doesNotMatch(document.querySelector('#hg-impact').textContent,/Verified ROI|£|×/);
+  assert.equal(document.querySelector('#hg-value').textContent,'—');
+  assert.equal(document.querySelector('#hg-hours').textContent,'—');
+  assert.match(document.querySelector('#hg-learning').textContent,/do not establish qualified learning priors/);
+  assert.match(document.querySelector('#hg-experiments').textContent,/Legacy reviewed \/ unqualified/);
+  assert.doesNotMatch(document.querySelector('#hg-experiments').textContent,/£12.34|Verified result/);
+  assert.equal(calls.some(call=>call.route.startsWith('/api/business-outcomes')),false,'descriptive bootstrap display never loads publication proof automatically');
   const beforeInvestigate = calls.length;
   investigate.click();
   assert.equal(document.querySelector('.view.active').id,'view-opportunities');
@@ -121,7 +144,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   document.querySelector('[data-view="revenue-engine"]').click();
   assert.equal(document.querySelector('.view.active').id, 'view-revenue-engine');
   assert.equal(document.getElementById('re-pipeline').textContent, '£240.00', 'Revenue Engine renders retained tenant data from bootstrap');
-  assert.equal(document.getElementById('re-attribution').textContent, '0.0%');
+  assert.equal(document.getElementById('re-attribution').textContent, 'Unavailable');
   assert.equal(document.querySelector('[onerror]'), null, 'source text is escaped');
   assert.ok(document.querySelector('#attention-queue .attention-item'));
   assert.ok(!document.getElementById('attention-queue').textContent.includes('No recorded exceptions or approvals need attention.'), 'active exceptions never show an all-clear message');
@@ -163,7 +186,8 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   document.querySelector('[data-period="month"]').click();
   assert.equal(document.getElementById('week-metrics').hidden, true);
   assert.equal(document.getElementById('month-metrics').hidden, false);
-  assert.ok(document.getElementById('revenue-chart').textContent.includes('No channel revenue is available yet'));
+  assert.match(document.getElementById('revenue-chart').textContent, /unverified/i);
+  assert.equal(document.getElementById('revenue-chart').querySelector('svg'), null);
   document.querySelector('[data-view="analytics"]').click();
   assert.equal(document.querySelector('.view.active').id, 'view-analytics');
   assert.ok(document.getElementById('analytics-summary').textContent.includes('Runvara'));
@@ -235,9 +259,9 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   });
   const bootstrap = await (await window.fetch('/api/bootstrap')).json();
   for (const scenario of [
-    { name: 'chart keeps positive, negative, zero and unavailable revenue distinct', values: [250, -50, 0, null] },
-    { name: 'chart treats no channels as an empty state', values: [] },
-    { name: 'chart does not turn an unknown value into zero', values: [null, undefined] }
+    { name: 'legacy positive, negative, zero and null scalars cannot revive financial charts', values: [250, -50, 0, null] },
+    { name: 'channel evidence treats no channels as unavailable', values: [] },
+    { name: 'channel evidence does not turn unknown scalars into zero', values: [null, undefined] }
   ]) await t.test(scenario.name, async () => {
     const chartErrors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', error => chartErrors.push(error.message));
     const chartDom = new JSDOM(await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8'), { url: base, runScripts: 'outside-only', virtualConsole });
@@ -253,19 +277,13 @@ test('cockpit renders authenticated controls and submits real persisted workflow
       assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false, w.document.getElementById('startup-error').textContent + '; ' + chartErrors.join('; '));
       const chart = w.document.getElementById('revenue-chart');
       assert.equal(chart.querySelector('[onerror]'), null);
-      if (scenario.values.length === 4) {
-        const rows = chart.querySelectorAll('.revenue-row');
-        assert.equal(rows.length, 4);
-        assert.equal(rows[0].querySelector('strong').textContent, '£250.00');
-        assert.equal(rows[1].querySelector('strong').textContent, '-£50.00');
-        assert.equal(rows[2].querySelector('strong').textContent, '£0.00');
-        assert.equal(rows[3].querySelector('strong').textContent, '—');
-        assert.equal(rows[0].querySelector('.revenue-bar').getAttribute('width'), '833.33');
-        assert.equal(rows[1].querySelector('.revenue-bar').getAttribute('x'), '0.00');
-        assert.equal(rows[1].querySelector('.revenue-bar').getAttribute('width'), '166.67');
-        assert.equal(rows[2].querySelector('.revenue-bar').getAttribute('width'), '0.00');
-        assert.equal(rows[3].querySelector('svg'), null);
-      } else assert.ok(chart.textContent.includes('No channel revenue is available yet'));
+      assert.equal(chart.querySelector('svg'), null, 'unqualified financial scalars cannot produce a chart');
+      assert.doesNotMatch(chart.textContent, /£|\$|250|50|£0/);
+      if (scenario.values.length) {
+        assert.equal(chart.querySelectorAll('details').length, scenario.values.length);
+        assert.match(chart.textContent, /Imported order evidence unavailable/);
+        assert.match(chart.textContent, /Source-period coverage is unverified/);
+      } else assert.ok(chart.textContent.includes('No imported channel evidence is available yet'));
       assert.deepEqual(chartErrors, []);
     } finally { chartDom.window.close(); }
   });

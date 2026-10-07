@@ -33,6 +33,13 @@ export function hasAmount(value) {
   return value !== '' && value !== null && value !== undefined && Number.isFinite(Number(value));
 }
 
+// Catalogue prices may arrive as decimal strings. Blank/coerced values do not
+// establish a selling price; an explicitly recorded zero does.
+export function hasCataloguePrice(value) {
+  return (typeof value === 'number' || (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim()))) &&
+    Number.isFinite(Number(value)) && Number(value) >= 0;
+}
+
 export function amount(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -89,20 +96,26 @@ export function unitEconomics(item = {}, record = {}, options = {}) {
     }
   }
 
+  // Cost completeness is useful independently of selling price (for example,
+  // graph cost-coverage nodes). It does not establish contribution or margin.
   const complete = missingFields.length === 0;
   const recordedCost = Object.values(costs).filter(Number.isFinite).reduce((sum, value) => sum + value, 0);
-  const price = hasAmount(item.price) ? amount(item.price) : null;
+  const price = hasCataloguePrice(item.price) ? amount(item.price) : null;
   const totalVariableCost = complete ? recordedCost : null;
   const contribution = complete && price !== null ? price - totalVariableCost : null;
   const margin = contribution !== null && price > 0 ? contribution / price * 100 : null;
   const configuredFloor = hasAmount(record.marginFloor) ? amount(record.marginFloor) : amount(options.marginFloor, 20);
   const status = !complete
     ? 'missing-costs'
-    : contribution < 0
-      ? 'loss-making'
-      : margin < configuredFloor
-        ? 'below-floor'
-        : 'profitable';
+    : price === null
+      ? 'missing-price'
+      : Number.isFinite(contribution) && contribution < 0
+        ? 'loss-making'
+        : !Number.isFinite(margin)
+          ? 'margin-unavailable'
+          : margin < configuredFloor
+            ? 'below-floor'
+            : 'profitable';
 
   return {
     complete,

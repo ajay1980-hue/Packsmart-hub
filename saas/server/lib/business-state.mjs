@@ -1,3 +1,4 @@
+import { compactOrderPeriod } from './order-analytics.mjs';
 import { evidenceInWorkspace as inWorkspace } from './business-evidence-scope.mjs';
 import { deriveOperations } from './operations.mjs';
 
@@ -5,7 +6,6 @@ const round = (value, digits = 2) => value !== null && value !== undefined && va
 const clean = (value, max = 180) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
 const rows = value => Array.isArray(value) ? value : [];
 const finiteNumber = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value)) ? Number(value) : null;
-const amount = value => round(finiteNumber(value));
 const bound = (value, fallback, maximum) => Number.isFinite(Number(value)) ? Math.max(0, Math.min(maximum, Math.floor(Number(value)))) : fallback;
 const identity = value => typeof value === 'string' && value === value.trim() && value.length <= 180 ? value : '';
 const workspaceIdentity = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value) ? value : '';
@@ -20,20 +20,14 @@ function opportunityEvidence(value, workspaceId) {
 }
 
 function verifiedPosture(experiment) {
-  const empty = { evidenceVerified:false, evidenceDecision:null, verifiedContributionValue:null, evidenceDecisionReason:null, evidenceUpdatedAt:null };
+  const empty = { evidenceVerified:false, evidenceDecision:null, verifiedContributionValue:null, evidenceDecisionReason:null, evidenceUpdatedAt:null,
+    legacyReviewRecorded:false, evidenceQualification:'none' };
   if (!experiment || experiment.status !== 'completed' || experiment.impact?.verified !== true) return empty;
-  const values = ['incrementalContribution', 'contributionProtected', 'costAvoided'].map(key => amount(experiment.impact[key])).filter(value => value !== null);
-  const value = values.length ? amount(values.reduce((sum, entry) => sum + entry, 0)) : null;
-  const decision = value !== null && value > 0 ? 'ready-for-owner-review' : value !== null && value < 0 ? 'deprioritise' : 'needs-more-evidence';
-  return {
-    evidenceVerified:true,
-    evidenceDecision:decision,
-    verifiedContributionValue:value,
-    evidenceDecisionReason:decision === 'ready-for-owner-review' ? 'Verified realised contribution evidence is positive.'
-      : decision === 'deprioritise' ? 'Verified realised contribution evidence is negative.'
-        : value === null ? 'Verified measurement does not establish contribution impact.' : 'No positive verified contribution evidence has been established.',
-    evidenceUpdatedAt:clean(experiment.impact.verifiedAt || experiment.completedAt, 80) || null
-  };
+  // A hot-state verified flag does not establish a committed measurement or a
+  // comparable intervention. Neither its sign nor amount can rank future work.
+  return { ...empty, evidenceDecision:'needs-more-evidence', legacyReviewRecorded:true, evidenceQualification:'legacy_unqualified',
+    evidenceDecisionReason:'Legacy review is recorded but unqualified. A committed measurement and immutable action/domain comparability evidence are required.',
+    evidenceUpdatedAt:clean(experiment.impact.verifiedAt || experiment.completedAt, 80) || null };
 }
 
 // This is a read-only projection of the existing durable collection, not a new
@@ -137,7 +131,8 @@ function stockRiskSummary(items = [], limit = 25) {
     product: clean(item.productTitle || item.title, 160),
     inventory: Number.isFinite(Number(item.inventory)) ? Number(item.inventory) : null,
     available: item.available !== false,
-    units30d: Number(item.units30d || 0)
+    units30d: item.units30d ?? null,
+    salesAttribution: item.salesAttribution || 'unverified_recorded_sku_only'
   }));
 }
 
@@ -152,13 +147,13 @@ function marginSummary(items = [], limit = 25) {
   }));
 }
 
-export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 25 } = {}) {
+export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 25, operations: suppliedOperations = null } = {}) {
   const workspaceId = workspaceIdentity(state.workspace?.id);
   if (workspaceId && (!inWorkspace(state, workspaceId) || !inWorkspace(state.workspace, workspaceId))) {
     throw Object.assign(new Error('Workspace identity mismatch'), { status:403, code:'WORKSPACE_MISMATCH' });
   }
   itemLimit = bound(itemLimit, 25, 100);
-  const operations = deriveOperations(state, { now });
+  const operations = suppliedOperations || deriveOperations(state, { now });
   const connections = connectionSummary(state);
   const pendingApprovals = (state.approvals || []).filter(item => item.status === 'pending');
   const opportunities = projectCanonicalOpportunities(state);
@@ -176,7 +171,10 @@ export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 
       paidOrders30d: operations.paidOrders30d,
       openOrders30d: operations.openOrders,
       refundedOrders30d: operations.refundedOrders30d,
-      revenue30d: round(operations.revenue30d)
+      revenue30d: null,
+      importedOrderEvidence: compactOrderPeriod(operations.last30d).importedOrderEvidence,
+      period: operations.last30d.period,
+      sourcePeriod: operations.last30d.sourcePeriod
     },
     profitability: {
       contribution30d: round(operations.last30d.operatingProfit),
@@ -184,8 +182,13 @@ export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 
       margin30d: round(operations.last30d.margin, 1),
       profitCoveragePercent: operations.last30d.profitCoverage,
       profitCoveredOrders: operations.last30d.profitCoveredOrders,
+      numericCostCoverage: operations.last30d.numericCostCoverage,
+      qualificationReason: operations.last30d.reason,
       costCoveragePercent: operations.costCoverage,
       averageVariantMargin: round(operations.averageMargin, 1),
+      averageVariantMarginBasis: operations.averageMarginBasis,
+      marginCoveredVariants: operations.marginCoveredVariants,
+      marginCoveragePercent: operations.marginCoverage,
       missingCostVariants: operations.missingCosts,
       lowMarginVariants: operations.lowMargin,
       lossMakingVariants: operations.negativeMargin,
@@ -212,7 +215,10 @@ export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 
       contribution30d: round(channel.operatingProfit),
       profitCoveragePercent: channel.profitCoverage,
       advertisingSpend30d: round(channel.advertisingSpend),
-      profitAfterAdvertising30d: round(channel.profitAfterAdvertising)
+      profitAfterAdvertising30d: null,
+      evidenceRef: { surface: 'commerce', provider: channel.id },
+      numericCostCoverage: channel.numericCostCoverage,
+      sourcePeriod: channel.sourcePeriod
     })),
     controls: {
       pendingApprovals: pendingApprovals.length,

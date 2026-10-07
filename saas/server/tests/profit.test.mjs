@@ -89,7 +89,7 @@ test('business dashboard separates windows, channels, stock value and profit cov
   }];
   state.economics['PS-1'] = completeCosts;
   state.orders = [{
-    id: 'order-1', provider: 'shopify', name: '#1', createdAt: now.toISOString(), financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED',
+    id: 'order-1', provider: 'shopify', name: '#1', createdAt: new Date(now.getTime() - 1).toISOString(), currency: 'GBP', financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED',
     total: 10, currentTotal: 10, refunds: 0, currentTax: 1.67, shippingCharged: 0,
     actualShippingCost: 2, paymentFees: 0.3, channelFees: 0.5, advertisingCost: 0, otherVariableCosts: 0,
     lineItems: [{ id: 'line-1', sku: 'PS-1', name: 'Pouch', quantity: 1, net: 8.33 }]
@@ -97,7 +97,10 @@ test('business dashboard separates windows, channels, stock value and profit cov
   state.integrationStatus.shopify = { status: 'connected' };
   const result = deriveOperations(state, { now, lowStockThreshold: 5 });
   assert.equal(result.today.orders, 1);
-  assert.equal(result.last7d.profitCoverage, 100);
+  assert.equal(result.last7d.profitCoverage, null);
+  assert.deepEqual(result.last7d.numericCostCoverage.orderCoverage, { numerator: 1, denominator: 1 });
+  assert.equal(result.last7d.operatingProfit, null);
+  assert.equal(result.last7d.importedOrderEvidence.groups[0].recordedAmounts.netTotal.knownSubtotal, '10');
   assert.equal(result.channels.find(channel => channel.id === 'shopify').orders, 1);
   assert.equal(result.stockRisks, 1);
   assert.equal(result.stockValue, 8);

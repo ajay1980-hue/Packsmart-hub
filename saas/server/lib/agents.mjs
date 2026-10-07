@@ -1,5 +1,6 @@
+import { recordedOrderNarrative, compactOrderPeriod } from './order-analytics.mjs';
 import crypto from 'node:crypto';
-import { deriveOperations, integrationMatrix } from './operations.mjs';
+import { deriveOperations, integrationMatrix, OPERATIONS_CALCULATION_VERSION } from './operations.mjs';
 import { normalizeApprovalRequest } from './operations.mjs';
 import { ensureControl } from './control.mjs';
 import { recordWork } from './events.mjs';
@@ -48,8 +49,8 @@ export function routeCommand(command) {
   return [...selected];
 }
 
-function connection(state, id) {
-  return integrationMatrix(state).find(item => item.id === id) || { status: 'not_configured', detail: 'Not connected', lastSyncAt: null };
+function connection(state, id, metrics) {
+  return integrationMatrix(state, process.env, metrics).find(item => item.id === id) || { status: 'not_configured', detail: 'Not connected', lastSyncAt: null };
 }
 
 function result(id, status, finding, data = {}, confidence = 0.8, issues = []) {
@@ -58,11 +59,11 @@ function result(id, status, finding, data = {}, confidence = 0.8, issues = []) {
 
 export function runSpecialist(agentId, state, options = {}) {
   const metrics = options.metrics || deriveOperations(state, options);
-  const shopify = connection(state, 'shopify');
-  const ebay = connection(state, 'ebay');
+  const shopify = connection(state, 'shopify', metrics);
+  const ebay = connection(state, 'ebay', metrics);
   switch (agentId) {
     case 'health_watch': {
-      const sources = integrationMatrix(state).filter(item => ['commerce', 'marketplace'].includes(item.kind));
+      const sources = integrationMatrix(state, process.env, metrics).filter(item => ['commerce', 'marketplace'].includes(item.kind));
       const failures = sources.filter(item => ['error', 'failed'].includes(item.status));
       const warnings = sources.filter(item => ['degraded', 'not_configured'].includes(item.status));
       const severity = failures.length ? 'CRITICAL' : warnings.length ? 'WARNING' : 'INFO';
@@ -70,17 +71,31 @@ export function runSpecialist(agentId, state, options = {}) {
     }
     case 'stock':
       return result(agentId, shopify.status === 'not_configured' ? 'Warning' : metrics.stockRisks ? 'Warning' : 'Idle', metrics.stockRisks ? `${metrics.stockRisks} active variant${metrics.stockRisks === 1 ? '' : 's'} need stock attention; ${metrics.outOfStock} are out of stock.` : 'No low-stock variants detected in available catalogue data.', { lowStock: metrics.stockRiskItems, outOfStock: metrics.outOfStock }, shopify.status === 'connected' ? 0.92 : 0.55, shopify.status === 'not_configured' ? [{ code: 'SHOPIFY_NOT_CONNECTED', severity: 'WARNING' }] : []);
-    case 'pricing':
-      return result(agentId, metrics.negativeMargin || metrics.lowMargin ? 'Warning' : 'Idle', metrics.missingCosts ? `${metrics.missingCosts} variants cannot be priced confidently until costs are completed.` : metrics.lowMargin ? `${metrics.lowMargin} variants are below their margin floor.` : 'Recorded product margins are above their configured floors.', { missingCosts: metrics.missingCostItems, belowFloor: metrics.lowMarginItems, lossMaking: metrics.negativeMarginItems }, metrics.costCoverage === 100 ? 0.94 : Math.max(0.35, metrics.costCoverage / 100), metrics.missingCosts ? [{ code: 'INCOMPLETE_COSTS', severity: 'WARNING' }] : []);
+    case 'pricing': {
+      const knownMargins = metrics.marginCoveredVariants ?? 0;
+      const incompleteMargins = knownMargins < metrics.variants;
+      const finding = metrics.missingCosts ? `${metrics.missingCosts} variants cannot be priced confidently until costs are completed.`
+        : metrics.negativeMargin ? `${metrics.negativeMargin} variants have negative recorded unit contribution.`
+          : metrics.lowMargin ? `${metrics.lowMargin} variants are below their contribution-margin floor.`
+            : knownMargins ? 'Known catalogue contribution margins meet their configured floors.'
+              : 'Catalogue contribution margins are unavailable from the recorded prices and costs.';
+      return result(agentId, metrics.negativeMargin || metrics.lowMargin || metrics.missingCosts || incompleteMargins ? 'Warning' : 'Idle',
+        `${finding} Margin evidence covers ${knownMargins} of ${metrics.variants} catalogue variants.`,
+        { missingCosts: metrics.missingCostItems, belowFloor: metrics.lowMarginItems, lossMaking: metrics.negativeMarginItems,
+          marginCoveredVariants: knownMargins, marginCoverage: metrics.marginCoverage },
+        metrics.marginCoverage === 100 ? 0.94 : Math.max(0.35, (metrics.marginCoverage || 0) / 100),
+        [...(metrics.missingCosts ? [{ code: 'INCOMPLETE_COSTS', severity: 'WARNING' }] : []),
+          ...(incompleteMargins ? [{ code: 'INCOMPLETE_MARGIN_EVIDENCE', severity: 'WARNING' }] : [])]);
+    }
     case 'finance':
-      return result(agentId, metrics.last30d.profitCoverage < 100 ? 'Warning' : 'Idle', `Last 30 days: ${money(metrics.last30d.revenue)} revenue; estimated operating contribution ${money(metrics.last30d.operatingProfit)} with ${metrics.last30d.profitCoverage}% profit coverage.`, { today: metrics.today, last7d: metrics.last7d, last30d: metrics.last30d, estimates: true }, metrics.last30d.profitCoverage / 100, metrics.last30d.profitCoverage < 100 ? [{ code: 'LOW_PROFIT_COVERAGE', severity: 'WARNING' }] : []);
+      return result(agentId, 'Warning', recordedOrderNarrative(metrics.last30d, 'Last 30 days UTC'), { today: compactOrderPeriod(metrics.today), last7d: compactOrderPeriod(metrics.last7d), last30d: compactOrderPeriod(metrics.last30d), financialQualification: 'unavailable' }, 0.5, [{ code: 'ORDER_FINANCIAL_QUALIFICATION_UNAVAILABLE', severity: 'WARNING' }]);
     case 'shopify':
       return result(agentId, shopify.status === 'connected' ? 'Idle' : shopify.status === 'not_configured' ? 'Warning' : 'Failed', shopify.status === 'connected' ? `Shopify is connected; ${metrics.products} products and ${metrics.variants} variants are available to Runvara.` : `Shopify: ${shopify.detail || 'NOT CONNECTED'}`, { connection: shopify, catalogueIssues: metrics.seoIssueItems }, shopify.status === 'connected' ? 0.96 : 0.35, shopify.status === 'connected' ? [] : [{ code: shopify.lastError || 'SHOPIFY_NOT_CONNECTED', severity: 'HIGH' }]);
     case 'ebay':
       if (ebay.status === 'connected' && state.ebay?.source === 'ebay-oauth-readonly') return result(agentId, 'Warning', `${state.ebay.listings?.length || 0} Inventory API listings are available. Full marketplace comparison needs the existing Manager catalogue feed.`, { connection: ebay, coverage: state.ebay.coverage, health: null }, 0.6, [{ code: 'FULL_CATALOGUE_UNAVAILABLE', severity: 'WARNING' }]);
       return result(agentId, ebay.status === 'connected' ? 'Idle' : ebay.status === 'not_configured' ? 'Warning' : 'Failed', ebay.status === 'connected' ? `${state.ebay?.listings?.length || 0} eBay listings available through the existing read-only Manager connection.` : `eBay: ${ebay.detail || 'NOT CONNECTED'}`, { connection: ebay, health: state.ebay?.health || null }, ebay.status === 'connected' ? 0.94 : 0.35, ebay.status === 'connected' ? [] : [{ code: ebay.lastError || 'EBAY_NOT_CONNECTED', severity: 'HIGH' }]);
     case 'sales':
-      return result(agentId, 'Idle', `${metrics.last30d.orders} orders produced ${money(metrics.last30d.revenue)} revenue in the last 30 days.`, { channels: metrics.channels, strongestProducts: metrics.productRows.slice().sort((a, b) => b.revenue30d - a.revenue30d).slice(0, 10) }, metrics.last30d.orders ? 0.88 : 0.5);
+      return result(agentId, 'Warning', recordedOrderNarrative(metrics.last30d, 'Last 30 days UTC'), { channels: metrics.channels, recordedSkuEvidence: metrics.last30d.importedOrderEvidence?.skuGroups || [], productSalesAttribution: 'unverified_recorded_sku_only' }, 0.5);
     case 'supplier':
       return result(agentId, metrics.supplierCount ? 'Idle' : 'Warning', metrics.supplierCount ? `${metrics.supplierCount} active supplier${metrics.supplierCount === 1 ? '' : 's'} recorded. Supplier orders remain approval-gated.` : 'No active supplier data is recorded.', { suppliers: state.suppliers || [], stockRisks: metrics.stockRiskItems }, metrics.supplierCount ? 0.75 : 0.3);
     case 'seo':
@@ -88,11 +103,11 @@ export function runSpecialist(agentId, state, options = {}) {
     case 'marketing':
       return result(agentId, 'Idle', 'Campaign preparation is available; publishing and advertising spend require approval.', { brand: ['premium', 'gold', 'black', 'grey', 'clean', 'professional', 'vibrant'], spend30d: metrics.advertising.spend }, 0.7);
     case 'customer_service':
-      return result(agentId, metrics.customerServiceIssues ? 'Warning' : 'Idle', metrics.customerServiceIssues ? `${metrics.customerServiceIssues} order${metrics.customerServiceIssues === 1 ? '' : 's'} may need customer follow-up.` : 'No customer-service order exceptions detected.', { cases: metrics.customerServiceItems }, metrics.orders30d ? 0.82 : 0.5);
+      return result(agentId, metrics.customerServiceIssues ? 'Warning' : 'Idle', metrics.customerServiceIssues === null ? 'Order follow-up evidence is unavailable.' : `${metrics.customerServiceIssues} retained order${metrics.customerServiceIssues === 1 ? '' : 's'} may need follow-up; source-period coverage is unverified${metrics.last30d.importedOrderEvidence?.completeness.retainedCohortComplete ? '' : ' and the scanned cohort is incomplete'}.`, { cases: metrics.customerServiceItems }, metrics.orders30d ? 0.82 : 0.5);
     case 'product_scout':
       return result(agentId, 'Warning', 'Live product discovery sources are NOT CONNECTED. Existing catalogue data can be scored, but no external opportunity is being claimed.', { sources: { trends: 'NOT CONNECTED', competitors: 'NOT CONNECTED', suppliers: metrics.supplierCount ? 'PARTIAL' : 'NOT CONNECTED' } }, 0.25, [{ code: 'SCOUT_SOURCES_NOT_CONNECTED', severity: 'WARNING' }]);
     case 'operations':
-      return result(agentId, metrics.openOrders ? 'Warning' : 'Idle', `${metrics.openOrders} open orders need operational review.`, { orders: metrics.customerServiceItems, exceptions: (state.exceptions || []).filter(item => ['open', 'acknowledged'].includes(item.status)).map(({ id, title, severity }) => ({ id, title, severity })) }, 0.8);
+      return result(agentId, metrics.openOrders ? 'Warning' : 'Idle', metrics.openOrders === null ? 'Open-order evidence is unavailable.' : `${metrics.openOrders} retained open orders need operational review; ${metrics.last30d.unknownFulfillmentOrders} have unknown fulfilment status. Source-period coverage is unverified.`, { orders: metrics.customerServiceItems, exceptions: (state.exceptions || []).filter(item => ['open', 'acknowledged'].includes(item.status)).map(({ id, title, severity }) => ({ id, title, severity })) }, 0.8);
     case 'compliance':
       return result(agentId, metrics.pendingApprovals ? 'Warning' : 'Idle', `${metrics.pendingApprovals} approvals are pending. Spending and risky external actions require the workspace owner's decision.`, { approvalIds: (state.approvals || []).filter(item => item.status === 'pending').map(item => item.id), externalWritesEnabled: false }, 1);
     default:
@@ -138,7 +153,7 @@ export async function runCommander(state, command, options = {}) {
   const workStatus = proposedType || conflicts.length ? 'REQUIRES APPROVAL' : specialistResults.some(item => item.workStatus === 'FAILED') ? 'FAILED' : specialistResults.every(item => item.workStatus === 'BLOCKED') ? 'BLOCKED' : 'COMPLETED';
   const run = {
     id: options.runId || `agent_run_${crypto.randomUUID()}`, command: safeText(command, 1000), routedAgents: agentIds,
-    startedAt, completedAt: nowIso(), status: specialistResults.some(item => item.status === 'Failed') ? 'Warning' : 'Completed',
+    startedAt, calculationVersion: OPERATIONS_CALCULATION_VERSION, completedAt: nowIso(), status: specialistResults.some(item => item.status === 'Failed') ? 'Warning' : 'Completed',
     summary: specialistResults.map(item => item.finding).filter(Boolean).join(' '), priorities,
     urgentRisks: issues.filter(item => ['HIGH', 'CRITICAL'].includes(item.severity)), results: specialistResults,
     workStatus, conflicts, decisionContext: decisions.map(({ id, title, content, revision }) => ({ id, title, content, revision })), approvalId: options.approvalId || null,
@@ -151,15 +166,17 @@ export async function runCommander(state, command, options = {}) {
 export function agentTeamSnapshot(state) {
   const settings = { ...defaultAgentSettings(), ...(state.agentSettings || {}) };
   const latest = new Map();
-  for (const run of state.agentRuns || []) for (const item of run.results || []) if (!latest.has(item.agentId)) latest.set(item.agentId, { ...item, runId: run.id });
+  for (const run of state.agentRuns || []) for (const item of run.results || []) if (!latest.has(item.agentId)) latest.set(item.agentId, { ...item, runId: run.id, calculationVersion: run.calculationVersion });
   return AGENT_DEFINITIONS.map(agent => {
     const last = latest.get(agent.id);
+    const historical = Boolean(last && last.calculationVersion !== OPERATIONS_CALCULATION_VERSION);
+    const historicalFinding = 'Historical analysis used earlier calculation rules. Run a new analysis for current qualified evidence.';
     const setting = settings[agent.id] || { autonomy: agent.defaultAutonomy, enabled: true };
     if (agent.id === 'commander') {
       const run = state.agentRuns?.[0];
-      return { ...agent, ...setting, status: run?.status === 'Warning' ? 'Warning' : 'Idle', lastRun: run?.completedAt || null, currentTask: null, lastFinding: run?.summary || 'Ready for a business command.', issuesDetected: run?.urgentRisks?.length || 0, confidence: run?.results?.length ? Math.round(run.results.reduce((sum, item) => sum + item.confidence, 0) / run.results.length * 100) : null };
+      return { ...agent, ...setting, status: run?.status === 'Warning' ? 'Warning' : 'Idle', lastRun: run?.completedAt || null, currentTask: null, historical: Boolean(run && run.calculationVersion !== OPERATIONS_CALCULATION_VERSION), lastFinding: run && run.calculationVersion !== OPERATIONS_CALCULATION_VERSION ? historicalFinding : run?.summary || 'Ready for a business command.', issuesDetected: run?.urgentRisks?.length || 0, confidence: run?.results?.length ? Math.round(run.results.reduce((sum, item) => sum + item.confidence, 0) / run.results.length * 100) : null };
     }
-    return { ...agent, ...setting, status: last?.status || 'Idle', lastRun: last?.completedAt || null, currentTask: null, lastFinding: last?.finding || 'Not run yet.', issuesDetected: last?.issues?.length || 0, confidence: last ? Math.round(last.confidence * 100) : null };
+    return { ...agent, ...setting, status: last?.status || 'Idle', lastRun: last?.completedAt || null, currentTask: null, historical, lastFinding: historical ? historicalFinding : last?.finding || 'Not run yet.', issuesDetected: last?.issues?.length || 0, confidence: last ? Math.round(last.confidence * 100) : null };
   });
 }
 
@@ -167,8 +184,8 @@ export function recordAgentRun(state, run, actor = 'system') {
   state.agentRuns = [run, ...(state.agentRuns || [])];
   recordWork(state, { id: run.id, title: run.command, source: 'commander', status: run.workStatus || 'COMPLETED', evidence: run.evidence || [{ type: 'agent_run', id: run.id }], approvalId: run.approvalId || null, executedExternally: false });
   const activities = [
-    { id: `activity_${crypto.randomUUID()}`, agentId: 'commander', type: 'command_analysis', message: `Commander analysis: ${run.command}`, status: run.workStatus || run.status, createdAt: run.completedAt },
-    ...run.results.map(item => ({ id: `activity_${crypto.randomUUID()}`, agentId: item.agentId, type: 'agent_finding', message: item.finding, status: item.status, confidence: item.confidence, createdAt: item.completedAt }))
+    { id: `activity_${crypto.randomUUID()}`, agentId: 'commander', type: 'command_analysis', calculationVersion: OPERATIONS_CALCULATION_VERSION, message: `Commander analysis: ${run.command}`, status: run.workStatus || run.status, createdAt: run.completedAt },
+    ...run.results.map(item => ({ id: `activity_${crypto.randomUUID()}`, agentId: item.agentId, type: 'agent_finding', calculationVersion: OPERATIONS_CALCULATION_VERSION, message: item.finding, status: item.status, confidence: item.confidence, createdAt: item.completedAt }))
   ];
   state.agentActivity = [...activities, ...(state.agentActivity || [])];
   return { run, actor };

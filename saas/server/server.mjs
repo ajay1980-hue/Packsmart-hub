@@ -1,3 +1,4 @@
+import { inspectOrderPeriod, orderFinancialView, editorOrderRecord, FINANCIAL_QUALIFICATION_REASON } from './lib/order-analytics.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -26,10 +27,11 @@ import {
   verifySessionToken
 } from './lib/security.mjs';
 import { IntegrationService } from './lib/integrations.mjs';
-import { ECONOMICS_FIELDS, ECONOMICS_TEXT_FIELDS, calculateOrderProfit, hasAmount } from './lib/profit.mjs';
+import { ECONOMICS_FIELDS, ECONOMICS_TEXT_FIELDS, hasAmount } from './lib/profit.mjs';
 import {
   APPROVAL_TYPES,
   AUTOMATION_DEFINITIONS,
+  OPERATIONS_CALCULATION_VERSION,
   buildDailyBrief,
   deriveOperations,
   integrationMatrix,
@@ -66,6 +68,8 @@ import { deriveImpact } from './lib/impact-engine.mjs';
 import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
 import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
+import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from './lib/experiment-measurements.mjs';
+import { evidenceInWorkspace } from './lib/business-evidence-scope.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 const VERSION = '6.15.2';
@@ -77,10 +81,28 @@ const STATIC_FILES = new Map([
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
+  ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
+  ['/activity-ui.js', ['saas/activity-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
 ]);
+
+function matchesStaticEtag(ifNoneMatch, etag) {
+  if (typeof ifNoneMatch !== 'string') return false;
+  const value = ifNoneMatch.replace(/^[ \t]+|[ \t]+$/g, '');
+  if (value === '*') return true;
+  // If-None-Match uses weak comparison. Parse quoted tags without splitting
+  // embedded commas; ignore empty list members and reject malformed fields.
+  const members = /[ \t]*(?:(?:W\/)?("[\x21\x23-\x7e\x80-\xff]*"))?[ \t]*(?:,|$)/gy;
+  let matched = false;
+  while (members.lastIndex < value.length) {
+    const member = members.exec(value);
+    if (!member || !member[0].length) return false;
+    if (member[1] === etag) matched = true;
+  }
+  return matched;
+}
 
 const PLANS = Object.freeze({
   starter: { name: 'Starter', indicativeMonthlyGbp: 29, features: ['1 workspace', 'Shopify connection', 'Profit and approval controls'] },
@@ -211,26 +233,35 @@ function csvCell(value) {
 }
 
 function accountingCsv(state) {
+  const inspection = inspectOrderPeriod(state, { startAt: '1970-01-01T00:00:00.000Z', endAt: new Date().toISOString() });
+  // Existing financial columns remain present but cannot claim accounting
+  // amounts. Exact normalized fields are separate, explicitly recorded columns.
   const headings = [
     'order_id', 'order_date', 'channel', 'financial_status', 'gross_revenue', 'net_revenue',
     'vat_tax', 'refunds', 'shipping_charged', 'landed_cost', 'packing_cost', 'handling_cost',
     'actual_shipping_cost', 'payment_fees', 'channel_fees', 'advertising_cost', 'other_variable_cost',
-    'gross_profit', 'operating_contribution', 'margin_percent', 'profit_basis', 'missing_inputs'
+    'gross_profit', 'operating_contribution', 'margin_percent', 'profit_basis', 'missing_inputs',
+    'source_identity_hash', 'cancelled', 'recorded_currency', 'currency_status', 'source_period_status',
+    'period_start_utc', 'period_end_utc_exclusive', 'retained_cohort_complete', 'financial_qualification',
+    'numeric_cost_inputs_complete', 'recorded_total', 'recorded_current_total', 'recorded_refunds',
+    'recorded_tax', 'recorded_current_tax', 'recorded_discounts', 'recorded_shipping_charged',
+    'recorded_net_total', 'recorded_net_ex_current_tax', 'known_recorded_amounts', 'unknown_recorded_amounts',
+    'excluded_conflicting_identities', 'scan_complete', 'output_complete', 'eligibility_resolved',
+    'excluded_scope_rows', 'missing_identity_rows', 'invalid_date_orders', 'available_source_rows', 'scanned_source_rows'
   ];
-  const rows = (state.orders || []).map(order => {
-    const profit = calculateOrderProfit(order, state.economics || {});
-    return [
-      order.name || order.id, order.createdAt, order.provider || 'shopify', order.financialStatus,
-      profit.grossRevenue, profit.netRevenue, profit.tax, profit.refunds, profit.shippingCharged,
-      profit.complete ? profit.breakdown.landed : null,
-      profit.complete ? profit.breakdown.packing : null,
-      profit.complete ? profit.breakdown.handling : null,
-      profit.complete ? profit.breakdown.delivery : null,
-      profit.complete ? profit.breakdown.paymentFee : null,
-      profit.complete ? profit.breakdown.channelFee : null,
-      profit.complete ? profit.breakdown.advertising : null,
-      profit.complete ? profit.breakdown.otherVariable : null,
-      profit.grossProfit, profit.contribution, profit.margin, profit.basis, profit.missingFields.join('; ')
+  const evidence = inspection.evidence;
+  if (!inspection.rows.length && !evidence?.completeness.retainedCohortComplete) throw Object.assign(new Error('Recorded evidence export unavailable: no eligible rows and scan, identity or collection evidence is incomplete'), { status: 409, code: 'ORDER_EVIDENCE_INCOMPLETE' });
+  const rows = inspection.rows.map(row => {
+    const order = editorOrderRecord(row.order), values = row.recordedAmounts;
+    const monetary = Object.values(values);
+    return [order.name || order.id, row.createdAt, row.provider, row.financialStatus,
+      ...Array(16).fill(null), 'unqualified_normalized_order_evidence', FINANCIAL_QUALIFICATION_REASON,
+      row.identityHash, row.cancelled, row.currency, row.currency ? 'unverified_recorded_code' : 'missing_or_malformed', 'unverified',
+      inspection.period.startAt, inspection.period.endAt, evidence.completeness.retainedCohortComplete, 'unavailable', row.costNumbersComplete,
+      ...['total', 'currentTotal', 'refunds', 'tax', 'currentTax', 'discounts', 'shippingCharged', 'netTotal', 'netTotalExCurrentTax'].map(field => values[field]),
+      monetary.filter(value => value !== null).length, monetary.filter(value => value === null).length,
+      evidence.counts.conflictingIdentities, evidence.completeness.scanComplete, evidence.completeness.outputComplete, evidence.completeness.eligibilityResolved,
+      evidence.counts.invalidScopeRows + evidence.counts.invalidLineScopeOrders, evidence.counts.missingIdentityRows, evidence.counts.invalidDateOrders, evidence.counts.availableOrders, evidence.counts.scannedOrders
     ].map(csvCell).join(',');
   });
   return [headings.join(','), ...rows].join('\r\n') + '\r\n';
@@ -324,9 +355,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   const locks = new Map();
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
+  const activityReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
+  const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const outcomeReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
+  const outcomeDraftLimiter = new SlidingWindowLimiter({ limit: 5, windowMs: 60000, blockMs: 60000 });
+  const outcomePublicationLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const signupLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const supportLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 5 * 60000 });
   let healthPending;
@@ -392,19 +428,23 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     catch { throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'JSON_INVALID' }); }
   }
 
-  async function serveStatic(pathname, res, { head = false } = {}) {
+  async function serveStatic(pathname, res, { head = false, ifNoneMatch } = {}) {
     const item = STATIC_FILES.get(pathname);
     if (!item) return false;
     const [relative, contentType] = item;
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
+      // Hash the exact bytes read for this response, never cached file metadata.
+      const etag = `"sha256-${crypto.createHash('sha256').update(body).digest('hex')}"`;
+      const notModified = matchesStaticEtag(ifNoneMatch, etag);
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
-      res.writeHead(200, {
+      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      res.writeHead(notModified ? 304 : 200, {
         ...headers(contentType, cacheControl),
+        ETag: etag,
         'Content-Security-Policy': csp
       });
-      res.end(head ? undefined : body);
+      res.end(head || notModified ? undefined : body);
     } catch {
       send(res, 404, { error: 'Static file not found', code: 'NOT_FOUND' });
     }
@@ -461,20 +501,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   }
 
-  async function mutate(auth, callback) {
+  async function mutate(auth, callback, { persist = true } = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
       const state = await store.get(auth.session.workspaceId);
       if (!state) throw Object.assign(new Error('Workspace not found'), { status: 404, code: 'WORKSPACE_NOT_FOUND' });
       const currentUser = state.users.find(item => item.id === auth.user.id);
       if (!currentUser || currentUser.active === false || currentUser.role !== auth.user.role || Number(currentUser.sessionVersion || 1) !== Number(auth.session.sessionVersion || 1)) throw Object.assign(new Error('Session changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
       const result = await callback(state);
-      await store.save(auth.session.workspaceId, state);
+      if (persist) await store.save(auth.session.workspaceId, state);
       return result;
     });
   }
 
   function briefSourceSignature(state) {
     const source = {
+      calculationVersion: OPERATIONS_CALCULATION_VERSION,
       products: state.products || [],
       orders: state.orders || [],
       economics: state.economics || {},
@@ -492,7 +533,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return crypto.createHash('sha256').update(JSON.stringify(source)).digest('hex').slice(0, 32);
   }
 
-  function currentBrief(state) {
+  function currentBrief(state, operations = null) {
     const today = new Date().toISOString().slice(0, 10);
     const sourceSignature = briefSourceSignature(state);
     const existing = (state.dailyBriefs || []).find(brief =>
@@ -502,10 +543,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     );
     if (existing) return existing;
     const brief = { ...buildDailyBrief(state, {
+      operations,
       lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
       marginFloor: state.settings?.marginFloor ?? clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
     }), sourceSignature };
-    brief.attention = { exceptions: (state.exceptions || []).filter(item => ['open', 'acknowledged'].includes(item.status)).length,
+    brief.attention = { exceptions: (state.exceptions || []).filter(item => item.present && ['open', 'acknowledged'].includes(item.status)).length,
       approvals: (state.approvals || []).filter(item => item.status === 'pending').length,
       failedAutomations: (state.automationRuns || []).filter(item => ['FAILED', 'BLOCKED'].includes(item.status) && item.startedAt.startsWith(today)).length,
       opportunities: (state.opportunities || []).filter(item => item.present && item.status === 'open').length };
@@ -516,8 +558,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   function bootstrapPayload(state, user, csrf) {
-    const brief = currentBrief(state);
-    const businessState = deriveBusinessState(state);
+    const operations = deriveOperations(state, {
+      lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
+      marginFloor: state.settings?.marginFloor ?? clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
+    });
+    const brief = currentBrief(state, operations);
+    const businessState = deriveBusinessState(state, { operations });
     const learning = deriveLearning(state);
     const opportunityQueue = deriveOpportunityQueue(businessState, { learning });
     const growthCouncil = runGrowthCouncil(businessState, opportunityQueue);
@@ -531,7 +577,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       launchAdmin: state.workspace.id === CUSTOMER_ZERO_WORKSPACE && user.role === 'owner' && normalizeEmail(user.email) === normalizeEmail(env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com'),
       csrf,
       products: state.products || [],
-      orders: state.orders || [],
+      orders: operations.orderProfitability.map(({ profitability, ...order }) => order),
+      orderDetailCoverage: operations.orderDetailCoverage,
       economics: state.economics || {},
       suppliers: state.suppliers || [],
       costHistory: state.costHistory || [],
@@ -551,20 +598,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       connectionNotifications: doctorNotifications(state),
       connectionRecommendations: recommendations(state, connectionCentre(state, integrations)),
       connectionWrites: (state.connectionWrites || []).slice(0, 50),
-      integrations: integrationMatrix(state, env),
+      integrations: integrationMatrix(state, env, operations),
       ebayOAuth: integrations.ebayOAuthStatus(state),
       ebay: state.ebay || null,
-      dashboard: deriveOperations(state, {
-        lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
-        marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
-      }),
+      dashboard: operations,
       brief,
-      onboarding: { ...onboardingState(state, env), journey: onboardingJourney(state) },
+      onboarding: { ...onboardingState(state, env, operations), journey: onboardingJourney(state) },
       aiTeam: agentTeamSnapshot(state),
       agentDefinitions: AGENT_DEFINITIONS,
       autonomyLevels: AUTONOMY_LEVELS,
-      agentActivity: (state.agentActivity || []).slice(0, 100),
-      agentRuns: (state.agentRuns || []).slice(0, 20),
+      agentActivity: (state.agentActivity || []).slice(0, 100).map(item => ({ ...item, historical: item.calculationVersion !== OPERATIONS_CALCULATION_VERSION })),
+      agentRuns: (state.agentRuns || []).slice(0, 20).map(item => ({ ...item, historical: item.calculationVersion !== OPERATIONS_CALCULATION_VERSION })),
       storage: store.provider,
       ...controlSnapshot(state)
     };
@@ -1127,7 +1171,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        if (req.method === 'GET' && pathname === '/api/activity') {
+          // This verified-session precheck can only deny. Every admitted request
+          // still performs fresh identity, role and session checks below.
+          const signedSession = sessionFrom(req);
+          if (signedSession) {
+            const activityScope = signedSession.workspaceId;
+            if (!activityReadLimiter.check(activityScope).allowed) throw Object.assign(new Error('Activity request limit reached'), { status: 429, code: 'ACTIVITY_RATE_LIMITED' });
+            activityReadLimiter.fail(activityScope);
+          }
+        }
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1137,6 +1191,73 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+
+        if (pathname === '/api/business-outcomes' || pathname.startsWith('/api/business-outcomes/')) {
+          const workspaceId = auth.session.workspaceId;
+          if ([...url.searchParams.keys()].length) throw Object.assign(new Error('Outcome reads do not accept tenant or query overrides'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+          const consume = limiter => {
+            if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
+            limiter.fail(rateKey);
+          };
+          const decodeId = raw => {
+            let id;
+            try { id = decodeURIComponent(raw); } catch {}
+            if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/.test(id)) throw Object.assign(new Error('Invalid outcome source identifier'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
+            return id;
+          };
+          if (req.method === 'GET' && pathname === '/api/business-outcomes') {
+            consume(outcomeReadLimiter);
+            const result = await store.businessOutcomeSummary(workspaceId);
+            send(res, 200, { workspaceId, summary: result.summary, current: result.publications }); return;
+          }
+          const source = pathname.match(/^\/api\/business-outcomes\/experiments\/([^/]+)(\/measurement)?$/);
+          if (source && req.method === 'GET' && !source[2]) {
+            requireOwner(auth); consume(outcomeReadLimiter);
+            const result = await store.getBusinessOutcomeReview(workspaceId, decodeId(source[1]));
+            send(res, 200, result); return;
+          }
+          if (source && req.method === 'PUT' && source[2]) {
+            requireOwner(auth); consume(outcomeDraftLimiter);
+            const id = decodeId(source[1]), body = await jsonBody(req, 16384);
+            const result = await mutate(auth, async state => {
+              const owned = (value, depth = 0) => depth <= 4 && evidenceInWorkspace(value, workspaceId)
+                && ['workspace', 'tenant'].every(key => !value[key] || typeof value[key] !== 'object' || owned(value[key], depth + 1));
+              const actors = (state.users || []).filter(user => user.id === auth.user.id);
+              const matches = Array.isArray(state.revenueEngine?.experiments) ? state.revenueEngine.experiments.filter(item => item?.id === id) : [];
+              if (!owned(state) || !owned(state.workspace) || !owned(state.revenueEngine) || matches.length !== 1 || !owned(matches[0])
+                || actors.length !== 1 || !owned(actors[0]) || actors[0].passwordChangeRequired) {
+                throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
+              }
+              const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
+                actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null });
+              matches[0].outcomeMeasurement = measurement;
+              const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
+              addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,
+                detail: { experimentId: id, revision: measurement.revision, measurementDigest: measurement.digest, published: false } });
+              return { measurement, assessment, committedState: state };
+            });
+            send(res, 200, { workspaceId, workspaceRevision: result.committedState._revision,
+              measurement: result.measurement, assessment: result.assessment }); return;
+          }
+          if (req.method === 'POST' && pathname === '/api/business-outcomes/publish') {
+            requireApprover(auth); consume(outcomePublicationLimiter);
+            if (String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() !== 'true') {
+              throw Object.assign(new Error('Outcome publication is paused; existing results remain available'), { status: 503, code: 'OUTCOME_PUBLICATION_PAUSED' });
+            }
+            const input = await jsonBody(req, 4096);
+            const result = await withWorkspaceLock(workspaceId, () => store.publishBusinessOutcome(workspaceId,
+              { id: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) }, input));
+            // Publication owns its atomic state/ledger/audit transaction. Never
+            // follow it with a stale generic state.save or auto-retry callback.
+            send(res, 200, result); return;
+          }
+          const version = pathname.match(/^\/api\/business-outcomes\/versions\/(outcome_version_[a-f0-9]{64})$/);
+          if (req.method === 'GET' && version) {
+            consume(outcomeReadLimiter);
+            send(res, 200, await store.getBusinessOutcomeEvidence(workspaceId, version[1])); return;
+          }
+          throw Object.assign(new Error('Outcome route not found'), { status: 404, code: 'NOT_FOUND' });
+        }
 
         if (pathname === '/api/admin/launch' || pathname === '/api/admin/invitations') {
           requireLaunchAdmin(auth, env);
@@ -1445,12 +1566,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const body = await jsonBody(req, 32768);
           const costs = cleanOrderCosts(body);
           const result = await mutate(auth, async state => {
-            const order = (state.orders || []).find(item => item.id === decodeURIComponent(orderEconomicsMatch[1]));
-            if (!order) throw Object.assign(new Error('Order not found'), { status: 404, code: 'ORDER_NOT_FOUND' });
+            const matches = (Array.isArray(state.orders) ? state.orders : []).filter(item => item && item.id === decodeURIComponent(orderEconomicsMatch[1]));
+            if (!matches.length) throw Object.assign(new Error('Order not found'), { status: 404, code: 'ORDER_NOT_FOUND' });
+            const order = matches[0];
+            const sourceKey = item => Object.hasOwn(item, 'externalId') ? item.externalId : item.id;
+            const identityCopies = (state.orders || []).filter(item => item && item.provider === order.provider && sourceKey(item) === sourceKey(order));
+            const inspection = inspectOrderPeriod(state, { startAt: '1970-01-01T00:00:00.000Z', endAt: new Date().toISOString() });
+            if (matches.length !== 1 || identityCopies.length !== 1 || !inspection.rows.some(row => row.order === order && row.costOverrideScopeValid)) {
+              throw Object.assign(new Error('Order identity is ambiguous or unqualified; costs were not changed'), { status: 409, code: 'ORDER_IDENTITY_UNQUALIFIED' });
+            }
+
             Object.assign(order, costs, { costUpdatedAt: new Date().toISOString() });
             order.costOverrides = { ...order.costOverrides, ...costs };
             addAudit(state, { type: 'order_costs_updated', actor: auth.user.id, detail: { orderId: order.id, changedFields: Object.keys(costs) } });
-            return { order, profitability: calculateOrderProfit(order, state.economics || {}) };
+            const updated = inspectOrderPeriod(state, inspection.period);
+            return { order: editorOrderRecord(order), profitability: orderFinancialView(updated, updated.rows.find(row => row.order === order)) };
           });
           send(res, 200, result);
           return;
@@ -1797,6 +1927,24 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
           send(res, 202, { job }); return;
         }
+        if (pathname === '/api/activity') {
+          requireOwner(auth);
+          if (req.method !== 'GET') throw Object.assign(new Error('Activity is read only'), { status: 405, code: 'ACTIVITY_READ_ONLY' });
+          if ([...url.searchParams.keys()].length || Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding']) {
+            throw Object.assign(new Error('Activity scope comes from the signed-in workspace'), { status: 400, code: 'ACTIVITY_REQUEST_INVALID' });
+          }
+          const observed = store.activitySnapshot?.(auth.session.workspaceId);
+          if (!observed || observed.schema !== 'runvara-activity/v1' || observed.workspaceId !== auth.session.workspaceId) {
+            throw Object.assign(new Error('Activity observations are unavailable'), { status: 503, code: 'ACTIVITY_UNAVAILABLE' });
+          }
+          // Explicit projection keeps internal instance/unattributed counters out
+          // of a tenant-admin response, even if later diagnostics grow fields.
+          const fields = ['schema','workspaceId','instanceId','instanceStartedAt','observedSince','snapshotAt','coverage','db','hotState','jobs','rateWindow','anomalies'];
+          const result = Object.fromEntries(fields.map(key => [key, observed[key]]));
+          if (Buffer.byteLength(JSON.stringify(result)) > 32768) throw Object.assign(new Error('Activity observations exceed the response bound'), { status: 503, code: 'ACTIVITY_UNAVAILABLE' });
+          send(res, 200, result); return;
+        }
+
         if (req.method === 'GET' && pathname === '/api/operator/provider-usage') {
           requireLaunchAdmin(auth, env);
           const workspaceId = text(url.searchParams.get('workspaceId') || auth.session.workspaceId, 256);
@@ -2100,7 +2248,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const executeWrite = pathname.match(/^\/api\/connection-writes\/([a-z0-9_-]+)\/execute$/i);
         if (req.method === 'POST' && executeWrite) {
           requireApprover(auth);
-          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state)));
+          const executionRate = connectionWriteLimiter.check(auth.session.workspaceId);
+          if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
+          connectionWriteLimiter.fail(auth.session.workspaceId);
+          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), durableStore: store.provider === 'supabase',
+            actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write, executedExternally: write.status === 'completed' }); return;
         }
 
@@ -2269,7 +2421,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
 
-      if (['GET', 'HEAD'].includes(req.method) && await serveStatic(pathname, res, { head: req.method === 'HEAD' })) return;
+      if (['GET', 'HEAD'].includes(req.method) && await serveStatic(pathname, res, { head: req.method === 'HEAD', ifNoneMatch: req.headers['if-none-match'] })) return;
       send(res, 404, { error: 'Not found', code: 'NOT_FOUND' });
     } catch (error) {
       const safe = sanitizeError(error);

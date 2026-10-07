@@ -50,6 +50,31 @@ test('first sync records real durable stages, retains partial imports and retrie
   assert.doesNotMatch(JSON.stringify(state.audit),/private provider payload/);
 });
 
+test('products-only first sync tolerates unavailable retained orders but selected orders fail explicitly', async () => {
+  for (const provider of ['shopify', 'ebay']) for (const orders of [undefined, null, [null]]) for (const selectedOrders of [false, true]) {
+    const state = stateFor(provider), calls = [];
+    state.orders = orders;
+    state.connectionSettings[provider].areas = selectedOrders ? ['products', 'orders'] : ['products'];
+    const integrations = service({ syncProvider: async (current, channel, { areas }) => {
+      calls.push([...areas]);
+      if (channel === 'shopify') current.products = [{ id: 'p1', provider: channel, variants: [{ id: 'v1' }] }];
+      else current.ebay = { listings: [{ id: 'listing1' }] };
+      return { status: 'connected', lastError: null };
+    } });
+    queueFirstSync(state, provider, 'owner');
+    const result = await runFirstSync(state, provider, { integrations, readSync: monitoredSync, save: async () => {} });
+    assert.equal(result.status, selectedOrders ? 'partial' : 'completed', `${provider}: orders selected=${selectedOrders}`);
+    assert.equal(result.validation.ok, !selectedOrders);
+    assert.equal(result.validation.counts.orders, null);
+    assert.deepEqual(result.validation.unavailableAreas, ['orders']);
+    assert.deepEqual(result.validation.problemAreas, selectedOrders ? ['orders'] : []);
+    assert.equal(calls.flat().includes('orders'), selectedOrders);
+    assert.equal(state.orders, orders, 'Validation must preserve the retained source collection');
+    assert.equal(validateImportedData(state, provider).ok, false, 'Unscoped diagnostics must still expose missing order evidence');
+    assert.equal(Boolean(state.integrationStatus[provider].areaSuccessAt?.orders), selectedOrders, 'Products-only success must not claim an order read');
+  }
+});
+
 test('doctor renews expiring tokens using the existing encrypted rotation and never performs channel writes',async()=>{
   const state=stateFor('pinterest');let tokenCalls=0;
   state.connections[0].encryptedCredentials=encryptCredentials({accessToken:'expired-access',refreshToken:'old-refresh',expiresAt:now.getTime()-1000},KEY);
@@ -114,7 +139,9 @@ test('recommended defaults and optional preferences stay least privilege, are re
 
 test('health includes evidence and honest unknowns, distinguishes restrictions and never fabricates scores',()=>{
   const state=stateFor();let channels=intelligentConnections(state,service(),{now,persistence:{primaryPersistence:true},scheduler:{lastTickAt:now.toISOString()}});
-  const health=channels.find(c=>c.id==='shopify').health;assert.equal(health.status,'Healthy');assert.equal(health.webhookHealth,'not_monitored');assert.equal(health.scopeEvidence,'not_reported');assert.equal(health.score,undefined);
+  const health=channels.find(c=>c.id==='shopify').health;assert.equal(health.status,'Attention needed');assert.equal(health.dataFreshness,'not_measured');assert.equal(health.authentication,'not_verified');assert.equal(health.webhookHealth,'not_monitored');assert.equal(health.scopeEvidence,'not_reported');assert.equal(health.score,undefined);
+  state.integrationStatus.shopify.areaSuccessAt=Object.fromEntries(connectionSettings(state,'shopify').areas.map(area=>[area,now.toISOString()]));
+  assert.equal(intelligentConnections(state,service(),{now}).find(c=>c.id==='shopify').health.status,'Healthy');
   state.integrationStatus.shopify.lastError='ACCOUNT_MISMATCH';assert.equal(classifyConnectionIssue(state,'shopify',now).kind,'account_mismatch');
   const ebay=stateFor('ebay');ebay.ebay={coverage:{readDiagnostics:{marketing:{errorIds:['35077']}}}};assert.equal(classifyConnectionIssue(ebay,'ebay',now).kind,'provider_restriction');
   state.products=[{provider:'shopify',id:'duplicate'},{provider:'shopify',id:'duplicate'}];assert.equal(validateImportedData(state,'shopify').ok,false);

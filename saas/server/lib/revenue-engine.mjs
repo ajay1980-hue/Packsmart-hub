@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { calculateOrderProfit, orderRevenue, settledOrder } from './profit.mjs';
+import { inspectImportedOrderEvidence } from './imported-order-evidence.mjs';
+import { evidenceInWorkspace } from './business-evidence-scope.mjs';
 
 const DAY = 86400000;
 const clean = (value, max = 240) => String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
@@ -11,21 +12,82 @@ function safeDate(value) {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+// The history window is explicit and half-open. These are recorded cohort
+// diagnostics; retained imports cannot establish a complete customer lifetime.
+const HISTORY_START = '1970-01-01T00:00:00Z';
+const ORDER_PROVIDERS = ['shopify', 'ebay', 'meta', 'tiktok_shop', 'pinterest', 'google_youtube', 'whatsapp_business', 'amazon'];
+const RECORDED_PURCHASE_STATUSES = new Set(['PAID', 'PARTIALLY_REFUNDED', 'REFUNDED']);
+const TOUCH_KINDS = new Set(['utm_source', 'utm_medium', 'utm_campaign', 'referrer', 'landing_page', 'source', 'campaign']);
+const ANALYTIC_LIMITS = Object.freeze({ advertisingRows: 2000, attributionTouches: 2000, basketPairs: 50, customerRows: 100, attributionRows: 100, sourceGroups: 100, touchesPerOrder: 16 });
+const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
+const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+function scoped(record, workspaceId, depth = 0) {
+  if (depth > 4 || !evidenceInWorkspace(record, workspaceId)) return false;
+  return ['workspace', 'tenant'].every(key => !Object.hasOwn(record, key) || !object(record[key]) || scoped(record[key], workspaceId, depth + 1));
+}
+
+function financialQualification() {
+  return { qualifiedOrders: 0, revenue: null, contribution: null, profitCoverage: null,
+    reason: 'no_trusted_source_period_currency_tax_or_historical_cost_contract' };
+}
+
+function importedHistory(state, now) {
+  const workspaceId = identifier(state?.workspace?.id);
+  let result;
+  try {
+    const endAt = now instanceof Date && Number.isFinite(now.getTime()) ? now.toISOString() : null;
+    result = inspectImportedOrderEvidence(state, { workspaceId, period: { startAt: HISTORY_START, endAt }, providers: ORDER_PROVIDERS });
+  } catch (error) {
+    if (!['WORKSPACE_REQUIRED', 'WORKSPACE_MISMATCH', 'ORDER_PERIOD_INVALID'].includes(error.code)) throw error;
+    return { evidence: null, rows: [], coverage: { status: 'unavailable', reason: error.code,
+      sourcePeriod: 'unverified', financialQualification: financialQualification(),
+      labels: ['source_period_unverified', 'financial_qualification_missing', 'recorded_cohort_unavailable'] } };
+  }
+  const { evidence } = result;
+  return { ...result, coverage: {
+    status: !evidence.completeness.collectionAvailable ? 'unavailable' : evidence.completeness.retainedCohortComplete ? 'recorded_cohort' : 'partial_recorded_cohort',
+    basis: 'retained_imported_orders', period: evidence.period, providers: evidence.providers,
+    sourcePeriod: 'unverified', sourceCounts: evidence.counts, completeness: evidence.completeness,
+    sourcePeriods: evidence.sourcePeriods, limits: evidence.limits,
+    financialQualification: financialQualification(),
+    labels: ['source_period_unverified', 'financial_qualification_missing', ...(!evidence.completeness.retainedCohortComplete ? ['recorded_cohort_incomplete'] : [])]
+  } };
+}
+
+function purchaseRows(history) {
+  return history.rows.filter(row => !row.cancelled && RECORDED_PURCHASE_STATUSES.has(row.financialStatus));
+}
+
 function customerKey(order) {
-  const hash = clean(order?.customerEmailHash, 128);
-  if (hash) return 'shopify:' + hash;
-  const providerCustomerId = clean(order?.customerId || order?.buyerId || order?.buyerUsername, 160);
-  if (providerCustomerId) return clean(order?.provider || 'channel', 40) + ':' + providerCustomerId;
+  // Customer IDs and email hashes have no cross-provider identity contract.
+  const emailHash = identifier(order.customerEmailHash);
+  if (emailHash) return order.provider + ':' + hash(['email_hash', emailHash]);
+  if (order.customerEmailHash !== null && order.customerEmailHash !== undefined) return null;
+  for (const field of ['customerId', 'buyerId', 'buyerUsername']) {
+    if (order[field] === null || order[field] === undefined) continue;
+    const value = identifier(order[field]);
+    return value ? order.provider + ':' + hash([field, value]) : null;
+  }
   return null;
 }
 
-function orderSourceEvidence(order) {
+function customerSignature(order) {
+  return JSON.stringify(['customerEmailHash', 'customerId', 'buyerId', 'buyerUsername'].map(field => [order[field] === null || order[field] === undefined ? 'absent' : identifier(order[field]) ? 'valid' : 'invalid', identifier(order[field])]));
+}
+
+function recordedText(value) {
+  return typeof value === 'string' && value.length <= 200 && value.trim() ? value.trim() : null;
+}
+
+function orderSourceEvidence(order, workspaceId) {
   const touches = [];
-  const add = (kind, value, confidence = 'confirmed') => {
-    const cleanValue = clean(value, 200);
-    if (cleanValue) touches.push({ kind, value: cleanValue, confidence });
+  const add = (kind, value) => {
+    const recorded = recordedText(value);
+    if (recorded) touches.push({ kind, value: recorded, confidence: 'recorded-unverified', provenance: 'normalized_order_field' });
   };
-  const attr = order?.attribution && typeof order.attribution === 'object' ? order.attribution : {};
+  const attr = object(order.attribution) && scoped(order.attribution, workspaceId) ? order.attribution : {};
   add('utm_source', attr.utmSource || order.utmSource);
   add('utm_medium', attr.utmMedium || order.utmMedium);
   add('utm_campaign', attr.utmCampaign || order.utmCampaign);
@@ -33,19 +95,58 @@ function orderSourceEvidence(order) {
   add('landing_page', attr.landingPage || order.landingPage);
   add('source', attr.source || order.sourceName || order.source);
   add('campaign', attr.campaign || order.campaignName);
-  if (order.provider) add('sales_channel', order.provider, 'confirmed');
   return touches;
 }
 
-function dominant(values) {
-  const counts = new Map();
-  for (const value of values.filter(Boolean)) counts.set(value, (counts.get(value) || 0) + 1);
-  return [...counts.entries()].sort((a,b) => b[1] - a[1])[0]?.[0] || null;
+function sourceMetadataValid(order, workspaceId) {
+  return order.attribution === undefined || order.attribution === null || (object(order.attribution) && scoped(order.attribution, workspaceId));
+}
+
+// The shared projection deliberately ignores customer/attribution payloads.
+// Reconcile the bounded original copies before using these extra fields; never
+// let an arbitrary first duplicate choose the favourable customer or campaign.
+function consumerConflicts(state, history, signature) {
+  const signatures = new Map(), conflicts = new Set();
+  if (!history.evidence) return conflicts;
+  for (const order of (Array.isArray(state.orders) ? state.orders : []).slice(0, history.evidence.counts.scannedOrders)) {
+    if (!object(order) || !ORDER_PROVIDERS.includes(order.provider)) continue;
+    const sourceId = identifier(Object.hasOwn(order, 'externalId') ? order.externalId : order.id);
+    if (!sourceId) continue;
+    const identityHash = hash([history.evidence.workspaceId, order.provider, sourceId]);
+    const value = signature(order);
+    if (signatures.has(identityHash) && signatures.get(identityHash) !== value) conflicts.add(identityHash);
+    else signatures.set(identityHash, value);
+  }
+  return conflicts;
+}
+
+function consumerCoverage(history, conflicts = 0, extra = {}) {
+  const coverage = { ...history.coverage, consumerConflictingIdentities: conflicts, ...extra };
+  const capped = extra.touchesTruncated || extra.pairsTruncated || extra.detailRowsTruncated;
+  const excluded = (extra.missingCustomerIdentityOrders || 0) + (extra.excludedSourceMetadataOrders || 0);
+  coverage.consumerCohortComplete = history.coverage.status === 'recorded_cohort' && !conflicts && !capped && !excluded;
+  if (excluded) {
+    coverage.status = coverage.status === 'unavailable' ? 'unavailable' : 'partial_recorded_cohort';
+    coverage.labels = [...coverage.labels, 'consumer_metadata_incomplete'];
+  }
+  if (capped) {
+    coverage.status = coverage.status === 'unavailable' ? 'unavailable' : 'partial_recorded_cohort';
+    coverage.labels = [...coverage.labels, 'analytic_output_truncated'];
+  }
+  if (conflicts) {
+    coverage.status = coverage.status === 'unavailable' ? 'unavailable' : 'partial_recorded_cohort';
+    coverage.labels = [...coverage.labels, 'consumer_metadata_conflicts'];
+  }
+  return coverage;
 }
 
 export function ensureRevenueEngine(state) {
   const current = state.revenueEngine && typeof state.revenueEngine === 'object' ? state.revenueEngine : {};
   state.revenueEngine = {
+    // Normalization must not erase a conflicting source scope before readers
+    // or owner publication checks can reject it. Never relabel foreign data.
+    ...Object.fromEntries(['workspaceId', 'workspace_id', 'tenantId', 'tenant_id', 'workspace', 'tenant']
+      .filter(key => Object.hasOwn(current, key)).map(key => [key, current[key]])),
     intentEvents: Array.isArray(current.intentEvents) ? current.intentEvents : [],
     leads: Array.isArray(current.leads) ? current.leads : [],
     quotes: Array.isArray(current.quotes) ? current.quotes : [],
@@ -59,149 +160,163 @@ export function ensureRevenueEngine(state) {
 }
 
 export function deriveCustomerIntelligence(state, { now = new Date() } = {}) {
-  const economics = state.economics || {};
+  const history = importedHistory(state, now);
+  const conflicts = consumerConflicts(state, history, customerSignature);
   const groups = new Map();
-  for (const order of state.orders || []) {
-    if (order.cancelledAt || !settledOrder(order)) continue;
+  let missingCustomerIdentityOrders = 0;
+  for (const row of purchaseRows(history)) {
+    if (conflicts.has(row.identityHash)) continue;
+    const { order, provider, createdAt } = row;
     const key = customerKey(order);
-    if (!key) continue;
-    const at = safeDate(order.createdAt);
-    if (!at) continue;
-    const profit = calculateOrderProfit(order, economics);
-    const revenue = orderRevenue(order).netRevenue || 0;
-    const row = groups.get(key) || { id: key, orders: [], channels: new Set(), products: new Map(), revenue: 0, contribution: 0, contributionCoveredRevenue: 0, completeProfitOrders: 0, firstPurchaseAt: at, lastPurchaseAt: at };
-    row.orders.push(order);
-    row.channels.add(order.provider || 'unknown');
-    row.revenue += revenue;
-    row.firstPurchaseAt = Math.min(row.firstPurchaseAt, at);
-    row.lastPurchaseAt = Math.max(row.lastPurchaseAt, at);
-    if (profit.complete) {
-      row.contribution += Number(profit.contribution || 0);
-      row.contributionCoveredRevenue += Number(profit.netRevenue || 0);
-      row.completeProfitOrders += 1;
-    }
-    for (const line of order.lineItems || []) {
-      const sku = clean(line.sku || line.name, 160);
-      if (!sku) continue;
-      const item = row.products.get(sku) || { sku, name: clean(line.name || sku, 180), quantity: 0, revenue: 0 };
-      item.quantity += Number(line.quantity || 0);
-      item.revenue += Number(line.net ?? line.gross ?? 0) || 0;
-      row.products.set(sku, item);
-    }
-    groups.set(key, row);
+    if (!key) { missingCustomerIdentityOrders++; continue; }
+    const at = Date.parse(createdAt);
+    const customer = groups.get(key) || { id: key, orders: [], provider, products: new Map(), firstPurchaseAt: at, lastPurchaseAt: at };
+    customer.orders.push(row);
+    customer.firstPurchaseAt = Math.min(customer.firstPurchaseAt, at);
+    customer.lastPurchaseAt = Math.max(customer.lastPurchaseAt, at);
+    const skus = new Set((Array.isArray(order.lineItems) ? order.lineItems : []).map(line => identifier(line?.sku)).filter(Boolean));
+    for (const sku of skus) customer.products.set(sku, (customer.products.get(sku) || 0) + 1);
+    groups.set(key, customer);
   }
 
   const customers = [...groups.values()].map(row => {
-    row.orders.sort((a,b) => safeDate(a.createdAt) - safeDate(b.createdAt));
-    const intervals = [];
-    for (let i=1;i<row.orders.length;i++) intervals.push((safeDate(row.orders[i].createdAt) - safeDate(row.orders[i-1].createdAt)) / DAY);
-    const averageReorderDays = intervals.length ? intervals.reduce((a,b)=>a+b,0)/intervals.length : null;
-    const daysSinceLastOrder = Math.max(0, (now.getTime() - row.lastPurchaseAt) / DAY);
-    const expectedNextOrderAt = averageReorderDays ? new Date(row.lastPurchaseAt + averageReorderDays * DAY).toISOString() : null;
-    const favourite = [...row.products.values()].sort((a,b)=>b.quantity-a.quantity || b.revenue-a.revenue)[0] || null;
-    const windowValue = days => row.orders.filter(order => now.getTime() - safeDate(order.createdAt) <= days * DAY).reduce((sum, order) => sum + (orderRevenue(order).netRevenue || 0), 0);
+    row.orders.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const intervals = row.orders.slice(1).map((order, index) => (Date.parse(order.createdAt) - Date.parse(row.orders[index].createdAt)) / DAY);
+    const averageReorderDays = intervals.length ? intervals.reduce((a, b) => a + b, 0) / intervals.length : null;
+    const daysSinceLastOrder = (now.getTime() - row.lastPurchaseAt) / DAY;
+    const expectedNextOrderAt = averageReorderDays > 0 ? new Date(row.lastPurchaseAt + averageReorderDays * DAY).toISOString() : null;
+    const favourite = [...row.products.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
     const repeat = row.orders.length > 1;
-    const due = repeat && averageReorderDays && daysSinceLastOrder >= averageReorderDays * .9;
+    const due = repeat && averageReorderDays > 0 && daysSinceLastOrder >= averageReorderDays * .9;
     const dormant = daysSinceLastOrder >= Math.max(60, (averageReorderDays || 45) * 1.75);
     const churnRisk = repeat && daysSinceLastOrder >= Math.max(45, (averageReorderDays || 30) * 1.35);
-    const segment = dormant ? 'dormant' : churnRisk ? 'churn-risk' : due ? 'reorder-due' : row.orders.length >= 3 ? 'loyal' : repeat ? 'repeat' : 'new';
     return {
-      id: row.id,
-      privacyLabel: 'Customer ' + row.id.split(':').pop().slice(0,8).toUpperCase(),
-      orderCount: row.orders.length,
-      revenue: rounded(row.revenue),
-      contribution: row.completeProfitOrders ? rounded(row.contribution) : null,
-      profitCoverage: row.orders.length ? Math.round(row.completeProfitOrders / row.orders.length * 100) : 0,
-      averageOrderValue: rounded(row.revenue / row.orders.length),
-      firstPurchaseAt: new Date(row.firstPurchaseAt).toISOString(),
-      lastPurchaseAt: new Date(row.lastPurchaseAt).toISOString(),
-      daysSinceLastOrder: rounded(daysSinceLastOrder, 1),
-      averageReorderDays: rounded(averageReorderDays, 1),
-      expectedNextOrderAt,
-      ltv30: rounded(windowValue(30)), ltv60: rounded(windowValue(60)), ltv90: rounded(windowValue(90)), ltv365: rounded(windowValue(365)),
-      favouriteProduct: favourite,
-      channels: [...row.channels],
-      segment,
-      signals: { repeat, reorderDue: Boolean(due), dormant, churnRisk }
+      id: row.id, provider: row.provider,
+      privacyLabel: 'Customer ' + row.id.split(':').pop().slice(0, 8).toUpperCase(),
+      orderCount: row.orders.length, revenue: null, contribution: null, profitCoverage: null, averageOrderValue: null,
+      firstPurchaseAt: new Date(row.firstPurchaseAt).toISOString(), lastPurchaseAt: new Date(row.lastPurchaseAt).toISOString(),
+      daysSinceLastOrder: rounded(daysSinceLastOrder, 1), averageReorderDays: averageReorderDays === null ? null : rounded(averageReorderDays, 1), expectedNextOrderAt,
+      ltv30: null, ltv60: null, ltv90: null, ltv365: null,
+      favouriteProduct: favourite ? { provider: row.provider, sku: favourite[0], name: favourite[0], recordedOrderCount: favourite[1], quantity: null, revenue: null, attribution: 'unverified_recorded_sku_only', refundsAllocated: false } : null,
+      channels: [row.provider],
+      segment: dormant ? 'dormant' : churnRisk ? 'churn-risk' : due ? 'reorder-due' : row.orders.length >= 3 ? 'loyal' : repeat ? 'repeat' : 'new',
+      signals: { repeat, reorderDue: Boolean(due), dormant, churnRisk },
+      basis: 'recorded_customer_cohort_heuristic', sourcePeriod: 'unverified', financialQualification: financialQualification(),
+      financialStatusCohorts: [...RECORDED_PURCHASE_STATUSES].map(financialStatus => ({ financialStatus, orders: row.orders.filter(order => order.financialStatus === financialStatus).length }))
     };
-  }).sort((a,b) => b.revenue - a.revenue);
+  }).sort((a, b) => b.orderCount - a.orderCount || b.lastPurchaseAt.localeCompare(a.lastPurchaseAt) || a.id.localeCompare(b.id));
 
-  const repeatCustomers = customers.filter(c=>c.orderCount>1).length;
-  const totalRevenue = customers.reduce((sum,c)=>sum+c.revenue,0);
-  const contributionKnown = customers.filter(c=>c.contribution!==null);
+  const repeatCustomers = customers.filter(customer => customer.orderCount > 1).length;
+  const available = history.coverage.status !== 'unavailable';
   const recommendations = [];
   for (const customer of customers) {
-    if (customer.signals.reorderDue) recommendations.push({ type:'reorder', customerId:customer.id, title:customer.privacyLabel + ' is near its usual reorder window', evidence:`${customer.orderCount} orders; average reorder ${customer.averageReorderDays} days; last order ${customer.daysSinceLastOrder} days ago.`, action:'Prepare a reorder reminder or account follow-up.', approvalRequired:true });
-    if (customer.signals.churnRisk) recommendations.push({ type:'retention', customerId:customer.id, title:customer.privacyLabel + ' shows retention risk', evidence:`Last order ${customer.daysSinceLastOrder} days ago versus an average ${customer.averageReorderDays || 'unknown'}-day repeat cycle.`, action:'Review a win-back message using margin-safe incentives only.', approvalRequired:true });
+    if (customer.signals.reorderDue) recommendations.push({ type: 'reorder', customerId: customer.id, title: customer.privacyLabel + ' is near its observed reorder window', evidence: `${customer.orderCount} recorded orders; average interval ${customer.averageReorderDays} days; last recorded order ${customer.daysSinceLastOrder} days ago. Retained history may be incomplete.`, action: 'Review the recorded pattern before preparing an account follow-up.', approvalRequired: true });
+    if (customer.signals.churnRisk) recommendations.push({ type: 'retention', customerId: customer.id, title: customer.privacyLabel + ' has a possible retention gap', evidence: `Last recorded order ${customer.daysSinceLastOrder} days ago versus an observed ${customer.averageReorderDays ?? 'unknown'}-day repeat cycle. Retained history may be incomplete.`, action: 'Review the customer history before preparing a win-back message.', approvalRequired: true });
   }
-
   return {
     summary: {
-      customers: customers.length,
-      repeatCustomers,
-      repeatRate: customers.length ? rounded(repeatCustomers / customers.length * 100, 1) : 0,
-      totalRevenue: rounded(totalRevenue),
-      knownContribution: contributionKnown.length ? rounded(contributionKnown.reduce((s,c)=>s+c.contribution,0)) : null,
-      reorderDue: customers.filter(c=>c.signals.reorderDue).length,
-      churnRisk: customers.filter(c=>c.signals.churnRisk).length,
-      dormant: customers.filter(c=>c.signals.dormant).length
-    },
-    customers,
-    recommendations: recommendations.slice(0,100),
-    coverage: {
-      identity: 'privacy-preserving customer keys from connected order data',
-      historicalWindow: 'limited to retained/imported order history; 365-day LTV is only complete when 365 days of orders are retained',
-      namesAndEmailsExposed: false
-    }
+      customers: available ? customers.length : null, repeatCustomers: available ? repeatCustomers : null,
+      repeatRate: customers.length ? rounded(repeatCustomers / customers.length * 100, 1) : null,
+      totalRevenue: null, knownContribution: null, profitCoverage: null, averageOrderValue: null,
+      reorderDue: available ? customers.filter(customer => customer.signals.reorderDue).length : null,
+      churnRisk: available ? customers.filter(customer => customer.signals.churnRisk).length : null,
+      dormant: available ? customers.filter(customer => customer.signals.dormant).length : null
+    }, customers: customers.slice(0, ANALYTIC_LIMITS.customerRows), recommendations: recommendations.slice(0, 100),
+    coverage: consumerCoverage(history, conflicts.size, {
+      identity: 'provider-scoped recorded customer identifiers; no cross-provider customer matching',
+      historicalWindow: 'Retained imports from 1970-01-01 through the exclusive observation time; no complete customer lifetime or source-period coverage is established.',
+      cohort: 'noncancelled recorded PAID, PARTIALLY_REFUNDED and REFUNDED orders; refunds do not establish retained units',
+      missingCustomerIdentityOrders, namesAndEmailsExposed: false, refundsAllocated: false,
+      customersAvailable: customers.length, customersReturned: Math.min(customers.length, ANALYTIC_LIMITS.customerRows), customerLimit: ANALYTIC_LIMITS.customerRows,
+      detailRowsTruncated: customers.length > ANALYTIC_LIMITS.customerRows, aggregatesUseFullBoundedCohort: true
+    })
   };
 }
 
-export function deriveAttribution(state) {
-  const orders = (state.orders || []).filter(order => !order.cancelledAt && settledOrder(order));
-  const rows = orders.map(order => {
-    const touches = [...orderSourceEvidence(order), ...(state.revenueEngine?.attributionTouches || []).filter(t => t.orderId === order.id)];
-    const sourceTouch = touches.find(t=>t.kind==='utm_source') || touches.find(t=>t.kind==='source') || null;
-    const channel = clean(order.provider || 'unknown', 80);
-    const revenue = orderRevenue(order).netRevenue || 0;
-    const profit = calculateOrderProfit(order, state.economics || {});
-    return { orderId: order.id, channel, source: sourceTouch?.value || null, touches, revenue: rounded(revenue), contribution: profit.complete ? rounded(profit.contribution) : null, confidence: sourceTouch ? 'confirmed-source' : 'channel-only' };
+export function deriveAttribution(state, { now = new Date() } = {}) {
+  const history = importedHistory(state, now), workspaceId = history.evidence?.workspaceId;
+  const conflicts = consumerConflicts(state, history, order => JSON.stringify([identifier(order.id), sourceMetadataValid(order, workspaceId), orderSourceEvidence(order, workspaceId)]));
+  const localIds = new Map();
+  for (const order of (Array.isArray(state.orders) ? state.orders : []).slice(0, history.evidence?.counts.scannedOrders || 0)) {
+    const localId = identifier(order?.id), sourceId = object(order) && identifier(Object.hasOwn(order, 'externalId') ? order.externalId : order.id);
+    if (!localId || !sourceId || !ORDER_PROVIDERS.includes(order.provider)) continue;
+    const key = JSON.stringify([order.provider, localId]);
+    const identities = localIds.get(key) || new Set();
+    identities.add(sourceId); localIds.set(key, identities);
+  }
+  const rawTouches = Array.isArray(state.revenueEngine?.attributionTouches) ? state.revenueEngine.attributionTouches : [];
+  const touchScopeValid = scoped(state.revenueEngine || {}, workspaceId) && history.evidence?.completeness.truncated.orders === false;
+  let unscopedTouchRows = 0;
+  const touchesByOrder = new Map();
+  for (const touch of rawTouches.slice(0, ANALYTIC_LIMITS.attributionTouches)) {
+    if (!touchScopeValid || !scoped(touch, workspaceId) || !ORDER_PROVIDERS.includes(touch.provider) || !identifier(touch.orderId) || !TOUCH_KINDS.has(touch.kind) || !recordedText(touch.value)) { unscopedTouchRows++; continue; }
+    const key = JSON.stringify([touch.provider, touch.orderId]);
+    if (localIds.get(key)?.size !== 1) { unscopedTouchRows++; continue; }
+    const touches = touchesByOrder.get(key) || [];
+    touches.push({ kind: touch.kind, value: recordedText(touch.value), confidence: 'recorded-unverified', provider: touch.provider, provenance: 'provider_scoped_recorded_touch' });
+    touchesByOrder.set(key, touches);
+  }
+  const selectedRows = purchaseRows(history);
+  const excludedSourceMetadataOrders = selectedRows.filter(row => !sourceMetadataValid(row.order, workspaceId)).length;
+  const rows = selectedRows.filter(row => !conflicts.has(row.identityHash) && sourceMetadataValid(row.order, workspaceId)).map(row => {
+    const { order, provider } = row;
+    const touches = [...orderSourceEvidence(order, workspaceId), ...(touchesByOrder.get(JSON.stringify([provider, order.id])) || [])];
+    const sourceTouch = touches.find(touch => touch.kind === 'utm_source') || touches.find(touch => touch.kind === 'source');
+    return { orderId: identifier(order.id), identityHash: row.identityHash, pointer: row.pointer, provider, channel: provider,
+      source: sourceTouch?.value || null, touches: touches.slice(0, ANALYTIC_LIMITS.touchesPerOrder),
+      touchEvidence: { available: touches.length, returned: Math.min(touches.length, ANALYTIC_LIMITS.touchesPerOrder), truncated: touches.length > ANALYTIC_LIMITS.touchesPerOrder }, revenue: null, contribution: null,
+      confidence: sourceTouch ? 'recorded-source-unverified' : 'channel-only', attribution: 'unverified_recorded_source_only', financialQualification: financialQualification() };
   });
-  const sourced = rows.filter(r=>r.source);
-  const bySource = new Map();
+  const sourced = rows.filter(row => row.source), bySource = new Map();
   for (const row of sourced) {
-    const item=bySource.get(row.source)||{source:row.source,orders:0,revenue:0,contribution:0,profitCoveredOrders:0};
-    item.orders++; item.revenue+=row.revenue;
-    if(row.contribution!==null){item.contribution+=row.contribution;item.profitCoveredOrders++;}
-    bySource.set(row.source,item);
+    const key = JSON.stringify([row.provider, row.source]);
+    const item = bySource.get(key) || { provider: row.provider, source: row.source, orders: 0, revenue: null, contribution: null, profitCoveredOrders: null, attribution: 'unverified_recorded_source_only' };
+    item.orders++; bySource.set(key, item);
   }
   return {
-    orders: rows,
-    bySource: [...bySource.values()].map(x=>({...x,revenue:rounded(x.revenue),contribution:x.profitCoveredOrders?rounded(x.contribution):null})).sort((a,b)=>b.revenue-a.revenue),
-    coverage: {
-      orders: rows.length,
-      sourceAttributedOrders: sourced.length,
-      sourceCoveragePercent: rows.length ? Math.round(sourced.length / rows.length * 100) : 0,
-      note: 'Runvara never infers traffic source from a sales channel. First/last/assisted attribution expands only when real UTM, referrer, analytics or campaign evidence is connected.'
-    }
+    orders: rows.slice(0, ANALYTIC_LIMITS.attributionRows), bySource: [...bySource.values()].sort((a, b) => b.orders - a.orders || a.provider.localeCompare(b.provider) || a.source.localeCompare(b.source)).slice(0, ANALYTIC_LIMITS.sourceGroups),
+    coverage: consumerCoverage(history, conflicts.size, {
+      orders: history.coverage.status === 'unavailable' ? null : rows.length,
+      sourceAttributedOrders: null, sourceCoveragePercent: null,
+      recordedSourceOrders: history.coverage.status === 'unavailable' ? null : sourced.length,
+      recordedSourceCoveragePercent: rows.length ? rounded(sourced.length / rows.length * 100, 1) : null,
+      attributionStatus: 'unverified', detailRowsTruncated: rows.length > ANALYTIC_LIMITS.attributionRows || bySource.size > ANALYTIC_LIMITS.sourceGroups || rows.some(row => row.touchEvidence.truncated),
+      orderRowsAvailable: rows.length, orderRowsReturned: Math.min(rows.length, ANALYTIC_LIMITS.attributionRows), orderRowLimit: ANALYTIC_LIMITS.attributionRows,
+      sourceGroupsAvailable: bySource.size, sourceGroupsReturned: Math.min(bySource.size, ANALYTIC_LIMITS.sourceGroups), sourceGroupLimit: ANALYTIC_LIMITS.sourceGroups, aggregatesUseFullBoundedCohort: true,
+      unscopedTouchRows, excludedSourceMetadataOrders, availableTouchRows: rawTouches.length,
+      cohort: 'noncancelled recorded PAID, PARTIALLY_REFUNDED and REFUNDED orders',
+      scannedTouchRows: Math.min(rawTouches.length, ANALYTIC_LIMITS.attributionTouches), touchesTruncated: rawTouches.length > ANALYTIC_LIMITS.attributionTouches,
+      note: 'Source labels are recorded, unverified observations. Touch joins require provider and an unambiguous local order ID. Source attribution, campaign sales and financial totals remain unavailable.'
+    })
   };
 }
 
-export function deriveBasketIntelligence(state) {
-  const pairCounts = new Map(), skuStats = new Map();
-  for (const order of state.orders || []) {
-    if (order.cancelledAt || !settledOrder(order)) continue;
-    const unique = [...new Set((order.lineItems || []).map(line=>clean(line.sku || line.name,160)).filter(Boolean))];
-    for (const sku of unique) skuStats.set(sku,(skuStats.get(sku)||0)+1);
-    for(let i=0;i<unique.length;i++) for(let j=i+1;j<unique.length;j++) {
-      const key=[unique[i],unique[j]].sort().join('||');
-      pairCounts.set(key,(pairCounts.get(key)||0)+1);
+export function deriveBasketIntelligence(state, { now = new Date() } = {}) {
+  const history = importedHistory(state, now), pairCounts = new Map(), skuStats = new Map();
+  const rows = purchaseRows(history);
+  for (const { order, provider } of rows) {
+    const unique = [...new Set((Array.isArray(order.lineItems) ? order.lineItems : []).map(line => identifier(line?.sku)).filter(Boolean))].sort();
+    for (const sku of unique) {
+      const key = JSON.stringify([provider, sku]);
+      skuStats.set(key, (skuStats.get(key) || 0) + 1);
+    }
+    for (let i = 0; i < unique.length; i++) for (let j = i + 1; j < unique.length; j++) {
+      const key = JSON.stringify([provider, unique[i], unique[j]]);
+      pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
     }
   }
-  const pairs=[...pairCounts.entries()].map(([key,count])=>{
-    const [a,b]=key.split('||'); const base=Math.min(skuStats.get(a)||1,skuStats.get(b)||1);
-    return {a,b,ordersTogether:count,affinity:rounded(count/base*100,1)};
-  }).sort((a,b)=>b.ordersTogether-a.ordersTogether || b.affinity-a.affinity);
-  return { pairs:pairs.slice(0,50), recommendations:pairs.filter(p=>p.ordersTogether>=2).slice(0,20).map(p=>({type:'cross-sell',title:`${p.a} + ${p.b}`,evidence:`Bought together in ${p.ordersTogether} retained orders; ${p.affinity}% affinity against the less-frequent item.`,approvalRequired:true})) };
+  const pairs = [...pairCounts.entries()].map(([key, count]) => {
+    const [provider, a, b] = JSON.parse(key);
+    const base = Math.min(skuStats.get(JSON.stringify([provider, a])), skuStats.get(JSON.stringify([provider, b])));
+    return { provider, a, b, ordersTogether: count, affinity: rounded(count / base * 100, 1), attribution: 'unverified_recorded_sku_only', refundsAllocated: false };
+  }).sort((a, b) => b.ordersTogether - a.ordersTogether || b.affinity - a.affinity || a.provider.localeCompare(b.provider) || a.a.localeCompare(b.a) || a.b.localeCompare(b.b));
+  return {
+    pairs: pairs.slice(0, ANALYTIC_LIMITS.basketPairs),
+    recommendations: pairs.filter(pair => pair.ordersTogether >= 2).slice(0, 20).map(pair => ({ type: 'cross-sell', provider: pair.provider, title: `${pair.a} + ${pair.b}`, evidence: `Recorded together in ${pair.ordersTogether} retained ${pair.provider} orders; ${pair.affinity}% co-occurrence against the less-frequent recorded SKU. SKU-to-product attribution is unverified and refunds are unallocated.`, approvalRequired: true })),
+    coverage: consumerCoverage(history, 0, { orders: history.coverage.status === 'unavailable' ? null : rows.length, attribution: 'unverified_recorded_sku_only', refundsAllocated: false,
+      basis: 'provider_scoped_recorded_sku_cooccurrence', pairsAvailable: pairs.length, pairsTruncated: pairs.length > ANALYTIC_LIMITS.basketPairs,
+      cohort: 'noncancelled recorded PAID, PARTIALLY_REFUNDED and REFUNDED orders; recorded lines are not verified kept purchases' })
+  };
 }
 
 export function deriveIntentRecovery(state, { now = new Date() } = {}) {
@@ -248,14 +363,26 @@ export function deriveSalesPipeline(state, { now = new Date() } = {}) {
 }
 
 export function deriveAdvertisingIntelligence(state) {
-  const rows=(state.advertisingCosts||[]).map(item=>{
-    const spend=Number(item.spend)||0, revenue=Number.isFinite(Number(item.attributableRevenue))?Number(item.attributableRevenue):null;
-    return {...item,roas:revenue!==null&&spend>0?rounded(revenue/spend,2):null};
-  });
-  const spend=rows.reduce((s,r)=>s+(Number(r.spend)||0),0);
-  const attributed=rows.filter(r=>r.attributableRevenue!==null&&r.attributableRevenue!==undefined);
-  const revenue=attributed.reduce((s,r)=>s+Number(r.attributableRevenue||0),0);
-  return {summary:{spend:rounded(spend),attributedRevenue:attributed.length?rounded(revenue):null,roas:attributed.length&&spend>0?rounded(revenue/spend,2):null,attributionCoverage:rows.length?Math.round(attributed.length/rows.length*100):0},rows};
+  const workspaceId = identifier(state?.workspace?.id);
+  const available = scoped(state, workspaceId) && scoped(state.workspace, workspaceId) && Array.isArray(state.advertisingCosts);
+  const recorded = available ? state.advertisingCosts : [];
+  let excludedScopeRows = 0;
+  const rows = [];
+  for (const [index, item] of recorded.slice(0, ANALYTIC_LIMITS.advertisingRows).entries()) {
+    if (!scoped(item, workspaceId)) { excludedScopeRows++; continue; }
+    // Preserve the source spelling and explicit unknowns. Even a known zero does
+    // not qualify currency, campaign attribution or an aggregate ROAS.
+    rows.push({ ...item, roas: null, attributionStatus: 'unverified',
+      provenance: { collection: 'state.advertisingCosts', pointer: `/advertisingCosts/${index}`, currency: 'recorded_currency_unverified', amounts: 'recorded_fields_not_qualified_financial_totals', attribution: 'no_trusted_attribution_contract' } });
+  }
+  return {
+    summary: { spend: null, attributedRevenue: null, roas: null, attributionCoverage: null }, rows,
+    coverage: { status: !available ? 'unavailable' : excludedScopeRows || recorded.length > ANALYTIC_LIMITS.advertisingRows ? 'partial_recorded_rows' : 'recorded_rows', availableRows: available ? recorded.length : null,
+      scannedRows: Math.min(recorded.length, ANALYTIC_LIMITS.advertisingRows), retainedRows: rows.length, excludedScopeRows,
+      truncated: recorded.length > ANALYTIC_LIMITS.advertisingRows, sourcePeriod: 'unverified',
+      labels: ['source_period_unverified', 'financial_qualification_missing', 'attribution_unverified', ...(recorded.length > ANALYTIC_LIMITS.advertisingRows ? ['analytic_output_truncated'] : []), ...(excludedScopeRows ? ['recorded_rows_incomplete'] : [])],
+      financialQualification: { reason: 'no_trusted_advertising_currency_or_attribution_contract', spend: null, attributedRevenue: null, roas: null } }
+  };
 }
 
 export function deriveGrowthPlan(state, { targetProfit = null } = {}) {
@@ -265,8 +392,8 @@ export function deriveGrowthPlan(state, { targetProfit = null } = {}) {
   if(intent.recoveries.length) opportunities.push({kind:'conversion',title:`Review ${intent.recoveries.length} recoverable buying-intent sessions`,evidence:'Recorded cart/checkout events have no matching completion event in the configured recovery window.',estimatedImpact:null,confidence:'medium',risk:'Do not send discounts below margin floor; outbound contact remains approval-controlled.',approvalRequired:true});
   if(baskets.recommendations.length) opportunities.push({kind:'aov',title:'Test evidence-backed cross-sell bundles',evidence:baskets.recommendations[0].evidence,estimatedImpact:null,confidence:'medium',risk:'Association does not prove uplift; use controlled experiments.',approvalRequired:true});
   if(pipeline.summary.overdueFollowUps) opportunities.push({kind:'b2b',title:`Resolve ${pipeline.summary.overdueFollowUps} overdue B2B follow-ups`,evidence:`Open pipeline value is £${Number(pipeline.summary.openPipeline||0).toFixed(2)}.`,estimatedImpact:null,confidence:'high',risk:'Quote terms and customer-facing messages need owner review.',approvalRequired:true});
-  if(attribution.coverage.sourceCoveragePercent<80) opportunities.push({kind:'attribution',title:'Increase source attribution coverage',evidence:`${attribution.coverage.sourceCoveragePercent}% of retained settled orders currently have confirmed traffic-source evidence.`,estimatedImpact:null,confidence:'high',risk:'Do not optimise spend from channel-only attribution.',approvalRequired:false});
-  return {targetProfit: Number.isFinite(Number(targetProfit))?Number(targetProfit):null, opportunities, generatedAt:nowIso(), note:'Estimated impact remains null where Runvara lacks defensible uplift evidence. The plan prioritises measurable actions without inventing financial certainty.'};
+  if(attribution.coverage.orders > 0) opportunities.push({kind:'attribution',title:'Verify recorded source attribution',evidence:`${attribution.coverage.recordedSourceOrders} of ${attribution.coverage.orders} assessed retained orders have recorded source labels; attribution and source-period coverage remain unverified.`,estimatedImpact:null,confidence:'low',risk:'Verify provider, campaign and currency evidence before optimising spend.',approvalRequired:false});
+  return {targetProfit: Number.isFinite(Number(targetProfit))?Number(targetProfit):null, opportunities, generatedAt:nowIso(), note:'Estimated impact remains null where Runvara lacks defensible uplift evidence. Legacy experiment review does not establish qualified contribution or future benefit. The plan prioritises measurable actions without inventing financial certainty.'};
 }
 
 
@@ -322,7 +449,7 @@ export function recordExperimentMeasurement(state, experimentId, body = {}, acto
   const method=clean(body.method,160);
   if(!method) throw Object.assign(new Error('Measurement method is required'),{status:400,code:'VALIDATION_FAILED'});
   const numbers=['incrementalRevenue','incrementalContribution','contributionProtected','costAvoided','minutesSaved'];
-  const impact={verified:false,status:'measured',method,measuredAt:nowIso(),recordedBy:actor};
+  const impact={verified:false,status:'measured',legacyReviewed:false,financiallyQualified:false,qualification:'legacy_unqualified',method,measuredAt:nowIso(),recordedBy:actor};
   let hasMetric=false;
   for(const field of numbers) {
     if(body[field]===null || body[field]===undefined || body[field]==='') continue;
@@ -335,16 +462,31 @@ export function recordExperimentMeasurement(state, experimentId, body = {}, acto
   experiment.impact=impact;
   experiment.status='measured';
   experiment.updatedAt=impact.measuredAt;
+  Object.assign(experiment,legacyExperimentView(experiment));
   engine.updatedAt=impact.measuredAt;
   return experiment;
 }
 
 function experimentDecisionPosture(impact = {}) {
-  const contribution = ['incrementalContribution','contributionProtected','costAvoided']
-    .reduce((sum, field) => sum + (Number.isFinite(Number(impact[field])) ? Number(impact[field]) : 0), 0);
-  if (contribution > 0) return { status:'ready-for-owner-review', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is positive.' };
-  if (contribution < 0) return { status:'deprioritise', verifiedContributionValue:rounded(contribution), reason:'Verified realised contribution evidence is negative.' };
-  return { status:'needs-more-evidence', verifiedContributionValue:0, reason:'No positive verified contribution evidence has been established.' };
+  // The legacy review flow has no committed typed measurement, currency,
+  // observation window or resolved source proof. Keep its review history, but
+  // never derive financial qualification or future ranking from its amounts.
+  return { status:'needs-more-evidence', verifiedContributionValue:null,
+    legacyReviewRecorded:impact.verified === true || String(impact.status || '').toLowerCase() === 'verified',
+    evidenceVerified:false, financiallyQualified:false, evidenceQualification:'legacy_unqualified',
+    reason:'Legacy measurement and owner review are unqualified context. Committed typed evidence and immutable action/domain comparability are required for a financial decision.' };
+}
+
+function legacyExperimentView(experiment) {
+  if (!experiment || typeof experiment !== 'object' || Array.isArray(experiment)) return experiment;
+  const impact=experiment.impact && typeof experiment.impact === 'object' && !Array.isArray(experiment.impact) ? experiment.impact : null;
+  const posture=experimentDecisionPosture(impact || {});
+  return { ...experiment,
+    ...(impact ? { impact:{ ...impact, legacyReviewed:posture.legacyReviewRecorded, qualified:false,
+      financiallyQualified:false, qualification:'legacy_unqualified' } } : {}),
+    decisionPosture:posture, evidenceVerified:false, evidenceDecision:posture.status,
+    verifiedContributionValue:null, legacyReviewRecorded:posture.legacyReviewRecorded,
+    financiallyQualified:false, qualified:false, evidenceQualification:'legacy_unqualified' };
 }
 
 export function verifyExperimentMeasurement(state, experimentId, body = {}, actor = 'system') {
@@ -359,13 +501,17 @@ export function verifyExperimentMeasurement(state, experimentId, body = {}, acto
   experiment.status='completed';
   experiment.completedAt=now;
   experiment.updatedAt=now;
-  const posture=experimentDecisionPosture(experiment.impact);
-  experiment.decisionPosture=posture;
+  Object.assign(experiment,legacyExperimentView(experiment));
+  const posture=experiment.decisionPosture;
   if (experiment.opportunityId) {
     const opportunity=(state.opportunities || []).find(item=>item.id===experiment.opportunityId);
     if (opportunity) {
       opportunity.experimentId=experiment.id;
       opportunity.experimentStatus='completed';
+      opportunity.evidenceVerified=false;
+      opportunity.financiallyQualified=false;
+      opportunity.legacyReviewRecorded=posture.legacyReviewRecorded;
+      opportunity.evidenceQualification=posture.evidenceQualification;
       opportunity.evidenceDecision=posture.status;
       opportunity.verifiedContributionValue=posture.verifiedContributionValue;
       opportunity.evidenceDecisionReason=posture.reason;
@@ -377,6 +523,10 @@ export function verifyExperimentMeasurement(state, experimentId, body = {}, acto
 }
 
 export function revenueEngineSnapshot(state) {
+  // Normalize a read-only view, including already-stored legacy financial
+  // postures. Reading must not rewrite historical measurements/review records.
+  state={...state,revenueEngine:{...state.revenueEngine,
+    experiments:(Array.isArray(state.revenueEngine?.experiments) ? state.revenueEngine.experiments : []).map(legacyExperimentView)}};
   ensureRevenueEngine(state);
   return {
     customers: deriveCustomerIntelligence(state),

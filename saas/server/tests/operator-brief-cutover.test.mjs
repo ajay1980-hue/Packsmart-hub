@@ -309,3 +309,24 @@ test('summarization keeps source currency and excludes nested customer/credentia
   huge.args.run.priorities = Array.from({ length: 8 }, () => ({ action: '\u0001'.repeat(1000) }));
   assert.equal((await huge.run()).reason, 'AI_REQUEST_BYTES_EXCEEDED'); assert.equal(huge.reservations.size, 0);
 });
+
+
+test('imported evidence wording and model context remain bounded without forwarding detailed or raw order payloads', async () => {
+  const f = fixture();
+  f.args.run = { summary: 'Source period unverified; partial scanned cohort. GBP 1000 recorded net subtotal, 2 known / 0 unknown. Profit unavailable. ' + 'x'.repeat(8000),
+    priorities: Array.from({ length: 20 }, () => ({ agentId: 'finance', action: 'Source period unverified. ' + 'x'.repeat(2000) })),
+    urgentRisks: [], workStatus: 'COMPLETED', results: [{ privateCustomer: 'never-forward-this-customer', importedOrderEvidence: { secretRaw: 'never-forward-this-order' } }] };
+  const result = await f.run();
+  assert.equal(result.used, true);
+  const body = JSON.parse(f.posts[0].init.body);
+  assert.match(body.instructions, /unverified evidence/);
+  assert.doesNotMatch(body.instructions, /supplied verified findings/);
+  assert.match(body.input, /Source period unverified/);
+  assert.doesNotMatch(body.input, /never-forward-this|secretRaw|importedOrderEvidence/);
+  assert.ok(Buffer.byteLength(f.posts[0].init.body) < 20000);
+  const oversized = fixture();
+  oversized.args.command = '\u0001'.repeat(1000);
+  oversized.args.run = { summary: '\u0001'.repeat(5000), priorities: Array.from({ length: 8 }, () => ({ agentId: 'finance', action: '\u0001'.repeat(1000) })) };
+  assert.equal((await oversized.run()).reason, 'AI_REQUEST_BYTES_EXCEEDED');
+  assert.equal(oversized.posts.length, 0);
+});

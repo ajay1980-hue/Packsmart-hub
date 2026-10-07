@@ -128,7 +128,7 @@ test('provider usage keeps unsafe NUMERIC summaries unavailable while preserving
   const store = createStore({ SUPABASE_URL: 'https://usage-numeric-test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test-key' }, {
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
-      return new Response(responseBody, { status: 200, headers: { 'Content-Type': 'application/json' } });
+      return new Response(responseBody, { status: 200, headers: { 'Content-Type': 'application/json', 'Content-Range': '0-0/1' } });
     }
   });
   for (const key of ['held_requests', 'held_input_tokens', 'held_total_tokens', 'held_cost_micros',

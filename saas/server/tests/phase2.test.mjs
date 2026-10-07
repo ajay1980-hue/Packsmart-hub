@@ -141,8 +141,10 @@ test('daily brief is deterministic and covers all requested operating signals', 
     image: 'https://cdn.shopify.com/image.png',
     variants: [{ id: 'v1', sku: 'BP-50', title: 'Pack of 50', price: 10, inventory: 5 }]
   }];
-  state.orders = [{ id: 'o1', createdAt: new Date().toISOString(), financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED', total: 10 }];
-  const brief = buildDailyBrief(state);
+  state.orders = [{ id: 'o1', provider: 'shopify', currency: 'GBP', createdAt: '2026-10-07T11:00:00.000Z', financialStatus: 'PAID', fulfillmentStatus: 'UNFULFILLED', total: 10 }];
+  const brief = buildDailyBrief(state, { now: new Date('2026-10-07T12:00:00.000Z') });
+  assert.equal(brief.revenue30d, null);
+  assert.equal(brief.last30d.importedOrderEvidence.groups[0].recordedAmounts.netTotal.unknownCount, 1);
   assert.equal(brief.logic, 'deterministic-v2');
   assert.equal(brief.orders30d, 1);
   assert.equal(brief.stockRisks, 1);

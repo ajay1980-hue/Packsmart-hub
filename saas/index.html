@@ -143,29 +143,29 @@
         </section>
 
         <div class="period-block">
-          <div class="period-heading"><p class="eyebrow">TODAY</p><small>Settled source data</small></div>
+          <div class="period-heading"><p class="eyebrow">TODAY</p><small>Retained records · source period unverified</small></div>
           <div class="kpis kpis-four">
-            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v14H4zM8 7V5a4 4 0 0 1 8 0v2M9 12h6"/></svg><span>Sales</span><strong id="today-revenue">—</strong><small>net collected revenue</small></button>
-            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6m-6 4h6m-6 4h3"/></svg><span>Orders</span><strong id="today-orders">—</strong><small id="today-open">— open</small></button>
-            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="profitable"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M6 17v-6m6 6V7m6 10V3"/></svg><span>Operating contribution</span><strong id="today-profit">—</strong><small id="today-profit-coverage">coverage —</small></button>
-            <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="all"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 14-14"/><circle cx="6.5" cy="6.5" r="3"/><circle cx="17.5" cy="17.5" r="3"/></svg><span>Margin</span><strong id="today-margin">—</strong><small>on profit-covered orders</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16v14H4zM8 7V5a4 4 0 0 1 8 0v2M9 12h6"/></svg><span>Sales</span><strong id="today-revenue">—</strong><small>financial qualification unavailable</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="today"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6m-6 4h6m-6 4h3"/></svg><span>Retained orders</span><strong id="today-orders">—</strong><small id="today-open">— open</small></button>
+            <button class="card kpi kpi-link" data-view-link="orders" data-target-filter="missing-profit"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21h18M6 17v-6m6 6V7m6 10V3"/></svg><span>Operating contribution</span><strong id="today-profit">—</strong><small id="today-profit-coverage">coverage —</small></button>
+            <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="all"><svg class="kpi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 14-14"/><circle cx="6.5" cy="6.5" r="3"/><circle cx="17.5" cy="17.5" r="3"/></svg><span>Margin</span><strong id="today-margin">—</strong><small>historical cost and currency unverified</small></button>
           </div>
         </div>
 
         <div class="operating-grid">
-          <article class="card trajectory-panel"><div class="section-head"><div><p class="eyebrow">REVENUE SIGNAL</p><h2>The shape of your sales</h2></div><span class="tag neutral">30 UTC days</span></div><div id="revenue-trajectory"></div></article>
+          <article class="card trajectory-panel"><div class="section-head"><div><p class="eyebrow">IMPORTED ORDER EVIDENCE</p><h2>Recorded order groups</h2></div><span class="tag neutral">30 UTC days</span></div><div id="revenue-trajectory"></div></article>
           <article class="card activity-panel"><div class="section-head"><div><p class="eyebrow">RUNVARA / IN MOTION</p><h2>Recorded operations</h2></div><button class="text-button" data-view-link="value">All work ↗</button></div><div id="operations-stream"></div></article>
         </div>
         <div class="analytics-grid">
-          <article class="card revenue-card"><div class="section-head"><div><p class="eyebrow">CHANNEL PERFORMANCE</p><h2>Revenue by channel</h2></div><span class="tag neutral">Last 30 days</span></div><p class="muted tiny">Net revenue from imported orders</p><div id="revenue-chart" class="revenue-chart"></div><button class="text-button" data-view-link="channels">View channel details <span aria-hidden="true">↗</span></button></article>
-          <article class="card period-card"><div class="section-head"><div><p class="eyebrow">BUSINESS PULSE</p><h2>Performance snapshot</h2></div></div><div class="segmented-control" role="group" aria-label="Performance period"><button type="button" data-period="week" aria-pressed="false" aria-controls="week-metrics">Last 7 days</button><button type="button" data-period="month" aria-pressed="true" aria-controls="month-metrics">Last 30 days</button></div><div id="week-metrics" class="metric-grid" hidden></div><div id="month-metrics" class="metric-grid"></div></article>
+          <article class="card revenue-card"><div class="section-head"><div><p class="eyebrow">CHANNEL EVIDENCE</p><h2>Retained records by channel</h2></div><span class="tag neutral">Last 30 days</span></div><p class="muted tiny">Recorded currencies and cohorts remain separate; no financial ranking</p><div id="revenue-chart" class="revenue-chart"></div><button class="text-button" data-view-link="channels">View channel details <span aria-hidden="true">↗</span></button></article>
+          <article class="card period-card"><div class="section-head"><div><p class="eyebrow">RECORDED EVIDENCE</p><h2>Period snapshot</h2></div></div><div class="segmented-control" role="group" aria-label="Performance period"><button type="button" data-period="week" aria-pressed="false" aria-controls="week-metrics">Last 7 days</button><button type="button" data-period="month" aria-pressed="true" aria-controls="month-metrics">Last 30 days</button></div><div id="week-metrics" class="metric-grid" hidden></div><div id="month-metrics" class="metric-grid"></div></article>
         </div>
 
         <div class="kpis kpis-six">
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="active"><span>Active catalogue</span><strong id="kpi-products">—</strong><small id="kpi-variants">— variants</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="low-stock"><span>Low stock</span><strong id="kpi-stock">—</strong><small id="kpi-out-stock">— out of stock</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="missing-costs"><span>Cost coverage</span><strong id="kpi-coverage">—</strong><small id="kpi-missing-costs">— missing</small></button>
-          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="below-floor"><span>Average margin</span><strong id="kpi-margin">—</strong><small id="kpi-low-margin">— below floor</small></button>
+          <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="below-floor"><span>Mean known contribution margin</span><strong id="kpi-margin">—</strong><small id="kpi-margin-coverage">— of — catalogue variants · unweighted</small><small id="kpi-low-margin">— below floor</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="loss-making"><span>Loss-making</span><strong id="kpi-loss">—</strong><small>fully costed SKUs</small></button>
           <button class="card kpi kpi-link" data-view-link="profit" data-target-filter="active"><span>Stock value at cost</span><strong id="kpi-stock-value">—</strong><small id="kpi-stock-value-coverage">coverage —</small></button>
         </div>
@@ -175,9 +175,9 @@
           <article class="card"><div class="section-head"><div><p class="eyebrow">CONTROL STATUS</p><h2>Risk &amp; automation</h2></div></div><div id="control-status" class="status-list"></div></article>
         </div>
 
-        <article class="card"><div class="section-head"><div><p class="eyebrow">CHANNEL ECONOMICS · 30 DAYS</p><h2>Sales and profit by channel</h2></div><button class="text-button" data-view-link="channels">Manage channels</button></div><div id="overview-channels" class="channel-grid compact"></div></article>
+        <article class="card"><div class="section-head"><div><p class="eyebrow">CHANNEL EVIDENCE · 30 DAYS</p><h2>Imported order coverage</h2></div><button class="text-button" data-view-link="channels">Manage channels</button></div><div id="overview-channels" class="channel-grid compact"></div></article>
         <div class="grid-2">
-          <article class="card"><div class="section-head"><div><p class="eyebrow">PRODUCT ECONOMICS</p><h2>Most profitable</h2></div><button class="text-button" data-view-link="profit" data-target-filter="profitable">View products</button></div><div id="best-products" class="ranking-list"></div></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">CATALOGUE UNIT ECONOMICS</p><h2>Highest known unit contribution</h2></div><button class="text-button" data-view-link="profit" data-target-filter="profitable">View products</button></div><div id="best-products" class="ranking-list"></div></article>
           <article class="card"><div class="section-head"><div><p class="eyebrow">MARGIN RISK</p><h2>Needs attention</h2></div><button class="text-button" data-view-link="profit" data-target-filter="below-floor">Review</button></div><div id="risk-products" class="ranking-list"></div></article>
         </div>
       </section>
@@ -185,26 +185,52 @@
       <section id="view-revenue-engine" class="view">
         <article class="card analytics-hero"><div><p class="eyebrow">RUNVARA / REVENUE ENGINE</p><h2>Turn evidence into profitable growth.</h2><p class="muted">Customers, retention, attribution, B2B pipeline, buying intent, basket intelligence and growth opportunities — with approval controls preserved.</p></div><span class="tag good">6.15 intelligence</span></article>
         <div class="kpis kpis-six">
-          <article class="card kpi"><span>Customers</span><strong id="re-customers">—</strong><small id="re-repeat">repeat rate —</small></article>
-          <article class="card kpi"><span>Reorder due</span><strong id="re-reorder">—</strong><small>evidence-backed windows</small></article>
-          <article class="card kpi"><span>Churn risk</span><strong id="re-churn">—</strong><small>retention signal</small></article>
+          <article class="card kpi"><span>Recorded customers</span><strong id="re-customers">—</strong><small id="re-repeat">repeat rate —</small></article>
+          <article class="card kpi"><span>Reorder due</span><strong id="re-reorder">—</strong><small>retained-cohort timing signal</small></article>
+          <article class="card kpi"><span>Churn risk</span><strong id="re-churn">—</strong><small>retained-cohort signal</small></article>
           <article class="card kpi"><span>Open B2B pipeline</span><strong id="re-pipeline">—</strong><small id="re-followups">— follow-ups due</small></article>
-          <article class="card kpi"><span>Source coverage</span><strong id="re-attribution">—</strong><small>confirmed traffic source</small></article>
+          <article class="card kpi"><span>Recorded source coverage</span><strong id="re-attribution">—</strong><small>source-period coverage unverified</small></article>
           <article class="card kpi"><span>Buying intent</span><strong id="re-intent">—</strong><small>recoverable sessions</small></article>
         </div>
         <div class="grid-2">
-          <article class="card"><div class="section-head"><div><p class="eyebrow">CUSTOMER GROWTH</p><h2>Retention &amp; lifetime value</h2></div><span class="tag neutral">Privacy-safe</span></div><div id="re-customer-summary" class="status-list"></div><div id="re-customers-list" class="ranking-list"></div></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">CUSTOMER GROWTH</p><h2>Retained customer cohorts</h2></div><span class="tag neutral">Privacy-safe</span></div><div id="re-customer-summary" class="status-list"></div><div id="re-customers-list" class="ranking-list"></div></article>
           <article class="card"><div class="section-head"><div><p class="eyebrow">GROWTH COMMANDER</p><h2>Best evidenced actions</h2></div><span class="tag neutral">No fake uplift</span></div><div id="re-growth-plan" class="priority-list"></div></article>
         </div>
         <div class="grid-2">
           <article class="card"><div class="section-head"><div><p class="eyebrow">ATTRIBUTION</p><h2>Source evidence</h2></div></div><div id="re-attribution-list" class="status-list"></div></article>
-          <article class="card"><div class="section-head"><div><p class="eyebrow">BASKET INTELLIGENCE</p><h2>Products bought together</h2></div></div><div id="re-baskets" class="ranking-list"></div></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">BASKET INTELLIGENCE</p><h2>Recorded SKU co-occurrence</h2></div></div><div id="re-baskets" class="ranking-list"></div></article>
         </div>
         <div class="grid-2">
           <article class="card"><div class="section-head"><div><p class="eyebrow">B2B SALES</p><h2>Pipeline &amp; follow-ups</h2></div></div><div id="re-sales" class="status-list"></div></article>
           <article class="card"><div class="section-head"><div><p class="eyebrow">MARKETING ECONOMICS</p><h2>Advertising performance</h2></div></div><div id="re-advertising" class="status-list"></div></article>
         </div>
         <article class="card"><div class="section-head"><div><p class="eyebrow">CONTROLLED GROWTH</p><h2>Recovery, experiments &amp; loyalty foundations</h2></div><span class="tag good">Approval protected</span></div><p class="muted">Cart and checkout recovery events, experiments, referrals, loyalty rules and customer-facing B2B actions are stored tenant-by-tenant. Significant outbound actions, discounts, pricing and spend remain behind approval controls.</p></article>
+        <details id="business-outcomes-panel" class="card business-outcomes-panel">
+          <summary><span class="eyebrow">MEASURED OUTCOMES</span><h2>Business results</h2><span class="muted">Owner-reviewed measurements, with exact currency and period</span></summary>
+          <p class="muted">Your team records results and the owner reviews them. Currencies and periods stay separate; these are not forecasts or ROI.</p>
+          <button id="business-outcomes-refresh" type="button" class="secondary">Refresh reviewed results</button>
+          <p id="business-outcomes-status" role="status" aria-live="polite" class="muted"></p>
+          <div id="business-outcomes-summary"></div>
+          <div class="outcome-selection"><label for="business-outcomes-experiment">Experiment</label><select id="business-outcomes-experiment"><option value="">Choose an experiment</option></select><button id="business-outcomes-load" type="button" class="secondary">Load experiment</button></div>
+          <div id="business-outcomes-detail"></div>
+          <form id="business-outcomes-form" class="record-form hidden">
+            <h3 class="wide">Record a business result</h3>
+            <p class="muted tiny wide">Blank fields remain unknown. Dates are UTC. Save a draft first, then ask the owner to review it.</p>
+            <label>Exact incremental contribution<input name="amount" type="text" inputmode="decimal" maxlength="26" placeholder="Unknown; zero and negatives allowed" pattern="-?[0-9]{1,18}(\.[0-9]{1,6})?"></label>
+            <label>Currency code<input name="currency" type="text" maxlength="3" pattern="[A-Z]{3}" placeholder="Unknown, e.g. GBP" autocomplete="off"></label>
+            <label>Window starts (UTC)<input name="startsAt" type="datetime-local" step="0.001"></label>
+            <label>Window ends (UTC, exclusive)<input name="endsAt" type="datetime-local" step="0.001"></label>
+            <label>Observed at (UTC)<input name="observedAt" type="datetime-local" step="0.001"></label>
+            <label>Coverage<select name="coverageStatus"><option value="unknown">Unknown</option><option value="partial">Partial</option><option value="complete">Complete</option></select></label>
+            <label>Observed population<input name="observedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
+            <label>Expected population<input name="expectedCount" type="text" inputmode="numeric" pattern="[0-9]+" maxlength="16" placeholder="Unknown"></label>
+            <label>Measurement method<select name="method"><option value="unknown">Unknown</option><option value="holdout">Holdout comparison</option><option value="before_after">Before and after</option><option value="reconciled_manual">Reconciled records</option></select></label>
+            <label>All relevant costs included?<select name="costsComplete"><option value="">Unknown</option><option value="false">No, incomplete</option><option value="true">Yes, complete</option></select></label>
+            <label class="wide">Recorded measurement report<textarea name="description" maxlength="1000" required placeholder="Describe the measured facts and cost coverage. Do not include personal data or credentials."></textarea></label>
+            <button type="submit" class="primary">Save measurement draft</button>
+          </form>
+          <section id="business-outcomes-review" class="outcome-review hidden" aria-label="Review business result"></section>
+        </details>
         <div class="grid-2">
           <article class="card">
             <div class="section-head"><div><p class="eyebrow">EXPERIMENT CONTROL</p><h2>Start from a real opportunity</h2></div><span class="tag neutral">Owner controlled</span></div>
@@ -227,7 +253,7 @@
         </div>
         <div class="grid-2">
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">MEASURE RESULT</p><h2>Record observed experiment impact</h2></div><span class="tag warn">Unverified until reviewed</span></div>
+            <div class="section-head"><div><p class="eyebrow">MEASURE RESULT</p><h2>Record legacy experiment impact</h2></div><span class="tag warn">Recorded / unqualified</span></div>
             <form id="re-experiment-measure-form" class="record-form">
               <label class="wide">Experiment<select name="experimentId" id="re-experiment-measure" required><option value="">Choose an active experiment</option></select></label>
               <label>Method<input name="method" maxlength="160" required placeholder="Holdout, before/after, cohort…"></label>
@@ -240,55 +266,54 @@
             </form>
           </article>
           <article class="card">
-            <div class="section-head"><div><p class="eyebrow">VERIFY RESULT</p><h2>Promote measured evidence into learning</h2></div><span class="tag good">Approver required</span></div>
+            <div class="section-head"><div><p class="eyebrow">VERIFY RESULT</p><h2>Review a legacy measurement</h2></div><span class="tag good">Approver required</span></div>
+            <p class="muted tiny">Legacy review remains recorded history. It does not publish a qualified business result or establish comparable learning evidence.</p>
             <form id="re-experiment-verify-form" class="record-form">
               <label class="wide">Measured experiment<select name="experimentId" id="re-experiment-verify" required><option value="">Choose a measured experiment</option></select></label>
               <label class="wide">Verification note<textarea name="note" maxlength="500" required placeholder="What source evidence did you check?"></textarea></label>
-              <button class="primary" type="submit">Verify measurement</button>
+              <button class="primary" type="submit">Record legacy review</button>
             </form>
           </article>
         </div>
         <article class="card">
-          <div class="section-head"><div><p class="eyebrow">EXPERIMENT REGISTER</p><h2>Draft → measured → verified</h2></div><span id="re-experiment-count" class="tag neutral">0 experiments</span></div>
+          <div class="section-head"><div><p class="eyebrow">EXPERIMENT REGISTER</p><h2>Recorded experiment history</h2></div><span id="re-experiment-count" class="tag neutral">0 experiments</span></div>
           <div id="re-experiment-list" class="control-list"></div>
         </article>
       </section>
 
       <section id="view-analytics" class="view">
         <article class="card analytics-hero">
-          <div><p class="eyebrow">RUNVARA / GROWTH INTELLIGENCE</p><h2>Know what is driving revenue, profit and demand.</h2><p id="analytics-summary" class="hero-copy">Building a joined-up view from your connected commerce and marketing data.</p></div>
+          <div><p class="eyebrow">RUNVARA / GROWTH INTELLIGENCE</p><h2>Inspect what your imported records establish.</h2><p id="analytics-summary" class="hero-copy">Building a joined-up view from your connected commerce and marketing data.</p></div>
           <div class="analytics-period"><span class="tag neutral">Last 30 days</span><small>Imported and recorded source data</small></div>
         </article>
 
         <div class="kpis kpis-six analytics-kpis">
-          <article class="card kpi"><span>Revenue</span><strong id="analytics-revenue">—</strong><small>net collected revenue</small></article>
-          <article class="card kpi"><span>Orders</span><strong id="analytics-orders">—</strong><small>across connected sales channels</small></article>
-          <article class="card kpi"><span>Operating contribution</span><strong id="analytics-profit">—</strong><small>where costs are covered</small></article>
-          <article class="card kpi"><span>Margin</span><strong id="analytics-margin">—</strong><small>profit-covered orders</small></article>
-          <article class="card kpi"><span>Recorded ad spend</span><strong id="analytics-ad-spend">—</strong><small>last 30 days</small></article>
-          <article class="card kpi"><span>Attributed ROAS</span><strong id="analytics-roas">—</strong><small id="analytics-roas-note">requires attributable revenue</small></article>
+          <article class="card kpi"><span>Revenue</span><strong id="analytics-revenue">—</strong><small>financial qualification unavailable</small></article>
+          <article class="card kpi"><span>Retained orders</span><strong id="analytics-orders">—</strong><small>source-period coverage unverified</small></article>
+          <article class="card kpi"><span>Operating contribution</span><strong id="analytics-profit">—</strong><small>historical cost assignment unverified</small></article>
+          <article class="card kpi"><span>Margin</span><strong id="analytics-margin">—</strong><small>financial qualification unavailable</small></article>
+          <article class="card kpi"><span>Ad spend total</span><strong id="analytics-ad-spend">—</strong><small>last 30 days</small></article>
+          <article class="card kpi"><span>Attributed ROAS</span><strong id="analytics-roas">—</strong><small id="analytics-roas-note">currency, period and attribution unverified</small></article>
         </div>
 
-        <div class="analytics-grid analytics-page-grid">
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">CHANNEL PERFORMANCE</p><h2>Revenue and profit by channel</h2></div><button class="text-button" data-view-link="channels">Manage connections ↗</button></div>
-            <div id="analytics-channel-table" class="analytics-table"></div>
-          </article>
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">ORDER SOURCE MIX</p><h2>Where sales are being captured</h2></div><span class="tag neutral">30 days</span></div>
+        <article class="card analytics-cohorts-card">
+          <div class="section-head"><div><p class="eyebrow">IMPORTED ORDER EVIDENCE</p><h2>Provider, currency and status groups</h2></div><button class="text-button" data-view-link="channels">Manage connections ↗</button></div>
+          <div id="analytics-channel-table" class="analytics-table"></div>
+        </article>
+
+        <div class="analytics-grid analytics-page-grid analytics-secondary-grid">
+          <article class="card analytics-providers-card">
+            <div class="section-head"><div><p class="eyebrow">RETAINED ORDER COUNTS</p><h2>Recorded providers</h2></div><span class="tag neutral">30 days</span></div>
             <div id="analytics-source-mix" class="source-mix"></div>
-            <p class="muted tiny">This shows the order source recorded by connected sales channels. Website traffic attribution (for example Google, Instagram, TikTok, email or referral) is shown only when that source data is actually connected.</p>
+            <p class="muted tiny">Source-period coverage is unverified. Counts describe retained records, not complete business sales or sales shares. No retained records does not establish zero sales. Provider labels do not establish traffic or campaign attribution.</p>
           </article>
-        </div>
-
-        <div class="analytics-grid analytics-page-grid">
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">MARKETING EFFICIENCY</p><h2>Spend and attributable return</h2></div><button class="text-button" data-view-link="marketing">Open Marketing Autopilot ↗</button></div>
-            <div id="analytics-marketing" class="analytics-table"></div>
-          </article>
-          <article class="card">
+          <article class="card analytics-coverage-card">
             <div class="section-head"><div><p class="eyebrow">DATA CONFIDENCE</p><h2>What Runvara can prove</h2></div></div>
             <div id="analytics-coverage" class="coverage-grid"></div>
+          </article>
+          <article class="card analytics-advertising-card">
+            <div class="section-head"><div><p class="eyebrow">ADVERTISING RECORDS</p><h2>Recorded cost entries</h2></div><button class="text-button" data-view-link="marketing">Open Marketing Autopilot ↗</button></div>
+            <div id="analytics-marketing" class="analytics-table"></div>
           </article>
         </div>
 
@@ -348,14 +373,14 @@
         <article class="card">
           <div class="section-head stack-mobile">
             <div><p class="eyebrow">TRUE PRODUCT ECONOMICS</p><h2>Products &amp; Profit</h2><p class="muted">Contribution = selling price minus landed, packing, delivery and channel costs. Handling, payment, advertising and other variable costs are also required; unknowns are never treated as zero. This is operating contribution, not statutory accounting profit.</p></div>
-            <div class="button-row"><a class="secondary button-link" href="/api/reports/accounting.csv">Export accounting CSV</a></div>
+            <div class="button-row"><a class="secondary button-link" href="/api/reports/accounting.csv">Export recorded evidence CSV</a></div>
           </div>
           <div class="filters filters-wide">
             <input id="product-search" type="search" placeholder="Search product, variant or SKU">
             <select id="product-status">
               <option value="active">Active</option><option value="all">All</option><option value="missing-costs">Missing costs</option><option value="profitable">Profitable</option><option value="below-floor">Below margin floor</option><option value="loss-making">Loss-making</option><option value="low-stock">Low stock</option><option value="out-of-stock">Out of stock</option>
             </select>
-            <select id="product-sort"><option value="product">Sort: product</option><option value="contribution-desc">Profit £ high-low</option><option value="margin-desc">Margin % high-low</option><option value="revenue-desc">Revenue high-low</option><option value="units-desc">Sales volume high-low</option><option value="stock-asc">Stock low-high</option></select>
+            <select id="product-sort"><option value="product">Sort: product</option><option value="contribution-desc">Profit £ high-low</option><option value="margin-desc">Margin % high-low</option><option value="stock-asc">Stock low-high</option></select>
           </div>
           <div class="table-wrap"><table class="economics-table"><thead><tr><th>Product / SKU</th><th>Price</th><th>Stock</th><th>Supplier</th><th>Landed</th><th>Packing</th><th>Handling</th><th>Postage</th><th>Payment</th><th>Channel</th><th>Ads</th><th>Other</th><th>Total variable</th><th>Contribution</th><th>Margin</th><th>Status</th></tr></thead><tbody id="economics-body"></tbody></table></div>
         </article>
@@ -363,14 +388,14 @@
 
       <section id="view-orders" class="view">
         <div class="kpis kpis-five">
-          <article class="card kpi"><span>Revenue · 30d</span><strong id="orders-revenue">—</strong><small>net after refunds</small></article>
-          <article class="card kpi"><span>Orders · 30d</span><strong id="orders-total">—</strong><small id="orders-open">— open</small></article>
-          <article class="card kpi"><span>Refunds · 30d</span><strong id="orders-refunds-value">—</strong><small id="orders-refunded">— affected orders</small></article>
-          <article class="card kpi"><span>Operating contribution</span><strong id="orders-profit">—</strong><small>covered orders only</small></article>
+          <article class="card kpi"><span>Revenue · 30d</span><strong id="orders-revenue">—</strong><small>financial qualification unavailable</small></article>
+          <article class="card kpi"><span>Retained orders · 30d</span><strong id="orders-total">—</strong><small id="orders-open">— open</small></article>
+          <article class="card kpi"><span>Recorded refunds</span><strong id="orders-refunds-value">—</strong><small id="orders-refunded">— affected orders</small></article>
+          <article class="card kpi"><span>Operating contribution</span><strong id="orders-profit">—</strong><small>historical cost basis unverified</small></article>
           <article class="card kpi"><span>Profit coverage</span><strong id="orders-profit-coverage">—</strong><small>unknowns withheld</small></article>
         </div>
         <article class="card">
-          <div class="section-head stack-mobile"><div><p class="eyebrow">ORDER PROFITABILITY</p><h2>Recent orders</h2><p class="muted">Open a record to see source revenue, refunds, VAT, line costs, channel fees and contribution.</p></div><div class="filters"><select id="order-filter"><option value="all">All orders</option><option value="today">Today</option><option value="open">Open</option><option value="refunded">Refunded</option><option value="missing-profit">Missing profit inputs</option><option value="profitable">Profitable</option><option value="loss-making">Loss-making</option></select><a class="secondary button-link" href="/api/reports/accounting.csv">Export CSV</a></div></div>
+          <div class="section-head stack-mobile"><div><p class="eyebrow">RECORDED ORDERS</p><h2>Recent orders</h2><p class="muted">Inspect normalized amounts, recorded status and raw cost inputs. Currency, source-period coverage and financial qualification remain unverified.</p></div><div class="filters"><select id="order-filter"><option value="all">All orders</option><option value="today">Today</option><option value="open">Open</option><option value="refunded">Recorded refund status</option><option value="missing-profit">Financial qualification unavailable</option></select><a class="secondary button-link" href="/api/reports/accounting.csv">Export CSV</a></div></div>
           <div id="order-list" class="order-profit-list"></div>
         </article>
       </section>
@@ -523,6 +548,13 @@
           <p id="launch-feedback" role="status"></p><label id="invite-link-label" class="hidden">Copy this private invitation link<input id="invite-link" readonly></label><div id="invitation-list" class="control-list"></div>
         </article>
         <div class="grid-2"><article class="card"><p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Your workspace</h2><div id="account-details" class="status-list"></div><div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div><form id="account-password-form" class="auth-form compact-form hidden"><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label><button class="primary" type="submit">Update password</button><p class="form-error" role="alert"></p></form></article><article class="card"><p class="eyebrow">ACCOUNT & ACCESS</p><h2>Subscription</h2><div id="billing-status" class="status-list"></div><div id="plan-grid" class="plan-grid"></div><p class="muted tiny">Beta access does not start a paid subscription. Commercial plans require owner confirmation before charging is enabled.</p></article></div>
+        <details id="workspace-activity-panel" class="card activity-panel hidden">
+          <summary><p class="eyebrow">YOUR WORKSPACE</p><h2>App activity</h2><span class="muted">Database requests, workspace snapshots and job events</span></summary>
+          <p class="muted">Check what Runvara has recorded for this workspace. These observations are not provider charges, physical storage totals or network bills.</p>
+          <button id="workspace-activity-refresh" class="secondary" type="button">Refresh activity</button>
+          <p id="workspace-activity-status" class="muted" role="status" aria-live="polite"></p>
+          <div id="workspace-activity-result" aria-busy="false"></div>
+        </details>
         <article class="card"><div class="section-head"><div><p class="eyebrow">IMMUTABLE HISTORY</p><h2>Audit events</h2></div><button id="refresh-audit" class="secondary" type="button">Refresh</button></div><div id="audit-list" class="audit-list"></div></article>
       </section>
     </main>
@@ -534,6 +566,8 @@
   <script src="/presentation.js?v=6.15.2"></script>
   <script src="/connections-ui.js?v=6.15.2"></script>
   <script src="/control-ui.js?v=6.15.2"></script>
+  <script src="/outcomes-ui.js?v=6.15.2"></script>
+  <script src="/activity-ui.js?v=6.15.2"></script>
   <script src="/app.js?v=6.15.2"></script>
 </body>
 </html>
