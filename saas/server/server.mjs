@@ -80,6 +80,7 @@ const STATIC_FILES = new Map([
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
+  ['/activity-ui.js', ['saas/activity-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
@@ -327,6 +328,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   const locks = new Map();
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
+  const activityReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
@@ -406,7 +408,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(200, {
         ...headers(contentType, cacheControl),
         'Content-Security-Policy': csp
@@ -1134,7 +1136,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
-        const auth = await authenticate(req, res, { identityOnly: pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        if (req.method === 'GET' && pathname === '/api/activity') {
+          // This verified-session precheck can only deny. Every admitted request
+          // still performs fresh identity, role and session checks below.
+          const signedSession = sessionFrom(req);
+          if (signedSession) {
+            const activityScope = signedSession.workspaceId;
+            if (!activityReadLimiter.check(activityScope).allowed) throw Object.assign(new Error('Activity request limit reached'), { status: 429, code: 'ACTIVITY_RATE_LIMITED' });
+            activityReadLimiter.fail(activityScope);
+          }
+        }
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1871,6 +1883,24 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const job = await agentOps.retry(auth.session.workspaceId, text(agentJobRetry[1], 120), {actorId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1)});
           send(res, 202, { job }); return;
         }
+        if (pathname === '/api/activity') {
+          requireOwner(auth);
+          if (req.method !== 'GET') throw Object.assign(new Error('Activity is read only'), { status: 405, code: 'ACTIVITY_READ_ONLY' });
+          if ([...url.searchParams.keys()].length || Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding']) {
+            throw Object.assign(new Error('Activity scope comes from the signed-in workspace'), { status: 400, code: 'ACTIVITY_REQUEST_INVALID' });
+          }
+          const observed = store.activitySnapshot?.(auth.session.workspaceId);
+          if (!observed || observed.schema !== 'runvara-activity/v1' || observed.workspaceId !== auth.session.workspaceId) {
+            throw Object.assign(new Error('Activity observations are unavailable'), { status: 503, code: 'ACTIVITY_UNAVAILABLE' });
+          }
+          // Explicit projection keeps internal instance/unattributed counters out
+          // of a tenant-admin response, even if later diagnostics grow fields.
+          const fields = ['schema','workspaceId','instanceId','instanceStartedAt','observedSince','snapshotAt','coverage','db','hotState','jobs','rateWindow','anomalies'];
+          const result = Object.fromEntries(fields.map(key => [key, observed[key]]));
+          if (Buffer.byteLength(JSON.stringify(result)) > 32768) throw Object.assign(new Error('Activity observations exceed the response bound'), { status: 503, code: 'ACTIVITY_UNAVAILABLE' });
+          send(res, 200, result); return;
+        }
+
         if (req.method === 'GET' && pathname === '/api/operator/provider-usage') {
           requireLaunchAdmin(auth, env);
           const workspaceId = text(url.searchParams.get('workspaceId') || auth.session.workspaceId, 256);

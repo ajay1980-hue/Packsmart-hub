@@ -257,4 +257,30 @@ test('strict shared transport preserves outcome cardinality and withholds read s
   assert.equal(store.telemetry.lastSuccessfulReadAt,'2026-01-01T00:00:00.000Z');
   assert.equal(store.telemetry.lastFailureCode,'SUPABASE_RESPONSE_INVALID');
   assert.equal(calls,3);assert.doesNotMatch(JSON.stringify(store.diagnostics()),/private invalid outcome evidence/);
+  assert.equal(store.activitySnapshot(WS).db.attempted,null,'tenant filters do not create trusted activity attribution');
+  const observed=store.activityMeter.instanceSnapshot().unattributed;
+  assert.equal(observed.db.attempted,3);assert.equal(observed.db.succeeded,2);assert.equal(observed.db.outcomes.invalid_response,1);
+});
+
+test('metered outcome RPC preserves safe rejection codes and never repeats an uncertain mutation', async () => {
+  for (const [databaseCode, expected] of [['P0O03', 'OUTCOME_OWNER_SESSION_CHANGED'], ['P0O05', 'OUTCOME_HEAD_CONFLICT'], ['42P01', 'OUTCOME_STORAGE_UNAVAILABLE'], [null, 'OUTCOME_PUBLICATION_UNCERTAIN']]) {
+    let calls = 0;
+    const store = createStore({ NODE_ENV: 'test', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only-key' }, {
+      fetchImpl: async (_url, options) => {
+        calls++;
+        assert.equal(options.method, 'POST');
+        if (databaseCode === null) return new Response('private truncated acknowledgement');
+        return Response.json({ code: databaseCode, message: 'private SQL and measurement text' }, { status: 400 });
+      }
+    });
+    await assert.rejects(store.publishBusinessOutcome(WS, actor, fixture().input), error => error.code === expected && !error.message.includes('private'));
+    assert.equal(calls, 1);
+    assert.equal(store.telemetry.lastSuccessfulWriteAt, null);
+    assert.equal(store.activitySnapshot(WS).db.attempted, null, 'RPC payload does not assign tenant activity');
+    const internal = store.activityMeter.instanceSnapshot().unattributed;
+    assert.equal(internal.db.attempted, 1);
+    assert.equal(internal.db.failed, 1);
+    assert.equal(internal.db.outcomes[databaseCode === null ? 'invalid_response' : 'http_error'], 1);
+    assert.equal(Object.values(internal.db.retries).reduce((sum, value) => sum + value, 0), 0);
+  }
 });

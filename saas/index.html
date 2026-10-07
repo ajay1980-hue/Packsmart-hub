@@ -550,6 +550,13 @@
           <p id="launch-feedback" role="status"></p><label id="invite-link-label" class="hidden">Copy this private invitation link<input id="invite-link" readonly></label><div id="invitation-list" class="control-list"></div>
         </article>
         <div class="grid-2"><article class="card"><p class="eyebrow">OWNER ACCOUNT</p><h2 id="account-workspace">Your workspace</h2><div id="account-details" class="status-list"></div><div class="button-row"><button id="show-password-change" class="secondary" type="button">Change password</button><button id="logout" class="secondary danger" type="button">Sign out</button></div><form id="account-password-form" class="auth-form compact-form hidden"><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="14" required></label><button class="primary" type="submit">Update password</button><p class="form-error" role="alert"></p></form></article><article class="card"><p class="eyebrow">ACCOUNT & ACCESS</p><h2>Subscription</h2><div id="billing-status" class="status-list"></div><div id="plan-grid" class="plan-grid"></div><p class="muted tiny">Beta access does not start a paid subscription. Commercial plans require owner confirmation before charging is enabled.</p></article></div>
+        <details id="workspace-activity-panel" class="card activity-panel hidden">
+          <summary><p class="eyebrow">YOUR WORKSPACE</p><h2>App activity</h2><span class="muted">Database requests, workspace snapshots and job events</span></summary>
+          <p class="muted">Check what Runvara has recorded for this workspace. These observations are not provider charges, physical storage totals or network bills.</p>
+          <button id="workspace-activity-refresh" class="secondary" type="button">Refresh activity</button>
+          <p id="workspace-activity-status" class="muted" role="status" aria-live="polite"></p>
+          <div id="workspace-activity-result" aria-busy="false"></div>
+        </details>
         <article class="card"><div class="section-head"><div><p class="eyebrow">IMMUTABLE HISTORY</p><h2>Audit events</h2></div><button id="refresh-audit" class="secondary" type="button">Refresh</button></div><div id="audit-list" class="audit-list"></div></article>
       </section>
     </main>
@@ -562,6 +569,7 @@
   <script src="/connections-ui.js?v=6.15.2"></script>
   <script src="/control-ui.js?v=6.15.2"></script>
   <script src="/outcomes-ui.js?v=6.15.2"></script>
+  <script src="/activity-ui.js?v=6.15.2"></script>
   <script src="/app.js?v=6.15.2"></script>
 </body>
 </html>

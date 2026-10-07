@@ -1,10 +1,10 @@
 # Runvara original blueprint acceptance, 2026-10-06
 
-This remains a scope ledger, not a completion claim. PR82 reporting, PR74 outcomes and PR75 dispatch safety are merged on actual main `f3471331062cfb626a5a941d12dab61bd8cd88d3`. The next incremental PR76 store-health repair is prepared locally above that main. Its release remains held until PR75 is deployed and its exact revision passes fresh postdeployment health.
+This remains a scope ledger, not a completion claim. PR82 reporting, PR74 outcomes, PR75 dispatch and PR76 store health are merged on actual main `75131e70afd569365d84a2baf4cc314f38bf0c42`. The next incremental PR77 activity stage is prepared locally above that main. Its release remains held until PR76 is deployed and its exact revision passes fresh postdeployment health.
 
-The approved outcome/reporting migrations and their recorded catalog provenance remain below. This worker performed no production operation. PR76 is the only next-stage feature added; PR77–81 activity, catalogue, analytics and static-revalidation features remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
+The approved outcome/reporting migrations and their recorded catalog provenance remain below. This worker performed no production operation. PR77 is the only next-stage feature added; PR78–81 catalogue, analytics and static-revalidation features remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
 
-The table and earlier sections preserve historical scope/preparation checkpoints. The final PR76 section records the current local stage and release gates. Prior stage test results do not substitute for the new stage's exact-head CI or production health.
+The table and earlier sections preserve historical scope/preparation checkpoints. The final PR77 section records the current local stage and release gates. Earlier stage results do not substitute for the new stage's exact-head CI or production health.
 
 | Original requirement | Evidence delivered | Remaining acceptance |
 |---|---|---|
@@ -91,3 +91,16 @@ The prior reporting-failure fixture now targets the actual RPC and asserts defer
 Fresh verification: **940 full Node22.23.3 tests passed**, **25 outcome PostgreSQL17.6 cases passed**, **73 reporting PostgreSQL17.6 cases passed**, with zero failures or skips. Full syntax, SaaS security guards, whitespace and independent source/interaction review passed. Both disposable PostgreSQL clusters stopped. Outcome/reporting migrations and unrelated feature modules are unchanged. The database results protect predecessor contracts; no production or browser result is inferred from them.
 
 No remote mutation, production request, migration or deployment occurred. Local Chromium remains absent; no browser install or Docker workaround was attempted. Remaining release gates are PR75 deployment plus fresh exact-revision health, fresh exact-head PR76 CI including required database/browser/container checks, then authorized PR76 release and its own postdeployment health. The full original OS and successor blueprint are not complete.
+
+
+## Incremental activity preparation after PR76, 2026-10-07
+
+Base: actual main `75131e70afd569365d84a2baf4cc314f38bf0c42`. Activity source: `1810612631d55c0d5d32918fe82a31808a96149c`, whose parent is old PR76 `72310bc02e420de9867a3aeebf126862c71058b4`. The 16-file activity-only diff was inspected and replayed once on `codex/runvara-activity-after-health`; its old parent was not replayed. No PR78–81 patch was imported.
+
+Conflict resolution preserves outcome and activity lifecycle modules, scripts/styles, no-cache routes, syntax checks and responsive browser commands. Compact authentication retains outcome, dispatch, archive, session, provider-usage and objective routes, and adds the signed-session activity quota before the compact identity read. Shared CAS instrumentation preserves strict decoding, safe error codes, cardinality metadata, bounded revision/acknowledgement checks, primary-health ownership and cache invalidation.
+
+Reporting commits and retries use explicit trusted context with separate fixed reporting categories. Exact activity counts match real request attempts without double counting. Compact reporting bytes remain request-body observations; only full state saves create full hot-state samples. Outcome/dispatch direct requests remain unattributed, and tests reject any implied tenant attribution from paths, payloads or responses. No recurring work, polling, persistent metadata or additional database write is introduced.
+
+Fresh verification: **1,000 full Node22.23.3 tests passed**, **25 outcome PostgreSQL17.6 cases passed**, **73 reporting PostgreSQL17.6 cases passed**, all with zero failures/skips. Syntax, SaaS security guards, whitespace and independent production-code/source review passed. A review found missing Audit/Billing responses in the combined UI test fixture; these were corrected and navigation-error assertions added before the final full pass. Both disposable PostgreSQL clusters stopped. Predecessor SQL and unrelated feature modules remain unchanged.
+
+The existing outcome responsive gate and new activity responsive gate are both retained alongside all earlier SaaS checks. Android Build is unchanged and targets main; it must pass after PR77 is retargeted from its old feature branch to main. Local Chromium remains absent, so browser/container checks are not claimed as passed and no installation/workaround was attempted. Remaining gates: PR76 exact deployment health, fresh PR77 exact-head CI including Android/database/browser/container, then authorized PR77 release and fresh postdeployment health. No remote mutation or production access occurred in this worker. The full original OS and successor blueprint remain incomplete.

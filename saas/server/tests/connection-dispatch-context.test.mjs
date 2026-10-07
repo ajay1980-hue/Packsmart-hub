@@ -67,6 +67,8 @@ for (const provider of ['shopify', 'meta']) test(`${provider}: one bounded index
   assert.ok(Buffer.byteLength(JSON.stringify(context)) < 2048);
   assert.equal(JSON.stringify(context).includes('must-not-load'), false);
   assert.equal(database.calls.length, 1);
+  assert.equal(store.activitySnapshot(WORKSPACE).db.attempted, null, 'a tenant filter is not an explicit activity observation context');
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 1);
   const { url, method, body } = database.calls[0];
   assert.equal(method, 'GET');
   assert.equal(body, '');

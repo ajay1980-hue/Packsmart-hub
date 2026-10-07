@@ -10,6 +10,7 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
+import { createActivityMeter } from '../lib/activity-meter.mjs';
 
 const workspaceId = 'outcome-app-lifecycle', experimentId = 'experiment_one', actorId = 'owner_one';
 const now = '2026-10-06T20:00:00.000Z';
@@ -56,6 +57,9 @@ async function harness(t) {
     if (['/api/auth/session', '/api/auth/login'].includes(route)) return Response.json({ user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf });
     if (route === '/api/auth/signup-options') return Response.json({ enabled: false });
     if (route === '/api/auth/logout') return h.logout ? h.logout.promise : Response.json({ ok: true });
+    if (route === '/api/audit?limit=250') return Response.json({ events: [] });
+    if (route === '/api/billing') return Response.json({});
+    if (route === '/api/activity') return h.activityHandler ? h.activityHandler() : Response.json(createActivityMeter({ dbAvailable: false }).snapshot(workspaceId));
     if (route.startsWith('/api/business-outcomes')) {
       const held = h.handler?.(route, config); if (held) return held;
       if (route === '/api/business-outcomes') return Response.json({ workspaceId, current: [], summary: { groups: [], coverage: { complete: true } } });
@@ -63,7 +67,7 @@ async function harness(t) {
     }
     throw new Error('Unexpected fixture route ' + route);
   };
-  for (const file of ['presentation.js', 'control-ui.js', 'outcomes-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'control-ui.js', 'outcomes-ui.js', 'activity-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
   await until(() => !h.$('app-shell').classList.contains('hidden'));
   h.panel = h.$('business-outcomes-panel');
   h.navigate = view => d.querySelector(`#main-nav [data-view="${view}"]`).click();
@@ -91,6 +95,47 @@ async function harness(t) {
   h.signedIn = () => !h.$('app-shell').classList.contains('hidden');
   return h;
 }
+
+test('outcome and activity navigation discard each other’s stale 401 without signing out the active workspace', async t => {
+  const h = await harness(t), oldOutcome = await h.begin('read');
+  h.navigate('audit');
+  const activityPanel = h.$('workspace-activity-panel');
+  activityPanel.open = true;
+  await until(() => h.$('workspace-activity-status').textContent.includes('Activity loaded'));
+  oldOutcome.hold.resolve(expired());
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(h.signedIn(), true);
+  assert.equal(oldOutcome.request.config.signal.aborted, true);
+  assert.equal(oldOutcome.request.config.isCurrent(), false);
+  assert.equal(activityPanel.open, true);
+  assert.match(h.$('workspace-activity-result').textContent, /Database activity tracking is unavailable/);
+  assert.equal(h.$('global-error').classList.contains('hidden'), true, 'audit navigation must settle without an unexpected-route error');
+
+  const activityHold = deferred(); h.activityHandler = () => activityHold.promise;
+  h.$('workspace-activity-refresh').click();
+  const oldActivity = h.calls.at(-1);
+  assert.equal(oldActivity.route, '/api/activity');
+  h.handler = null;
+  await h.open();
+  activityHold.resolve(expired());
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(h.signedIn(), true);
+  assert.equal(oldActivity.config.signal.aborted, true);
+  assert.equal(oldActivity.config.isCurrent(), false);
+  assert.equal(h.panel.open, true);
+  assert.match(h.$('business-outcomes-summary').textContent, /Reviewed results loaded/);
+  assert.equal(h.$('global-error').classList.contains('hidden'), true);
+  const count = h.calls.length;
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(h.calls.length, count, 'navigation never automatically retries a stale read or mutation');
+  assert.equal(h.calls.filter(call => call.config.method === 'POST').length, 0);
+  h.logout = deferred(); h.$('logout').click();
+  assert.equal(h.panel.open, false, 'logout closes the outcome panel before its response');
+  assert.equal(activityPanel.open, false, 'logout closes the activity panel before its response');
+  assert.equal(h.$('workspace-activity-result').textContent, '');
+  h.logout.resolve(Response.json({ ok: true }));
+  await until(() => !h.signedIn());
+});
 
 for (const kind of ['read', 'save', 'publish']) {
   test(`${kind} response after same-task panel close cannot expire the current session`, async t => {

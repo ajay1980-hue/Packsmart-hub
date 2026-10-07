@@ -295,3 +295,83 @@ test('historical noncanonical reporting timestamps stay visible as deferred inst
   assert.equal(result.integrationStatus.reporting.lastError, 'REPORTING_STATUS_DEFERRED');
   assert.equal(f.store.schedulerCache.has(f.workspaceId), false);
 });
+
+test('reporting recovery meters each real attempt once under reporting scope and preserves full primary snapshot samples', async () => {
+  for (const failure of ['lost-after-commit', 'network-before-commit', 'cancelled-statement']) {
+    const f = await fixture({ padding: 20_000 });
+    const before = f.store.activitySnapshot(f.workspaceId);
+    let reportAttempts = 0;
+    f.intercept = async (call, perform) => {
+      if (call.table !== RPC || reportAttempts++ > 0) return perform();
+      if (failure === 'lost-after-commit') {
+        await perform();
+        throw new TypeError('synthetic lost reporting acknowledgement');
+      }
+      if (failure === 'network-before-commit') throw new TypeError('synthetic reporting connection failure');
+      return Response.json({ code: '57014' }, { status: 500 });
+    };
+    const saved = await f.store.save(f.workspaceId, f.state);
+    const observed = f.store.activitySnapshot(f.workspaceId);
+    const reportCount = failure === 'lost-after-commit' ? 1 : 2;
+    assert.equal(primary(f).length, 1);
+    assert.equal(reports(f).length, reportCount);
+    assert.equal(observed.db.attempted - before.db.attempted, f.calls.length);
+    assert.equal(observed.db.completed - before.db.completed, f.calls.length);
+    assert.equal(observed.db.operations.state_commit - before.db.operations.state_commit, 1);
+    assert.equal(observed.db.operations.reporting_commit - before.db.operations.reporting_commit, reportCount);
+    assert.equal(observed.db.operations.state_read - before.db.operations.state_read, revisions(f).length);
+    assert.equal(observed.db.retries.primary_network_reconciled, 0);
+    assert.equal(observed.db.retries.primary_statement_cancelled, 0);
+    assert.equal(observed.db.retries.reporting_network_reconciled, failure === 'network-before-commit' ? 1 : 0);
+    assert.equal(observed.db.retries.reporting_statement_cancelled, failure === 'cancelled-statement' ? 1 : 0);
+    assert.equal(observed.db.requestBody.bytes - before.db.requestBody.bytes, bodyBytes(f.calls));
+    const primaryStateBytes = Buffer.byteLength(JSON.stringify(JSON.parse(primary(f)[0].body).state));
+    assert.equal(observed.hotState.attempted.bytes, primaryStateBytes);
+    assert.equal(observed.hotState.confirmed.bytes, primaryStateBytes);
+    assert.equal(observed.hotState.attempted.observations, 1);
+    assert.equal(observed.hotState.confirmed.observations, 1);
+    assert.equal(f.store.telemetry.stateBytes, primaryStateBytes);
+    assert.ok(primaryStateBytes > bodyBytes(reports(f)), 'compact report bodies cannot become full-state storage samples');
+    assert.equal(f.store.activitySnapshot('other-tenant').db.attempted, null);
+    assert.equal(f.store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+    assert.equal(saved.integrationStatus.reporting.status, 'connected');
+    assert.equal(f.store.diagnostics().primaryPersistence, true);
+    assert.equal(f.store.diagnostics().lastPrimaryFailureAt, null);
+    if (reportCount === 2) assert.equal(reports(f)[0].body, reports(f)[1].body);
+  }
+});
+
+test('narrow reporting success or unverifiable response cannot repair primary health or create hot-state growth', async () => {
+  for (const invalidBody of [false, true]) {
+    const f = await fixture();
+    await f.store.save(f.workspaceId, f.state);
+    const before = f.store.activitySnapshot(f.workspaceId);
+    f.calls.length = 0;
+    f.store.primaryPersistenceHealthy = false;
+    f.store.telemetry.lastPrimaryWriteAt = '2026-10-01T00:00:00.000Z';
+    f.store.telemetry.lastPrimaryFailureAt = '2026-10-02T00:00:00.000Z';
+    const lastSuccessfulWriteAt = f.store.telemetry.lastSuccessfulWriteAt;
+    if (invalidBody) f.intercept = call => {
+      assert.equal(call.table, RPC);
+      return new Response('private unconfirmed reporting body');
+    };
+    const request = f.store.commitReportingStatus(f.workspaceId, healthy(), f.state._revision, randomUUID());
+    if (invalidBody) await assert.rejects(request, { code: 'SUPABASE_RESPONSE_INVALID' });
+    else await request;
+    const after = f.store.activitySnapshot(f.workspaceId);
+    assert.equal(primary(f).length, 0);
+    assert.equal(reports(f).length, 1);
+    assert.equal(after.db.attempted - before.db.attempted, 1);
+    assert.equal(after.db.operations.reporting_commit - before.db.operations.reporting_commit, 1);
+    assert.equal(after.db.operations.state_commit, before.db.operations.state_commit);
+    assert.deepEqual(after.hotState, before.hotState);
+    assert.equal(f.store.diagnostics().primaryPersistence, false);
+    assert.equal(f.store.telemetry.lastPrimaryWriteAt, '2026-10-01T00:00:00.000Z');
+    assert.equal(f.store.telemetry.lastPrimaryFailureAt, '2026-10-02T00:00:00.000Z');
+    if (invalidBody) {
+      assert.equal(f.store.telemetry.lastSuccessfulWriteAt, lastSuccessfulWriteAt);
+      assert.equal(after.db.outcomes.invalid_response - before.db.outcomes.invalid_response, 1);
+      assert.doesNotMatch(JSON.stringify(after), /private unconfirmed reporting body/);
+    }
+  }
+});
