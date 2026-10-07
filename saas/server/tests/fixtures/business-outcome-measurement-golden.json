@@ -1,0 +1,107 @@
+{
+  "context": {
+    "workspaceId": "tenant-golden",
+    "experimentId": "experiment_golden",
+    "actorId": "user_admin_golden",
+    "now": "2026-10-06T16:00:00.000Z",
+    "previousMeasurement": null
+  },
+  "input": {
+    "expectedRevision": 0,
+    "amount": "123.450000",
+    "currency": "GBP",
+    "window": {
+      "startsAt": "2026-10-01T00:00:00.000Z",
+      "endsAt": "2026-10-06T00:00:00.000Z"
+    },
+    "coverage": {
+      "status": "complete",
+      "observedCount": 12,
+      "expectedCount": 12
+    },
+    "method": {
+      "kind": "reconciled_manual"
+    },
+    "observedAt": "2026-10-06T12:00:00.000Z",
+    "report": {
+      "description": "Reconciled retained order revenue and recorded variable costs.",
+      "costsComplete": true
+    }
+  },
+  "measurement": {
+    "schema": "runvara-experiment-measurement/v1",
+    "workspaceId": "tenant-golden",
+    "experimentId": "experiment_golden",
+    "revision": 1,
+    "recordedBy": "user_admin_golden",
+    "recordedAt": "2026-10-06T16:00:00.000Z",
+    "metric": "incrementalContribution",
+    "amount": "123.45",
+    "currency": "GBP",
+    "window": {
+      "startsAt": "2026-10-01T00:00:00.000Z",
+      "endsAt": "2026-10-06T00:00:00.000Z"
+    },
+    "coverage": {
+      "status": "complete",
+      "scopeId": "whole_business_ce203c60594bf81482855621be816971bbb9ca13e8c9a137c731214e751e5046",
+      "observedCount": 12,
+      "expectedCount": 12
+    },
+    "method": {
+      "kind": "reconciled_manual",
+      "definitionVersion": "incremental-contribution/v1"
+    },
+    "provenance": {
+      "observationId": "measurement_observation_e8748103939123b02473c1ccd21fbfd96544de83319282daa3042a75a0979f1b",
+      "sourceRefs": [
+        {
+          "type": "measurement_report",
+          "id": "measurement_report_7ade075d80366185a7fde1ba1c6d7ef6ac17a0a50d0584f03f31ab14ed1cf76c",
+          "digest": "6e8ef5f0974c31d67049604048c810f63bf83d7c575a83d1e38eec10f7e477b8"
+        }
+      ],
+      "observedAt": "2026-10-06T12:00:00.000Z",
+      "aggregation": "standalone"
+    },
+    "links": {
+      "action": null,
+      "opportunity": null,
+      "approval": null,
+      "objective": null
+    },
+    "report": {
+      "schema": "runvara-measurement-report/v1",
+      "id": "measurement_report_7ade075d80366185a7fde1ba1c6d7ef6ac17a0a50d0584f03f31ab14ed1cf76c",
+      "workspaceId": "tenant-golden",
+      "experimentId": "experiment_golden",
+      "measurementRevision": 1,
+      "recordedBy": "user_admin_golden",
+      "recordedAt": "2026-10-06T16:00:00.000Z",
+      "description": "Reconciled retained order revenue and recorded variable costs.",
+      "costsComplete": true,
+      "facts": {
+        "metric": "incrementalContribution",
+        "amount": "123.45",
+        "currency": "GBP",
+        "window": {
+          "startsAt": "2026-10-01T00:00:00.000Z",
+          "endsAt": "2026-10-06T00:00:00.000Z"
+        },
+        "coverage": {
+          "status": "complete",
+          "scopeId": "whole_business_ce203c60594bf81482855621be816971bbb9ca13e8c9a137c731214e751e5046",
+          "observedCount": 12,
+          "expectedCount": 12
+        },
+        "method": {
+          "kind": "reconciled_manual",
+          "definitionVersion": "incremental-contribution/v1"
+        },
+        "observedAt": "2026-10-06T12:00:00.000Z"
+      },
+      "digest": "6e8ef5f0974c31d67049604048c810f63bf83d7c575a83d1e38eec10f7e477b8"
+    },
+    "digest": "8a3f07f810777a260ed6bbe8ba0d632d6ce386f565b1b1ff027adf77995ec76a"
+  }
+}

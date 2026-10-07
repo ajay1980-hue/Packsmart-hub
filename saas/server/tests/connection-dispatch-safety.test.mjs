@@ -947,6 +947,73 @@ test('Supabase dispatch uses only trusted bounded context selectors after the in
   assert.ok(reads.every(call => call.url.searchParams.get('select') !== 'state'));
 });
 
+test('dispatch preserves exact claims when narrow reporting is deferred or a lost reporting reply is reconciled', async t => {
+  for (const failure of ['denied-reporting', 'lost-reporting-reply']) await t.test(failure, async t => {
+    const f = await fixture(t, { storage: 'mock-supabase' });
+    const originalFetch = f.store.fetch, reports = [], before = f.database.calls.length;
+    f.store.fetch = async (url, options = {}) => {
+      if (new URL(url).pathname.endsWith('/rpc/runvara_commit_reporting_status')) {
+        reports.push({ body: options.body });
+        if (failure === 'denied-reporting') return Response.json({ code: '42501' }, { status: 403 });
+        await originalFetch(url, options);
+        throw new TypeError('synthetic lost reporting reply');
+      }
+      return originalFetch(url, options);
+    };
+    const result = await f.run();
+    assert.equal(result.status, 'completed');
+    assert.equal(f.mutations.length, 1, 'reporting recovery must never repeat the approved external mutation');
+    assert.equal(f.mutations[0].body.variables.product.title, 'Approved title');
+    const storageCalls = f.database.calls.slice(before);
+    assert.equal(storageCalls.filter(call => call.method === 'PATCH').length, 3, 'initial claim, phase claim and terminal result each save full state once');
+    assert.equal(reports.length, 3, 'there is one narrow follow-up per full state save, without full-state fallback');
+    for (const call of reports) {
+      const body = JSON.parse(call.body);
+      assert.ok(Buffer.byteLength(call.body) <= 16384);
+      assert.deepEqual(Object.keys(body).sort(), ['p_expected_revision', 'p_next_revision', 'p_report', 'p_updated_at', 'p_workspace_id']);
+      assert.equal(Object.hasOwn(body, 'state'), false);
+    }
+    assert.equal(storageCalls.filter(call => call.url.searchParams.get('select') === 'revision:state->>_revision').length,
+      failure === 'lost-reporting-reply' ? 3 : 0);
+    const saved = f.database.states.get(WORKSPACE);
+    assert.equal(saved.connectionWrites[0].status, 'completed');
+    assert.equal(saved.connectionDispatchAdmissions.length, 1);
+    assert.equal(saved.approvals[0].executedExternally, true);
+    assert.equal(saved._revision, f.state._revision);
+    if (failure === 'denied-reporting') assert.match(saved.integrationStatus.reporting.detail, /pending/);
+    else assert.equal(saved.integrationStatus.reporting.status, 'connected');
+  });
+});
+
+test('an unverifiable reporting reply after the phase claim cannot permit mutation or replay the claimed phase', async t => {
+  for (const kind of ['malformed', 'oversized']) await t.test(kind, async t => {
+    const f = await fixture(t, { storage: 'mock-supabase' });
+    const originalFetch = f.store.fetch;
+    let reports = 0;
+    f.store.fetch = async (url, options = {}) => {
+      const response = await originalFetch(url, options);
+      if (new URL(url).pathname.endsWith('/rpc/runvara_commit_reporting_status') && ++reports === 2) {
+        return new Response(kind === 'malformed' ? 'private unverified reporting acknowledgement' : 'x'.repeat(4097));
+      }
+      return response;
+    };
+    const result = await f.observe();
+    assertBlocked(result, f.mutations);
+    assert.equal(result.code, 'STATE_CONFLICT');
+    assert.equal(reports, 2);
+    const durable = await f.replica.get(WORKSPACE);
+    assert.equal(durable.connectionWrites[0].status, 'executing');
+    assert.equal(durable.connectionWrites[0].dispatchClaim.phases.shopify_mutation.status, 'dispatching');
+    assert.notEqual(durable._revision, f.state._revision);
+    const before = f.database.calls.length;
+    const replay = await executeConnectionWrite(durable, f.write.id, durable.users[0].id, f.service,
+      () => f.replica.save(WORKSPACE, durable), { ...f.options,
+        loadFreshState: context => f.replica.getConnectionWriteContext(WORKSPACE, context) }).catch(error => error);
+    assertBlocked(replay, f.mutations);
+    assert.equal(f.database.calls.length, before, 'an already-claimed phase cannot acquire fresh dispatch authority by retrying');
+  });
+});
+
 test('Instagram status observation failures retain the acknowledged container through cooldown and later publish once', async t => {
   const raw = 'PRIVATE provider diagnostic with synthetic credentials';
   const cases = {
