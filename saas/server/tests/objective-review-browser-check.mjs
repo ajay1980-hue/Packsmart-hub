@@ -11,8 +11,9 @@ import { createSessionToken } from '../lib/security.mjs';
 import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import { buildObjectiveReview } from '../lib/objective-review.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
+import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
 
-async function captureRestriction(page, width, name) {
+async function captureRestriction(page, width, name, typography) {
   const panel = page.locator('#business-objective-restriction');
   const assertFits = async label => {
     const dimensions = await panel.evaluate(element => ({ page: document.documentElement.scrollWidth,
@@ -20,27 +21,18 @@ async function captureRestriction(page, width, name) {
     assert.ok(dimensions.page <= width + 2 && dimensions.panel <= dimensions.available + 2,
       `restriction ${label} overflow at ${width}px: ${JSON.stringify(dimensions)}`);
   };
+  await typography.evaluate(session => session.assertBaseline());
   await assertFits(name);
   await panel.screenshot({ path: `/tmp/runvara-business-objectives-${name}-${width}.png` });
-  // Double each computed text size once, without widening the viewport or
-  // cascading 200% through nested elements. This is a text-resizing fixture.
-  const styles = await panel.evaluate(element => Array.from(element.querySelectorAll('*'), node => {
-    const computed = getComputedStyle(node);
-    return { style: node.getAttribute('style'), fontSize: parseFloat(computed.fontSize), lineHeight: parseFloat(computed.lineHeight) };
-  }));
+  await typography.evaluate(session => session.begin());
   try {
-    await panel.evaluate((element, sizes) => Array.from(element.querySelectorAll('*')).forEach((node, index) => {
-      node.style.fontSize = `${sizes[index].fontSize * 2}px`;
-      if (Number.isFinite(sizes[index].lineHeight)) node.style.lineHeight = `${sizes[index].lineHeight * 2}px`;
-    }), styles);
+    await typography.evaluate(session => session.enlarge());
     await assertFits(`${name} at 200% text`);
     await panel.screenshot({ path: `/tmp/runvara-business-objectives-${name}-${width}-large-text.png` });
   } finally {
-    await panel.evaluate((element, originals) => Array.from(element.querySelectorAll('*')).forEach((node, index) => {
-      if (originals[index].style === null) node.removeAttribute('style');
-      else node.setAttribute('style', originals[index].style);
-    }), styles);
+    await typography.evaluate(session => session.restore());
   }
+  await typography.evaluate(session => session.assertBaseline());
 }
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-review-browser-'));
@@ -162,6 +154,7 @@ try {
     if (!await details.evaluate(element => element.open)) await details.locator('summary').click();
     const manage = page.locator(`[data-manage-objective-restriction="${objective.id}"]`);
     const panel = page.locator('#business-objective-restriction');
+    const typography = await panel.evaluateHandle(createRestrictionTypographySession);
     const form = page.locator('#objective-restriction-form');
     const mode = page.locator('#objective-restriction-mode');
     const account = page.locator('#objective-restriction-connection');
@@ -212,7 +205,7 @@ try {
     await openRestriction(); await mode.selectOption('enforce');
     assert.equal(await account.inputValue(), '', 'cancel discards the unsaved account choice');
     await account.selectOption(state.connections[0].id);
-    await captureRestriction(page, width, 'add-restriction');
+    await captureRestriction(page, width, 'add-restriction', typography);
     await saveRestriction(1, policyFor(state.connections[0]));
 
     await openRestriction();
@@ -223,7 +216,7 @@ try {
     await account.selectOption(state.connections[1].id);
     const consequence = await page.locator('#objective-restriction-consequence').textContent();
     for (const connection of state.connections) assert.ok(consequence.includes(connection.metadata.shopDomain), 'rebinding names both exact accounts');
-    await captureRestriction(page, width, 'move-restriction');
+    await captureRestriction(page, width, 'move-restriction', typography);
     await saveRestriction(2, policyFor(state.connections[1]));
 
     await openRestriction();
@@ -239,11 +232,12 @@ try {
     assert.ok((await panel.textContent()).includes(state.connections[1].metadata.shopDomain), 'the removed binding remains visible');
     assert.equal(await acknowledge.isChecked(), false);
     await mode.selectOption('preparation_only');
-    await captureRestriction(page, width, 'remove-unavailable-restriction');
+    await captureRestriction(page, width, 'remove-unavailable-restriction', typography);
     await saveRestriction(3, { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' });
     assert.equal(calls.length, before, 'restriction editing does not request another diagnostic, approval, or job');
     assert.deepEqual(unexpected, [], 'only the bounded local fixture routes were requested');
     assert.deepEqual(errors, []); assert.deepEqual(external, []);
+    await typography.dispose();
     await context.close();
   }
   console.log('Objective review and owner restriction browser checks passed at 320, 390 and 1200 pixels with synthetic diagnostics and normal/200% text screenshots.');
