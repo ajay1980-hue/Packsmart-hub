@@ -87,6 +87,22 @@ const STATIC_FILES = new Map([
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
 ]);
 
+function matchesStaticEtag(ifNoneMatch, etag) {
+  if (typeof ifNoneMatch !== 'string') return false;
+  const value = ifNoneMatch.replace(/^[ \t]+|[ \t]+$/g, '');
+  if (value === '*') return true;
+  // If-None-Match uses weak comparison. Parse quoted tags without splitting
+  // embedded commas; ignore empty list members and reject malformed fields.
+  const members = /[ \t]*(?:(?:W\/)?("[\x21\x23-\x7e\x80-\xff]*"))?[ \t]*(?:,|$)/gy;
+  let matched = false;
+  while (members.lastIndex < value.length) {
+    const member = members.exec(value);
+    if (!member || !member[0].length) return false;
+    if (member[1] === etag) matched = true;
+  }
+  return matched;
+}
+
 const PLANS = Object.freeze({
   starter: { name: 'Starter', indicativeMonthlyGbp: 29, features: ['1 workspace', 'Shopify connection', 'Profit and approval controls'] },
   growth: { name: 'Growth', indicativeMonthlyGbp: 79, features: ['All Starter features', 'eBay and social commerce', 'Daily operations brief'] },
@@ -402,19 +418,23 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     catch { throw Object.assign(new Error('Invalid JSON'), { status: 400, code: 'JSON_INVALID' }); }
   }
 
-  async function serveStatic(pathname, res, { head = false } = {}) {
+  async function serveStatic(pathname, res, { head = false, ifNoneMatch } = {}) {
     const item = STATIC_FILES.get(pathname);
     if (!item) return false;
     const [relative, contentType] = item;
     try {
       const body = await fs.readFile(new URL(relative, `file://${repoRoot}/`));
+      // Hash the exact bytes read for this response, never cached file metadata.
+      const etag = `"sha256-${crypto.createHash('sha256').update(body).digest('hex')}"`;
+      const notModified = matchesStaticEtag(ifNoneMatch, etag);
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
       const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
-      res.writeHead(200, {
+      res.writeHead(notModified ? 304 : 200, {
         ...headers(contentType, cacheControl),
+        ETag: etag,
         'Content-Security-Policy': csp
       });
-      res.end(head ? undefined : body);
+      res.end(head || notModified ? undefined : body);
     } catch {
       send(res, 404, { error: 'Static file not found', code: 'NOT_FOUND' });
     }
@@ -2379,7 +2399,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
 
-      if (['GET', 'HEAD'].includes(req.method) && await serveStatic(pathname, res, { head: req.method === 'HEAD' })) return;
+      if (['GET', 'HEAD'].includes(req.method) && await serveStatic(pathname, res, { head: req.method === 'HEAD', ifNoneMatch: req.headers['if-none-match'] })) return;
       send(res, 404, { error: 'Not found', code: 'NOT_FOUND' });
     } catch (error) {
       const safe = sanitizeError(error);

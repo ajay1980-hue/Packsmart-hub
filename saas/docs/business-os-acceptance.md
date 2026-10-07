@@ -1,10 +1,10 @@
 # Runvara original blueprint acceptance, 2026-10-06
 
-This remains a scope ledger, not a completion claim. PR82 reporting and the incremental outcome, dispatch, store-health and activity stages are merged on actual main `abf83315af0c65c7a1cbdcabc306a8a381c602da`. The next incremental PR78 catalogue-price safety stage is prepared locally above that main. Its release remains held until PR77 is deployed and its exact revision passes fresh postdeployment health.
+This remains a scope ledger, not a completion claim. PR79 public-asset revalidation is prepared locally above tested PR78 commit `fb0046beba9cd5a62cdf4a31129e71ebee596ff4`. At this preparation checkpoint the known merged predecessor is PR77 main `abf83315af0c65c7a1cbdcabc306a8a381c602da`; final PR78 main ancestry must be established separately once supplied. No release may bypass predecessor health or fresh exact-head CI.
 
-The approved outcome/reporting migrations and their catalog provenance remain below. This worker performed no production operation. PR78 is the only next-stage feature added; PR79–81 static-revalidation, connection-health and imported-order analytics changes remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
+The approved outcome/reporting migrations and their provenance remain below. This worker performed no production operation. PR79 is the only next-stage feature added above tested PR78; PR80–81 connection-health and imported-order analytics changes remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
 
-The table and earlier sections preserve historical scope/preparation checkpoints. The final PR78 section records the current local stage and release gates. Earlier stage results do not replace the new stage's exact-head CI or production health.
+The table and earlier sections preserve historical scope/preparation checkpoints. The final PR79 section records this local stage and release gates. Earlier stage results do not substitute for the new stage's exact-head CI, actual-main ancestry or production health.
 
 | Original requirement | Evidence delivered | Remaining acceptance |
 |---|---|---|
@@ -117,3 +117,14 @@ One meaningful interaction gap was addressed in the existing brief-cache regress
 Fresh verification passed **1,010 full Node22.23.3 tests**, **25 outcome PostgreSQL17.6 cases** and **73 reporting PostgreSQL17.6 cases**, all with zero failures/skips. Syntax, SaaS security guards, whitespace and independent source/interaction review passed. The PostgreSQL suites used separate fresh local clusters and both stopped. Cache transport/metering assertions use a synthetic PostgREST fixture; no live provider or production request was made.
 
 No source SQL, schema, dependency, recurring task or additional background work was introduced. Existing responsive and Android workflows are retained. Remaining gates are PR77 exact-deployment health, fresh PR78 exact-head CI including responsive browser/container and required database/Android checks, then authorized PR78 release and its own fresh postdeployment health. This worker made no remote mutation, migration, merge or deployment. The original OS is not complete and the successor blueprint is untouched.
+
+
+## Incremental static revalidation after tested PR78, 2026-10-07
+
+Tested local base: `fb0046beba9cd5a62cdf4a31129e71ebee596ff4`. Published source PR79: `d9ecb818c8ec20cf074080e3a2c139c3ac4191a8`, parent `3ebc1c75370b6a8b843da3829bc1b7af59f0a867`. The isolated three-file source was inspected and replayed on `codex/runvara-static-after-catalogue`. The only conflict kept the existing outcome/activity no-cache allowlist entries while applying exact-byte conditional responses. Source code ancestry is explicit; actual PR78 main will require a matching-tree rebase when supplied.
+
+All current static routes retain their cache policy, CSP/security headers, MIME types and GET/HEAD-only handling. The expanded raw HTTP matrix covers outcome/activity scripts alongside the other seven unique assets and the index alias. API/auth/tenant/OAuth responses remain no-store without ETags, including successful signed-in activity/outcome reads and rejected query overrides under conditional headers. No static validator can confer tenant access or turn a rejected private request into a 304.
+
+Fresh local verification passed **1,015 full Node22.23.3 tests**, **25 outcome PostgreSQL17.6 cases** and **73 reporting PostgreSQL17.6 cases**, all with zero failures/skips, plus syntax, SaaS security guards, whitespace and independent source review. Both disposable PostgreSQL clusters stopped. The raw HTTP test measured 498,277 initial bytes for nine unique public assets and zero revalidated body bytes. It excludes headers and is not a production bandwidth-savings claim.
+
+Only static server handling, its tests and documentation changed in this stage. Predecessor libraries, UI files, source SQL and workflows remain unchanged; PR80–81 are not imported. No remote or production mutation, migration, merge or deployment occurred. No browser install or Docker workaround was attempted. Remaining finalization/release steps are actual PR78 main ancestry, predecessor health, fresh exact-head CI including Android/browser/container/database gates, authorized release, and the new deployed revision's health/static verification. This is preparation, not full OS completion.
