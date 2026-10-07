@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { once } from 'node:events';
@@ -73,7 +74,7 @@ test('unresolved transport failure and malformed primary acknowledgements remain
   assert.equal(network.diagnostics().primaryPersistence,false); assert.ok(network.diagnostics().lastPrimaryFailureAt);
   for (const value of [null,{},'not rows',[{workspace_id:'other'}]]) {
     const store=factory(async()=>Response.json(value));
-    await assert.rejects(store.commit('tenant-one',state(),'old',true),{code:'SUPABASE_RESPONSE_INVALID'});
+    await assert.rejects(store.commit('tenant-one',state(),'old',true),{code:'SUPABASE_PERSISTENCE_RESPONSE_INVALID'});
     assert.equal(store.diagnostics().primaryPersistence,false);
   }
 });
@@ -95,14 +96,15 @@ test('duplicate new workspace identity is a conflict, not a persistence outage',
 
 test('mirror errors and deferred reporting-status commit preserve the successful primary commit', async () => {
   for (const failure of ['mirror','reporting']) {
-    let patches=0;
+    let reportingFailures=0;
     const fake=fakeSupabase({fault:({table,method})=>failure==='mirror'&&table==='workspaces'&&method==='POST'
-      ? {status:500,code:'XX000'} : failure==='reporting'&&table==='saas_workspace_state'&&method==='PATCH'&&++patches===1 ? {status:500,code:'XX000'}:null});
+      ? {status:500,code:'XX000'} : failure==='reporting'&&table==='runvara_commit_reporting_status'&&method==='POST'&&++reportingFailures===1 ? {status:500,code:'XX000'}:null});
     const store=factory(fake.fetchImpl), s=seedWorkspaceState();
-    await store.save(s.workspace.id,s);
+    const result=await store.save(s.workspace.id,s);
     const d=store.diagnostics(); assert.ok(d.lastPrimaryWriteAt); assert.equal(d.lastPrimaryFailureAt,null); assert.equal(d.primaryPersistence,true);
     assert.ok(fake.states.has(s.workspace.id));
     if(failure==='mirror')assert.ok(d.reportingFailures>0);
+    else { assert.equal(reportingFailures,1); assert.equal(result.integrationStatus.reporting.lastError,'REPORTING_STATUS_DEFERRED'); }
   }
 });
 
@@ -111,6 +113,41 @@ test('reporting-status follow-up can neither clear an unrelated primary failure 
   store.primaryPersistenceHealthy=false;store.telemetry.lastPrimaryFailureAt='2026-01-01T00:00:00.000Z';store.telemetry.lastPrimaryWriteAt='2025-01-01T00:00:00.000Z';
   await store.commit('tenant-one',state(),'old',true,{primary:false});
   assert.equal(store.diagnostics().primaryPersistence,false);assert.equal(store.diagnostics().lastPrimaryWriteAt,'2025-01-01T00:00:00.000Z');
+});
+
+test('narrow reporting RPC decode failures neither claim transport success nor change primary health', async () => {
+  const report = { status:'connected',detail:'Synthetic reporting result.',lastSyncAt:'2026-10-07T10:00:00.000Z',lastFailureAt:null,lastError:null,failures:[] };
+  for (const primaryHealthy of [false,true]) for (const [expectedCode,response] of [
+    ['SUPABASE_RESPONSE_INVALID',() => new Response(`private malformed report ${key}`)],
+    ['SUPABASE_RESPONSE_INVALID',() => new Response(null,{status:204})],
+    ['SUPABASE_RESPONSE_INVALID',() => new Response(new ReadableStream({start(controller){controller.error(new Error(key));}}))],
+    ['SUPABASE_RESPONSE_TOO_LARGE',() => new Response('x'.repeat(4097))],
+    [null,() => Response.json([{workspace_id:'tenant-one'}])]
+  ]) {
+    let calls=0;
+    const store=factory(async(url,options)=>{
+      calls++;assert.equal(new URL(url).pathname,'/rest/v1/rpc/runvara_commit_reporting_status');assert.equal(options.method,'POST');
+      assert.ok(Buffer.byteLength(options.body)<=16384);assert.equal(Object.hasOwn(JSON.parse(options.body),'state'),false);
+      return response();
+    });
+    store.primaryPersistenceHealthy=primaryHealthy;
+    store.telemetry.lastPrimaryFailureAt='2026-01-02T00:00:00.000Z';
+    store.telemetry.lastPrimaryWriteAt='2026-01-01T00:00:00.000Z';
+    store.telemetry.lastSuccessfulWriteAt='2026-01-03T00:00:00.000Z';
+    let error;
+    try { await store.commitReportingStatus('tenant-one',report,randomUUID(),randomUUID()); } catch (caught) { error=caught; }
+    assert.equal(error?.code??null,expectedCode);
+    assert.equal(calls,1,'unverified response decoding does not authorize an automatic mutation retry');
+    assert.equal(store.diagnostics().primaryPersistence,primaryHealthy);
+    assert.equal(store.telemetry.lastPrimaryFailureAt,'2026-01-02T00:00:00.000Z');
+    assert.equal(store.telemetry.lastPrimaryWriteAt,'2026-01-01T00:00:00.000Z');
+    if(error){
+      assert.ok(['SUPABASE_RESPONSE_INVALID','SUPABASE_RESPONSE_TOO_LARGE'].includes(error.code));
+      assert.equal(store.telemetry.lastSuccessfulWriteAt,'2026-01-03T00:00:00.000Z');
+      assert.equal(store.telemetry.lastFailureCode,error.code);
+      assert.doesNotMatch(JSON.stringify(store.diagnostics()),/private malformed report|private-test-key/);
+    } else assert.notEqual(store.telemetry.lastSuccessfulWriteAt,'2026-01-03T00:00:00.000Z');
+  }
 });
 
 

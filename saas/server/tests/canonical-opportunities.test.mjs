@@ -34,7 +34,7 @@ function candidate(id, extra = {}) {
   return { id, title:`Review ${id}`, kind:'pricing', reference:id, status:'open', present:true, confidence:0.85, risk:'high', effort:'low', ...extra };
 }
 
-test('detected opportunity keeps its identity and verified posture through measurement, business state and Command queue', () => {
+test('detected opportunity keeps identity and approval gates while legacy reviews remain unqualified', () => {
   const state = business();
   const pricing = state.opportunities.find(item => item.kind === 'pricing');
   assert.ok(pricing.id);
@@ -52,12 +52,15 @@ test('detected opportunity keeps its identity and verified posture through measu
   assert.equal(row.kind, 'margin');
   assert.equal(row.evidenceKind, 'pricing');
   assert.equal(row.experimentId, experiment.id);
-  assert.equal(row.evidenceDecision, 'ready-for-owner-review');
-  assert.equal(row.verifiedContributionValue, 80);
-  assert.equal(row.evidenceVerified, true);
+  assert.equal(row.evidenceDecision, null);
+  assert.equal(row.verifiedContributionValue, null);
+  assert.equal(row.evidenceVerified, false);
   assert.equal(row.expectedContributionProfit, null);
   assert.equal(row.score, null);
-  assert.equal(row.learning.samples, 2);
+  assert.equal(row.learning, null);
+  assert.equal(projected.evidenceQualification, 'legacy_unqualified');
+  assert.equal(projected.legacyReviewRecorded, true);
+  assert.equal(projected.evidenceDecision, 'needs-more-evidence');
   assert.equal(row.approvalRequired, true);
   assert.equal(row.requiredAction, 'major_price_change');
   assert.equal(row.actionType, 'major_price_change');
@@ -83,7 +86,7 @@ test('reorder learning uses the actual evidence kind while retaining inventory s
   assert.equal(row.kind, 'inventory');
   assert.equal(row.evidenceKind, 'reorder');
   assert.equal(row.learning.samples, 4);
-  assert.equal(row.verifiedContributionValue, 12);
+  assert.equal(row.verifiedContributionValue, null);
   assert.equal(row.approvalRequired, true);
   assert.equal(row.expectedContributionProfit, null);
   const foreign = deriveOpportunityQueue(businessState, { learning:{ workspaceId:'another-tenant', priors:[{ kind:'reorder', usableForGuidance:true, samples:8, positiveRatePercent:100 }] } });
@@ -120,7 +123,7 @@ test('unverified, stale, forged, wrongly linked and ambiguous experiment posture
   });
 });
 
-test('verified revenue-only measurements stay unknown and explicit zero stays zero', async t => {
+test('legacy revenue, zero and missing values remain stored but never become qualified posture', async t => {
   for (const [name, metrics, expected] of [
     ['revenue only', { incrementalRevenue:900 }, null],
     ['measured zero contribution', { incrementalRevenue:900, incrementalContribution:0 }, 0],
@@ -130,15 +133,17 @@ test('verified revenue-only measurements stay unknown and explicit zero stays ze
     const opportunity = state.opportunities.find(item => item.kind === 'pricing');
     verified(state, opportunity, metrics);
     const row = project(state).queue.opportunities.find(item => item.id === opportunity.id);
-    assert.equal(row.evidenceVerified, true);
-    assert.equal(row.evidenceDecision, 'needs-more-evidence');
-    assert.equal(row.verifiedContributionValue, expected);
+    assert.equal(row.evidenceVerified, false);
+    assert.equal(row.evidenceDecision, null);
+    assert.equal(row.verifiedContributionValue, null);
+    const stored = state.revenueEngine.experiments.find(item => item.id === row.experimentId);
+    for (const [metric,value] of Object.entries(metrics)) assert.equal(stored.impact[metric], value);
     assert.equal(row.expectedContributionProfit, null);
     assert.equal(row.score, null);
   });
 });
 
-test('negative verification does not promote the candidate over stronger unpriced alternatives', () => {
+test('negative legacy review cannot infer opportunity ranking from an unqualified historical sign', () => {
   const state = business();
   const pricing = state.opportunities.find(item => item.kind === 'pricing');
   const reorder = state.opportunities.find(item => item.kind === 'reorder');
@@ -146,10 +151,15 @@ test('negative verification does not promote the candidate over stronger unprice
   pricing.expectedContributionProfit = 1000;
   pricing.confidence = 1;
   const queue = project(state).queue;
-  assert.ok(queue.opportunities.findIndex(item => item.id === reorder.id) < queue.opportunities.findIndex(item => item.id === pricing.id));
+  assert.ok(queue.opportunities.some(item => item.id === reorder.id));
   const row = queue.opportunities.find(item => item.id === pricing.id);
-  assert.equal(row.evidenceDecision, 'deprioritise');
-  assert.equal(row.verifiedContributionValue, -20);
+  assert.equal(row.evidenceDecision, null);
+  assert.equal(row.verifiedContributionValue, null);
+  assert.equal(row.expectedContributionProfit, null);
+  assert.equal(state.revenueEngine.experiments.find(item => item.id === row.experimentId).impact.incrementalContribution, -20);
+  const positiveCopy = structuredClone(state);
+  positiveCopy.revenueEngine.experiments.find(item => item.id === row.experimentId).impact.incrementalContribution = 99999;
+  assert.deepEqual(project(positiveCopy).queue.opportunities.map(item=>[item.id,item.score]), queue.opportunities.map(item=>[item.id,item.score]), 'unqualified historical sign and magnitude cannot change ranking');
   assert.equal(row.approvalRequired, true);
 });
 

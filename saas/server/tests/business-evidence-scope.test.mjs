@@ -9,7 +9,8 @@ test('foreign containers, rows and nested impacts cannot become local learning o
  approvals:[{id:'bad',status:'approved',executionStatus:'completed',impact:{workspaceId:'foreign',verified:true,incrementalContribution:100}}]};
  const original=structuredClone(state);
  assert.equal(deriveLearning(state).summary.verifiedLearningEvents,0);
- assert.equal(deriveImpact(state).verified.verifiedValue,0);
+ assert.equal(deriveImpact(state).verified.verifiedValue,null);
+ assert.equal(deriveImpact(state).legacy.recordedEvents,0);
  assert.deepEqual(state,original,'scope filtering cannot mutate authoritative records');
 });
 
@@ -17,22 +18,25 @@ test('same-tenant verified sources retain full scope and source values',()=>{
  const id='tenant-'+ 'x'.repeat(170);
  const state={workspace:{id},workRecords:[{workspaceId:id,id:'w',kind:'pricing',status:'COMPLETED',evidence:[{workspace_id:id,impact:{tenantId:id,verified:true,incrementalContribution:10}}]}]};
  assert.equal(deriveLearning(state).workspaceId,id);assert.equal(deriveImpact(state).workspaceId,id);
- assert.equal(deriveImpact(state).verified.verifiedValue,10);
+ assert.equal(deriveImpact(state).verified.verifiedValue,null);
+ assert.equal(deriveImpact(state).legacy.evidence[0].metrics.incrementalContribution,'10');
+ assert.equal(deriveImpact(state).legacy.evidence[0].qualified,false);
  assert.equal(deriveLearning({...state,workspaceId:'foreign'}).summary.verifiedLearningEvents,0);
+ assert.equal(deriveImpact({...state,workspaceId:'foreign'}).legacy.recordedEvents,0);
 });
 
 test('conflicting duplicate outcome identities are excluded rather than choosing favourable first values',()=>{
  const state={workspace:{id:'own'},workRecords:[{id:'one',kind:'pricing',status:'COMPLETED',evidence:[{impact:{id:'same',verified:true,incrementalContribution:100}},{impact:{id:'same',verified:true,incrementalContribution:-50}}]}]};
  const learning=deriveLearning(state), impact=deriveImpact(state);
  assert.equal(learning.summary.verifiedLearningEvents,0);assert.equal(learning.summary.conflictingEvidenceExcluded,1);
- assert.equal(impact.verified.verifiedValue,0);assert.equal(impact.coverage.conflictingEvidenceExcluded,1);
+ assert.equal(impact.verified.verifiedValue,null);assert.equal(impact.coverage.conflictingEvidenceExcluded,1);
 });
 
 test('explicit malformed or foreign scope markers never disappear during aggregation',()=>{
  for(const marker of [{tenant:'foreign'},{workspace:null},{workspace:{}},{tenant:{}}]) {
   const state={workspace:{id:'own'},revenueEngine:{experiments:[{id:'e',...marker,kind:'pricing',status:'completed',impact:{verified:true,incrementalContribution:100}}]}};
   assert.equal(deriveLearning(state).summary.verifiedLearningEvents,0);
-  assert.equal(deriveImpact(state).verified.verifiedValue,0);
+  assert.equal(deriveImpact(state).verified.verifiedValue,null);
  }
 });
 
@@ -40,5 +44,5 @@ test('ambiguous experiment IDs are excluded before verification or terminal-stat
  const state={workspace:{id:'own'},revenueEngine:{experiments:[{id:'same',kind:'pricing',status:'completed',impact:{verified:true,incrementalContribution:100}},{id:'same',kind:'pricing',status:'measured',impact:{verified:false,incrementalContribution:-50}}]}};
  assert.equal(deriveLearning(state).summary.verifiedLearningEvents,0);
  assert.equal(deriveLearning(state).summary.ambiguousSourceRecordsExcluded,2);
- assert.equal(deriveImpact(state).verified.verifiedValue,0);
+ assert.equal(deriveImpact(state).verified.verifiedValue,null);
 });
