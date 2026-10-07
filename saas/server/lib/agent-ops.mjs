@@ -5,7 +5,7 @@ import { runConnectionDoctor } from './connection-doctor.mjs';
 import { addAudit, recordWork } from './events.mjs';
 import { marketingPlannerCycle } from './marketing.mjs';
 import { monitoredSync } from './scheduler.mjs';
-import { configureAiEconomics, ensureAiEconomics, planMonthlyValueGbp, routeAiWork } from './ai-economics.mjs';
+import { configureAiEconomics, ensureAiEconomics, planMonthlyValueGbp, publicAiSettings, routeAiWork } from './ai-economics.mjs';
 import { buildObjectiveReview, objectiveReviewFingerprint } from './objective-review.mjs';
 
 export const AGENT_JOB_TYPES = Object.freeze({
@@ -540,7 +540,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   async function workspaceSnapshot(workspaceId, state) {
     state ||= await store.get(workspaceId);
     const settings = state ? ensureAgentOps(state) : null;
-    const aiSettings = state ? ensureAiEconomics(state) : null;
+    const aiSettings = state ? publicAiSettings(ensureAiEconomics(state)) : null;
     const jobs = await store.listAgentJobs(workspaceId, 100);
     const usage = await store.agentOpsUsage(workspaceId, new Date().toISOString().slice(0,10));
     const now=new Date(), monthStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)).toISOString(), monthEnd=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1)).toISOString();
@@ -584,7 +584,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       const aiSettings = configureAiEconomics(state, input, actor);
       addAudit(state, { type:'agent_ops_operator_updated', actor, detail:{ workspaceId, paused:settings.paused, enabled:settings.enabled, maxConcurrentJobs:settings.maxConcurrentJobs, dailyAiUnitLimit:settings.dailyAiUnitLimit, routingMode:aiSettings.routingMode, monthlyCostLimitUsd:aiSettings.monthlyCostLimitUsd } });
       await store.save(workspaceId, state);
-      return { ...settings, aiEconomics:aiSettings };
+      return { ...settings, aiEconomics:publicAiSettings(aiSettings) };
     });
   }
 
