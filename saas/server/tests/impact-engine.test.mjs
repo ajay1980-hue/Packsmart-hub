@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deriveImpact } from '../lib/impact-engine.mjs';
 
-test('impact engine counts only explicit verified realised evidence',()=>{
+test('legacy measurements remain visible and unqualified without committed publication proof',()=>{
   const state={
     workspace:{id:'tenant-a'},
     subscription:{monthlyPriceGbp:100},
@@ -22,15 +22,21 @@ test('impact engine counts only explicit verified realised evidence',()=>{
     ]
   };
   const result=deriveImpact(state);
-  assert.equal(result.verified.incrementalRevenue,500);
-  assert.equal(result.verified.incrementalContribution,250);
-  assert.equal(result.verified.contributionProtected,30);
-  assert.equal(result.verified.costAvoided,20);
-  assert.equal(result.verified.verifiedValue,300);
-  assert.equal(result.verified.hoursSaved,1.5);
-  assert.equal(result.roi.multiple,3);
-  assert.equal(result.activity.verifiedImpactEvents,3);
+  assert.deepEqual(result.verified, {incrementalRevenue:null,incrementalContribution:null,contributionProtected:null,costAvoided:null,verifiedValue:null,hoursSaved:null});
+  assert.deepEqual(result.roi,{subscriptionCost:null,verifiedValue:null,multiple:null});
+  assert.equal(result.activity.verifiedImpactEvents,0);
+  assert.equal(result.activity.completedWork,2);
+  assert.equal(result.activity.completedAutomations,1);
+  assert.equal(result.activity.completedExperiments,1);
+  assert.equal(result.legacy.recordedEvents,4);
+  assert.equal(result.legacy.reviewedEvents,3);
+  assert.equal(result.legacy.qualified,false);
+  assert.equal(result.evidence.find(row=>row.sourceId==='w1').metrics.incrementalContribution,'180');
+  assert.equal(result.evidence.find(row=>row.sourceId==='w1').metrics.minutesSaved,'90');
+  assert.ok(result.evidence.every(row=>row.qualified===false && row.currency===null && row.window===null));
+  assert.equal(result.outcomeCoverage.publicationProofAvailable,false);
   assert.equal(result.safeguards.forecastsCountedAsImpact,false);
+  assert.equal(state.workRecords[0].evidence[0].impact.incrementalContribution,180,'stored legacy amounts are preserved');
 });
 
 test('estimated approval financial impact and recommendations never become realised ROI',()=>{
@@ -44,8 +50,8 @@ test('estimated approval financial impact and recommendations never become reali
     opportunities:[{id:'o1',expectedContributionProfit:1000,score:800}]
   };
   const result=deriveImpact(state);
-  assert.equal(result.verified.verifiedValue,0);
-  assert.equal(result.roi.multiple,0);
+  assert.equal(result.verified.verifiedValue,null);
+  assert.equal(result.roi.multiple,null);
   assert.equal(result.activity.verifiedImpactEvents,0);
 });
 
@@ -60,7 +66,32 @@ test('impact evidence is tenant-local and duplicate evidence IDs are not double 
   };
   const result=deriveImpact(state);
   assert.equal(result.workspaceId,'tenant-c');
-  assert.equal(result.verified.costAvoided,25);
-  assert.equal(result.activity.verifiedImpactEvents,1);
+  assert.equal(result.verified.costAvoided,null);
+  assert.equal(result.activity.verifiedImpactEvents,0);
+  assert.equal(result.legacy.recordedEvents,1);
+  assert.equal(result.evidence[0].metrics.costAvoided,'25');
+  assert.equal(result.evidence[0].metrics.incrementalContribution,null);
   assert.equal(JSON.stringify(result).includes('tenant-a'),false);
+});
+
+test('qualification does not trim or relabel malformed or foreign root scope',()=>{
+  for (const state of [{workspace:{id:' tenant-a '}},{workspace:{id:'tenant-a'},tenantId:'foreign'},{workspace:{id:'tenant-a',tenantId:'foreign'}}]) {
+    assert.throws(()=>deriveImpact(state,{outcomeSnapshot:{versions:[],publicationBoundary:{}}}),{code:'WORKSPACE_MISMATCH'});
+  }
+});
+
+test('legacy missing and explicit zero stay distinguishable without becoming qualified sums',()=>{
+  const state={workspace:{id:'tenant-zero'},revenueEngine:{experiments:[
+    {id:'zero',status:'completed',impact:{verified:true,incrementalContribution:0,minutesSaved:0}},
+    {id:'unknown',status:'completed',impact:{verified:true}},
+    {id:'negative',status:'completed',impact:{verified:true,incrementalContribution:'-0.000001'}}
+  ]}};
+  const before=structuredClone(state),result=deriveImpact(state);
+  assert.equal(result.legacy.recordedEvents,3);
+  assert.equal(result.evidence.find(row=>row.sourceId==='zero').metrics.incrementalContribution,'0');
+  assert.equal(result.evidence.find(row=>row.sourceId==='zero').metrics.minutesSaved,'0');
+  assert.equal(result.evidence.find(row=>row.sourceId==='unknown').metrics.incrementalContribution,null);
+  assert.equal(result.evidence.find(row=>row.sourceId==='negative').metrics.incrementalContribution,'-0.000001');
+  assert.equal(result.verified.incrementalContribution,null); assert.equal(result.verified.hoursSaved,null);
+  assert.deepEqual(state,before);
 });

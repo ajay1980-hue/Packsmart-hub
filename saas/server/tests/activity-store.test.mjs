@@ -82,7 +82,7 @@ test('normal saves retain original request volume and report reporting/archive w
   assert.ok(result.db.operations.reporting_write>0);assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted,0);
   assert.equal(result.db.requestBody.bytes,fake.calls.reduce((n,c)=>n+Buffer.byteLength(c.body),0));
   const before=fake.calls.length;await store.save(WS,s);
-  assert.equal(fake.calls.length-before,3,'Unchanged save remains2 CAS writes plus1 existing variants read, with no meter writes');
+  assert.equal(fake.calls.length-before,3,'Unchanged save remains one primary CAS, one narrow reporting CAS and one existing variants read, with no meter writes');
   assert.equal(store.activitySnapshot(OTHER).db.attempted,null);
 });
 

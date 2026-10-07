@@ -172,3 +172,23 @@ test('real app aborts on close/logout and ignores stale 401 while retaining curr
   assert.ok(calls.filter(c=>c.route.startsWith('/api/activity')).every(c=>c.route==='/api/activity'&&!c.config.body&&!c.config.method));
   activity=deferred();button.click();activity.resolve(Response.json({code:'AUTH_REQUIRED'},{status:401}));await until(()=>$('app-shell').classList.contains('hidden'));assert.equal(root.textContent,'');assert.equal(panel.open,false);
 });
+
+test('reporting retry counters stay visibly separate from primary saves and full-state size observations',async t=>{
+  const meter=createActivityMeter({instanceId:'reporting-ui',now:()=>Date.parse('2026-10-07T00:00:00Z')});
+  for(const retryKind of ['reporting_statement_cancelled','reporting_network_reconciled']){
+    const token=meter.beginDbAttempt({workspaceId,operation:'reporting_commit',method:'POST',requestBodyBytes:364,retryKind});
+    meter.finishDbAttempt(token,{outcome:'succeeded',responseBodyBytes:30});
+  }
+  meter.observeHotState(workspaceId,{kind:'confirmed',bytes:1400000});
+  const h=await harness(t,{snapshot:meter.snapshot(workspaceId)});await h.open();
+  assert.equal(h.value(h.root,'Reporting saves'),'2');
+  assert.equal(h.value(h.root,'Workspace saves'),'0');
+  assert.equal(h.value(h.root,'Reporting retried after a cancelled save'),'1');
+  assert.equal(h.value(h.root,'Reporting retried after checking an uncertain save'),'1');
+  assert.equal(h.value(h.root,'Retried after a cancelled save'),'0');
+  assert.equal(h.value(h.root,'Retried after checking an uncertain save'),'0');
+  const confirmed=h.section('Workspace snapshot sizes').querySelectorAll('article')[1];
+  assert.equal(h.value(confirmed,'Recorded size'),'1,400,000 bytes');
+  assert.equal(h.value(confirmed,'Change from previous'),'Unknown');
+  assert.match(h.section('Recorded data sizes').textContent,/728 bytes/);
+});

@@ -112,9 +112,10 @@ test('safe tag preview is read-only and execution refuses a changed before-state
   const calls=[];const service={shopifyConfig:()=>({domain:'test.myshopify.com'}),shopifyGraphql:async(query)=>{calls.push(query);return{product:{id:state.products[0].id,title:'Test product',tags:['existing']}};}};
   const before=JSON.stringify(state),preview=await previewShopifyTagTest(state,state.products[0].id,service);assert.equal(JSON.stringify(state),before);assert.ok(calls.every(q=>q.startsWith('query ')));assert.deepEqual(preview.before,['existing']);assert.equal(preview.proposed.length,2);
   state.connectionSettings={shopify:{permissionMode:'approval_gated'}};
-  const write=proposeConnectionWrite(state,'shopify',{...preview.request,requestId:'acceptance-test-request-1'},state.users[0].id);const approval=state.approvals.find(a=>a.id===write.approvalId);approval.status='approved';
+  const write=proposeConnectionWrite(state,'shopify',{...preview.request,requestId:'acceptance-test-request-1'},state.users[0].id);const approval=state.approvals.find(a=>a.id===write.approvalId);approval.status='approved';approval.decidedBy=state.users[0].id;
   service.shopifyGraphql=async()=>({product:{id:state.products[0].id,tags:['changed']}});
-  await assert.rejects(executeConnectionWrite(state,write.id,state.users[0].id,service,async()=>{}),{code:'WRITE_BASELINE_CHANGED'});assert.equal(write.status,'pending_approval');
+  state._revision='synthetic-baseline-revision';
+  await assert.rejects(executeConnectionWrite(state,write.id,state.users[0].id,service,async()=>{}, {durableStore:true,loadFreshState:async()=>state,actorSession:{workspaceId:state.workspace.id,userId:state.users[0].id,sessionVersion:state.users[0].sessionVersion}}),{code:'WRITE_BASELINE_CHANGED'});assert.equal(write.status,'pending_approval');
 });
 
 test('asynchronous password verification keeps existing scrypt hashes compatible',async()=>{

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { derivePortfolioAllocation } from '../lib/portfolio-engine.mjs';
 
-test('portfolio ranks verified contribution ahead of unverified ideas without inventing spend efficiency', () => {
+test('portfolio does not rank legacy contribution flags as qualified financial evidence', () => {
   const state={
     workspace:{id:'tenant-portfolio'},
     opportunities:[
@@ -14,8 +14,12 @@ test('portfolio ranks verified contribution ahead of unverified ideas without in
     ]}
   };
   const result=derivePortfolioAllocation(state);
-  assert.equal(result.portfolio[0].opportunityId,'o1');
-  assert.equal(result.portfolio[0].verifiedContribution,120);
+  assert.equal(result.portfolio[0].opportunityId,'o2','ordinary recorded confidence is not overridden by an unqualified historical amount');
+  assert.ok(result.portfolio.every(row=>row.verifiedContribution===null));
+  assert.equal(result.coverage.verifiedContribution,0);
+  assert.equal(state.revenueEngine.experiments[0].impact.incrementalContribution,120);
+  const changed=structuredClone(state); changed.revenueEngine.experiments[0].impact.incrementalContribution=-999999;
+  assert.deepEqual(derivePortfolioAllocation(changed).portfolio,result.portfolio,'legacy sign and amount never drive allocation');
   assert.equal(result.portfolio[0].contributionPerPound,null);
   assert.equal(result.portfolio[0].contributionPerHour,null);
   assert.equal(result.allocation.nextPound,null);
@@ -23,7 +27,7 @@ test('portfolio ranks verified contribution ahead of unverified ideas without in
   assert.equal(result.safeguards.unknownCostDoesNotBecomeZero,true);
 });
 
-test('next pound and next hour use explicit execution cost and effort only', () => {
+test('known planned costs and effort cannot turn legacy historical contribution into efficiency', () => {
   const state={
     workspace:{id:'tenant-efficiency'},
     opportunities:[
@@ -36,10 +40,12 @@ test('next pound and next hour use explicit execution cost and effort only', () 
     ]}
   };
   const result=derivePortfolioAllocation(state);
-  assert.equal(result.allocation.nextPound.opportunityId,'o1');
-  assert.equal(result.allocation.nextPound.verifiedContributionPerPound,5);
-  assert.equal(result.allocation.nextHour.opportunityId,'o2');
-  assert.equal(result.allocation.nextHour.verifiedContributionPerHour,150);
+  assert.equal(result.allocation.nextPound,null);
+  assert.equal(result.allocation.nextHour,null);
+  assert.deepEqual(result.portfolio.map(row=>[row.opportunityId,row.executionCost,row.effortHours]),[['o1',20,4],['o2',50,1]]);
+  assert.ok(result.portfolio.every(row=>row.contributionPerPound===null && row.contributionPerHour===null && row.verifiedContribution===null));
+  assert.equal(result.coverage.poundEfficiencyReady,0); assert.equal(result.coverage.hourEfficiencyReady,0);
+  assert.ok(result.portfolio.every(row=>row.approvalRequired),'known positive costs retain approval gates');
 });
 
 test('revenue alone never becomes contribution evidence', () => {

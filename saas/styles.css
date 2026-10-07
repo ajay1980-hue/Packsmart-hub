@@ -1672,6 +1672,34 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .automation-history-evidence small { color: var(--muted); }
 @media (max-width: 600px) { .automation-history-heading { align-items: flex-start; } }
 
+/* Explicit, bounded business-result reads and owner review. */
+.business-outcomes-panel { min-width: 0; overflow-wrap: anywhere; border-color: rgba(218,172,74,.3); }
+.business-outcomes-panel > summary { cursor: pointer; }
+.business-outcomes-panel > summary h2 { display: inline-block; margin: .5rem .8rem .5rem 0; }
+.business-outcomes-panel > summary .eyebrow { display: block; }
+.business-outcomes-panel h3 { margin-top: 1.3rem; }
+.business-outcomes-panel h4 { margin: .5rem 0; }
+.business-outcomes-panel button { max-width: 100%; white-space: normal; }
+.business-outcomes-panel input, .business-outcomes-panel select, .business-outcomes-panel textarea { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.outcome-record, .outcome-current, .outcome-review { border: 1px solid var(--line); border-radius: 12px; padding: 1rem; margin: .8rem 0; min-width: 0; }
+.outcome-review { border-color: rgba(218,172,74,.55); background: rgba(218,172,74,.04); }
+.outcome-facts { display: grid; gap: .6rem; font-size: .9rem; }
+.outcome-facts > div { display: grid; grid-template-columns: minmax(8rem,1fr) minmax(0,2fr); gap: .8rem; }
+.outcome-facts dt { color: var(--muted); }
+.outcome-facts dd { margin: 0; min-width: 0; }
+.outcome-selection { display: grid; grid-template-columns: minmax(0,1fr); gap: .65rem; margin: 1.5rem 0; }
+.outcome-selection button { justify-self: start; }
+.outcome-actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.outcome-attest { display: flex; align-items: flex-start; gap: .7rem; margin: 1rem 0; line-height: 1.5; }
+.outcome-attest input { width: auto; flex: 0 0 auto; margin-top: .3rem; }
+.outcome-description { white-space: pre-wrap; }
+.outcome-error { color: #f5bc89; }
+@media (max-width: 600px) {
+  .outcome-facts > div { grid-template-columns: minmax(0,1fr); gap: .2rem; }
+  .outcome-record, .outcome-current, .outcome-review { padding: .75rem; }
+  .business-outcomes-panel .record-form { grid-template-columns: minmax(0,1fr); }
+  .business-outcomes-panel .record-form .wide { grid-column: 1; }
+}
 /* Bounded, on-demand workspace activity observations. */
 .activity-panel { min-width: 0; overflow-wrap: anywhere; }
 .activity-panel > summary { cursor: pointer; }
