@@ -13,6 +13,41 @@ import { createSessionToken } from '../lib/security.mjs';
 import { createBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 
+async function graphTypography(page) {
+  return page.locator('#business-graph-result section.status-list').evaluateAll(sections => sections.flatMap(section =>
+    [...section.children].map(row => {
+      const label = row.querySelector('span'), value = row.querySelector('b');
+      const measure = element => {
+        const style = getComputedStyle(element), range = document.createRange(), bounds = element.getBoundingClientRect();
+        range.selectNodeContents(element);
+        const textRects = [...range.getClientRects()].filter(rect => rect.width && rect.height);
+        const rowBounds = row.getBoundingClientRect();
+        return { text: element.textContent, fontSize: parseFloat(style.fontSize), whiteSpace: style.whiteSpace,
+          overflowX: style.overflowX, overflowY: style.overflowY, textOverflow: style.textOverflow,
+          lineCount: new Set(textRects.map(rect => Math.round(rect.top * 100) / 100)).size,
+          width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight,
+          textInside: textRects.every(rect => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 &&
+            rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1),
+          insideRow: bounds.left >= rowBounds.left - 1 && bounds.right <= rowBounds.right + 1 &&
+            bounds.top >= rowBounds.top - 1 && bounds.bottom <= rowBounds.bottom + 1 };
+      };
+      return { label: measure(label), value: measure(value) };
+    })));
+}
+
+function assertReadableRows(rows, width, { doubled = false } = {}) {
+  assert.ok(rows.length > 0, 'expanded measurement, result and snapshot rows were inspected');
+  for (const row of rows) for (const item of [row.label, row.value]) {
+    const context = `${width}px${doubled ? ' doubled text' : ''}: ${JSON.stringify(row)}`;
+    assert.ok(item.fontSize >= (doubled ? 28 : 14), 'nested evidence text stays readable: ' + context);
+    assert.notEqual(item.whiteSpace, 'nowrap', 'larger text must be allowed to wrap: ' + context);
+    assert.ok(!['hidden', 'clip'].includes(item.overflowX) && !['hidden', 'clip'].includes(item.overflowY), 'text cannot be clipped: ' + context);
+    assert.notEqual(item.textOverflow, 'ellipsis', 'exact evidence cannot be shortened: ' + context);
+    assert.ok(item.width + 1 >= item.scrollWidth && item.height + 1 >= item.scrollHeight, 'text fits its full visible box: ' + context);
+    assert.ok(item.textInside && item.insideRow, 'all text remains inside its visible row: ' + context);
+  }
+}
+
 const NOW = '2026-10-07T12:00:00.000Z', WORKSPACE = 'graph-preview';
 const digest = value => createHash('sha256').update(value).digest('hex');
 function publication(index, { experimentId, amount, currency = 'GBP', withdrawn = false }) {
@@ -44,18 +79,22 @@ try {
   state.products = [{ id: 'p1', provider: 'shopify', title: 'Packaging evidence fixture', status: 'active', variants: [{ id: 'v1', sku: 'PS-1', price: 10, inventory: 3, available: true }] }];
   state.revenueEngine.experiments = [
     { id: 'browser_experiment_one', status: 'completed', impact: { verified: true, incrementalContribution: 500 } },
-    { id: 'browser_experiment_two', status: 'completed' }
+    { id: 'browser_experiment_two', status: 'completed' },
+    { id: 'browser_long_experiment_one', status: 'completed' },
+    { id: 'browser_long_experiment_two', status: 'completed' }
   ];
   const rows = [publication(1, { experimentId: 'browser_experiment_one', amount: '-12.340001' }),
     publication(2, { experimentId: 'browser_archived_experiment', amount: '0', currency: 'USD' }),
-    publication(3, { experimentId: 'browser_experiment_two', amount: '99', withdrawn: true })];
+    publication(3, { experimentId: 'browser_experiment_two', amount: '99', withdrawn: true }),
+    publication(4, { experimentId: 'browser_long_experiment_one', amount: '999999999999999999.123456', currency: 'EUR' }),
+    publication(5, { experimentId: 'browser_long_experiment_two', amount: '1', currency: 'EUR' })];
   const persistence = createBusinessOutcomePersistence({ now: () => new Date(NOW), request: async (route, options) => {
     currentReads++;
     assert.ok(route.startsWith('runvara_business_outcome_heads?workspace_id=eq.graph-preview&'));
     assert.ok(route.endsWith('&order=outcome_id.asc&limit=51')); assert.equal(options.includeResponseMetadata, true);
     assert.doesNotMatch(route, /source_measurement|source_action/); assert.equal(options.method || 'GET', 'GET');
     if (readBarrier) { const barrier = readBarrier; readBarrier = null; await new Promise(resolve => { barrier.release = resolve; }); }
-    return { data: structuredClone(rows), contentRange: '0-2/3' };
+    return { data: structuredClone(rows), contentRange: '0-4/5' };
   } });
   server.packsmart.store.businessOutcomeSummary = workspaceId => persistence.current(workspaceId);
   await server.packsmart.store.save(state.workspace.id, state);
@@ -97,7 +136,7 @@ try {
     await result.getByText('Complete current-result read', { exact: true }).waitFor();
     assert.equal(calls.length, 1); assert.equal(currentReads, readsBefore + 1, 'one explicit request reads one current-head snapshot');
     assert.equal(new URL(calls[0]).search, '?outcomes=current');
-    assert.match(await result.textContent(), /Published results loaded2/); assert.match(await result.textContent(), /Withdrawn results loaded1/);
+    assert.match(await result.textContent(), /Published results loaded4/); assert.match(await result.textContent(), /Withdrawn results loaded1/);
     assert.match(await result.textContent(), /-12.340001/); assert.match(await result.textContent(), /GBP/); assert.match(await result.textContent(), /USD/);
     assert.match(await result.textContent(), /Exact scoped amount0/); assert.match(await result.textContent(), /2026-10-01T00:00:00.000Z/);
     assert.match(await result.textContent(), /2026-10-06T00:00:00.000Z/); assert.match(await result.textContent(), /independent, not atomic or synchronized/);
@@ -107,7 +146,45 @@ try {
     const dimensions = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, width: innerWidth }));
     assert.ok(dimensions.scroll <= dimensions.width + 2, `graph viewport overflow at ${width}px: ${JSON.stringify(dimensions)}`);
     assert.deepEqual(errors, []);
+    // Expand each existing evidence block so actual result, amount and snapshot
+    // typography is checked, including long opaque version/snapshot references.
+    await result.locator('details').evaluateAll(elements => elements.forEach(element => { element.open = true; }));
+    const normal = await graphTypography(page);
+    assertReadableRows(normal, width);
+    const ordinaryAmounts = normal.filter(row => row.label.text === 'Exact scoped amount' && ['-12.340001', '0'].includes(row.value.text));
+    assert.equal(ordinaryAmounts.length, 2, 'ordinary exact amounts are present unchanged');
+    const timestamps = normal.filter(row => /^(Observation window|Workspace read completed|Outcome read completed)/.test(row.label.text));
+    assert.equal(timestamps.length, 8, 'three exact observation windows and both independent snapshot times are visible');
+    for (const row of [...ordinaryAmounts, ...timestamps]) assert.equal(row.value.lineCount, 1, `ordinary exact evidence stays on one line at ${width}px: ${JSON.stringify(row)}`);
+    const longAmount = normal.find(row => row.label.text === 'Exact scoped amount' && row.value.text === '1000000000000000000.123456');
+    assert.ok(longAmount, 'a grouped exact amount longer than one candidate amount is preserved');
     await details.screenshot({ path: `/tmp/runvara-business-graph-${width}.png` });
+
+    // Double the rendered labels and values, matching a larger-text preference
+    // without changing unrelated app typography. Natural wrapping is expected.
+    await result.locator('section.status-list > div > span, section.status-list > div > b').evaluateAll(elements => {
+      for (const element of elements) {
+        element.dataset.normalFontSize = element.style.fontSize;
+        element.style.fontSize = `${parseFloat(getComputedStyle(element).fontSize) * 2}px`;
+      }
+    });
+    const doubled = await graphTypography(page);
+    assertReadableRows(doubled, width, { doubled: true });
+    assert.deepEqual(doubled.map(row => [row.label.text, row.value.text]), normal.map(row => [row.label.text, row.value.text]), 'enlarged text preserves every exact value and label');
+    if (width < 600) {
+      assert.ok(doubled.some(row => row.label.text.startsWith('Observation window') && row.value.lineCount > 1), 'phone timestamps wrap naturally at doubled text size');
+      assert.ok(doubled.find(row => row.value.text === longAmount.value.text).value.lineCount > 1, 'long exact amounts wrap without losing digits at doubled text size');
+    }
+    const enlargedDimensions = await page.evaluate(() => {
+      const inspector = document.querySelector('.business-graph-inspector');
+      return { scroll: document.documentElement.scrollWidth, width: innerWidth, panelWidth: inspector.clientWidth, panelScroll: inspector.scrollWidth };
+    });
+    assert.ok(enlargedDimensions.scroll <= enlargedDimensions.width + 2 && enlargedDimensions.panelScroll <= enlargedDimensions.panelWidth + 1,
+      `doubled graph text overflows at ${width}px: ${JSON.stringify(enlargedDimensions)}`);
+    await details.screenshot({ path: `/tmp/runvara-business-graph-large-text-${width}.png` });
+    await result.locator('section.status-list > div > span, section.status-list > div > b').evaluateAll(elements => {
+      for (const element of elements) { element.style.fontSize = element.dataset.normalFontSize; delete element.dataset.normalFontSize; }
+    });
 
     const closedRead = {}; readBarrier = closedRead;
     await button.click(); await until(() => Boolean(closedRead.release));

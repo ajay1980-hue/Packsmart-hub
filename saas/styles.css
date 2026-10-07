@@ -493,6 +493,21 @@ main {
 .status-list span { color: var(--muted); }
 .status-list b { max-width: 65%; text-align: right; overflow-wrap: anywhere; }
 
+/* Reviewed measurements keep exact values readable without narrowing labels
+   and amounts into competing columns on phones. Larger user text can wrap. */
+.business-graph-inspector section.status-list > div { font-size: max(.875rem, 14px); line-height: 1.5; }
+@media (max-width: 600px) {
+  .business-graph-inspector section.status-list > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: .25rem;
+    padding: .6rem 0;
+  }
+  .business-graph-inspector section.status-list > div > span { overflow-wrap: normal; }
+  .business-graph-inspector section.status-list > div > b { max-width: 100%; min-width: 0; text-align: left; white-space: normal; }
+}
+
 .channel-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
