@@ -34,8 +34,8 @@ export function expectedReadScopes(provider, areas) {
   return []; // eBay/TikTok grants are checked by their existing read adapters.
 }
 
-export function classifyConnectionIssue(state, provider, now = new Date()) {
-  const status = state.integrationStatus?.[provider] || {}, record = recordFor(state, provider);
+export function classifyConnectionIssue(state, provider, now = new Date(), record = recordFor(state, provider)) {
+  const status = state.integrationStatus?.[provider] || {};
   const code = String(state.connectionAuthAttention?.[provider]?.code || status.lastError || record?.lastError || '');
   const first = state.connectionFirstSync?.[provider];
   const failures = Object.values(first?.failures || {});
@@ -61,40 +61,91 @@ export function classifyConnectionIssue(state, provider, now = new Date()) {
   return null;
 }
 
-export function connectionHealth(state, channel, readiness, { now = new Date(), persistence = {}, scheduler = {} } = {}) {
-  const record = recordFor(state, channel.id), settings = channel.settings;
+// These are projections of saved evidence, never live access or coverage checks.
+function timestampEvidence(value, now, { allowFuture = false } = {}) {
+  if (value == null || value === '') return { at: null, state: 'missing' };
+  const iso = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/.test(value);
+  const time = iso ? Date.parse(value) : NaN;
+  if (!Number.isFinite(time) || new Date(`${value.slice(0, 10)}T00:00:00Z`).toISOString().slice(0, 10) !== value.slice(0, 10)) return { at: null, state: 'invalid' };
+  if (!allowFuture && time > now.getTime()) return { at: null, state: 'future' };
+  return { at: new Date(time).toISOString(), state: 'valid' };
+}
+
+function readFreshnessEvidence(state, channel, now) {
+  const { settings, id } = channel;
+  const scheduled = settings.autoSync === true && !settings.disconnected && [15, 30, 60, 180, 360, 1440].includes(settings.frequencyMinutes);
+  // Preserve the existing warning window, tied only to the saved read schedule.
+  const windowMinutes = scheduled ? Math.max(2 * settings.frequencyMinutes, 60) : null;
+  const areas = CONNECTORS[id].areas.filter(area => settings.areas.includes(area)).map(area => {
+    const timestamp = timestampEvidence(state.integrationStatus?.[id]?.areaSuccessAt?.[area], now);
+    return { area, lastSuccessfulSyncAt: timestamp.at, timestampStatus: timestamp.state,
+      dataFreshness: !scheduled || !timestamp.at ? 'not_measured' : now.getTime() - Date.parse(timestamp.at) > windowMinutes * 60000 ? 'stale' : 'current' };
+  });
+  const measured = areas.filter(area => area.timestampStatus === 'valid').length;
+  return { mode: settings.autoSync === false || settings.disconnected ? 'manual' : scheduled ? 'scheduled' : 'unknown',
+    source: 'integration_area_success_at', windowMinutes,
+    selectedAreaEvidence: measured && measured === areas.length ? 'all_recorded' : measured ? 'some_recorded' : 'none_recorded', areas };
+}
+
+export function connectionHealth(state, channel, readiness, { now = new Date(), persistence = {}, scheduler = {}, connectionRecord = recordFor(state, channel.id) } = {}) {
+  const record = connectionRecord, settings = channel.settings;
   const expected = expectedReadScopes(channel.id, settings.areas);
   const granted = record?.metadata?.grantedScopes;
   const missing = Array.isArray(granted) && granted.length ? expected.filter(scope => !granted.includes(scope) && !granted.includes(scope.replace(/^read_/, 'write_'))) : [];
-  const last = Date.parse(channel.lastSuccessfulSyncAt || '');
-  const stale = settings.autoSync && Number.isFinite(last) && now.getTime() - last > Math.max(2 * settings.frequencyMinutes, 60) * 60000;
-  const expiry = Date.parse(channel.accessExpiresAt || '');
-  const expiresSoon = Number.isFinite(expiry) && expiry - now.getTime() < 24 * 3600000;
-  let issue = classifyConnectionIssue(state, channel.id, now);
-  let status = 'Healthy', message = 'Access and the last completed read are healthy.', action = null;
+  const last = timestampEvidence(channel.lastSuccessfulSyncAt, now), checked = timestampEvidence(channel.lastCheckedAt, now);
+  const freshnessEvidence = readFreshnessEvidence(state, channel, now);
+  const dataFreshness = freshnessEvidence.areas.some(area => area.dataFreshness === 'stale') ? 'stale'
+    : freshnessEvidence.areas.length && freshnessEvidence.areas.every(area => area.dataFreshness === 'current') ? 'current' : 'not_measured';
+  const expiry = timestampEvidence(channel.accessExpiresAt, now, { allowFuture: true });
+  const accessExpiry = !expiry.at ? 'unknown' : Date.parse(expiry.at) <= now.getTime() ? 'expired'
+    : Date.parse(expiry.at) - now.getTime() < 24 * 3600000 ? 'expiring' : 'not_expiring';
+  const expiresSoon = accessExpiry === 'expiring';
+  const issue = classifyConnectionIssue(state, channel.id, now, record);
+  const authIssue = issue && ['reconnect_required', 'account_mismatch', 'missing_scope'].includes(issue.kind);
+  // Read failures must not hide a separate saved authorization failure. Keep
+  // this precedence local to the projection; the recovery classifier is shared.
+  const authCodes = [state.connectionAuthAttention?.[channel.id]?.code, state.integrationStatus?.[channel.id]?.lastError, record?.lastError].join(' ');
+  const authFailure = record?.status === 'auth_expired' || /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED|ACCESS_DENIED|ACCOUNT_MISMATCH|ACCOUNT_UNCONFIRMED|PERMISSION|SCOPE/.test(authCodes);
+  const authentication = channel.configured && !settings.disconnected && (accessExpiry === 'expired'
+    || Boolean(state.connectionAuthAttention?.[channel.id]) || missing.length > 0 || authFailure
+    || ['auth_expired', 'error', 'disconnected'].includes(record?.status)
+    || authIssue) ? 'attention' : 'not_verified';
+  let status = 'Healthy', message = 'Recorded reads are within the saved sync freshness window. Current access has not been checked by this view.', action = null;
   if (settings.disconnected) { status = 'Disconnected'; message = 'This channel is disconnected. Previously imported data is retained.'; action = {action:'connect',label:`Connect ${channel.name}`}; }
   else if (!channel.configured) { status = readiness.oauthReady ? 'Disconnected' : 'Setup pending'; message = readiness.restrictionMessage || 'Connect this account to begin reading your business data.'; action = {action:readiness.oauthReady?'connect':'setup-request',label:readiness.oauthReady?`Connect ${channel.name}`:'Request access'}; }
-  else if (issue) { status = ['reconnect_required','account_mismatch','missing_scope'].includes(issue.kind) ? 'Reconnect required' : issue.kind === 'provider_unavailable' ? 'Provider unavailable' : 'Degraded'; message = issue.message; action = issue.action; }
+  else if (authIssue) { status = 'Reconnect required'; message = issue.message; action = issue.action; }
+  else if (authFailure) { status = 'Reconnect required'; message = 'The saved connection reports an access problem. Sign in again to check access. Previous data is retained.'; action = {action:'reconnect',label:`Reconnect ${channel.name}`}; }
   else if (missing.length) { status = 'Attention needed'; message = 'Some selected data may need additional access. Review access before enabling those reads.'; action = {action:'reconnect',label:`Review ${channel.name} access`}; }
+  else if ((expiresSoon || accessExpiry === 'expired') && !readiness.refreshSupported) { status = 'Reconnect required'; message = accessExpiry === 'expired' ? 'Your saved access has expired. Sign in again to check access.' : 'Your saved access is expiring. Sign in again to keep data up to date.'; action = {action:'reconnect',label:`Reconnect ${channel.name}`}; }
+  else if (accessExpiry === 'expired' || expiresSoon) { status = 'Attention needed'; message = accessExpiry === 'expired' ? 'Your saved access has expired. Refresh access to check whether it can be renewed.' : 'Saved access expires within 24 hours. Refresh access to check renewal.'; action = {action:'refresh',label:'Refresh access'}; }
+  else if (issue) {
+    status = issue.kind === 'provider_unavailable' ? 'Provider unavailable' : 'Degraded'; message = issue.message; action = issue.action;
+    if (!settings.autoSync && issue.repair === 'read') {
+      const reason = { interrupted: 'A previous read was interrupted.', rate_limit: 'The provider is limiting requests.', provider_unavailable: 'The provider returned a temporary service error.', temporary_read_failure: 'A read was temporarily interrupted.' };
+      message = `${reason[issue.kind]} Automatic syncing is off. Previous data is retained; retry manually when ready.`;
+      action = { action: 'sync', label: 'Retry selected data' };
+    }
+  }
   else if (channel.id === 'google_youtube' && Array.isArray(state.channelData?.google_youtube?.channels) && !state.channelData.google_youtube.channels.length) { status = 'Attention needed'; message = 'Google sign-in succeeded, but this account has no authorised YouTube channel.'; action = {action:'reconnect',label:'Connect the account with your YouTube channel'}; }
   else if (channel.id === 'meta' && record?.metadata?.assets?.pages?.length === 0) { status = 'Attention needed'; message = 'Facebook sign-in succeeded, but no business Page was returned. Existing data is safe.'; action = {action:'reconnect',label:'Reconnect and select your Facebook Page'}; }
-  else if (expiresSoon && !readiness.refreshSupported) { status = 'Reconnect required'; message = 'Your saved access is expiring. Sign in again to keep data up to date.'; action = {action:'reconnect',label:`Reconnect ${channel.name}`}; }
-  else if (stale) { status = 'Attention needed'; message = 'Your imported data is older than the expected sync interval. Previous data is safe.'; action = {action:'sync',label:'Refresh your data'}; }
-  else if (!channel.lastSuccessfulSyncAt) { status = 'Attention needed'; message = channel.progress ? 'Runvara is reading your selected data.' : 'The account is connected. Its first read has not completed yet.'; action = channel.progress ? null : {action:'sync',label:'Start first read'}; }
-  else if (expiresSoon) { status = 'Attention needed'; message = 'Access expires soon. Runvara will attempt a safe renewal.'; }
+  else if (authentication === 'attention') { status = 'Attention needed'; message = 'The saved connection needs an access check. An earlier successful check does not confirm current access.'; action = {action:'test',label:'Test connection'}; }
+  else if (dataFreshness === 'stale') { status = 'Attention needed'; message = 'Some selected data is older than the saved sync freshness window. Previous data is retained.'; action = {action:'sync',label:'Refresh your data'}; }
+  else if (freshnessEvidence.mode === 'manual') { status = 'Attention needed'; message = 'Automatic syncing is off. Freshness is not assessed against a schedule; refresh selected data when needed.'; action = {action:'sync',label:'Refresh your data'}; }
+  else if (dataFreshness === 'not_measured') { status = 'Attention needed'; message = channel.progress ? 'Runvara is reading selected data. Freshness is not yet confirmed for every selected area.' : 'Freshness is unknown for some selected data. A saved sync time does not confirm that every selected area was read.'; action = channel.progress ? null : {action:'sync',label:'Refresh selected data'}; }
   const doctor = state.connectionDoctor?.[channel.id];
-  if (doctor?.exhausted && issue?.repair) { status = 'Attention needed'; message = 'Repeated safe retries could not restore this read. Your existing data is safe.'; action = {action:'sync',label:'Retry this connection'}; }
+  if (doctor?.exhausted && issue?.repair && authentication !== 'attention' && !expiresSoon) { status = 'Attention needed'; message = 'Repeated safe retries could not restore this read. Your existing data is safe.'; action = {action:'sync',label:'Retry this connection'}; }
   if (persistence.primaryPersistence === false) { status = 'Degraded'; message = 'Runvara cannot confirm that recent changes are saved. Existing saved data is retained; support needs to restore storage.'; action = {action:'open',label:'Check again shortly'}; }
   else if (channel.configured && scheduler.lastError && status === 'Healthy') { status = 'Attention needed'; message = 'Automatic checks need attention. Your saved data is safe; you can refresh it manually while Runvara recovers.'; action = {action:'sync',label:'Refresh your data'}; }
   return { status, message, action, severity: status === 'Healthy' ? 'informational' : issue?.severity || 'important',
     cause: issue?.kind || (status === 'Setup pending' ? 'provider_setup_pending' : null),
-    authentication: issue && ['reconnect_required','account_mismatch'].includes(issue.kind) ? 'attention' : record?.lastCheckedAt ? 'verified' : 'not_verified',
+    authentication, authenticationEvidence: { source: 'connection_record', lastSuccessfulCheckAt: checked.at, timestampStatus: checked.state, currentAccess: 'not_measured' },
     expectedScopes: expected, grantedScopes: granted || [], scopeEvidence: Array.isArray(granted) && granted.length ? 'reported' : 'not_reported', missingScopes: missing,
-    accessExpiresAt: channel.accessExpiresAt, lastConnectionTestAt: channel.lastCheckedAt,
-    lastSuccessfulSyncAt: channel.lastSuccessfulSyncAt, lastFailedSyncAt: channel.lastFailedSyncAt, dataFreshness: stale ? 'stale' : Number.isFinite(last) ? 'current' : 'not_measured',
+    accessExpiresAt: expiry.at, accessExpiry, expiryEvidence: { source: 'saved_access_expiry', timestampStatus: expiry.state }, lastConnectionTestAt: checked.at,
+    lastSuccessfulSyncAt: last.at, lastSuccessfulSyncEvidence: { source: 'channel_summary', timestampStatus: last.state },
+    lastFailedSyncAt: timestampEvidence(channel.lastFailedSyncAt, now).at, dataFreshness, freshnessEvidence,
     activeReads: channel.history.filter(r => r.status === 'running').length,
     failedAreas: Object.keys(state.connectionFirstSync?.[channel.id]?.failures || {}),
-    nextRetryAt: doctor?.nextRetryAt || null, webhookHealth: 'not_monitored',
+    nextRetryAt: settings.autoSync === true && !settings.disconnected ? timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at : null, webhookHealth: 'not_monitored',
     persistenceHealth: persistence.primaryPersistence === false ? 'degraded' : persistence.primaryPersistence ? 'healthy' : 'not_measured',
     schedulerHealth: scheduler.lastError ? 'attention' : scheduler.lastTickAt ? 'running' : 'not_measured', schedulerLastTickAt: scheduler.lastTickAt || null };
 }
@@ -117,7 +168,8 @@ export function intelligentConnections(state, integrations, context = {}) {
   const registry = providerReadiness(state, integrations);
   return connectionCentre(state, integrations).map(channel => {
     const readiness = registry.find(r => r.id === channel.id);
-    return { ...channel, readiness, health: connectionHealth(state, channel, readiness, context), firstSync: state.connectionFirstSync?.[channel.id] || null };
+    const connectionRecord = channel.id === 'ebay' ? integrations.ebayConnection?.(state) : recordFor(state, channel.id);
+    return { ...channel, readiness, health: connectionHealth(state, channel, readiness, { ...context, connectionRecord }), firstSync: state.connectionFirstSync?.[channel.id] || null };
   });
 }
 

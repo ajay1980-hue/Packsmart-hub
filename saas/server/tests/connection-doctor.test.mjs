@@ -114,7 +114,9 @@ test('recommended defaults and optional preferences stay least privilege, are re
 
 test('health includes evidence and honest unknowns, distinguishes restrictions and never fabricates scores',()=>{
   const state=stateFor();let channels=intelligentConnections(state,service(),{now,persistence:{primaryPersistence:true},scheduler:{lastTickAt:now.toISOString()}});
-  const health=channels.find(c=>c.id==='shopify').health;assert.equal(health.status,'Healthy');assert.equal(health.webhookHealth,'not_monitored');assert.equal(health.scopeEvidence,'not_reported');assert.equal(health.score,undefined);
+  const health=channels.find(c=>c.id==='shopify').health;assert.equal(health.status,'Attention needed');assert.equal(health.dataFreshness,'not_measured');assert.equal(health.authentication,'not_verified');assert.equal(health.webhookHealth,'not_monitored');assert.equal(health.scopeEvidence,'not_reported');assert.equal(health.score,undefined);
+  state.integrationStatus.shopify.areaSuccessAt=Object.fromEntries(connectionSettings(state,'shopify').areas.map(area=>[area,now.toISOString()]));
+  assert.equal(intelligentConnections(state,service(),{now}).find(c=>c.id==='shopify').health.status,'Healthy');
   state.integrationStatus.shopify.lastError='ACCOUNT_MISMATCH';assert.equal(classifyConnectionIssue(state,'shopify',now).kind,'account_mismatch');
   const ebay=stateFor('ebay');ebay.ebay={coverage:{readDiagnostics:{marketing:{errorIds:['35077']}}}};assert.equal(classifyConnectionIssue(ebay,'ebay',now).kind,'provider_restriction');
   state.products=[{provider:'shopify',id:'duplicate'},{provider:'shopify',id:'duplicate'}];assert.equal(validateImportedData(state,'shopify').ok,false);
