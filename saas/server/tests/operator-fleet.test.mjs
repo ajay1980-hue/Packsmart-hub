@@ -6,6 +6,7 @@ import path from 'node:path';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { createAgentOperations } from '../lib/agent-ops.mjs';
 import { normalizeAiUsage } from '../lib/ai-economics.mjs';
+import { legacyAiUsagePage, legacyAiUsageUnknown } from '../lib/legacy-ai-usage.mjs';
 
 async function setup(t) {
   const dir=await fs.mkdtemp(path.join(os.tmpdir(),'runvara-fleet-'));
@@ -63,7 +64,7 @@ test('operator controls can pause a selected workspace without changing another 
 });
 
 
-test('fleet economics aggregate measured token spend without leaking prompts', async t => {
+test('fleet economics withhold volatile monthly totals without leaking prompts', async t => {
   const {store,ops}=await setup(t);
   const usage=normalizeAiUsage({
     workspaceId:'tenant-two',jobId:null,taskType:'agent_command',model:'gpt-5.6-luna',
@@ -72,9 +73,37 @@ test('fleet economics aggregate measured token spend without leaking prompts', a
   await store.recordAiUsage('tenant-two',usage);
   const fleet=await ops.fleetSnapshot();
   const tenant=fleet.workspaces.find(item=>item.workspaceId==='tenant-two');
-  assert.equal(tenant.aiUsageMonth.totals.requests,1);
-  assert.ok(tenant.aiUsageMonth.totals.estimatedCostUsd>0);
-  assert.ok(fleet.totals.aiEstimatedCostUsdMonth>0);
+  assert.equal(tenant.aiUsageMonth.status, 'partial');
+  assert.equal(tenant.aiUsageMonth.reason, 'AI_USAGE_VOLATILE_STORE');
+  assert.equal(tenant.aiUsageMonth.totals, null);
+  assert.equal(fleet.totals.aiEstimatedCostUsdMonth, null);
+  assert.equal(fleet.totals.aiRequestsMonth, null);
   assert.equal(fleet.totals.planMonthlyValueGbp,79);
   assert.equal(JSON.stringify(fleet).includes('resp-fleet-test'),false);
+});
+
+
+test('fleet contains failed or malformed workspace summaries without dropping unrelated health', async t => {
+  const {store,ops}=await setup(t);
+  const calls=[];
+  for (const mode of ['mixed', 'unavailable', 'malformed', 'complete', 'rollover', 'wrong-tenant']) {
+    store.aiUsageSummary = async (workspaceId,start,end) => {
+      calls.push(workspaceId);
+      if (workspaceId==='tenant-two') {
+        if (mode==='mixed') return legacyAiUsageUnknown(workspaceId,start,end,'AI_USAGE_TRUNCATED','partial');
+        if (mode==='unavailable') throw new Error('private usage failure');
+        if (mode==='malformed') return {status:'complete',totals:{requests:0,estimatedCostUsd:0},secret:'private usage failure'};
+        if (mode==='rollover') return legacyAiUsagePage({data:[],contentRange:'*/0'},workspaceId,'2026-09-01T00:00:00.000Z','2026-10-01T00:00:00.000Z');
+        if (mode==='wrong-tenant') return legacyAiUsagePage({data:[],contentRange:'*/0'},'another-tenant',start,end);
+      }
+      return legacyAiUsagePage({data:[],contentRange:'*/0'},workspaceId,start,end);
+    };
+    const before=calls.length, fleet=await ops.fleetSnapshot();
+    assert.equal(calls.length-before,2,mode);
+    assert.equal(fleet.totals.workspaces,2); assert.equal(fleet.totals.planMonthlyValueGbp,79);
+    assert.equal(fleet.totals.aiUsageMonthStatus,mode==='complete'?'complete':'partial',mode);
+    assert.equal(fleet.totals.aiEstimatedCostUsdMonth,mode==='complete'?0:null,mode);
+    assert.equal(fleet.totals.aiRequestsMonth,mode==='complete'?0:null,mode);
+    assert.doesNotMatch(JSON.stringify(fleet),/private usage failure|another-tenant/);
+  }
 });

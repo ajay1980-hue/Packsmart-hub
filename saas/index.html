@@ -510,10 +510,11 @@
       <section id="view-fleet" class="view">
         <article class="card fleet-hero">
           <div class="section-head stack-mobile">
-            <div><p class="eyebrow">RUNVARA / OPERATOR FLEET</p><h2>Every customer workspace. One control plane.</h2><p class="muted">Platform-owner view of worker health, queue pressure, AI allowances and customer workspaces. Customer business data remains isolated.</p></div>
+            <div><p class="eyebrow">RUNVARA / OPERATOR FLEET</p><h2>Workspaces in this snapshot. One control plane.</h2><p class="muted">Platform-owner view of worker health, queue pressure, AI allowances and customer workspaces. Customer business data remains isolated.</p></div>
             <div class="button-row"><span id="fleet-worker-status" class="tag neutral">Worker checking</span><button id="fleet-refresh" class="secondary" type="button">Refresh fleet</button></div>
           </div>
           <div id="fleet-kpis" class="kpis kpis-six fleet-kpis"></div>
+          <p class="muted tiny">Totals and usage coverage describe the workspaces in this snapshot, before the search filter. This snapshot may not include every workspace.</p>
         </article>
 
         <div class="grid-2 fleet-ops-grid">
@@ -522,8 +523,8 @@
         </div>
 
         <div class="grid-2 fleet-economics-grid">
-          <article class="card"><div class="section-head"><div><p class="eyebrow">FLEET ECONOMICS</p><h2>AI cost vs plan value</h2><p class="muted tiny">AI cost uses measured provider tokens. Plan value is shown separately in GBP; Runvara does not fake a cross-currency margin.</p></div><span id="fleet-ai-provider-status" class="tag neutral">Checking provider</span></div><div id="fleet-economics-summary" class="status-list"></div></article>
-          <article class="card"><div class="section-head"><div><p class="eyebrow">MODEL ROUTER</p><h2>Cost-aware model ladder</h2><p class="muted tiny">Routing respects plan ceilings and per-workspace operator controls.</p></div></div><div id="fleet-model-catalog" class="model-catalog"></div></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">FLEET ECONOMICS</p><h2>AI cost vs plan value</h2><p class="muted tiny">Estimates from recorded legacy usage only, not complete provider billing or all provider spend. Missing or incomplete records never mean zero spend. Governed usage is inspected separately below; these scopes must not be added together. Plan value remains separate in GBP.</p><p class="muted tiny">Provider configuration reflects environment/key setup only; it does not verify access, successful calls or accounting coverage.</p></div><span id="fleet-ai-provider-status" class="tag neutral">Checking configuration</span></div><div id="fleet-economics-summary" class="status-list"></div></article>
+          <article class="card"><div class="section-head"><div><p class="eyebrow">MODEL ROUTER</p><h2>Cost-aware model ladder</h2><p class="muted tiny">Routing respects plan ceilings and per-workspace operator controls. Catalogue dates identify static pricing records; they do not confirm current provider prices.</p></div></div><div id="fleet-model-catalog" class="model-catalog"></div></article>
         </div>
 
         <details class="card">

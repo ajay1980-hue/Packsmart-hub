@@ -15,6 +15,8 @@ import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
 import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
 import { orderFinancialMirrorRow, orderReportingCurrency } from './shopify-order-source.mjs';
+import { LEGACY_AI_USAGE_COLUMNS, LEGACY_AI_USAGE_MAX_ROWS, LEGACY_AI_USAGE_MAX_BYTES,
+  legacyAiUsageWindow, legacyAiUsageUnknown, legacyAiUsagePage } from './legacy-ai-usage.mjs';
 import { planAutomationRetention, applyAutomationRetention, verifyAutomationArchivePayload,
   AUTOMATION_ARCHIVE_BATCH_SIZE, AUTOMATION_ARCHIVE_BATCH_BYTES, AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES } from './automation-retention.mjs';
 import {
@@ -565,22 +567,9 @@ class FileStore {
   }
 
   async aiUsageSummary(workspaceId, startAt, endAt) {
-    const rows=this.aiUsage.filter(item => item.workspace_id === workspaceId && Date.parse(item.occurred_at) >= Date.parse(startAt) && Date.parse(item.occurred_at) < Date.parse(endAt));
-    const byModel={};
-    for(const row of rows) {
-      const model=row.model || 'unknown';
-      const current=byModel[model] ||= {model,requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0};
-      current.requests++; current.inputTokens+=Number(row.input_tokens||0); current.cachedInputTokens+=Number(row.cached_input_tokens||0);
-      current.cacheWriteTokens+=Number(row.cache_write_tokens||0); current.outputTokens+=Number(row.output_tokens||0);
-      current.estimatedCostUsd+=Number(row.estimated_cost_usd||0);
-    }
-    const totals=Object.values(byModel).reduce((out,item)=>({
-      requests:out.requests+item.requests,inputTokens:out.inputTokens+item.inputTokens,cachedInputTokens:out.cachedInputTokens+item.cachedInputTokens,
-      cacheWriteTokens:out.cacheWriteTokens+item.cacheWriteTokens,outputTokens:out.outputTokens+item.outputTokens,estimatedCostUsd:out.estimatedCostUsd+item.estimatedCostUsd
-    }),{requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0});
-    totals.estimatedCostUsd=Number(totals.estimatedCostUsd.toFixed(8));
-    for(const item of Object.values(byModel)) item.estimatedCostUsd=Number(item.estimatedCostUsd.toFixed(8));
-    return {totals,byModel:Object.values(byModel).sort((a,b)=>b.estimatedCostUsd-a.estimatedCostUsd)};
+    // This array is process-local and resets on restart. Even an empty array
+    // cannot establish a complete recorded month, so do not expose a false zero.
+    return legacyAiUsageUnknown(workspaceId, startAt, endAt, 'AI_USAGE_VOLATILE_STORE', 'partial');
   }
 
   async ping() { return true; }
@@ -1621,22 +1610,20 @@ class SupabaseStore {
   }
 
   async aiUsageSummary(workspaceId, startAt, endAt) {
-    const rows=await this.scopedRequest(workspaceId, 'usage_read', `runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&occurred_at=gte.${encodeURIComponent(startAt)}&occurred_at=lt.${encodeURIComponent(endAt)}&select=model,input_tokens,cached_input_tokens,cache_write_tokens,output_tokens,estimated_cost_usd`)||[];
-    const byModel={};
-    for(const row of rows) {
-      const model=row.model||'unknown';
-      const current=byModel[model] ||= {model,requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0};
-      current.requests++; current.inputTokens+=Number(row.input_tokens||0); current.cachedInputTokens+=Number(row.cached_input_tokens||0);
-      current.cacheWriteTokens+=Number(row.cache_write_tokens||0); current.outputTokens+=Number(row.output_tokens||0);
-      current.estimatedCostUsd+=Number(row.estimated_cost_usd||0);
+    if (!legacyAiUsageWindow(workspaceId, startAt, endAt)) return legacyAiUsageUnknown(workspaceId, startAt, endAt, 'AI_USAGE_INPUT_INVALID');
+    try {
+      // One bounded indexed workspace/month read, never pagination. Exact count
+      // adds DB work over the filtered month, including rows beyond the limit;
+      // it detects server max_rows caps and is not proof of provider billing.
+      const page = await this.scopedRequest(workspaceId, 'usage_read', `runvara_ai_usage?workspace_id=eq.${encodeURIComponent(workspaceId)}&occurred_at=gte.${encodeURIComponent(startAt)}&occurred_at=lt.${encodeURIComponent(endAt)}&select=${LEGACY_AI_USAGE_COLUMNS}&order=occurred_at.desc&limit=${LEGACY_AI_USAGE_MAX_ROWS + 1}`, {
+        maxResponseBytes: LEGACY_AI_USAGE_MAX_BYTES, includeResponseMetadata: true, headers: { Prefer: 'count=exact' }
+      });
+      return legacyAiUsagePage(page, workspaceId, startAt, endAt);
+    } catch (error) {
+      const reason = ['SUPABASE_RESPONSE_TOO_LARGE', 'SUPABASE_RESPONSE_INVALID'].includes(error?.code)
+        ? 'AI_USAGE_RESPONSE_INVALID' : 'AI_USAGE_READ_UNAVAILABLE';
+      return legacyAiUsageUnknown(workspaceId, startAt, endAt, reason);
     }
-    const totals=Object.values(byModel).reduce((out,item)=>({
-      requests:out.requests+item.requests,inputTokens:out.inputTokens+item.inputTokens,cachedInputTokens:out.cachedInputTokens+item.cachedInputTokens,
-      cacheWriteTokens:out.cacheWriteTokens+item.cacheWriteTokens,outputTokens:out.outputTokens+item.outputTokens,estimatedCostUsd:out.estimatedCostUsd+item.estimatedCostUsd
-    }),{requests:0,inputTokens:0,cachedInputTokens:0,cacheWriteTokens:0,outputTokens:0,estimatedCostUsd:0});
-    totals.estimatedCostUsd=Number(totals.estimatedCostUsd.toFixed(8));
-    for(const item of Object.values(byModel)) item.estimatedCostUsd=Number(item.estimatedCostUsd.toFixed(8));
-    return {totals,byModel:Object.values(byModel).sort((a,b)=>b.estimatedCostUsd-a.estimatedCostUsd)};
   }
 
   async listWorkspaceIds() {

@@ -1495,6 +1495,10 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 /* Operator Fleet */
 .fleet-hero { background: radial-gradient(circle at 92% 10%, #1f87d622, transparent 34%), linear-gradient(135deg,#0d1724,#08111b); }
 .fleet-kpis { margin-top: 1rem; }
+#view-fleet .card, #fleet-workspaces .fleet-workspace { min-width: 0; }
+#fleet-kpis .kpi > strong, #fleet-workspaces .fleet-signal-grid b,
+#fleet-workspaces h3, #fleet-workspaces small, #fleet-model-catalog { overflow-wrap: anywhere; }
+#fleet-model-catalog .model-row > div { min-width: 0; grid-template-columns: auto minmax(0,1fr); }
 .fleet-ops-grid { margin-top: 1rem; }
 .fleet-capacity { display:grid; gap:.8rem; }
 .fleet-meter { height: 12px; overflow:hidden; border-radius:999px; background:#ffffff0b; border:1px solid var(--line); }

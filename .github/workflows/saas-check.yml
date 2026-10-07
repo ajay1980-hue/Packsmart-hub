@@ -40,6 +40,8 @@ jobs:
         run: node saas/server/tests/business-graph-browser-check.mjs
       - name: Verify governed usage on mobile and desktop
         run: node saas/server/tests/provider-usage-browser-check.mjs
+      - name: Verify legacy usage completeness on mobile and desktop
+        run: node saas/server/tests/legacy-ai-usage-browser-check.mjs
       - name: Verify objective preparation on mobile and desktop
         run: node saas/server/tests/objective-review-browser-check.mjs
       - name: Verify archived automation history on mobile and desktop
@@ -60,6 +62,7 @@ jobs:
             /tmp/runvara-business-graph-*.png
             /tmp/runvara-business-objectives-*.png
             /tmp/runvara-provider-usage-*.png
+            /tmp/runvara-legacy-ai-usage-*.png
             /tmp/runvara-objective-review-*.png
             /tmp/runvara-automation-history-*.png
             /tmp/runvara-business-outcomes-*.png

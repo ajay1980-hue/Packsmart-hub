@@ -7,6 +7,7 @@ import { marketingPlannerCycle } from './marketing.mjs';
 import { monitoredSync } from './scheduler.mjs';
 import { configureAiEconomics, ensureAiEconomics, planMonthlyValueGbp, publicAiSettings, routeAiWork } from './ai-economics.mjs';
 import { buildObjectiveReview, objectiveReviewFingerprint } from './objective-review.mjs';
+import { legacyAiUsageUnknown, publicLegacyAiUsage, fleetLegacyAiUsage } from './legacy-ai-usage.mjs';
 
 export const AGENT_JOB_TYPES = Object.freeze({
   agent_command: { priority: 70, maxAttempts: 3, aiUnits: 1 },
@@ -544,7 +545,9 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     const jobs = await store.listAgentJobs(workspaceId, 100);
     const usage = await store.agentOpsUsage(workspaceId, new Date().toISOString().slice(0,10));
     const now=new Date(), monthStart=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)).toISOString(), monthEnd=new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth()+1,1)).toISOString();
-    const aiUsageMonth=await store.aiUsageSummary(workspaceId,monthStart,monthEnd);
+    let aiUsageMonth;
+    try { aiUsageMonth = publicLegacyAiUsage(await store.aiUsageSummary(workspaceId,monthStart,monthEnd), workspaceId, monthStart, monthEnd); }
+    catch { aiUsageMonth = legacyAiUsageUnknown(workspaceId, monthStart, monthEnd); }
     const counts = Object.fromEntries(['queued','running','succeeded','blocked','dead_letter'].map(name => [name, jobs.filter(j=>j.status===name).length]));
     return { settings, aiSettings, usage:{ aiUnitsToday:usage, dailyAiUnitLimit:settings?.dailyAiUnitLimit ?? 0 }, aiUsageMonth, counts, jobs, worker:{ running:status.running, lastTickAt:status.lastTickAt } };
   }
@@ -635,14 +638,12 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         for (const [key,value] of Object.entries(item.counts)) out[key]=(out[key]||0)+value;
         out.aiUnitsToday=(out.aiUnitsToday||0)+item.aiUnitsToday;
         out.dailyAiUnitLimit=(out.dailyAiUnitLimit||0)+item.dailyAiUnitLimit;
-        out.aiEstimatedCostUsdMonth=(out.aiEstimatedCostUsdMonth||0)+Number(item.aiUsageMonth?.totals?.estimatedCostUsd||0);
-        out.aiRequestsMonth=(out.aiRequestsMonth||0)+Number(item.aiUsageMonth?.totals?.requests||0);
         out.planMonthlyValueGbp=(out.planMonthlyValueGbp||0)+Number(item.planMonthlyValueGbp||0);
         out.unhealthyConnections=(out.unhealthyConnections||0)+item.unhealthyConnections;
         out.pendingApprovals=(out.pendingApprovals||0)+item.pendingApprovals;
         out.openExceptions=(out.openExceptions||0)+item.openExceptions;
         return out;
-      }, { workspaces:workspaces.length }),
+      }, { workspaces:workspaces.length, ...fleetLegacyAiUsage(workspaces.map(item => item.aiUsageMonth)) }),
       workspaces
     };
   }

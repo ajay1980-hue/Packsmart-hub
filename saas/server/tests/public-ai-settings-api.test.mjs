@@ -9,6 +9,7 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
 import { AI_PRICING_UPDATED_AT } from '../lib/ai-economics.mjs';
 import { operatorBriefPolicy, OPERATOR_BRIEF_ENDPOINT } from '../lib/operator-brief-policy.mjs';
+import { legacyAiUsagePage, legacyAiUsageUnknown } from '../lib/legacy-ai-usage.mjs';
 
 const privateMarker = 'synthetic-server-only-ai-settings';
 const publicKeys = ['monthlyCostLimitUsd', 'pricingUpdatedAt', 'routingMode', 'updatedAt', 'updatedBy'];
@@ -205,4 +206,59 @@ test('operator settings PUT and fleet GET retain platform-owner isolation and pu
     assert.equal(Object.hasOwn(workspace, 'governance'), false);
   }
   assert.equal(calls.save, 1, 'fleet inspection adds no writes');
+});
+
+test('agent-ops usage preserves completeness and own-tenant month scope for every permitted read role', async t => {
+  const { request, auth, store, stateFile } = await fixture(t);
+  const before = await fs.readFile(stateFile, 'utf8'), calls = [];
+  let mode = 'complete';
+  store.aiUsageSummary = async (workspaceId, startAt, endAt) => {
+    calls.push({ workspaceId, startAt, endAt });
+    if (mode === 'throw') throw new Error(privateMarker);
+    if (mode === 'partial') return legacyAiUsageUnknown(workspaceId, startAt, endAt, 'AI_USAGE_TRUNCATED', 'partial');
+    if (mode === 'malformed') return { status: 'complete', totals: { requests: 0, estimatedCostUsd: 0 }, secret: privateMarker };
+    const summary = legacyAiUsagePage({ data: [], contentRange: '*/0' }, workspaceId, startAt, endAt);
+    return mode === 'foreign' ? { ...summary, workspaceId: 'settings-beta' } : { ...summary, privateInternal: privateMarker };
+  };
+  const instant = new Date(), start = new Date(Date.UTC(instant.getUTCFullYear(), instant.getUTCMonth(), 1)).toISOString();
+  const end = new Date(Date.UTC(instant.getUTCFullYear(), instant.getUTCMonth() + 1, 1)).toISOString();
+  for (const role of ['owner', 'admin', 'member', 'viewer']) {
+    for (mode of ['complete', 'partial', 'throw', 'malformed', 'foreign']) {
+      const priorCalls = calls.length;
+      const result = await request('/api/agent-ops?workspaceId=settings-beta&startAt=1900-01-01&endAt=9999-01-01', { identity: auth('settings-alpha', role) });
+      assert.equal(result.status, 200); assertPublic(result.body.aiSettings);
+      assert.equal(calls.length - priorCalls, 1); assert.deepEqual(calls.at(-1), { workspaceId: 'settings-alpha', startAt: start, endAt: end });
+      const usage = result.body.aiUsageMonth;
+      assert.equal(usage.workspaceId, 'settings-alpha'); assert.equal(usage.startAt, start); assert.equal(usage.endAt, end);
+      assert.equal(usage.status, mode === 'complete' ? 'complete' : mode === 'partial' ? 'partial' : 'unavailable');
+      if (mode === 'complete') { assert.equal(usage.totals.requests, 0); assert.equal(usage.totals.estimatedCostUsd, 0); }
+      else assert.equal(usage.totals, null);
+      assert.deepEqual(usage.byModel, []);
+    }
+  }
+  const beforeDenied = calls.length;
+  assert.equal((await request('/api/agent-ops', { identity: null })).status, 401);
+  for (const role of ['owner', 'admin', 'member', 'viewer']) assert.equal((await request('/api/operator/agent-ops', { identity: auth('settings-alpha', role) })).status, 403);
+  assert.equal(calls.length, beforeDenied);
+  assert.equal(await fs.readFile(stateFile, 'utf8'), before);
+});
+
+test('operator fleet usage remains unknown for mixed evidence and cannot expose private store fields', async t => {
+  const { request, auth, store, stateFile } = await fixture(t);
+  const before = await fs.readFile(stateFile, 'utf8'), calls = [];
+  store.aiUsageSummary = async (workspaceId, startAt, endAt) => {
+    calls.push(workspaceId);
+    if (workspaceId === 'settings-beta') throw new Error(privateMarker);
+    return { ...legacyAiUsagePage({ data: [], contentRange: '*/0' }, workspaceId, startAt, endAt), credentials: privateMarker };
+  };
+  const result = await request('/api/operator/agent-ops?workspaceId=settings-beta', { identity: auth('packsmart-solutions') });
+  assert.equal(result.status, 200); assert.equal(calls.length, 3);
+  assert.equal(result.body.totals.aiUsageMonthStatus, 'partial');
+  assert.equal(result.body.totals.aiUsageMonthCompleteWorkspaces, 2);
+  assert.equal(result.body.totals.aiUsageMonthUnavailableWorkspaces, 1);
+  assert.equal(result.body.totals.aiUsageMonthScope, 'returned_workspaces');
+  assert.equal(result.body.totals.aiEstimatedCostUsdMonth, null); assert.equal(result.body.totals.aiRequestsMonth, null);
+  const beta = result.body.workspaces.find(item => item.workspaceId === 'settings-beta');
+  assert.equal(beta.aiUsageMonth.status, 'unavailable'); assert.equal(beta.aiUsageMonth.totals, null);
+  assert.equal(await fs.readFile(stateFile, 'utf8'), before);
 });

@@ -123,9 +123,9 @@ test('a configured provider cannot bypass atomic admission through the legacy Fi
   assert.equal(result.reason,'AI_USAGE_DURABLE_STORE_REQUIRED');
   assert.equal(calls.length,0);
   const month=await provider.monthlyUsage('alpha');
-  assert.equal(month.totals.requests,0);
-  assert.equal(month.totals.inputTokens,0);
-  assert.equal(month.totals.estimatedCostUsd,0);
+  assert.equal(month.status,'partial');
+  assert.equal(month.reason,'AI_USAGE_VOLATILE_STORE');
+  assert.equal(month.totals,null);
   assert.equal(JSON.stringify(store.aiUsage).includes('check pricing'),false);
   assert.equal(JSON.stringify(store.aiUsage).includes('Verified operator brief'),false);
   t.after(async()=>fs.rm(dir,{recursive:true,force:true}));
