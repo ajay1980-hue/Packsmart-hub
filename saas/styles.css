@@ -1671,3 +1671,23 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .automation-history-evidence p { margin: .35rem 0; white-space: pre-wrap; }
 .automation-history-evidence small { color: var(--muted); }
 @media (max-width: 600px) { .automation-history-heading { align-items: flex-start; } }
+
+
+/* Exact imported-order evidence stays readable inside its existing card. */
+#revenue-trajectory, #revenue-chart, #analytics-channel-table, #analytics-marketing,
+#week-metrics, #month-metrics { min-width: 0; overflow-wrap: anywhere; }
+#revenue-chart > details { min-width: 0; }
+#analytics-channel-table, #analytics-marketing { display: block; }
+#week-metrics > details, #month-metrics > details { grid-column: 1 / -1; min-width: 0; }
+#week-metrics > div, #month-metrics > div { flex-wrap: wrap; }
+.imported-evidence-table { min-width: 54rem; }
+.imported-evidence-table caption { padding: .7rem; text-align: left; color: var(--muted); line-height: 1.5; }
+.imported-evidence-table td { vertical-align: top; }
+.imported-evidence-table small { display: inline-block; color: var(--muted); margin-top: .3rem; line-height: 1.5; }
+.imported-evidence-table dd { margin: .2rem 0 .8rem; }
+#view-overview .kpi > strong, #view-analytics .kpi > strong, #view-orders .kpi > strong { overflow-wrap: anywhere; }
+#today-revenue, #today-profit, #today-margin, #hg-coverage,
+#analytics-revenue, #analytics-profit, #analytics-margin, #analytics-ad-spend, #analytics-roas,
+#orders-revenue, #orders-refunds-value, #orders-profit, #orders-profit-coverage { font-size: clamp(1rem, 2vw, 1.4rem); line-height: 1.35; }
+#analytics-coverage .coverage-item > div { flex-wrap: wrap; }
+#analytics-coverage .coverage-item { min-width: 0; overflow-wrap: anywhere; }

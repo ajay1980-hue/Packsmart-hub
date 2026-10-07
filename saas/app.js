@@ -43,6 +43,84 @@
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value));
   }
 
+  function countLabel(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? String(value) : 'Unknown';
+  }
+
+  function recordedDecimal(value) {
+    // Projection decimals are exact strings. Never round or aggregate them in the browser.
+    return typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? value : 'Unknown';
+  }
+
+  function recordedInput(value) {
+    // Raw editor evidence keeps its spelling and is never a qualified financial amount.
+    return typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? value
+      : typeof value === 'number' && Number.isFinite(value) ? String(value) : 'Unknown';
+  }
+
+  function importedEvidence(period) {
+    let evidence = period?.importedOrderEvidence;
+    const ref = period?.evidenceRef;
+    if (!evidence && ref?.period === 'last30d') {
+      const shared = state.data.dashboard?.last30d?.importedOrderEvidence;
+      if (shared?.schema === 'imported-order-evidence/v1') evidence = { ...shared,
+        groups: (shared.groups || []).filter(group => group.provider === ref.provider),
+        sourcePeriods: (shared.sourcePeriods || []).filter(source => source.provider === ref.provider),
+        counts: { ...shared.counts, retainedOrders: period.orders }
+      };
+    }
+    return evidence?.schema === 'imported-order-evidence/v1' ? evidence : null;
+  }
+
+  function recordedCurrency(group) {
+    return typeof group?.currency === 'string' && /^[A-Z]{3}$/.test(group.currency)
+      ? group.currency + ' · unverified recorded code' : 'Unknown currency · sums withheld';
+  }
+
+  function recordedMetric(metric, completeAllowed = true) {
+    if (!metric) return '<span>Unknown</span>';
+    return '<strong>' + escapeHtml(recordedDecimal(metric.knownSubtotal)) + '</strong><br><small>Known subtotal · ' +
+      escapeHtml(countLabel(metric.knownCount)) + ' known / ' + escapeHtml(countLabel(metric.unknownCount)) + ' unknown</small><br><small>Complete retained cohort: ' +
+      escapeHtml(completeAllowed && metric.complete === true ? recordedDecimal(metric.completeCohortTotal) : 'Unavailable') + '</small>';
+  }
+
+  function numericCostLabel(costs) {
+    const ratio = costs?.orderCoverage;
+    return ratio ? countLabel(ratio.numerator) + ' / ' + countLabel(ratio.denominator) + ' retained orders' : 'Unavailable';
+  }
+
+  function importedEvidenceTable(period, { details = false } = {}) {
+    const evidence = importedEvidence(period);
+    if (!evidence) return '<p class="empty-state">Imported order evidence unavailable. Source-period coverage is unverified; business totals are unavailable.</p>';
+    const completeness = evidence.completeness || {}, presentation = evidence.presentation || {};
+    const clipped = presentation.truncated === true;
+    const completeAllowed = !clipped && completeness.retainedCohortComplete === true;
+    const truncatedAreas = Object.entries(completeness.truncated || {}).filter(([, value]) => value === true).map(([key]) => statusLabel(key));
+    const clippingNote = clipped ? '<p class="missing-inputs">Partial grouped view: ' + escapeHtml(countLabel(presentation.groupsReturned)) + ' of ' + escapeHtml(countLabel(presentation.groupsAvailable)) + ' period groups returned. Other groups may be omitted; complete-cohort totals and value coverage are withheld.</p>' : '';
+    const scanNote = truncatedAreas.length ? '<p class="missing-inputs">Bounded projection truncated: ' + escapeHtml(truncatedAreas.join(', ')) + '. Known subtotals describe only the scanned subset.</p>' : '';
+    const windowLabel = evidence.period ? evidence.period.startAt + ' ≤ recorded createdAt < ' + evidence.period.endAt : 'Period unavailable';
+    const retainedOrders = evidence.counts?.retainedOrders ?? (evidence.groups?.length === 1 ? evidence.groups[0].orders : undefined);
+    const providers = (evidence.sourcePeriods || []).map(item => statusLabel(item.provider) + ': source period unverified').join(' · ');
+    const note = clippingNote + scanNote + '<p class="signal-note">' + escapeHtml(windowLabel) + '</p><p class="muted tiny">' + escapeHtml(providers || 'Source period unverified') +
+      '. Normalized recorded amounts may contain importer defaults or derived values. Currency recognition and source currency are unverified. These are retained records, not business totals, collected cash or profit.</p>' +
+      '<p class="muted tiny">Retained orders: ' + escapeHtml(countLabel(retainedOrders)) + ' · Scan ' + (completeness.scanComplete ? 'complete' : 'incomplete') +
+      ' · Output ' + (completeness.outputComplete && !clipped ? 'complete' : 'incomplete') + ' · Eligibility ' + (completeness.eligibilityResolved ? 'resolved' : 'unresolved') +
+      '. Financial qualification unavailable. Numeric cost completeness does not establish historical cost assignment.</p>';
+    if (!evidence.groups?.length) return note + '<p class="empty-state">No retained order groups for this selection. An empty retained collection does not establish zero sales.</p>';
+    const fields = [['total','Recorded total'],['currentTotal','Recorded current total'],['refunds','Recorded refunds'],['tax','Recorded original tax'],['currentTax','Recorded current tax'],['discounts','Recorded discounts'],['shippingCharged','Recorded shipping charged'],['netTotal','Normalized net total'],['netTotalExCurrentTax','Normalized net less current tax']];
+    const rows = evidence.groups.map(group => {
+      const costs = group.costNumbers || {}, coverage = completeAllowed ? costs.netTotalCoverage : null;
+      const extra = details ? '<details class="evidence"><summary>All recorded amounts and cost evidence</summary><dl>' + fields.map(([key,label]) => '<div><dt>' + label + '</dt><dd>' + recordedMetric(group.recordedAmounts?.[key], completeAllowed) + '</dd></div>').join('') +
+        '<div><dt>Net subtotal with numeric costs</dt><dd>' + recordedMetric(costs.coveredNetTotal, completeAllowed) + '</dd></div><div><dt>Exact numeric cost / net amount coverage</dt><dd>' +
+        escapeHtml(coverage ? recordedDecimal(coverage.numerator) + ' / ' + recordedDecimal(coverage.denominator) : 'Unavailable') + '</dd></div></dl></details>' : '';
+      return '<tr><td>' + escapeHtml(statusLabel(group.provider)) + '</td><td>' + escapeHtml(recordedCurrency(group)) + '</td><td>' + escapeHtml(statusLabel(group.financialStatus)) +
+        '</td><td>' + (group.cancelled ? 'Cancelled' : 'Not recorded cancelled') + '</td><td>' + escapeHtml(countLabel(group.orders)) + '</td><td>' + recordedMetric(group.recordedAmounts?.netTotal, completeAllowed) + extra +
+        '</td><td>' + recordedMetric(group.recordedAmounts?.refunds, completeAllowed) + '</td><td>' + escapeHtml(numericCostLabel(costs)) + '<small>' + escapeHtml(countLabel(costs.incompleteOrders)) +
+        ' incomplete · retained cost cohort ' + (!completeAllowed ? 'unavailable' : costs.completeCohort === true ? 'complete' : costs.completeCohort === false ? 'incomplete' : 'unavailable') + '</small><small>Profit / margin / cash: unavailable</small></td></tr>';
+    }).join('');
+    return note + '<div class="table-wrap table-scroll"><table class="imported-evidence-table"><caption>Exact normalized amounts by retained provider, currency, financial status and cancellation cohort</caption><thead><tr><th scope="col">Provider</th><th scope="col">Recorded currency</th><th scope="col">Recorded status</th><th scope="col">Cancellation</th><th scope="col">Orders</th><th scope="col">Recorded net amount</th><th scope="col">Recorded refunds</th><th scope="col">Numeric cost availability</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
   function usd(value) {
     if (value === '' || value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
     return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: Number(value) < 1 ? 4 : 2, maximumFractionDigits: Number(value) < 1 ? 6 : 2 }).format(Number(value));
@@ -200,7 +278,7 @@
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
-    const titles = { overview: 'Command Centre', 'revenue-engine': 'Revenue Engine', analytics: 'Analytics', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Order Profitability', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
+    const titles = { overview: 'Command Centre', 'revenue-engine': 'Revenue Engine', analytics: 'Analytics', 'ai-team': 'AI Team', marketing: 'Marketing Autopilot', 'market-radar': 'Market Radar', profit: 'Products & Profit', orders: 'Orders & Recorded Costs', suppliers: 'Suppliers & Costs', channels: 'Connection Centre', approvals: 'Approval Centre', automations: 'Automation Rules', issues: 'Exception Centre', opportunities: 'Opportunities', memory: 'Decision Memory', value: 'Value & Work', audit: 'Audit & Account', fleet: 'Operator Fleet' };
     $('#page-title').textContent = titles[view] || 'Packsmart Ops';
     if (view === 'audit') {
       loadAudit().catch(error => showMessage(error.message, 'error'));
@@ -251,19 +329,8 @@
   }
 
   function renderRevenueChart() {
-    const channels = (state.data.integrations || []).filter(item => ['commerce', 'marketplace', 'social-commerce'].includes(item.kind) && (item.metrics30d?.orders > 0 || Number(item.metrics30d?.revenue) || item.lastSyncAt || item.status === 'connected'));
-    const revenue = channel => {
-      const value = channel.metrics30d?.revenue;
-      return value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
-    };
-    const values = channels.map(revenue).filter(value => value !== null);
-    if (!values.length) { $('#revenue-chart').innerHTML = '<div class="empty-state">No channel revenue is available yet. Connect a sales channel and import orders to see performance here.</div>'; return; }
-    const min = Math.min(0, ...values), max = Math.max(0, ...values), range = max - min || 1;
-    const zero = -min / range * 1000;
-    $('#revenue-chart').innerHTML = channels.map(channel => {
-      const value = revenue(channel), end = value === null ? zero : (value - min) / range * 1000;
-      return '<div class="revenue-row"><div><span>' + escapeHtml(channel.name) + '</span><strong' + (value < 0 ? ' class="bad"' : '') + '>' + escapeHtml(money(value)) + '</strong></div>' + (value === null ? '<small class="muted">No imported revenue data</small>' : '<svg viewBox="0 0 1000 14" preserveAspectRatio="none" aria-hidden="true"><rect class="revenue-track" width="1000" height="14" rx="7"/><rect class="revenue-bar' + (value < 0 ? ' negative' : '') + '" x="' + Math.min(zero, end).toFixed(2) + '" width="' + Math.abs(end - zero).toFixed(2) + '" height="14" rx="7"/><line class="revenue-zero" x1="' + zero.toFixed(2) + '" x2="' + zero.toFixed(2) + '" y1="0" y2="14"/></svg>') + '</div>';
-    }).join('');
+    const channels = (state.data.integrations || []).filter(item => ['commerce', 'marketplace', 'social-commerce'].includes(item.kind) && (item.metrics30d || item.lastSyncAt || item.status === 'connected'));
+    $('#revenue-chart').innerHTML = channels.length ? channels.map(channel => '<details class="evidence"><summary>' + escapeHtml(channel.name) + ' · ' + escapeHtml(countLabel(channel.metrics30d?.orders)) + ' retained orders</summary>' + importedEvidenceTable(channel.metrics30d) + '</details>').join('') : '<div class="empty-state">No imported channel evidence is available yet. Source-period coverage remains unverified.</div>';
   }
 
   function applyTarget(view, filter) {
@@ -285,15 +352,16 @@
 
   function metricRows(period) {
     return [
-      ['Revenue', money(period.revenue)], ['Orders', period.orders || 0], ['Open', period.openOrders || 0],
-      ['Gross profit', money(period.grossProfit)], ['Operating contribution', money(period.operatingProfit)],
-      ['Margin', percent(period.margin)], ['Refunds', money(period.refunds)], ['Profit coverage', (period.profitCoverage || 0) + '%']
-    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong></div>').join('');
+      ['Retained orders', countLabel(period.orders)], ['Recorded open orders', countLabel(period.openOrders)],
+      ['Revenue / cash', 'Unavailable'], ['Profit / margin', 'Unavailable'],
+      ['Numeric cost availability', numericCostLabel(period.numericCostCoverage)], ['Source-period coverage', 'Unverified']
+    ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong></div>').join('') +
+      '<details class="evidence"><summary>Inspect exact retained cohorts</summary>' + importedEvidenceTable(period, { details: true }) + '</details>';
   }
 
   function channelCard(channel) {
     const metrics = channel.metrics30d;
-    const metricHtml = metrics ? '<div class="channel-metrics"><span><b>' + escapeHtml(metrics.orders || 0) + '</b> orders</span><span><b>' + escapeHtml(money(metrics.revenue)) + '</b> revenue</span><span><b>' + escapeHtml(money(metrics.operatingProfit)) + '</b> contribution</span><span><b>' + escapeHtml(money(metrics.advertisingSpend)) + '</b> ads</span></div>' : '';
+    const metricHtml = metrics ? '<div class="channel-metrics"><span><b>' + escapeHtml(countLabel(metrics.orders)) + '</b> retained orders</span><span>Source period unverified</span><span>Revenue / profit unavailable</span></div>' : '';
     const connected = (state.data.connectionCentre || []).find(item => item.id === channel.id);
     const sync = connected?.lastSuccessfulSyncAt || channel.lastSyncAt;
     const areas = connected ? connected.settings?.areas || [] : channel.capabilities || [];
@@ -306,21 +374,9 @@
   }
 
   function renderTrajectory() {
-    const signals = state.data.dashboard?.revenueSignals;
-    const root = $('#revenue-trajectory');
-    if (!signals?.daily?.length) { root.innerHTML = '<p class="empty-state">Import orders to build a revenue history.</p>'; return; }
-    const days = signals.daily, values = days.filter(item => item.revenue !== null).map(item => item.revenue);
-    const minimum = Math.min(0,...values), maximum = Math.max(1,...values), range = maximum - minimum;
-    const x = index => 12 + index * 576 / Math.max(1,days.length - 1), y = value => 140 - (value - minimum) / range * 120;
-    const segments = []; let segment = [];
-    days.forEach((item,index) => { if (item.revenue === null) { if (segment.length) segments.push(segment); segment = []; } else segment.push(`${x(index).toFixed(1)},${y(item.revenue).toFixed(1)}`); });
-    if (segment.length) segments.push(segment);
-    const comparison = signals.comparisons?.[30];
-    const delta = comparison?.change;
-    const comparisonText = delta != null ? `${delta > 0 ? '+' : ''}${delta}% against the previous 30 days` : comparison?.previous?.revenue === null || comparison?.current?.revenue === null ? 'Incomplete revenue values — comparison unavailable' : 'No positive previous-period baseline';
-    const orders = days.reduce((sum,item)=>sum+item.orders,0), unknown = days.reduce((sum,item)=>sum+item.orders-item.knownOrders,0);
-    const caption = orders ? `${orders} settled imported orders. ${unknown ? `${unknown} have unknown revenue; gaps remain visible.` : 'Zero days mean no settled orders in the imported records.'}` : 'No settled orders in the imported records for these dates.';
-    root.innerHTML = `<div class="trajectory-reading"><strong>${money(comparison?.current?.revenue)}</strong><span>${escapeHtml(comparisonText)}<small>Rolling 30-day net revenue</small></span></div><svg class="trajectory" viewBox="0 0 600 168" role="img" aria-label="Daily imported net revenue over 30 UTC days"><title>Daily imported net revenue</title><desc>${escapeHtml(caption)} Exact values are in the data table below.</desc><defs><linearGradient id="revenue-signal" x1="0" x2="1"><stop stop-color="#4c8eff"/><stop offset="1" stop-color="#37d8ef"/></linearGradient></defs><path class="trajectory-grid" d="M12 20H588M12 80H588M12 140H588"/>${segments.map(points=>`<polyline class="trajectory-line" points="${points.join(' ')}"/>`).join('')}${days.map((item,index)=>item.revenue!==null&&item.orders ? `<circle class="trajectory-point" cx="${x(index)}" cy="${y(item.revenue)}" r="3"><title>${escapeHtml(item.date + ': ' + money(item.revenue))}</title></circle>`:'').join('')}<text x="12" y="164">${escapeHtml(days[0].date)}</text><text x="588" y="164" text-anchor="end">${escapeHtml(days.at(-1).date)}</text></svg><p class="signal-note">${escapeHtml(caption)}</p><details class="evidence trajectory-data"><summary>View exact daily values</summary><div class="table-scroll"><table><thead><tr><th scope="col">UTC date</th><th scope="col">Settled orders</th><th scope="col">Net revenue</th></tr></thead><tbody>${days.map(item=>`<tr><td>${escapeHtml(item.date)}</td><td>${item.orders}</td><td>${money(item.revenue)}${item.revenue===null ? ` <small>Known subtotal ${money(item.knownRevenue)}</small>`:''}</td></tr>`).join('')}</tbody></table></div></details>`;
+    const dashboard = state.data.dashboard || {}, signals = dashboard.revenueSignals || {};
+    const period = signals.periodRef === 'last30d' ? dashboard.last30d : signals.period || dashboard.last30d;
+    $('#revenue-trajectory').innerHTML = importedEvidenceTable(period, { details: true });
   }
 
   function renderOperationsStream() {
@@ -337,43 +393,45 @@
     const sales = re.sales || { summary:{}, quotes:[] };
     const intent = re.intent || { recoveries:[] };
     const baskets = re.baskets || { pairs:[] };
-    const advertising = re.advertising || { summary:{} };
+    const recordedSourceCoverage = attribution.coverage.orders > 0 ? percent(attribution.coverage.recordedSourceCoveragePercent) : 'Unavailable';
     const growth = re.growthPlan || { opportunities:[] };
-    $('#re-customers').textContent = String(customers.summary.customers || 0);
-    $('#re-repeat').textContent = percent(customers.summary.repeatRate) + ' repeat rate';
-    $('#re-reorder').textContent = String(customers.summary.reorderDue || 0);
-    $('#re-churn').textContent = String(customers.summary.churnRisk || 0);
+    $('#re-customers').textContent = countLabel(customers.summary.customers);
+    $('#re-repeat').textContent = percent(customers.summary.repeatRate) + ' retained-cohort repeat rate';
+    $('#re-reorder').textContent = countLabel(customers.summary.reorderDue);
+    $('#re-churn').textContent = countLabel(customers.summary.churnRisk);
     $('#re-pipeline').textContent = money(sales.summary.openPipeline);
     $('#re-followups').textContent = String(sales.summary.overdueFollowUps || 0) + ' follow-ups due';
-    $('#re-attribution').textContent = percent(attribution.coverage.sourceCoveragePercent);
+    $('#re-attribution').textContent = recordedSourceCoverage;
     $('#re-intent').textContent = String(intent.recoveries?.length || 0);
     $('#re-customer-summary').innerHTML = [
-      ['Known customer revenue', money(customers.summary.totalRevenue)],
-      ['Known contribution', money(customers.summary.knownContribution)],
-      ['Dormant customers', String(customers.summary.dormant || 0)],
-      ['Identity model', 'Hashed / channel-scoped']
+      ['Customer revenue / lifetime value', 'Unavailable'],
+      ['Customer contribution', 'Unavailable'],
+      ['Recorded dormant customers', countLabel(customers.summary.dormant)],
+      ['Cohort basis', 'Retained recorded orders · source period unverified']
     ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
     $('#re-customers-list').innerHTML = (customers.customers || []).slice(0,8).map(customer =>
-      '<div class="ranking-row"><div><b>'+escapeHtml(customer.privacyLabel)+'</b><small>'+escapeHtml(statusLabel(customer.segment))+' · '+customer.orderCount+' orders · last '+escapeHtml(String(customer.daysSinceLastOrder))+' days ago</small></div><strong>'+escapeHtml(money(customer.revenue))+'</strong></div>'
-    ).join('') || '<div class="empty-state">Customer intelligence appears when settled orders contain a privacy-safe customer identity.</div>';
+      '<div class="ranking-row"><div><b>'+escapeHtml(customer.privacyLabel)+'</b><small>'+escapeHtml(statusLabel(customer.segment))+' · '+escapeHtml((customer.channels || []).map(statusLabel).join(', ') || 'Provider unverified')+' · '+escapeHtml(countLabel(customer.orderCount))+' retained orders · last '+escapeHtml(String(customer.daysSinceLastOrder))+' recorded days ago</small></div><strong>Value unavailable</strong></div>'
+    ).join('') || '<div class="empty-state">No retained customer cohort is available. Source coverage and financial value remain unverified.</div>';
+    if (customers.coverage?.detailRowsTruncated) $('#re-customers-list').insertAdjacentHTML('beforeend', '<p class="muted tiny">Bounded customer detail: ' + escapeHtml(countLabel(customers.coverage.customersReturned)) + ' of ' + escapeHtml(countLabel(customers.coverage.customersAvailable)) + ' recorded customers returned. Counts describe the full bounded retained cohort; source-period coverage is unverified.</p>');
     $('#re-growth-plan').innerHTML = (growth.opportunities || []).map(item =>
       '<div class="priority-item"><div><b>'+escapeHtml(item.title)+'</b><p>'+escapeHtml(item.evidence)+'</p><small>'+escapeHtml(statusLabel(item.confidence))+' confidence · '+(item.approvalRequired?'approval required':'read-only action')+'</small></div></div>'
     ).join('') || '<div class="empty-state">No evidence-backed growth action is strong enough to recommend yet.</div>';
     $('#re-attribution-list').innerHTML = [
-      ['Confirmed source coverage', percent(attribution.coverage.sourceCoveragePercent)],
-      ['Orders assessed', String(attribution.coverage.orders || 0)],
-      ['Source-attributed orders', String(attribution.coverage.sourceAttributedOrders || 0)]
-    ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('') + '<p class="muted tiny">'+escapeHtml(attribution.coverage.note || '')+'</p>';
+      ['Recorded source coverage', recordedSourceCoverage],
+      ['Retained orders assessed', countLabel(attribution.coverage.orders)],
+      ['Orders with a recorded source', countLabel(attribution.coverage.recordedSourceOrders)]
+    ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('') + '<p class="muted tiny">'+escapeHtml(attribution.reason || attribution.coverage.note || 'Source-period coverage and financial attribution remain unverified.')+'</p>';
+    if (attribution.coverage.detailRowsTruncated) $('#re-attribution-list').insertAdjacentHTML('beforeend', '<p class="muted tiny">Recorded source detail is truncated. ' + escapeHtml(countLabel(attribution.coverage.orderRowsReturned)) + ' of ' + escapeHtml(countLabel(attribution.coverage.orderRowsAvailable)) + ' order details returned; source-period coverage is unverified.</p>');
     $('#re-baskets').innerHTML = (baskets.pairs || []).slice(0,8).map(pair =>
-      '<div class="ranking-row"><div><b>'+escapeHtml(pair.a)+' + '+escapeHtml(pair.b)+'</b><small>'+pair.ordersTogether+' orders together</small></div><strong>'+escapeHtml(percent(pair.affinity))+'</strong></div>'
-    ).join('') || '<div class="empty-state">Repeated product pairs will appear as order history grows.</div>';
+      '<div class="ranking-row"><div><b>'+escapeHtml(pair.a)+' + '+escapeHtml(pair.b)+'</b><small>'+escapeHtml(statusLabel(pair.provider))+' · '+escapeHtml(countLabel(pair.ordersTogether))+' retained orders together · recorded SKU association only</small></div><strong>'+escapeHtml(percent(pair.affinity))+'<small>retained-cohort affinity</small></strong></div>'
+    ).join('') || '<div class="empty-state">No retained recorded SKU pairs are available. Catalogue attribution and source-period coverage remain unverified.</div>';
     $('#re-sales').innerHTML = [
       ['Leads', String(sales.summary.leads || 0)], ['Open quotes', String(sales.summary.openQuotes || 0)],
       ['Open pipeline', money(sales.summary.openPipeline)], ['Quote conversion', percent(sales.summary.conversionPercent)]
     ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
     $('#re-advertising').innerHTML = [
-      ['Recorded spend', money(advertising.summary.spend)], ['Attributed revenue', money(advertising.summary.attributedRevenue)],
-      ['ROAS', advertising.summary.roas == null ? '—' : Number(advertising.summary.roas).toFixed(2)+'×'], ['Attribution coverage', percent(advertising.summary.attributionCoverage)]
+      ['Spend total', 'Unavailable'], ['Attributed revenue', 'Unavailable'],
+      ['ROAS', 'Unavailable'], ['Financial attribution', 'Unverified']
     ].map(item=>'<div><span>'+escapeHtml(item[0])+'</span><b>'+escapeHtml(item[1])+'</b></div>').join('');
 
     const experiments = Array.isArray(re.experiments) ? re.experiments : [];
@@ -404,81 +462,27 @@
   }
 
   function renderAnalytics() {
-    const dashboard = state.data.dashboard || {};
-    const month = dashboard.last30d || {};
-    const cutoff = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    const salesChannels = (state.data.integrations || []).filter(item =>
-      ['commerce', 'marketplace', 'social-commerce'].includes(item.kind) &&
-      (item.metrics30d || item.status === 'connected' || item.lastSyncAt)
-    );
-    const adCosts = (state.data.advertisingCosts || []).filter(item => {
-      const when = Date.parse(item.date || item.createdAt || '');
-      return Number.isFinite(when) && when >= cutoff;
-    });
-    const adSpend = adCosts.reduce((sum, item) => sum + (Number(item.spend) || 0), 0);
-    const attributableRecords = adCosts.filter(item => item.attributableRevenue !== null && item.attributableRevenue !== undefined && Number.isFinite(Number(item.attributableRevenue)));
-    const attributableRevenue = attributableRecords.reduce((sum, item) => sum + Number(item.attributableRevenue || 0), 0);
-    const roas = adSpend > 0 && attributableRecords.length ? attributableRevenue / adSpend : null;
-
-    $('#analytics-revenue').textContent = money(month.revenue);
-    $('#analytics-orders').textContent = String(month.orders || 0);
-    $('#analytics-profit').textContent = money(month.operatingProfit);
-    $('#analytics-margin').textContent = percent(month.margin);
-    $('#analytics-ad-spend').textContent = money(adSpend);
-    $('#analytics-roas').textContent = roas === null ? '—' : roas.toFixed(2) + '×';
-    $('#analytics-roas-note').textContent = roas === null ? (adSpend ? 'add attributable revenue to calculate' : 'no ad spend recorded') : money(attributableRevenue) + ' attributed revenue';
-
-    const ranked = [...salesChannels].sort((a,b) => Number(b.metrics30d?.revenue || 0) - Number(a.metrics30d?.revenue || 0));
-    const top = ranked.find(item => Number(item.metrics30d?.revenue || 0) !== 0);
-    $('#analytics-summary').textContent = top
-      ? top.name + ' is currently the largest recorded sales channel at ' + money(top.metrics30d?.revenue) + ' over the last 30 days. Runvara keeps source gaps visible rather than guessing.'
-      : 'Connect and sync your sales channels to build a reliable cross-channel performance picture. Runvara will not invent attribution where source data is missing.';
-
-    $('#analytics-channel-table').innerHTML = ranked.length ? '<div class="analytics-table-head"><span>Channel</span><span>Orders</span><span>Revenue</span><span>Contribution</span><span>Ads</span></div>' + ranked.map(channel => {
-      const m = channel.metrics30d || {};
-      return '<button class="analytics-table-row" data-view-link="channels"><span><b>' + escapeHtml(channel.name) + '</b><small>' + escapeHtml(statusLabel(channel.status || 'unknown')) + '</small></span><span>' + escapeHtml(String(m.orders || 0)) + '</span><span>' + escapeHtml(money(m.revenue)) + '</span><span>' + escapeHtml(money(m.operatingProfit)) + '</span><span>' + escapeHtml(money(m.advertisingSpend)) + '</span></button>';
-    }).join('') : '<div class="empty-state">No connected sales-channel metrics are available yet.</div>';
-
-    const totalChannelOrders = ranked.reduce((sum, channel) => sum + Number(channel.metrics30d?.orders || 0), 0);
-    $('#analytics-source-mix').innerHTML = totalChannelOrders ? ranked.filter(channel => Number(channel.metrics30d?.orders || 0) > 0).map(channel => {
-      const orders = Number(channel.metrics30d?.orders || 0);
-      const share = totalChannelOrders ? (orders / totalChannelOrders * 100) : 0;
-      return '<div class="source-row"><div><span>' + escapeHtml(channel.name) + '</span><strong>' + escapeHtml(String(orders)) + ' orders · ' + share.toFixed(1) + '%</strong></div><div class="source-track"><span style="width:' + Math.max(2, Math.min(100, share)).toFixed(1) + '%"></span></div></div>';
-    }).join('') : '<div class="empty-state">Order-source mix will appear after connected channels import recent orders.</div>';
-
-    const marketingByChannel = {};
-    adCosts.forEach(item => {
-      const key = String(item.channel || 'other');
-      const row = marketingByChannel[key] || { spend: 0, revenue: 0, attributed: false };
-      row.spend += Number(item.spend || 0);
-      if (item.attributableRevenue !== null && item.attributableRevenue !== undefined && Number.isFinite(Number(item.attributableRevenue))) {
-        row.revenue += Number(item.attributableRevenue); row.attributed = true;
-      }
-      marketingByChannel[key] = row;
-    });
-    const marketingRows = Object.entries(marketingByChannel).sort((a,b) => b[1].spend - a[1].spend);
-    $('#analytics-marketing').innerHTML = marketingRows.length ? '<div class="analytics-table-head analytics-marketing-head"><span>Channel</span><span>Spend</span><span>Attributed revenue</span><span>ROAS</span></div>' + marketingRows.map(([channel, row]) => {
-      const channelRoas = row.attributed && row.spend > 0 ? row.revenue / row.spend : null;
-      return '<div class="analytics-table-row analytics-marketing-row"><span><b>' + escapeHtml(statusLabel(channel)) + '</b><small>recorded marketing cost</small></span><span>' + escapeHtml(money(row.spend)) + '</span><span>' + escapeHtml(row.attributed ? money(row.revenue) : '—') + '</span><span>' + escapeHtml(channelRoas === null ? '—' : channelRoas.toFixed(2) + '×') + '</span></div>';
-    }).join('') : '<div class="empty-state">No marketing spend has been recorded in the last 30 days. Add costs as campaigns begin so Runvara can calculate return.</div>';
-
-    const connected = salesChannels.filter(item => item.status === 'connected').length;
-    const profitCoverage = Number(month.profitCoverage || 0);
-    const attributionCoverage = adCosts.length ? Math.round(attributableRecords.length / adCosts.length * 100) : 0;
+    const dashboard = state.data.dashboard || {}, month = dashboard.last30d || {};
+    const salesChannels = (state.data.integrations || []).filter(item => ['commerce', 'marketplace', 'social-commerce'].includes(item.kind) && (item.metrics30d || item.status === 'connected' || item.lastSyncAt));
+    const adCosts = state.data.advertisingCosts || [];
+    $('#analytics-revenue').textContent = 'Unavailable';
+    $('#analytics-orders').textContent = countLabel(month.orders);
+    $('#analytics-profit').textContent = 'Unavailable';
+    $('#analytics-margin').textContent = 'Unavailable';
+    $('#analytics-ad-spend').textContent = 'Unavailable';
+    $('#analytics-roas').textContent = 'Unavailable';
+    $('#analytics-roas-note').textContent = 'Currency, period and attribution not qualified';
+    $('#analytics-summary').textContent = 'Runvara shows exact normalized order evidence by provider, recorded currency, status and cancellation. Source-period coverage, revenue, profit and collected cash remain unverified.';
+    $('#analytics-channel-table').innerHTML = importedEvidenceTable(month, { details: true });
+    $('#analytics-source-mix').innerHTML = salesChannels.length ? salesChannels.map(channel => '<div class="source-row"><div><span>' + escapeHtml(channel.name) + '</span><strong>' + escapeHtml(countLabel(channel.metrics30d?.orders)) + ' retained orders</strong></div><small>Source period unverified · not a share of business sales</small></div>').join('') : '<div class="empty-state">No channel evidence is available.</div>';
+    $('#analytics-marketing').innerHTML = '<p class="muted tiny">All retained raw entries, with recorded dates shown. Currency, attribution and source-period coverage are unverified; totals and ROAS are unavailable.</p>' + (adCosts.length ? '<div class="table-wrap table-scroll"><table><thead><tr><th scope="col">Recorded date</th><th scope="col">Channel</th><th scope="col">Recorded currency</th><th scope="col">Recorded spend</th><th scope="col">Recorded attribution amount</th></tr></thead><tbody>' + adCosts.map(item => '<tr><td>' + escapeHtml(item.date || item.createdAt || 'Unknown') + '</td><td>' + escapeHtml(statusLabel(item.channel)) + '</td><td>' + escapeHtml(recordedCurrency(item)) + '</td><td>' + escapeHtml(recordedInput(item.spend)) + '</td><td>' + escapeHtml(recordedInput(item.attributableRevenue)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty-state">No advertising cost entries retained. This does not establish zero spend.</div>');
     $('#analytics-coverage').innerHTML = [
-      ['Sales-channel coverage', connected + ' connected', connected ? 'good' : 'warn', 'Live/synced commerce sources available to the workspace'],
-      ['Profit coverage', profitCoverage + '%', profitCoverage >= 90 ? 'good' : 'warn', 'Orders with enough cost data for contribution analysis'],
-      ['Marketing attribution', adCosts.length ? attributionCoverage + '%' : 'Not started', adCosts.length && attributionCoverage >= 80 ? 'good' : 'warn', 'Recorded ad-cost rows that include attributable revenue'],
-      ['Traffic-source attribution', 'Needs source data', 'neutral', 'GA4/UTM or equivalent visitor-source data is not inferred from order channels']
-    ].map(item => '<div class="coverage-item"><div><span>' + escapeHtml(item[0]) + '</span><strong class="' + item[2] + '">' + escapeHtml(item[1]) + '</strong></div><small>' + escapeHtml(item[3]) + '</small></div>').join('');
-
-    const insights = [];
-    if (top) insights.push({ tone: 'good', title: top.name + ' leads recorded channel revenue', detail: money(top.metrics30d?.revenue) + ' in the last 30 days across imported source data.' });
-    if (profitCoverage < 100) insights.push({ tone: profitCoverage < 70 ? 'warn' : 'neutral', title: 'Profit confidence can improve', detail: profitCoverage + '% of recent orders currently have sufficient cost coverage. Filling missing landed, fulfilment and fee inputs will make channel decisions stronger.' });
-    if (adSpend > 0 && !attributableRecords.length) insights.push({ tone: 'warn', title: 'Advertising spend is recorded without attributed revenue', detail: money(adSpend) + ' of spend is visible, but Runvara cannot responsibly calculate ROAS until attributable revenue is supplied by a connected source or recorded evidence.' });
-    if (!adSpend) insights.push({ tone: 'neutral', title: 'Marketing efficiency is ready for data', detail: 'As paid campaigns start, record or connect spend and attributable revenue so Runvara can compare growth with actual return.' });
-    if (!connected) insights.push({ tone: 'warn', title: 'Connect a commerce source to unlock channel intelligence', detail: 'Analytics stays evidence-based and will expand automatically as connected platforms supply orders, revenue and costs.' });
-    $('#analytics-insights').innerHTML = insights.length ? insights.slice(0,5).map(item => '<article class="analytics-insight"><span class="tag ' + item.tone + '">' + escapeHtml(item.tone === 'good' ? 'Signal' : item.tone === 'warn' ? 'Attention' : 'Next') + '</span><div><b>' + escapeHtml(item.title) + '</b><p>' + escapeHtml(item.detail) + '</p></div></article>').join('') : '<div class="empty-state">No analytics insight is available yet.</div>';
+      ['Source-period coverage', 'Unverified', 'A successful sync does not establish complete order coverage.'],
+      ['Numeric cost availability', numericCostLabel(month.numericCostCoverage), 'Availability of recorded cost numbers only; historical assignment remains unverified.'],
+      ['Financial qualification', 'Unavailable', 'Revenue, contribution, margin and collected cash are not qualified.'],
+      ['Marketing attribution', 'Unavailable', 'Recorded attribution amounts do not establish reconciled campaign return.']
+    ].map(item => '<div class="coverage-item"><div><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong></div><small>' + escapeHtml(item[2]) + '</small></div>').join('');
+    $('#analytics-insights').innerHTML = '<article class="analytics-insight"><span class="tag neutral">Evidence</span><div><b>Keep recorded cohorts separate</b><p>Known subtotals describe only scanned records in one provider, currency, status and cancellation cohort. Complete retained cohorts still do not establish business-period totals.</p></div></article><article class="analytics-insight"><span class="tag warn">Needs evidence</span><div><b>Financial comparisons are unavailable</b><p>Source coverage, original currencies, historical cost and tax treatment, settlements and attribution need qualification before financial rankings or return comparisons can be shown.</p></div></article>';
   }
 
   function renderHypergrowthCommand() {
@@ -494,8 +498,8 @@
     const verified = impact.verified || {};
     $('#hg-value').textContent = money(verified.verifiedValue);
     $('#hg-hours').textContent = verified.hoursSaved == null ? '—' : Number(verified.hoursSaved).toFixed(1) + 'h';
-    $('#hg-coverage').textContent = String(business.profitability?.profitCoveragePercent ?? 0) + '%';
-    $('#hg-coverage-note').textContent = String(business.profitability?.profitCoveredOrders ?? 0) + ' profit-covered orders';
+    $('#hg-coverage').textContent = 'Unavailable';
+    $('#hg-coverage-note').textContent = 'Historical cost, currency and tax basis unverified';
     const recommended = council.commander?.recommended?.length || 0;
     const approvals = council.commander?.prepareForApproval?.length || 0;
     const evidence = council.commander?.needsEvidence?.length || 0;
@@ -616,12 +620,12 @@
     $('#readiness-score').textContent = String(dashboard.readiness || 0) + '%';
     const readiness = Number(dashboard.readiness);
     $('#readiness-arc').setAttribute('stroke-dasharray', (Number.isFinite(readiness) ? Math.max(0, Math.min(100, readiness)) : 0) + ' 100');
-    $('#today-revenue').textContent = money(today.revenue);
-    $('#today-orders').textContent = String(today.orders || 0);
-    $('#today-open').textContent = String(today.openOrders || 0) + ' open';
-    $('#today-profit').textContent = money(today.operatingProfit);
-    $('#today-profit-coverage').textContent = 'coverage ' + String(today.profitCoverage || 0) + '%';
-    $('#today-margin').textContent = percent(today.margin);
+    $('#today-revenue').textContent = 'Unavailable';
+    $('#today-orders').textContent = countLabel(today.orders);
+    $('#today-open').textContent = countLabel(today.openOrders) + ' recorded open';
+    $('#today-profit').textContent = 'Unavailable';
+    $('#today-profit-coverage').textContent = 'Financial qualification unavailable';
+    $('#today-margin').textContent = 'Unavailable';
     $('#week-metrics').innerHTML = metricRows(dashboard.last7d || {});
     $('#month-metrics').innerHTML = metricRows(dashboard.last30d || {});
     renderRevenueChart();
@@ -643,9 +647,9 @@
       ['Pending approvals', dashboard.pendingApprovals || 0, dashboard.pendingApprovals ? 'warn' : 'good'],
       ['Active automations', String(dashboard.activeAutomations || 0) + '/' + String(dashboard.automationCount || 0), dashboard.activeAutomations ? 'good' : 'warn'],
       ['SEO issues', dashboard.seoIssues || 0, dashboard.seoIssues ? 'warn' : 'good'],
-      ['Customer-service issues', dashboard.customerServiceIssues || 0, dashboard.customerServiceIssues ? 'warn' : 'good'],
+      ['Recorded customer-service issues', countLabel(dashboard.customerServiceIssues), dashboard.customerServiceIssues == null ? 'neutral' : dashboard.customerServiceIssues ? 'warn' : 'good'],
       ['Integration issues', dashboard.integrationIssues || 0, dashboard.integrationIssues ? 'warn' : 'good'],
-      ['Ad spend · 30d', money(dashboard.advertising && dashboard.advertising.spend), 'neutral']
+      ['Ad spend total', 'Unavailable · currency and period unverified', 'neutral']
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b class="' + item[2] + '">' + escapeHtml(item[1]) + '</b></div>').join('');
     $('#overview-channels').innerHTML = (state.data.integrations || []).filter(item => ['commerce', 'marketplace', 'social-commerce'].includes(item.kind)).map(channelCard).join('');
     $('#best-products').innerHTML = ranking(dashboard.mostProfitable || [], false);
@@ -675,8 +679,6 @@
     const rows = [...items];
     if (state.productSort === 'contribution-desc') rows.sort((a, b) => (b.contribution ?? -Infinity) - (a.contribution ?? -Infinity));
     else if (state.productSort === 'margin-desc') rows.sort((a, b) => (b.margin ?? -Infinity) - (a.margin ?? -Infinity));
-    else if (state.productSort === 'revenue-desc') rows.sort((a, b) => (b.revenue30d || 0) - (a.revenue30d || 0));
-    else if (state.productSort === 'units-desc') rows.sort((a, b) => (b.units30d || 0) - (a.units30d || 0));
     else if (state.productSort === 'stock-asc') rows.sort((a, b) => (a.inventory ?? Infinity) - (b.inventory ?? Infinity));
     else rows.sort((a, b) => (a.productTitle + a.title).localeCompare(b.productTitle + b.title));
     return rows;
@@ -696,20 +698,32 @@
       const image = item.productImage ? '<img src="' + escapeHtml(item.productImage) + '" alt="">' : '<span class="image-placeholder">PS</span>';
       const supplierOptions = '<option value="">No supplier mapped</option>' + suppliers.map(supplier => '<option value="' + escapeHtml(supplier.id) + '"' + (economics.supplierId === supplier.id ? ' selected' : '') + '>' + escapeHtml(supplier.name) + '</option>').join('');
       const missingTitle = item.missingFields && item.missingFields.length ? item.missingFields.join(', ') : 'Complete cost coverage';
-      return '<tr class="economics-row" data-sku="' + escapeHtml(item.sku) + '"><td><div class="product-cell">' + image + '<div><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.title) + ' · ' + escapeHtml(item.sku || 'No SKU') + '</small><small>30d: ' + escapeHtml(item.units30d || 0) + ' units · ' + escapeHtml(money(item.revenue30d)) + '</small></div></div></td><td class="numeric">' + money(item.price) + '</td><td class="numeric ' + (item.inventory !== null && item.inventory <= lowStockThreshold ? 'warn' : '') + '">' + (item.inventory == null ? '—' : escapeHtml(item.inventory)) + '</td><td><select class="econ-input compact-select" data-field="supplierId" aria-label="Supplier for ' + escapeHtml(item.sku) + '">' + supplierOptions + '</select></td><td>' + moneyInput('landed', 'Landed cost for ' + item.sku, economics) + '</td><td>' + moneyInput('packing', 'Packing cost for ' + item.sku, economics) + '</td><td>' + moneyInput('handling', 'Handling cost for ' + item.sku, economics) + '</td><td>' + moneyInput('delivery', 'Actual postage cost for ' + item.sku, economics) + '</td><td>' + moneyInput('paymentFee', 'Payment fee for ' + item.sku, economics) + '</td><td>' + moneyInput('channelFee', 'Channel fee for ' + item.sku, economics) + '</td><td>' + moneyInput('advertising', 'Advertising allocation for ' + item.sku, economics) + '</td><td>' + moneyInput('otherVariable', 'Other variable cost for ' + item.sku, economics) + '</td><td class="numeric">' + money(item.totalVariableCost) + '</td><td class="numeric ' + statusClass(item.status) + '">' + money(item.contribution) + '</td><td class="numeric ' + statusClass(item.status) + '">' + percent(item.margin) + '</td><td><span class="tag ' + statusClass(item.status) + '" title="' + escapeHtml(missingTitle) + '">' + escapeHtml(statusLabel(item.status)) + '</span><div class="table-actions"><button class="text-button cost-details" type="button">Supplier detail</button><button class="primary small-button save-economics" type="button">Save</button></div></td></tr>' +
+      return '<tr class="economics-row" data-sku="' + escapeHtml(item.sku) + '"><td><div class="product-cell">' + image + '<div><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.title) + ' · ' + escapeHtml(item.sku || 'No SKU') + '</small><small>Order attribution unverified · sales and stock cover unavailable</small></div></div></td><td class="numeric">' + money(item.price) + '</td><td class="numeric ' + (item.inventory !== null && item.inventory <= lowStockThreshold ? 'warn' : '') + '">' + (item.inventory == null ? '—' : escapeHtml(item.inventory)) + '</td><td><select class="econ-input compact-select" data-field="supplierId" aria-label="Supplier for ' + escapeHtml(item.sku) + '">' + supplierOptions + '</select></td><td>' + moneyInput('landed', 'Landed cost for ' + item.sku, economics) + '</td><td>' + moneyInput('packing', 'Packing cost for ' + item.sku, economics) + '</td><td>' + moneyInput('handling', 'Handling cost for ' + item.sku, economics) + '</td><td>' + moneyInput('delivery', 'Actual postage cost for ' + item.sku, economics) + '</td><td>' + moneyInput('paymentFee', 'Payment fee for ' + item.sku, economics) + '</td><td>' + moneyInput('channelFee', 'Channel fee for ' + item.sku, economics) + '</td><td>' + moneyInput('advertising', 'Advertising allocation for ' + item.sku, economics) + '</td><td>' + moneyInput('otherVariable', 'Other variable cost for ' + item.sku, economics) + '</td><td class="numeric">' + money(item.totalVariableCost) + '</td><td class="numeric ' + statusClass(item.status) + '">' + money(item.contribution) + '</td><td class="numeric ' + statusClass(item.status) + '">' + percent(item.margin) + '</td><td><span class="tag ' + statusClass(item.status) + '" title="' + escapeHtml(missingTitle) + '">' + escapeHtml(statusLabel(item.status)) + '</span><div class="table-actions"><button class="text-button cost-details" type="button">Supplier detail</button><button class="primary small-button save-economics" type="button">Save</button></div></td></tr>' +
         '<tr class="cost-detail-row hidden" data-sku="' + escapeHtml(item.sku) + '"><td colspan="16"><div class="cost-detail-grid"><label>Supplier SKU<input class="econ-input" data-field="supplierSku" value="' + escapeHtml(inputValue(economics.supplierSku)) + '"></label><label>Box quantity<input class="econ-input" data-field="boxQuantity" type="number" min="0" step="1" value="' + escapeHtml(inputValue(economics.boxQuantity)) + '"></label><label>Box price (£)<input class="econ-input" data-field="boxPrice" type="number" min="0" step="0.01" value="' + escapeHtml(inputValue(economics.boxPrice)) + '"></label><label>Supplier unit cost (£)<input class="econ-input" data-field="supplierUnitCost" type="number" min="0" step="0.0001" value="' + escapeHtml(inputValue(economics.supplierUnitCost)) + '"></label><label>Delivery allocation / unit (£)<input class="econ-input" data-field="supplierDelivery" type="number" min="0" step="0.0001" value="' + escapeHtml(inputValue(economics.supplierDelivery)) + '"></label><label>Supplier VAT rate (%)<input class="econ-input" data-field="supplierVatRate" type="number" min="0" max="100" step="0.1" value="' + escapeHtml(inputValue(economics.supplierVatRate)) + '"></label><label>VAT recoverable<select class="econ-input" data-field="supplierVatRecoverable"><option value=""' + (economics.supplierVatRecoverable == null ? ' selected' : '') + '>Unknown</option><option value="true"' + (economics.supplierVatRecoverable === true ? ' selected' : '') + '>Yes</option><option value="false"' + (economics.supplierVatRecoverable === false ? ' selected' : '') + '>No</option></select></label><label>Margin floor (%)<input class="econ-input" data-field="marginFloor" type="number" min="0" max="100" step="0.1" value="' + escapeHtml(inputValue(economics.marginFloor)) + '"></label><label class="detail-notes">Notes<textarea class="econ-input" data-field="notes">' + escapeHtml(inputValue(economics.notes)) + '</textarea></label></div><p class="muted tiny">If landed cost is blank, it is derived only when unit/box cost, supplier delivery, VAT rate and VAT recovery treatment are all known.</p></td></tr>';
     }).join('') || '<tr><td colspan="16" class="empty-state">No products match this filter.</td></tr>';
   }
 
+  function recordedOrderStatus(order) {
+    if (order.recordedStatus) return order.recordedStatus;
+    const group = importedEvidence(order.profitability)?.groups?.[0];
+    const status = typeof order.fulfillmentStatus === 'string' ? order.fulfillmentStatus.toUpperCase() : 'UNKNOWN';
+    const fulfillmentStatus = ['FULFILLED','UNFULFILLED','PARTIAL','PARTIALLY_FULFILLED','RESTOCKED','IN_PROGRESS','ON_HOLD','OPEN','SCHEDULED'].includes(status) ? status : 'UNKNOWN';
+    const refunds = group?.recordedAmounts?.refunds?.knownSubtotal;
+    return { fulfillmentStatus, financialStatus: group?.financialStatus || 'UNKNOWN', cancelled: group?.cancelled === true,
+      hasRecordedRefund: ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(group?.financialStatus) || (typeof refunds === 'string' && /^\d+(?:\.\d+)?$/.test(refunds) && refunds !== '0') };
+  }
+
   function orderMatches(order) {
-    const p = order.profitability || {};
     if (state.orderFilter === 'all') return true;
-    if (state.orderFilter === 'open') return !['FULFILLED', 'RESTOCKED'].includes(String(order.fulfillmentStatus).toUpperCase());
-    if (state.orderFilter === 'refunded') return Number(p.refunds || 0) > 0 || String(order.financialStatus).includes('REFUND');
-    if (state.orderFilter === 'missing-profit') return !p.complete;
-    if (state.orderFilter === 'profitable') return p.complete && p.contribution >= 0;
-    if (state.orderFilter === 'loss-making') return p.complete && p.contribution < 0;
-    if (state.orderFilter === 'today') return new Date(order.createdAt).toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10);
+    const recorded = recordedOrderStatus(order);
+    if (state.orderFilter === 'open') return !recorded.cancelled && recorded.fulfillmentStatus !== 'UNKNOWN' && !['FULFILLED', 'RESTOCKED'].includes(recorded.fulfillmentStatus);
+    if (state.orderFilter === 'refunded') return recorded.hasRecordedRefund === true;
+    if (state.orderFilter === 'missing-profit') return true;
+    if (state.orderFilter === 'profitable' || state.orderFilter === 'loss-making') return false;
+    if (state.orderFilter === 'today') {
+      const recorded = new Date(order.createdAt);
+      return Number.isFinite(recorded.getTime()) && recorded.toISOString().slice(0, 10) === new Date().toISOString().slice(0, 10);
+    }
     return true;
   }
 
@@ -718,23 +732,23 @@
   }
 
   function renderOrders() {
-    const dashboard = state.data.dashboard || {};
-    const month = dashboard.last30d || {};
-    $('#orders-revenue').textContent = money(month.revenue);
-    $('#orders-total').textContent = String(month.orders || 0);
-    $('#orders-open').textContent = String(month.openOrders || 0) + ' open';
-    $('#orders-refunds-value').textContent = money(month.refunds);
-    $('#orders-refunded').textContent = String(dashboard.refundedOrders30d || 0) + ' affected orders';
-    $('#orders-profit').textContent = money(month.operatingProfit);
-    $('#orders-profit-coverage').textContent = String(month.profitCoverage || 0) + '%';
+    const dashboard = state.data.dashboard || {}, month = dashboard.last30d || {};
+    $('#orders-revenue').textContent = 'Unavailable';
+    $('#orders-total').textContent = countLabel(month.orders);
+    $('#orders-open').textContent = countLabel(month.openOrders) + ' recorded open';
+    $('#orders-refunds-value').textContent = 'See recorded cohorts';
+    $('#orders-refunded').textContent = 'Source-period refunds unverified';
+    $('#orders-profit').textContent = 'Unavailable';
+    $('#orders-profit-coverage').textContent = 'Unavailable';
     const orders = (dashboard.orderProfitability || []).filter(orderMatches);
-    $('#order-list').innerHTML = orders.length ? orders.slice(0, 250).map(order => {
-      const p = order.profitability || {};
-      const profitStatus = !p.complete ? 'incomplete' : p.contribution < 0 ? 'loss-making' : 'profitable';
-      const missing = (p.missingFields || []).length ? '<div class="missing-inputs"><b>Missing inputs</b><span>' + escapeHtml(p.missingFields.join(' · ')) + '</span></div>' : '';
-      const lines = (p.lines || []).length ? p.lines.map(line => '<div><span>' + escapeHtml(line.name) + '<small>' + escapeHtml(line.sku || 'No SKU') + ' × ' + escapeHtml(line.quantity) + '</small></span><strong>' + escapeHtml(money(line.netSales)) + '</strong></div>').join('') : '<div class="empty-state">Line items have not been imported.</div>';
-      return '<details class="order-profit-card" data-order-id="' + escapeHtml(order.id) + '"><summary><div><b>' + escapeHtml(order.name || order.id) + '</b><small>' + date(order.createdAt) + ' · ' + escapeHtml(statusLabel(order.provider || 'shopify')) + '</small></div><div class="order-state"><span class="tag ' + statusClass(order.financialStatus === 'REFUNDED' ? 'loss-making' : order.financialStatus === 'PAID' ? 'connected' : 'degraded') + '">' + escapeHtml(statusLabel(order.financialStatus)) + '</span><span class="tag ' + statusClass(order.fulfillmentStatus === 'FULFILLED' ? 'connected' : 'degraded') + '">' + escapeHtml(statusLabel(order.fulfillmentStatus)) + '</span></div><div class="order-total"><strong>' + escapeHtml(money(p.netRevenue)) + '</strong><span class="' + statusClass(profitStatus) + '">' + escapeHtml(money(p.contribution)) + '</span></div></summary><div class="order-detail"><div class="order-metrics"><div><span>Gross order</span><b>' + money(p.grossRevenue) + '</b></div><div><span>Discounts</span><b>' + money(p.discounts) + '</b></div><div><span>Refunds</span><b>' + money(p.refunds) + '</b></div><div><span>VAT / tax</span><b>' + money(p.tax) + '</b></div><div><span>Customer shipping</span><b>' + money(p.shippingCharged) + '</b></div><div><span>Variable costs</span><b>' + money(p.totalVariableCost) + '</b></div><div><span>Gross profit</span><b>' + money(p.grossProfit) + '</b></div><div><span>Operating contribution</span><b class="' + statusClass(profitStatus) + '">' + money(p.contribution) + '</b></div><div><span>Margin</span><b>' + percent(p.margin) + '</b></div><div><span>Basis</span><b>' + escapeHtml(statusLabel(p.basis)) + '</b></div></div>' + missing + '<div class="order-detail-grid"><div><h3>Order lines</h3><div class="line-item-list">' + lines + '</div></div><div><h3>Actual business costs</h3><div class="order-cost-grid">' + costField('Actual shipping (£)', 'actualShippingCost', order) + costField('Payment fees (£)', 'paymentFees', order) + costField('Channel fees (£)', 'channelFees', order) + costField('Advertising (£)', 'advertisingCost', order) + costField('Other variable (£)', 'otherVariableCosts', order) + '</div><button class="primary small-button save-order-costs" type="button">Save order costs</button></div></div></div></details>';
-    }).join('') : '<div class="empty-state">No orders match this filter. Live order data appears after a read-only channel connection.</div>';
+    const detailCoverage = dashboard.orderDetailCoverage;
+    const detailNote = detailCoverage?.truncated ? '<p class="missing-inputs">Partial order-detail view. Additional retained orders are not shown. Period cohorts are available in Analytics.</p>' : '';
+    $('#order-list').innerHTML = detailNote + (orders.length ? orders.slice(0, 250).map(order => {
+      const p = order.profitability || {}, evidence = importedEvidence(p), group = evidence?.groups?.length === 1 ? evidence.groups[0] : null;
+      const recordedNet = group ? recordedDecimal(group.recordedAmounts?.netTotal?.knownSubtotal) : 'Unknown';
+      const lines = (order.lineItems || []).length ? order.lineItems.map(line => '<div><span>' + escapeHtml(line.name || line.title || 'Recorded line') + '<small>' + escapeHtml(line.sku || 'No recorded SKU') + ' · recorded quantity ' + escapeHtml(recordedInput(line.quantity)) + '</small></span><strong>' + escapeHtml(recordedInput(line.net)) + '<small>Recorded line amount · currency / refund allocation unverified</small></strong></div>').join('') : '<div class="empty-state">Raw line items have not been retained.</div>';
+      return '<details class="order-profit-card" data-order-id="' + escapeHtml(order.id) + '"><summary><div><b>' + escapeHtml(order.name || order.id) + '</b><small>' + date(order.createdAt) + ' · ' + escapeHtml(statusLabel(order.provider)) + '</small></div><div class="order-state"><span class="tag neutral">Recorded ' + escapeHtml(statusLabel(order.financialStatus)) + '</span><span class="tag neutral">' + (recordedOrderStatus(order).cancelled ? 'Cancelled' : 'Not recorded cancelled') + '</span><span class="tag neutral">' + escapeHtml(statusLabel(order.fulfillmentStatus)) + '</span></div><div class="order-total"><strong>' + escapeHtml(recordedNet) + '</strong><small>Normalized recorded net · ' + escapeHtml(recordedCurrency(group || order)) + '</small><span>Profit unavailable</span></div></summary><div class="order-detail">' + importedEvidenceTable(p, { details: true }) + '<div class="order-detail-grid"><div><h3>Recorded order lines</h3><p class="muted tiny">Recorded SKUs and quantities do not establish catalogue attribution or stock movement.</p><div class="line-item-list">' + lines + '</div></div><div><h3>Recorded cost inputs</h3><p class="muted tiny">Cost currency, tax treatment and historical assignment are unverified. Saving numeric inputs does not qualify profit.</p><div class="order-cost-grid">' + costField('Shipping cost', 'actualShippingCost', order) + costField('Payment fees', 'paymentFees', order) + costField('Channel fees', 'channelFees', order) + costField('Advertising cost', 'advertisingCost', order) + costField('Other variable costs', 'otherVariableCosts', order) + '</div><button class="primary small-button save-order-costs" type="button">Save order costs</button></div></div></div></details>';
+    }).join('') : '<div class="empty-state">No retained orders match this filter. An empty selection does not establish zero sales.</div>');
   }
 
   function approvalCard(item) {
@@ -943,9 +957,10 @@
     const inventoryOnly = ebay.source === 'ebay-oauth-readonly';
     const listingsAvailable = coverage.offersAvailable !== false && coverage.inventoryAvailable !== false && !/unavailable:.*(?:inventory|offers)/i.test(ebayStatus?.lastError || '');
     const comparisonAvailable = listingsAvailable && !inventoryOnly && coverage.fullCatalogueAvailable !== false;
+    const recordedOrderCount = (state.data.connectionCentre || []).find(channel => channel.id === 'ebay')?.counts?.orders;
     $('#ebay-health').innerHTML = [
       ['Connected account', ebay.account || '—'], ['Catalogue coverage', inventoryOnly ? 'Inventory API only; full comparison needs the existing Manager feed' : 'Existing Manager catalogue'], [inventoryOnly ? 'Inventory API listings' : 'Listings', !listingsAvailable ? 'Source unavailable' : ebay.listings && ebay.listings.length || 0], ['Drafts', !listingsAvailable ? 'Source unavailable' : ebay.drafts && ebay.drafts.length || 0],
-      ['Orders', (state.data.orders || []).filter(order => order.provider === 'ebay').length], ['Fee records', ebay.fees && ebay.fees.length || 0], ['Promotions', ebay.promotions && ebay.promotions.length || 0],
+      ['Recorded orders', countLabel(recordedOrderCount)], ['Fee records', ebay.fees && ebay.fees.length || 0], ['Promotions', ebay.promotions && ebay.promotions.length || 0],
       ['Missing on eBay', !comparisonAvailable ? 'Cannot compare' : ebay.health && ebay.health.missingOnEbay && ebay.health.missingOnEbay.length || 0], ['Stale on eBay', !comparisonAvailable ? 'Cannot compare' : ebay.health && ebay.health.staleOnEbay && ebay.health.staleOnEbay.length || 0], ['Last read sync', date(ebay.syncedAt)]
     ].map(item => '<div><span>' + escapeHtml(item[0]) + '</span><b>' + escapeHtml(item[1]) + '</b></div>').join('');
   }
@@ -1030,7 +1045,7 @@
       return `<article class="agent-card" data-agent-id="${escapeHtml(agent.id)}"><div class="agent-head"><span class="agent-mark">${agentIcon(agent.id)}</span><div><b>${escapeHtml(agent.name)}</b><small>${escapeHtml(window.RunvaraUI.role(agent.id))}</small></div>${window.RunvaraUI.badge(agent.enabled===false?'Disabled':agent.status,agent.enabled===false?'neutral':statusClass(String(agent.status).toLowerCase()))}</div><div class="agent-task"><span class="eyebrow">${agent.currentTask ? 'CURRENT TASK' : 'LATEST FINDING'}</span><p class="agent-finding">${escapeHtml(agent.currentTask || agent.lastFinding || 'Ready for its first analysis.')}</p></div><dl><div><dt>Last run</dt><dd>${escapeHtml(agent.lastRun ? date(agent.lastRun) : 'Not yet run')}</dd></div><div><dt>Issues detected</dt><dd>${escapeHtml(agent.issuesDetected || 0)}</dd></div><div><dt>Rule confidence</dt><dd>${escapeHtml(agent.confidence == null ? '—' : agent.confidence+'%')}</dd></div></dl><div class="agent-context"><span>${runs.length} analyses in recent team history</span><span>${decisions} decisions consulted in latest run</span>${pending.length ? `<button class="text-button" data-view-link="approvals">${pending.length} awaiting approval ↗</button>` : '<span>No pending requests from this agent</span>'}</div></article>`;
     }).join('') || '<div class="empty-state">No specialists were returned for this workspace.</div>';
     const activity = state.data.agentActivity || [];
-    $('#agent-activity').innerHTML = activity.length ? activity.map(item => '<div class="activity-row"><span class="activity-dot ' + statusClass(String(item.status).toLowerCase()) + '"></span><div><b>' + escapeHtml(statusLabel(item.agentId)) + '</b><p>' + escapeHtml(item.message) + '</p><small>' + escapeHtml(date(item.createdAt)) + (item.confidence === undefined ? '' : ' · confidence ' + Math.round(item.confidence * 100) + '%') + '</small></div></div>').join('') : '<div class="empty-state">No agent runs yet. Send the Commander a quick command.</div>';
+    $('#agent-activity').innerHTML = activity.length ? activity.map(item => '<div class="activity-row"><span class="activity-dot ' + statusClass(String(item.status).toLowerCase()) + '"></span><div><b>' + escapeHtml(statusLabel(item.agentId)) + '</b><p>' + (item.historical ? 'Historical analysis (earlier calculation rules): ' : '') + escapeHtml(item.message) + '</p><small>' + escapeHtml(date(item.createdAt)) + (item.confidence === undefined ? '' : ' · confidence ' + Math.round(item.confidence * 100) + '%') + '</small></div></div>').join('') : '<div class="empty-state">No agent runs yet. Send the Commander a quick command.</div>';
   }
 
   function fleetRisk(workspace) {
@@ -1158,7 +1173,7 @@
     const card = button.closest('[data-order-id]'); const costs = {};
     card.querySelectorAll('.order-cost-input').forEach(input => { costs[input.dataset.field] = input.value; });
     setBusy(button, true, 'Saving…');
-    try { await request('/api/orders/' + encodeURIComponent(card.dataset.orderId) + '/economics', { method: 'PUT', body: JSON.stringify(costs) }); await loadBootstrap({ migrate: false }); showMessage('Actual order costs saved and profitability recalculated.'); }
+    try { await request('/api/orders/' + encodeURIComponent(card.dataset.orderId) + '/economics', { method: 'PUT', body: JSON.stringify(costs) }); await loadBootstrap({ migrate: false }); showMessage('Recorded order costs saved. Financial qualification remains unavailable.'); }
     catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
   }
 

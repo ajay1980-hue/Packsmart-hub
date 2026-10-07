@@ -132,7 +132,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   document.querySelector('[data-view="revenue-engine"]').click();
   assert.equal(document.querySelector('.view.active').id, 'view-revenue-engine');
   assert.equal(document.getElementById('re-pipeline').textContent, '£240.00', 'Revenue Engine renders retained tenant data from bootstrap');
-  assert.equal(document.getElementById('re-attribution').textContent, '0.0%');
+  assert.equal(document.getElementById('re-attribution').textContent, 'Unavailable');
   assert.equal(document.querySelector('[onerror]'), null, 'source text is escaped');
   assert.ok(document.querySelector('#attention-queue .attention-item'));
   assert.ok(!document.getElementById('attention-queue').textContent.includes('No recorded exceptions or approvals need attention.'), 'active exceptions never show an all-clear message');
@@ -174,7 +174,8 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   document.querySelector('[data-period="month"]').click();
   assert.equal(document.getElementById('week-metrics').hidden, true);
   assert.equal(document.getElementById('month-metrics').hidden, false);
-  assert.ok(document.getElementById('revenue-chart').textContent.includes('No channel revenue is available yet'));
+  assert.match(document.getElementById('revenue-chart').textContent, /unverified/i);
+  assert.equal(document.getElementById('revenue-chart').querySelector('svg'), null);
   document.querySelector('[data-view="analytics"]').click();
   assert.equal(document.querySelector('.view.active').id, 'view-analytics');
   assert.ok(document.getElementById('analytics-summary').textContent.includes('Runvara'));
@@ -246,9 +247,9 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   });
   const bootstrap = await (await window.fetch('/api/bootstrap')).json();
   for (const scenario of [
-    { name: 'chart keeps positive, negative, zero and unavailable revenue distinct', values: [250, -50, 0, null] },
-    { name: 'chart treats no channels as an empty state', values: [] },
-    { name: 'chart does not turn an unknown value into zero', values: [null, undefined] }
+    { name: 'legacy positive, negative, zero and null scalars cannot revive financial charts', values: [250, -50, 0, null] },
+    { name: 'channel evidence treats no channels as unavailable', values: [] },
+    { name: 'channel evidence does not turn unknown scalars into zero', values: [null, undefined] }
   ]) await t.test(scenario.name, async () => {
     const chartErrors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', error => chartErrors.push(error.message));
     const chartDom = new JSDOM(await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8'), { url: base, runScripts: 'outside-only', virtualConsole });
@@ -264,19 +265,13 @@ test('cockpit renders authenticated controls and submits real persisted workflow
       assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false, w.document.getElementById('startup-error').textContent + '; ' + chartErrors.join('; '));
       const chart = w.document.getElementById('revenue-chart');
       assert.equal(chart.querySelector('[onerror]'), null);
-      if (scenario.values.length === 4) {
-        const rows = chart.querySelectorAll('.revenue-row');
-        assert.equal(rows.length, 4);
-        assert.equal(rows[0].querySelector('strong').textContent, '£250.00');
-        assert.equal(rows[1].querySelector('strong').textContent, '-£50.00');
-        assert.equal(rows[2].querySelector('strong').textContent, '£0.00');
-        assert.equal(rows[3].querySelector('strong').textContent, '—');
-        assert.equal(rows[0].querySelector('.revenue-bar').getAttribute('width'), '833.33');
-        assert.equal(rows[1].querySelector('.revenue-bar').getAttribute('x'), '0.00');
-        assert.equal(rows[1].querySelector('.revenue-bar').getAttribute('width'), '166.67');
-        assert.equal(rows[2].querySelector('.revenue-bar').getAttribute('width'), '0.00');
-        assert.equal(rows[3].querySelector('svg'), null);
-      } else assert.ok(chart.textContent.includes('No channel revenue is available yet'));
+      assert.equal(chart.querySelector('svg'), null, 'unqualified financial scalars cannot produce a chart');
+      assert.doesNotMatch(chart.textContent, /£|\$|250|50|£0/);
+      if (scenario.values.length) {
+        assert.equal(chart.querySelectorAll('details').length, scenario.values.length);
+        assert.match(chart.textContent, /Imported order evidence unavailable/);
+        assert.match(chart.textContent, /Source-period coverage is unverified/);
+      } else assert.ok(chart.textContent.includes('No imported channel evidence is available yet'));
       assert.deepEqual(chartErrors, []);
     } finally { chartDom.window.close(); }
   });

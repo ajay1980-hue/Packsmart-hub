@@ -42,8 +42,9 @@ test('business state is compact, tenant-scoped and withholds profit when cost ev
   assert.equal(result.workspaceId, 'tenant-a');
   assert.equal(result.profitability.missingCostVariants, 1);
   assert.equal(result.profitability.missingCosts[0].sku, 'SKU-MISSING');
-  assert.equal(result.profitability.profitCoveragePercent, 100);
-  assert.equal(result.profitability.contribution30d, 6);
+  assert.equal(result.profitability.profitCoveragePercent, null);
+  assert.deepEqual(result.profitability.numericCostCoverage.orderCoverage, { numerator: 1, denominator: 1 });
+  assert.equal(result.profitability.contribution30d, null);
   assert.equal(result.inventory.stockRisks, 1);
   assert.equal(result.evidence.profitUnknownWhenCostsMissing, true);
 
@@ -65,6 +66,7 @@ test('business state reports contribution as unknown when retained orders lack r
   }];
   const result = deriveBusinessState(state, { now:new Date('2026-10-05T13:00:00.000Z') });
   assert.equal(result.profitability.contribution30d, null);
-  assert.equal(result.profitability.profitCoveragePercent, 0);
+  assert.equal(result.profitability.profitCoveragePercent, null);
+  assert.deepEqual(result.profitability.numericCostCoverage.orderCoverage, { numerator: 0, denominator: 1 });
   assert.equal(result.profitability.missingCostVariants, 1);
 });

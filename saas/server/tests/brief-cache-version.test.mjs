@@ -11,10 +11,11 @@ import { detectExceptions, detectOpportunities } from '../lib/control.mjs';
 import { buildDailyBrief } from '../lib/operations.mjs';
 import { createSessionToken } from '../lib/security.mjs';
 
-// Frozen pre-version cache contract. This deliberately does not use the current
+// Frozen prior calculation-version cache contract. This deliberately does not use the current
 // signature helper: the fixture must remain a cache written by the old logic.
 function legacySignature(state) {
   return createHash('sha256').update(JSON.stringify({
+    calculationVersion: 'catalogue-financial-eligibility/v1',
     products: state.products || [], orders: state.orders || [], economics: state.economics || {},
     advertisingCosts: state.advertisingCosts || [], revenueEngine: state.revenueEngine || {}, approvals: state.approvals || [],
     integrationStatus: Object.fromEntries(Object.entries(state.integrationStatus || {}).map(([key, value]) => [key, {
@@ -54,7 +55,7 @@ test('bootstrap invalidates legacy same-input analysis once while retaining brie
   state.exceptions.push(oldException);
   const legacyBrief = { ...buildDailyBrief(state), id: 'legacy-same-day-brief', lowMargin: 1, averageMargin: 20,
     summary: '1 fully costed variant is below its contribution-margin floor.', attention: { exceptions: 2 }, sourceSignature: legacySignature(state) };
-  delete legacyBrief.calculationVersion;
+  legacyBrief.calculationVersion = 'catalogue-financial-eligibility/v1';
   state.dailyBriefs = [legacyBrief];
   state.controlSignature = legacySignature(state);
   state.agentRuns = [{ id: 'legacy-agent-run', completedAt: now, status: 'Completed', summary: '1 variant is below its margin floor.',

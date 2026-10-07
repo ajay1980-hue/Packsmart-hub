@@ -4,7 +4,7 @@ import { deriveCustomerIntelligence, deriveAttribution, deriveBasketIntelligence
 
 const now = new Date('2026-10-01T12:00:00.000Z');
 function order(id, customer, createdAt, lines, total=120) {
-  return { id, provider:'shopify', customerEmailHash:customer, createdAt, financialStatus:'PAID', fulfillmentStatus:'FULFILLED', total, currentTotal:total, refunds:0, tax:20, currentTax:20, discounts:0, shippingCharged:0, actualShippingCost:5, paymentFees:2, channelFees:0, advertisingCost:0, otherVariableCosts:0, lineItems:lines };
+  return { id, provider:'shopify', currency:'GBP', customerEmailHash:customer, createdAt, financialStatus:'PAID', fulfillmentStatus:'FULFILLED', total, currentTotal:total, refunds:0, tax:20, currentTax:20, discounts:0, shippingCharged:0, actualShippingCost:5, paymentFees:2, channelFees:0, advertisingCost:0, otherVariableCosts:0, lineItems:lines };
 }
 const economics = {
   A:{ landedCost:20, packing:1, handling:1, delivery:0, paymentFee:0, channelFee:0, advertising:0, otherVariable:0 },
@@ -12,7 +12,7 @@ const economics = {
 };
 
 test('customer intelligence uses privacy-preserving order identity and evidence-backed retention', () => {
-  const state={economics,orders:[
+  const state={workspace:{id:'workspace-revenue'},economics,orders:[
     order('o1','abc123','2026-07-01T00:00:00Z',[{sku:'A',name:'A',quantity:1,net:100}]),
     order('o2','abc123','2026-08-01T00:00:00Z',[{sku:'A',name:'A',quantity:1,net:100},{sku:'B',name:'B',quantity:1,net:20}]),
     order('o3','other','2026-09-25T00:00:00Z',[{sku:'B',name:'B',quantity:1,net:120}])
@@ -21,28 +21,35 @@ test('customer intelligence uses privacy-preserving order identity and evidence-
   assert.equal(result.summary.customers,2);
   assert.equal(result.summary.repeatCustomers,1);
   assert.equal(result.coverage.namesAndEmailsExposed,false);
-  const repeat=result.customers.find(c=>c.id==='shopify:abc123');
+  const repeat=result.customers.find(c=>c.orderCount===2);
   assert.equal(repeat.orderCount,2);
   assert.equal(repeat.averageReorderDays,31);
   assert.equal(repeat.signals.churnRisk,true);
-  assert.ok(repeat.contribution === null || typeof repeat.contribution === 'number');
-  assert.equal(repeat.profitCoverage, 0);
+  assert.equal(repeat.contribution, null);
+  assert.equal(repeat.profitCoverage, null);
+  assert.equal(repeat.revenue, null);
+  assert.equal(repeat.ltv365, null);
+  assert.ok(result.coverage.labels.includes('source_period_unverified'));
 });
 
 test('attribution does not invent traffic sources from provider channel', () => {
-  const state={economics,orders:[order('o1','abc','2026-09-01T00:00:00Z',[{sku:'A',quantity:1,net:100}])],revenueEngine:{attributionTouches:[]}};
+  const state={workspace:{id:'workspace-revenue'},economics,orders:[order('o1','abc','2026-09-01T00:00:00Z',[{sku:'A',quantity:1,net:100}])],revenueEngine:{attributionTouches:[]}};
   const result=deriveAttribution(state);
   assert.equal(result.orders[0].source,null);
   assert.equal(result.orders[0].confidence,'channel-only');
-  assert.equal(result.coverage.sourceCoveragePercent,0);
-  state.revenueEngine.attributionTouches=[{orderId:'o1',kind:'utm_source',value:'google',confidence:'confirmed'}];
+  assert.equal(result.coverage.sourceCoveragePercent,null);
+  assert.equal(result.coverage.recordedSourceCoveragePercent,0);
+  state.revenueEngine.attributionTouches=[{provider:'shopify',orderId:'o1',kind:'utm_source',value:'google',confidence:'confirmed'}];
   const sourced=deriveAttribution(state);
   assert.equal(sourced.orders[0].source,'google');
-  assert.equal(sourced.coverage.sourceCoveragePercent,100);
+  assert.equal(sourced.coverage.sourceCoveragePercent,null);
+  assert.equal(sourced.coverage.recordedSourceCoveragePercent,100);
+  assert.equal(sourced.orders[0].confidence,'recorded-source-unverified');
+  assert.equal(sourced.orders[0].revenue,null);
 });
 
 test('basket intelligence only recommends repeated observed pairs', () => {
-  const state={economics,orders:[
+  const state={workspace:{id:'workspace-revenue'},economics,orders:[
     order('o1','a','2026-09-01T00:00:00Z',[{sku:'A',quantity:1},{sku:'B',quantity:1}]),
     order('o2','b','2026-09-02T00:00:00Z',[{sku:'A',quantity:1},{sku:'B',quantity:1}])
   ]};
@@ -53,7 +60,7 @@ test('basket intelligence only recommends repeated observed pairs', () => {
 });
 
 test('intent recovery, B2B pipeline and commander keep outbound actions approval controlled', () => {
-  const state={economics,orders:[],revenueEngine:{}};
+  const state={workspace:{id:'workspace-revenue'},economics,orders:[],revenueEngine:{}};
   const engine=ensureRevenueEngine(state);
   engine.intentEvents=[{type:'checkout_started',sessionId:'s1',value:500,createdAt:'2026-09-30T00:00:00Z'}];
   engine.leads=[{id:'l1',company:'Trade Co',stage:'quote'}];

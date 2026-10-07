@@ -105,8 +105,6 @@ function eligibleProducts(state) {
       Number.isFinite(item.contribution) && Number.isFinite(item.margin) && item.margin >= minMargin)
     .filter(item => item.productImage || item.image)
     .sort((a, b) => {
-      const revenue = Number(b.revenue30d || 0) - Number(a.revenue30d || 0);
-      if (revenue) return revenue;
       return Number(b.contribution || 0) - Number(a.contribution || 0);
     });
 }
@@ -169,7 +167,7 @@ export function draftMarketingCampaign(state, { now = new Date(), source = 'manu
     evidence: [
       { type: 'product_margin', id: product.sku, detail: `Margin ${Number(product.margin).toFixed(1)}%; contribution £${Number(product.contribution).toFixed(2)}` },
       { type: 'inventory', id: product.sku, detail: product.inventory == null ? 'Inventory count unavailable; product is marked available.' : `${product.inventory} units recorded` },
-      { type: 'sales_signal', id: product.sku, detail: `${product.units30d || 0} units / £${Number(product.revenue30d || 0).toFixed(2)} recorded revenue in 30 days` }
+      { type: 'sales_signal', id: product.sku, detail: 'Historical product sales attribution and stock cover are unavailable; recorded SKU matches do not establish a catalogue variant assignment.' }
     ]
   };
   // Helpers above normalize state.marketing. Write through its current object,
