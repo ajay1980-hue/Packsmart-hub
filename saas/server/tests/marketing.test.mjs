@@ -56,6 +56,32 @@ test('campaign drafting selects only a profitable in-stock product and creates c
   assert.match(campaign.copy.longCaption, /Packsmart Solutions/);
 });
 
+test('missing catalogue prices cannot become zero-price campaigns even at a zero margin floor', () => {
+  for (const price of [undefined, null, '', '   ', false, true, NaN, Infinity, '0x10', '0Xff', '0b10', '0B10', '0o10', '0O10']) {
+    const state = stateWithProduct();
+    state.products[0].variants[0].price = price;
+    updateMarketingSettings(state, { minMarginPercent: 0 }, 'owner');
+    assert.throws(() => draftMarketingCampaign(state), { code: 'NO_MARKETING_CANDIDATE' });
+    assert.deepEqual(state.marketing.campaigns, []);
+    assert.equal(state.marketing.lastPlannerRunAt, null);
+  }
+});
+
+test('zero price does not establish a marketing margin, while an explicit zero margin on positive price does', () => {
+  const state = stateWithProduct();
+  updateMarketingSettings(state, { minMarginPercent: 0 }, 'owner');
+  state.products[0].variants[0].price = 0;
+  for (const field of ['landed', 'packing', 'handling', 'delivery', 'paymentFee', 'channelFee', 'advertising', 'otherVariable']) state.economics['MAIL-001'][field] = 0;
+  assert.throws(() => draftMarketingCampaign(state), { code: 'NO_MARKETING_CANDIDATE' });
+  state.products[0].variants[0].price = '20.00';
+  state.economics['MAIL-001'].landed = 20;
+  const campaign = draftMarketingCampaign(state);
+  assert.equal(campaign.product.price, 20);
+  assert.equal(campaign.product.margin, 0);
+  assert.equal(campaign.product.contribution, 0);
+  assert.match(campaign.copy.shortCaption, /from £20\.00/);
+});
+
 test('planner prepares no more than one campaign per day', () => {
   const state = stateWithProduct();
   const first = marketingPlannerCycle(state, { now: new Date('2026-09-26T08:00:00Z') });

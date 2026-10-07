@@ -30,6 +30,7 @@ import { ECONOMICS_FIELDS, ECONOMICS_TEXT_FIELDS, calculateOrderProfit, hasAmoun
 import {
   APPROVAL_TYPES,
   AUTOMATION_DEFINITIONS,
+  OPERATIONS_CALCULATION_VERSION,
   buildDailyBrief,
   deriveOperations,
   integrationMatrix,
@@ -484,6 +485,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   function briefSourceSignature(state) {
     const source = {
+      calculationVersion: OPERATIONS_CALCULATION_VERSION,
       products: state.products || [],
       orders: state.orders || [],
       economics: state.economics || {},
@@ -514,7 +516,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
       marginFloor: state.settings?.marginFloor ?? clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
     }), sourceSignature };
-    brief.attention = { exceptions: (state.exceptions || []).filter(item => ['open', 'acknowledged'].includes(item.status)).length,
+    brief.attention = { exceptions: (state.exceptions || []).filter(item => item.present && ['open', 'acknowledged'].includes(item.status)).length,
       approvals: (state.approvals || []).filter(item => item.status === 'pending').length,
       failedAutomations: (state.automationRuns || []).filter(item => ['FAILED', 'BLOCKED'].includes(item.status) && item.startedAt.startsWith(today)).length,
       opportunities: (state.opportunities || []).filter(item => item.present && item.status === 'open').length };

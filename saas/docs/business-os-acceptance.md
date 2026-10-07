@@ -1,10 +1,10 @@
 # Runvara original blueprint acceptance, 2026-10-06
 
-This remains a scope ledger, not a completion claim. PR82 reporting, PR74 outcomes, PR75 dispatch and PR76 store health are merged on actual main `75131e70afd569365d84a2baf4cc314f38bf0c42`. The next incremental PR77 activity stage is prepared locally above that main. Its release remains held until PR76 is deployed and its exact revision passes fresh postdeployment health.
+This remains a scope ledger, not a completion claim. PR82 reporting and the incremental outcome, dispatch, store-health and activity stages are merged on actual main `abf83315af0c65c7a1cbdcabc306a8a381c602da`. The next incremental PR78 catalogue-price safety stage is prepared locally above that main. Its release remains held until PR77 is deployed and its exact revision passes fresh postdeployment health.
 
-The approved outcome/reporting migrations and their recorded catalog provenance remain below. This worker performed no production operation. PR77 is the only next-stage feature added; PR78–81 catalogue, analytics and static-revalidation features remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
+The approved outcome/reporting migrations and their catalog provenance remain below. This worker performed no production operation. PR78 is the only next-stage feature added; PR79–81 static-revalidation, connection-health and imported-order analytics changes remain excluded. The original OS remains incomplete and the successor blueprint is untouched.
 
-The table and earlier sections preserve historical scope/preparation checkpoints. The final PR77 section records the current local stage and release gates. Earlier stage results do not substitute for the new stage's exact-head CI or production health.
+The table and earlier sections preserve historical scope/preparation checkpoints. The final PR78 section records the current local stage and release gates. Earlier stage results do not replace the new stage's exact-head CI or production health.
 
 | Original requirement | Evidence delivered | Remaining acceptance |
 |---|---|---|
@@ -104,3 +104,16 @@ Reporting commits and retries use explicit trusted context with separate fixed r
 Fresh verification: **1,000 full Node22.23.3 tests passed**, **25 outcome PostgreSQL17.6 cases passed**, **73 reporting PostgreSQL17.6 cases passed**, all with zero failures/skips. Syntax, SaaS security guards, whitespace and independent production-code/source review passed. A review found missing Audit/Billing responses in the combined UI test fixture; these were corrected and navigation-error assertions added before the final full pass. Both disposable PostgreSQL clusters stopped. Predecessor SQL and unrelated feature modules remain unchanged.
 
 The existing outcome responsive gate and new activity responsive gate are both retained alongside all earlier SaaS checks. Android Build is unchanged and targets main; it must pass after PR77 is retargeted from its old feature branch to main. Local Chromium remains absent, so browser/container checks are not claimed as passed and no installation/workaround was attempted. Remaining gates: PR76 exact deployment health, fresh PR77 exact-head CI including Android/database/browser/container, then authorized PR77 release and fresh postdeployment health. No remote mutation or production access occurred in this worker. The full original OS and successor blueprint remain incomplete.
+
+
+## Incremental catalogue-price safety after PR77, 2026-10-07
+
+Base: actual main `abf83315af0c65c7a1cbdcabc306a8a381c602da`. Source PR78: `c9ab79ffecf00b99c245d4cdde2e99079810a3de`, parent `3ebc1c75370b6a8b843da3829bc1b7af59f0a867`. Its 13-file diff and ancestry were inspected before applying to `codex/runvara-catalogue-after-activity`. The clean replay preserves the source stable patch ID `3ef5d1f4ded581fa807468a5778a7f0e92c4006d`; no PR79–81 patch was imported.
+
+Unknown prices stay unknown and explicit zero remains distinguishable. Valid cost-completeness facts remain available independently of financial eligibility. Contribution/margin ranking requires the corresponding finite inputs/results; catalogue means are explicitly the known unweighted sample with covered/total counts. Marketing does not turn missing price into a zero-price offer. Existing typed outcomes, dispatch authority, strict response health and activity/reporting safeguards remain unchanged.
+
+One meaningful interaction gap was addressed in the existing brief-cache regression: it now covers FileStore and a previously saved healthy Supabase snapshot. The calculation-version change causes one primary write and one bounded reporting RPC, with correct separate activity counts and full-state sample bytes. Subsequent unchanged bootstrap performs no write and keeps samples/counters stable. Historical brief, exception, agent-run and typed-owner-measurement evidence is preserved; the normalized historical brief row remains unchanged and is not resubmitted. This adds test coverage, not another runtime persistence path.
+
+Fresh verification passed **1,010 full Node22.23.3 tests**, **25 outcome PostgreSQL17.6 cases** and **73 reporting PostgreSQL17.6 cases**, all with zero failures/skips. Syntax, SaaS security guards, whitespace and independent source/interaction review passed. The PostgreSQL suites used separate fresh local clusters and both stopped. Cache transport/metering assertions use a synthetic PostgREST fixture; no live provider or production request was made.
+
+No source SQL, schema, dependency, recurring task or additional background work was introduced. Existing responsive and Android workflows are retained. Remaining gates are PR77 exact-deployment health, fresh PR78 exact-head CI including responsive browser/container and required database/Android checks, then authorized PR78 release and its own fresh postdeployment health. This worker made no remote mutation, migration, merge or deployment. The original OS is not complete and the successor blueprint is untouched.
