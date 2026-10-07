@@ -44,6 +44,8 @@ jobs:
         run: node saas/server/tests/objective-review-browser-check.mjs
       - name: Verify archived automation history on mobile and desktop
         run: node saas/server/tests/automation-history-browser-check.mjs
+      - name: Verify imported order evidence on mobile and desktop
+        run: node saas/server/tests/imported-order-evidence-browser-check.mjs
       - name: Upload responsive verification image
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,6 +58,7 @@ jobs:
             /tmp/runvara-provider-usage-*.png
             /tmp/runvara-objective-review-*.png
             /tmp/runvara-automation-history-*.png
+            /tmp/runvara-imported-order-*.png
           if-no-files-found: ignore
       - name: Build production container
         run: docker build -f saas/server/Dockerfile -t packsmart-ops:test .

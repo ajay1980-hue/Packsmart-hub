@@ -7,33 +7,14 @@ const context = vm.createContext({window:{},Intl,Date});
 vm.runInContext(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'),context);
 const ui=context.window.RunvaraUI;
 
-test('revenue signals preserve refunds, unknown values and exact comparison boundaries',()=>{
-  const now=new Date('2026-09-24T12:00:00Z');
-  const order=(date,value,other={})=>({createdAt:date,financialStatus:'PAID',currentTotal:value,...other});
-  const signals=revenueSignals([
-    order('2026-09-24T10:00:00Z',100),
-    order('2026-09-24T11:00:00Z',null,{total:40,refunds:10}),
-    order('2026-09-23T11:00:00Z',null),
-    order('2026-09-22T11:00:00Z',-5),
-    order('2026-09-24T13:00:00Z',999),
-    order('2026-09-24T11:00:00Z',999,{cancelledAt:'2026-09-24'}),
-    order('2026-09-24T11:00:00Z',999,{financialStatus:'PENDING'}),
-    order('2026-08-25T12:00:00Z',20),
-    order('2026-08-25T11:59:59Z',10),
-  ],now);
-  assert.equal(signals.daily.length,30);
-  assert.equal(signals.daily.at(-1).revenue,130);
-  assert.equal(signals.daily.at(-2).revenue,null);
-  assert.equal(signals.daily.at(-2).knownOrders,0);
-  assert.equal(signals.daily.at(-3).revenue,-5);
-  assert.equal(signals.daily.at(-4).revenue,0);
-  assert.equal(signals.comparisons[30].current.revenue,null);
-  assert.equal(signals.comparisons[30].current.knownRevenue,145);
-  assert.equal(signals.comparisons[30].previous.revenue,10);
-  assert.equal(signals.comparisons[30].change,null);
-  const comparison=revenueSignals([order('2026-09-24',100),order('2026-09-11',50)],now);
-  assert.equal(comparison.comparisons[7].change,100);
-  assert.equal(revenueSignals([],now).comparisons[7].change,null);
+test('revenue signals reference shared recorded evidence without scalar comparisons or rescanning',()=>{
+  const trap = new Proxy({}, { get() { throw new Error('Series must reuse existing period evidence'); } });
+  const signals = revenueSignals(trap);
+  assert.deepEqual(signals.daily, []);
+  assert.equal(signals.periodRef, 'last30d');
+  assert.equal(signals.status, 'source_period_unverified');
+  assert.deepEqual(signals.comparisons[30], { current: null, previous: null, change: null });
+  assert.deepEqual(signals.comparisons[7], { current: null, previous: null, change: null });
 });
 
 test('incident projection links only evidenced single causes, keeps every record and never mutates state',()=>{

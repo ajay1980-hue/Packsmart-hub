@@ -1,3 +1,4 @@
+import { compactOrderPeriod } from './order-analytics.mjs';
 import { evidenceInWorkspace as inWorkspace } from './business-evidence-scope.mjs';
 import { deriveOperations } from './operations.mjs';
 
@@ -137,7 +138,8 @@ function stockRiskSummary(items = [], limit = 25) {
     product: clean(item.productTitle || item.title, 160),
     inventory: Number.isFinite(Number(item.inventory)) ? Number(item.inventory) : null,
     available: item.available !== false,
-    units30d: Number(item.units30d || 0)
+    units30d: item.units30d ?? null,
+    salesAttribution: item.salesAttribution || 'unverified_recorded_sku_only'
   }));
 }
 
@@ -152,13 +154,13 @@ function marginSummary(items = [], limit = 25) {
   }));
 }
 
-export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 25 } = {}) {
+export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 25, operations: suppliedOperations = null } = {}) {
   const workspaceId = workspaceIdentity(state.workspace?.id);
   if (workspaceId && (!inWorkspace(state, workspaceId) || !inWorkspace(state.workspace, workspaceId))) {
     throw Object.assign(new Error('Workspace identity mismatch'), { status:403, code:'WORKSPACE_MISMATCH' });
   }
   itemLimit = bound(itemLimit, 25, 100);
-  const operations = deriveOperations(state, { now });
+  const operations = suppliedOperations || deriveOperations(state, { now });
   const connections = connectionSummary(state);
   const pendingApprovals = (state.approvals || []).filter(item => item.status === 'pending');
   const opportunities = projectCanonicalOpportunities(state);
@@ -176,7 +178,10 @@ export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 
       paidOrders30d: operations.paidOrders30d,
       openOrders30d: operations.openOrders,
       refundedOrders30d: operations.refundedOrders30d,
-      revenue30d: round(operations.revenue30d)
+      revenue30d: null,
+      importedOrderEvidence: compactOrderPeriod(operations.last30d).importedOrderEvidence,
+      period: operations.last30d.period,
+      sourcePeriod: operations.last30d.sourcePeriod
     },
     profitability: {
       contribution30d: round(operations.last30d.operatingProfit),
@@ -184,6 +189,8 @@ export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 
       margin30d: round(operations.last30d.margin, 1),
       profitCoveragePercent: operations.last30d.profitCoverage,
       profitCoveredOrders: operations.last30d.profitCoveredOrders,
+      numericCostCoverage: operations.last30d.numericCostCoverage,
+      qualificationReason: operations.last30d.reason,
       costCoveragePercent: operations.costCoverage,
       averageVariantMargin: round(operations.averageMargin, 1),
       averageVariantMarginBasis: operations.averageMarginBasis,
@@ -215,7 +222,10 @@ export function deriveBusinessState(state = {}, { now = new Date(), itemLimit = 
       contribution30d: round(channel.operatingProfit),
       profitCoveragePercent: channel.profitCoverage,
       advertisingSpend30d: round(channel.advertisingSpend),
-      profitAfterAdvertising30d: round(channel.profitAfterAdvertising)
+      profitAfterAdvertising30d: null,
+      evidenceRef: { surface: 'commerce', provider: channel.id },
+      numericCostCoverage: channel.numericCostCoverage,
+      sourcePeriod: channel.sourcePeriod
     })),
     controls: {
       pendingApprovals: pendingApprovals.length,

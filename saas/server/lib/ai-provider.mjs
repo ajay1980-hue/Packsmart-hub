@@ -35,10 +35,10 @@ function requestBody(workspaceId, route, command, run, outputTokens) {
         affected: typeof item?.affected === 'number' && Number.isFinite(item.affected) ? item.affected : null })),
     workStatus: safeText(run?.workStatus, 80) || 'COMPLETED'
   };
-  const input = ['User request: ' + safeText(command, 1000), 'Verified deterministic Runvara findings:', JSON.stringify(deterministic),
+  const input = ['User request: ' + safeText(command, 1000), 'Deterministic Runvara findings with explicit qualification limits:', JSON.stringify(deterministic),
     'Write a concise operator brief using only these findings. Do not invent metrics, actions, external results, or approvals. Do not claim an action was executed. Keep the final brief under 180 words.'].join('\n');
   return JSON.stringify({ model: route.model,
-    instructions: 'You are Runvara Operator Brief. Summarise only supplied verified findings. You are read-only and must never claim to perform external actions.',
+    instructions: 'You are Runvara Operator Brief. Summarise only supplied findings and preserve their qualification limits. Recorded imported-order subtotals are unverified evidence, not business revenue, profit or collected cash. Never combine currency/status cohorts or convert unavailable values to zero. You are read-only and must never claim to perform external actions.',
     input, max_output_tokens: outputTokens, reasoning: { effort: route.tier === 'quality' ? 'medium' : 'low' }, store: false,
     safety_identifier: crypto.createHash('sha256').update(workspaceId).digest('hex').slice(0, 32), prompt_cache_key: 'runvara-operator-brief-v1' });
 }

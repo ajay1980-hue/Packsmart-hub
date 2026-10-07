@@ -1,16 +1,12 @@
 import crypto from 'node:crypto';
+import { orderPeriod, inspectOrderPeriod, summarizeOrderInspection, recordedOrderNarrative, orderFinancialView, unqualifiedAdvertising, ORDER_EVIDENCE_PRESENTATION_LIMITS, compactOrderPeriod, hasRecordedRefund, editorOrderRecord } from './order-analytics.mjs';
 import { createRequire } from 'node:module';
 import { requiresApproval } from './security.mjs';
 import {
   amount,
-  calculateOrderProfit,
   deriveLandedCost,
   hasAmount,
   hasCataloguePrice,
-  orderRevenue,
-  sameUtcDay,
-  settledOrder,
-  summarizeOrders,
   unitEconomics,
   withinDays
 } from './profit.mjs';
@@ -21,7 +17,7 @@ try { ebayCommercial = require('../../../ebay-manager/strategy.js'); } catch {}
 
 // Bump when deterministic reporting/detection semantics change, even if the
 // persisted source records are unchanged. Historical reports keep their version.
-export const OPERATIONS_CALCULATION_VERSION = 'catalogue-financial-eligibility/v1';
+export const OPERATIONS_CALCULATION_VERSION = 'imported-order-analytics/v2';
 
 export const SOCIAL_COMMERCE_CHANNELS = Object.freeze([
   { id: 'meta', name: 'Facebook & Instagram Shops', kind: 'social-commerce', capabilities: ['catalogue', 'listings', 'orders', 'ads'] },
@@ -123,84 +119,27 @@ export function calculateEbayListingProfit(listing, economics = {}, feeModel = {
   };
 }
 
-function productSales(orders, now) {
-  const bySku = new Map();
-  for (const order of orders) {
-    if (!withinDays(order.createdAt, 30, now) || !settledOrder(order) || order.cancelledAt) continue;
-    for (const line of order.lineItems || []) {
-      const sku = String(line.sku || '').trim();
-      if (!sku) continue;
-      const current = bySku.get(sku) || { units30d: 0, revenue30d: 0 };
-      current.units30d += Math.max(0, amount(line.quantity));
-      if (hasAmount(line.net)) current.revenue30d += amount(line.net);
-      else if (hasAmount(line.discountedTotal)) current.revenue30d += amount(line.discountedTotal);
-      bySku.set(sku, current);
-    }
-  }
-  return bySku;
-}
-
-function advertisingSummary(records = [], now = new Date()) {
-  const recent = records.filter(record => withinDays(record.date || record.createdAt, 30, now));
-  const spend = recent.filter(record => hasAmount(record.spend)).reduce((sum, record) => sum + amount(record.spend), 0);
-  const revenue = recent.filter(record => hasAmount(record.attributableRevenue)).reduce((sum, record) => sum + amount(record.attributableRevenue), 0);
-  return {
-    spend: Number(spend.toFixed(2)),
-    attributableRevenue: Number(revenue.toFixed(2)),
-    roas: spend > 0 ? Number((revenue / spend).toFixed(2)) : null,
-    coverage: recent.length
-  };
-}
-
-function channelEconomics(state, now) {
-  const ids = ['shopify', 'ebay', ...SOCIAL_COMMERCE_CHANNELS.map(item => item.id), ...MARKETPLACE_CHANNELS.map(item => item.id)];
-  return ids.map(id => {
-    const orders = (state.orders || []).filter(order => String(order.provider || 'shopify') === id);
-    const metrics = summarizeOrders(orders, state.economics || {}, order => withinDays(order.createdAt, 30, now));
-    const advertising = advertisingSummary((state.advertisingCosts || []).filter(record => record.channel === id), now);
-    return {
-      id,
-      ...metrics,
-      advertisingSpend: advertising.spend,
-      attributableRevenue: advertising.attributableRevenue,
-      roas: advertising.roas,
-      profitAfterAdvertising: metrics.operatingProfit === null ? null : Number((metrics.operatingProfit - advertising.spend).toFixed(2))
-    };
-  });
-}
-
-export function revenueSignals(orders = [], now = new Date()) {
-  const end = now.getTime(), day = 86400000;
-  const eligible = orders.filter(order => !order.cancelledAt && settledOrder(order) && Number.isFinite(Date.parse(order.createdAt)) && Date.parse(order.createdAt) <= end);
-  const total = selected => {
-    const values = selected.map(order => orderRevenue(order).netRevenue);
-    const known = values.filter(value => value !== null);
-    const subtotal = Number(known.reduce((sum, value) => sum + value, 0).toFixed(2));
-    return { orders: selected.length, knownOrders: known.length, revenue: known.length === values.length ? subtotal : null, knownRevenue: subtotal };
-  };
-  const buckets = new Map();
-  const today = Date.parse(now.toISOString().slice(0, 10) + 'T00:00:00Z');
-  for (let index = 29; index >= 0; index--) buckets.set(new Date(today - index * day).toISOString().slice(0, 10), []);
-  for (const order of eligible) buckets.get(new Date(order.createdAt).toISOString().slice(0, 10))?.push(order);
-  const comparisons = Object.fromEntries([7,30].map(days => {
-    const boundary = end - days * day;
-    const current = total(eligible.filter(order => Date.parse(order.createdAt) >= boundary));
-    const previous = total(eligible.filter(order => Date.parse(order.createdAt) >= boundary - days * day && Date.parse(order.createdAt) < boundary));
-    // A missing or zero baseline cannot support a percentage comparison.
-    const change = current.revenue !== null && previous.revenue !== null && previous.revenue > 0 ? Number(((current.revenue - previous.revenue) / previous.revenue * 100).toFixed(1)) : null;
-    return [days, { current, previous, change }];
+function channelEconomics(state, inspection) {
+  return inspection.providers.map(id => ({ id, ...summarizeOrderInspection(inspection, id),
+    advertisingSpend: null, attributableRevenue: null, roas: null, profitAfterAdvertising: null,
+    advertisingBasis: 'recorded_costs_currency_and_attribution_unverified'
   }));
-  return { daily: [...buckets].map(([date, rows]) => ({ date, ...total(rows) })), comparisons };
+}
+
+// Scalar revenue series are deprecated: source coverage and currency are not
+// qualified. Reuse existing period evidence; never rescan the snapshot per point.
+export function revenueSignals() {
+  return { daily: [], periodRef: 'last30d', comparisons: { 7: { current: null, previous: null, change: null }, 30: { current: null, previous: null, change: null } },
+    basis: 'recorded_order_evidence', status: 'source_period_unverified' };
 }
 
 export function deriveOperations(state, { now = new Date(), lowStockThreshold = state.settings?.lowStockThreshold ?? 20, marginFloor = state.settings?.marginFloor ?? 20 } = {}) {
   const products = state.products || [];
   const variants = flattenProducts(products);
   const economics = state.economics || {};
-  const sales = productSales(state.orders || [], now);
   const productRows = variants.map(item => {
     const result = contributionFor(item, economics, { marginFloor });
-    return { ...item, ...result, ...(sales.get(item.sku) || { units30d: 0, revenue30d: 0 }) };
+    return { ...item, ...result, units30d: null, revenue30d: null, stockCoverDays: null, salesAttribution: 'unverified_recorded_sku_only' };
   });
   const covered = productRows.filter(item => item.complete);
   const contributionKnown = covered.filter(item => hasCataloguePrice(item.price) && Number.isFinite(item.contribution));
@@ -214,14 +153,17 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   );
   const outOfStock = stockRisks.filter(item => item.available === false || (item.inventory !== null && item.inventory <= 0));
 
-  const orders = state.orders || [];
-  const today = summarizeOrders(orders, economics, order => sameUtcDay(order.createdAt, now));
-  const last7d = summarizeOrders(orders, economics, order => withinDays(order.createdAt, 7, now));
-  const last30d = summarizeOrders(orders, economics, order => withinDays(order.createdAt, 30, now));
-  const orderProfitability = orders
-    .filter(order => withinDays(order.createdAt, 90, now))
-    .map(order => ({ ...order, profitability: calculateOrderProfit(order, economics) }));
-  const refundedOrders = orders.filter(order => withinDays(order.createdAt, 30, now) && ((orderRevenue(order).refunds || 0) > 0 || String(order.financialStatus).includes('REFUND')));
+  const orders = Array.isArray(state.orders) ? state.orders : [];
+  const todayInspection = inspectOrderPeriod(state, orderPeriod(now, 'today'));
+  const weekInspection = inspectOrderPeriod(state, orderPeriod(now, 7));
+  const monthInspection = inspectOrderPeriod(state, orderPeriod(now, 30));
+  const detailInspection = inspectOrderPeriod(state, orderPeriod(now, 90));
+  const today = summarizeOrderInspection(todayInspection);
+  const last7d = summarizeOrderInspection(weekInspection);
+  const last30d = summarizeOrderInspection(monthInspection);
+  const rawDetailOrders = detailInspection.rows.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const orderProfitability = rawDetailOrders.slice(0, ORDER_EVIDENCE_PRESENTATION_LIMITS.orderDetails)
+    .map(row => ({ ...editorOrderRecord(row.order), recordedStatus: { financialStatus: row.financialStatus, fulfillmentStatus: row.fulfillmentStatus, cancelled: row.cancelled, hasRecordedRefund: hasRecordedRefund(row), createdAt: row.createdAt }, profitability: orderFinancialView(detailInspection, row) }));
 
   const averageMargin = marginKnown.length ? marginKnown.reduce((sum, item) => sum + item.margin, 0) / marginKnown.length : null;
   const costCoverage = variants.length ? Math.round(covered.length / variants.length * 100) : 0;
@@ -238,12 +180,12 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
     return issues;
   });
 
-  const customerServiceItems = orders.filter(order => {
-    const open = !['FULFILLED', 'RESTOCKED'].includes(String(order.fulfillmentStatus || '').toUpperCase());
-    const oldOpen = open && withinDays(order.createdAt, 30, now) && !withinDays(order.createdAt, 2, now);
-    const paymentIssue = ['PENDING', 'EXPIRED', 'VOIDED'].includes(String(order.financialStatus || '').toUpperCase());
-    return oldOpen || paymentIssue || (orderRevenue(order).refunds || 0) > 0;
-  }).map(order => ({ id: order.id, name: order.name, provider: order.provider, createdAt: order.createdAt, financialStatus: order.financialStatus, fulfillmentStatus: order.fulfillmentStatus }));
+  const customerServiceItems = monthInspection.rows.filter(row => {
+    const open = row.fulfillmentStatus !== 'UNKNOWN' && !['FULFILLED', 'RESTOCKED'].includes(row.fulfillmentStatus);
+    const oldOpen = open && !withinDays(row.createdAt, 2, now) && !row.cancelled;
+    const paymentIssue = ['PENDING', 'EXPIRED', 'VOIDED'].includes(row.financialStatus);
+    return oldOpen || paymentIssue || hasRecordedRefund(row);
+  }).map(({ order }) => { const safe = editorOrderRecord(order); return { id: safe.id, name: safe.name, provider: safe.provider, createdAt: safe.createdAt, financialStatus: safe.financialStatus, fulfillmentStatus: safe.fulfillmentStatus }; });
 
   const pendingApprovals = (state.approvals || []).filter(item => item.status === 'pending');
   const commerceStatuses = state.integrationStatus || {};
@@ -251,19 +193,19 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   const integrationIssues = expectedChannels.filter(id => ['error', 'failed', 'auth_expired', 'degraded'].includes(commerceStatuses[id]?.status) || commerceStatuses[id]?.lastError);
   const activeAutomations = Object.values(state.automations || {}).filter(Boolean).length;
   const automationCount = Object.keys(state.automations || {}).length;
-  const channels = channelEconomics(state, now);
-  const advertising = advertisingSummary(state.advertisingCosts || [], now);
+  const channels = channelEconomics(state, monthInspection);
+  const advertising = unqualifiedAdvertising(state.advertisingCosts);
   const supplierCount = (state.suppliers || []).filter(item => item.active !== false).length;
   const readiness = Math.max(0, Math.min(100, Math.round(
     15 + (products.length ? 10 : 0) + costCoverage * 0.35 + (state.storageReady ? 15 : 0) +
     (commerceStatuses.shopify?.status === 'connected' ? 10 : 0) + (commerceStatuses.ebay?.status === 'connected' ? 5 : 0) +
-    (supplierCount ? 5 : 0) + (last30d.orders ? Math.min(5, last30d.profitCoverage / 20) : 0) + (pendingApprovals.length === 0 ? 5 : 0)
+    (supplierCount ? 5 : 0) + (last30d.numericCostCoverage.orderCoverage ? 5 * last30d.numericCostCoverage.orderCoverage.numerator / last30d.numericCostCoverage.orderCoverage.denominator : 0) + (pendingApprovals.length === 0 ? 5 : 0)
   )));
 
   const recommendations = [];
   if (missingCosts.length) recommendations.push({ id: 'complete-costs', priority: 100, title: `Complete costs for ${missingCosts.length} variant${missingCosts.length === 1 ? '' : 's'}`, detail: 'Profit stays unknown until every required variable cost is explicitly recorded, including valid zero values.', actionType: 'safe', view: 'profit', filter: 'missing-costs' });
   if (negativeMargin.length) recommendations.push({ id: 'negative-margin', priority: 98, title: `Review ${negativeMargin.length} loss-making variant${negativeMargin.length === 1 ? '' : 's'}`, detail: 'Fully recorded variable costs exceed selling price. Any material live price change remains approval-gated.', actionType: 'major_price_change', view: 'profit', filter: 'loss-making' });
-  if (last30d.paidOrders && last30d.profitCoverage < 100) recommendations.push({ id: 'order-profit-coverage', priority: 96, title: `Complete profit inputs for ${last30d.paidOrders - last30d.profitCoveredOrders} order${last30d.paidOrders - last30d.profitCoveredOrders === 1 ? '' : 's'}`, detail: 'Order profit is withheld where tax, line items, refunds or business costs are unknown.', actionType: 'safe', view: 'orders', filter: 'missing-profit' });
+  if (last30d.orders) recommendations.push({ id: 'order-profit-coverage', priority: 96, title: 'Review imported order evidence', detail: `${last30d.numericCostCoverage.completeOrders} of ${last30d.orders} retained orders have numeric cost inputs. Historical currency, tax, cost assignments and source coverage still need qualification before profit can be reported.`, actionType: 'safe', view: 'orders', filter: 'missing-profit' });
   if (lowMargin.length && !negativeMargin.length) recommendations.push({ id: 'low-margin', priority: 88, title: `Review ${lowMargin.length} low-margin variant${lowMargin.length === 1 ? '' : 's'}`, detail: 'Contribution is below its configured operating floor.', actionType: 'major_price_change', view: 'profit', filter: 'below-floor' });
   if (stockRisks.length) recommendations.push({ id: 'stock-risk', priority: 84, title: `Resolve ${stockRisks.length} stock risk${stockRisks.length === 1 ? '' : 's'}`, detail: 'Replenishment can be prepared, but supplier orders require approval.', actionType: 'supplier_order', view: 'profit', filter: 'low-stock' });
   if (last30d.openOrders) recommendations.push({ id: 'open-orders', priority: 78, title: `Check ${last30d.openOrders} open order${last30d.openOrders === 1 ? '' : 's'}`, detail: 'Review fulfilment status and any customer-service follow-up.', actionType: 'safe', view: 'orders', filter: 'open' });
@@ -274,10 +216,11 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   recommendations.sort((a, b) => b.priority - a.priority);
 
   return {
-    generatedAt: now.toISOString(), today, last7d, last30d, revenueSignals: revenueSignals(orders, now),
+    generatedAt: now.toISOString(), today, last7d, last30d, revenueSignals: revenueSignals(state, now, { last7d, last30d }),
     revenue30d: last30d.revenue, orders30d: last30d.orders, paidOrders30d: last30d.paidOrders,
-    refundedOrders30d: refundedOrders.length, openOrders: last30d.openOrders,
+    refundedOrders30d: last30d.refundedOrders, openOrders: last30d.openOrders,
     products: products.length, variants: variants.length, productRows, orderProfitability,
+    orderDetailCoverage: { limit: ORDER_EVIDENCE_PRESENTATION_LIMITS.orderDetails, returnedRows: orderProfitability.length, scannedRows: Math.min(orders.length, 2000), availableRows: rawDetailOrders.length, returned: orderProfitability.length, available: rawDetailOrders.length, truncated: !detailInspection.evidence?.completeness.retainedCohortComplete || rawDetailOrders.length !== orderProfitability.length, complete: Boolean(detailInspection.evidence?.completeness.retainedCohortComplete && rawDetailOrders.length === orderProfitability.length) },
     stockRisks: stockRisks.length, stockRiskItems: stockRisks.slice(0, 100), outOfStock: outOfStock.length,
     stockValue: stockWithCost.length ? Number(stockValue.toFixed(2)) : null,
     stockValueCoverage: positiveStock.length ? Math.round(stockWithCost.length / positiveStock.length * 100) : 0,
@@ -291,7 +234,7 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
     marginCoverage: variants.length ? Math.round(marginKnown.length / variants.length * 100) : 0,
     averageMarginBasis: 'unweighted-known-catalogue-contribution-margins',
     seoIssues: seoIssues.length, seoIssueItems: seoIssues.slice(0, 100),
-    customerServiceIssues: customerServiceItems.length, customerServiceItems: customerServiceItems.slice(0, 100),
+    customerServiceIssues: last30d.orders === null ? null : customerServiceItems.length, customerServiceItems: customerServiceItems.slice(0, 100),
     pendingApprovals: pendingApprovals.length, integrationIssues: integrationIssues.length,
     activeAutomations, automationCount, supplierCount, advertising, channels, readiness,
     recommendations: recommendations.slice(0, 12)
@@ -300,16 +243,14 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
 
 export function compactDailyBrief(brief) {
   const summaries = new Set(['today', 'last7d', 'last30d', 'advertising', 'channels', 'recommendations', 'topActions', 'attention', 'archive']);
-  return Object.fromEntries(Object.entries(brief).filter(([key, value]) => value === null || typeof value !== 'object' || summaries.has(key)));
+  return Object.fromEntries(Object.entries(brief).filter(([key, value]) => value === null || typeof value !== 'object' || summaries.has(key)).map(([key, value]) => [key, ['today', 'last7d', 'last30d'].includes(key) ? compactOrderPeriod(value) : value]));
 }
 
 export function buildDailyBrief(state, options = {}) {
-  const metrics = deriveOperations(state, options);
+  const metrics = options.operations || deriveOperations(state, options);
   const lines = [];
-  if (metrics.today.orders) lines.push(`Today: £${metrics.today.revenue.toFixed(2)} revenue from ${metrics.today.orders} order${metrics.today.orders === 1 ? '' : 's'}.`);
-  else lines.push('No settled sales have been imported for today.');
-  if (metrics.last7d.orders) lines.push(`Last 7 days: £${metrics.last7d.revenue.toFixed(2)} revenue; operating contribution is ${metrics.last7d.operatingProfit === null ? 'not yet reliable' : `£${metrics.last7d.operatingProfit.toFixed(2)}`}.`);
-  else lines.push('Seven-day sales data is not yet available from a connected order source.');
+  lines.push(recordedOrderNarrative(metrics.today, 'Today UTC'));
+  lines.push(recordedOrderNarrative(metrics.last7d, 'Last 7 days UTC'));
   lines.push(`${metrics.products} products and ${metrics.variants} variants are in the operations catalogue.`);
   if (metrics.missingCosts) lines.push(`${metrics.missingCosts} variants still have incomplete variable-cost coverage.`);
   else if (metrics.variants) lines.push('Required variable-cost coverage is complete for the current catalogue.');
@@ -348,10 +289,10 @@ export function normalizeApprovalRequest(body, requestedBy) {
   };
 }
 
-export function integrationMatrix(state, env = process.env) {
+export function integrationMatrix(state, env = process.env, operations = null) {
   const statuses = state.integrationStatus || {};
   const connectionMap = new Map((state.connections || []).map(item => [item.provider, item]));
-  const metricMap = new Map(channelEconomics(state, new Date()).map(item => [item.id, item]));
+  const metricMap = new Map((operations?.channels || channelEconomics(state, inspectOrderPeriod(state, orderPeriod(new Date(), 30)))).map(item => [item.id, item]));
   const makeChannel = channel => {
     const status = statuses[channel.id] || {};
     const connection = connectionMap.get(channel.id);
@@ -388,8 +329,8 @@ export function ebayComparisonAvailable(ebay) {
   return Boolean(ebay?.health && ebay.source !== 'ebay-oauth-readonly' && ebay.coverage?.fullCatalogueAvailable !== false && ebay.coverage?.offersAvailable !== false && ebay.coverage?.inventoryAvailable !== false);
 }
 
-export function onboardingState(state, env = process.env) {
-  const integrations = integrationMatrix(state, env);
+export function onboardingState(state, env = process.env, operations = null) {
+  const integrations = integrationMatrix(state, env, operations);
   return {
     accountCreated: Boolean(state.users?.length), workspaceCreated: Boolean(state.workspace?.id),
     commerceConnected: integrations.some(item => ['shopify', 'ebay'].includes(item.id) && item.status === 'connected'),

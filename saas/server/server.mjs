@@ -1,3 +1,4 @@
+import { inspectOrderPeriod, orderFinancialView, editorOrderRecord, FINANCIAL_QUALIFICATION_REASON } from './lib/order-analytics.mjs';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import http from 'node:http';
@@ -26,7 +27,7 @@ import {
   verifySessionToken
 } from './lib/security.mjs';
 import { IntegrationService } from './lib/integrations.mjs';
-import { ECONOMICS_FIELDS, ECONOMICS_TEXT_FIELDS, calculateOrderProfit, hasAmount } from './lib/profit.mjs';
+import { ECONOMICS_FIELDS, ECONOMICS_TEXT_FIELDS, hasAmount } from './lib/profit.mjs';
 import {
   APPROVAL_TYPES,
   AUTOMATION_DEFINITIONS,
@@ -212,26 +213,35 @@ function csvCell(value) {
 }
 
 function accountingCsv(state) {
+  const inspection = inspectOrderPeriod(state, { startAt: '1970-01-01T00:00:00.000Z', endAt: new Date().toISOString() });
+  // Existing financial columns remain present but cannot claim accounting
+  // amounts. Exact normalized fields are separate, explicitly recorded columns.
   const headings = [
     'order_id', 'order_date', 'channel', 'financial_status', 'gross_revenue', 'net_revenue',
     'vat_tax', 'refunds', 'shipping_charged', 'landed_cost', 'packing_cost', 'handling_cost',
     'actual_shipping_cost', 'payment_fees', 'channel_fees', 'advertising_cost', 'other_variable_cost',
-    'gross_profit', 'operating_contribution', 'margin_percent', 'profit_basis', 'missing_inputs'
+    'gross_profit', 'operating_contribution', 'margin_percent', 'profit_basis', 'missing_inputs',
+    'source_identity_hash', 'cancelled', 'recorded_currency', 'currency_status', 'source_period_status',
+    'period_start_utc', 'period_end_utc_exclusive', 'retained_cohort_complete', 'financial_qualification',
+    'numeric_cost_inputs_complete', 'recorded_total', 'recorded_current_total', 'recorded_refunds',
+    'recorded_tax', 'recorded_current_tax', 'recorded_discounts', 'recorded_shipping_charged',
+    'recorded_net_total', 'recorded_net_ex_current_tax', 'known_recorded_amounts', 'unknown_recorded_amounts',
+    'excluded_conflicting_identities', 'scan_complete', 'output_complete', 'eligibility_resolved',
+    'excluded_scope_rows', 'missing_identity_rows', 'invalid_date_orders', 'available_source_rows', 'scanned_source_rows'
   ];
-  const rows = (state.orders || []).map(order => {
-    const profit = calculateOrderProfit(order, state.economics || {});
-    return [
-      order.name || order.id, order.createdAt, order.provider || 'shopify', order.financialStatus,
-      profit.grossRevenue, profit.netRevenue, profit.tax, profit.refunds, profit.shippingCharged,
-      profit.complete ? profit.breakdown.landed : null,
-      profit.complete ? profit.breakdown.packing : null,
-      profit.complete ? profit.breakdown.handling : null,
-      profit.complete ? profit.breakdown.delivery : null,
-      profit.complete ? profit.breakdown.paymentFee : null,
-      profit.complete ? profit.breakdown.channelFee : null,
-      profit.complete ? profit.breakdown.advertising : null,
-      profit.complete ? profit.breakdown.otherVariable : null,
-      profit.grossProfit, profit.contribution, profit.margin, profit.basis, profit.missingFields.join('; ')
+  const evidence = inspection.evidence;
+  if (!inspection.rows.length && !evidence?.completeness.retainedCohortComplete) throw Object.assign(new Error('Recorded evidence export unavailable: no eligible rows and scan, identity or collection evidence is incomplete'), { status: 409, code: 'ORDER_EVIDENCE_INCOMPLETE' });
+  const rows = inspection.rows.map(row => {
+    const order = editorOrderRecord(row.order), values = row.recordedAmounts;
+    const monetary = Object.values(values);
+    return [order.name || order.id, row.createdAt, row.provider, row.financialStatus,
+      ...Array(16).fill(null), 'unqualified_normalized_order_evidence', FINANCIAL_QUALIFICATION_REASON,
+      row.identityHash, row.cancelled, row.currency, row.currency ? 'unverified_recorded_code' : 'missing_or_malformed', 'unverified',
+      inspection.period.startAt, inspection.period.endAt, evidence.completeness.retainedCohortComplete, 'unavailable', row.costNumbersComplete,
+      ...['total', 'currentTotal', 'refunds', 'tax', 'currentTax', 'discounts', 'shippingCharged', 'netTotal', 'netTotalExCurrentTax'].map(field => values[field]),
+      monetary.filter(value => value !== null).length, monetary.filter(value => value === null).length,
+      evidence.counts.conflictingIdentities, evidence.completeness.scanComplete, evidence.completeness.outputComplete, evidence.completeness.eligibilityResolved,
+      evidence.counts.invalidScopeRows + evidence.counts.invalidLineScopeOrders, evidence.counts.missingIdentityRows, evidence.counts.invalidDateOrders, evidence.counts.availableOrders, evidence.counts.scannedOrders
     ].map(csvCell).join(',');
   });
   return [headings.join(','), ...rows].join('\r\n') + '\r\n';
@@ -494,7 +504,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return crypto.createHash('sha256').update(JSON.stringify(source)).digest('hex').slice(0, 32);
   }
 
-  function currentBrief(state) {
+  function currentBrief(state, operations = null) {
     const today = new Date().toISOString().slice(0, 10);
     const sourceSignature = briefSourceSignature(state);
     const existing = (state.dailyBriefs || []).find(brief =>
@@ -504,6 +514,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     );
     if (existing) return existing;
     const brief = { ...buildDailyBrief(state, {
+      operations,
       lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
       marginFloor: state.settings?.marginFloor ?? clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
     }), sourceSignature };
@@ -518,8 +529,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   function bootstrapPayload(state, user, csrf) {
-    const brief = currentBrief(state);
-    const businessState = deriveBusinessState(state);
+    const operations = deriveOperations(state, {
+      lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
+      marginFloor: state.settings?.marginFloor ?? clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
+    });
+    const brief = currentBrief(state, operations);
+    const businessState = deriveBusinessState(state, { operations });
     const learning = deriveLearning(state);
     const opportunityQueue = deriveOpportunityQueue(businessState, { learning });
     const growthCouncil = runGrowthCouncil(businessState, opportunityQueue);
@@ -533,7 +548,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       launchAdmin: state.workspace.id === CUSTOMER_ZERO_WORKSPACE && user.role === 'owner' && normalizeEmail(user.email) === normalizeEmail(env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com'),
       csrf,
       products: state.products || [],
-      orders: state.orders || [],
+      orders: operations.orderProfitability.map(({ profitability, ...order }) => order),
+      orderDetailCoverage: operations.orderDetailCoverage,
       economics: state.economics || {},
       suppliers: state.suppliers || [],
       costHistory: state.costHistory || [],
@@ -553,20 +569,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       connectionNotifications: doctorNotifications(state),
       connectionRecommendations: recommendations(state, connectionCentre(state, integrations)),
       connectionWrites: (state.connectionWrites || []).slice(0, 50),
-      integrations: integrationMatrix(state, env),
+      integrations: integrationMatrix(state, env, operations),
       ebayOAuth: integrations.ebayOAuthStatus(state),
       ebay: state.ebay || null,
-      dashboard: deriveOperations(state, {
-        lowStockThreshold: state.settings?.lowStockThreshold ?? clamp(env.LOW_STOCK_THRESHOLD, 0, 100000, 20),
-        marginFloor: clamp(env.MARGIN_FLOOR_PERCENT, 0, 100, 20)
-      }),
+      dashboard: operations,
       brief,
-      onboarding: { ...onboardingState(state, env), journey: onboardingJourney(state) },
+      onboarding: { ...onboardingState(state, env, operations), journey: onboardingJourney(state) },
       aiTeam: agentTeamSnapshot(state),
       agentDefinitions: AGENT_DEFINITIONS,
       autonomyLevels: AUTONOMY_LEVELS,
-      agentActivity: (state.agentActivity || []).slice(0, 100),
-      agentRuns: (state.agentRuns || []).slice(0, 20),
+      agentActivity: (state.agentActivity || []).slice(0, 100).map(item => ({ ...item, historical: item.calculationVersion !== OPERATIONS_CALCULATION_VERSION })),
+      agentRuns: (state.agentRuns || []).slice(0, 20).map(item => ({ ...item, historical: item.calculationVersion !== OPERATIONS_CALCULATION_VERSION })),
       storage: store.provider,
       ...controlSnapshot(state)
     };
@@ -1447,12 +1460,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const body = await jsonBody(req, 32768);
           const costs = cleanOrderCosts(body);
           const result = await mutate(auth, async state => {
-            const order = (state.orders || []).find(item => item.id === decodeURIComponent(orderEconomicsMatch[1]));
-            if (!order) throw Object.assign(new Error('Order not found'), { status: 404, code: 'ORDER_NOT_FOUND' });
+            const matches = (Array.isArray(state.orders) ? state.orders : []).filter(item => item && item.id === decodeURIComponent(orderEconomicsMatch[1]));
+            if (!matches.length) throw Object.assign(new Error('Order not found'), { status: 404, code: 'ORDER_NOT_FOUND' });
+            const order = matches[0];
+            const sourceKey = item => Object.hasOwn(item, 'externalId') ? item.externalId : item.id;
+            const identityCopies = (state.orders || []).filter(item => item && item.provider === order.provider && sourceKey(item) === sourceKey(order));
+            const inspection = inspectOrderPeriod(state, { startAt: '1970-01-01T00:00:00.000Z', endAt: new Date().toISOString() });
+            if (matches.length !== 1 || identityCopies.length !== 1 || !inspection.rows.some(row => row.order === order && row.costOverrideScopeValid)) {
+              throw Object.assign(new Error('Order identity is ambiguous or unqualified; costs were not changed'), { status: 409, code: 'ORDER_IDENTITY_UNQUALIFIED' });
+            }
+
             Object.assign(order, costs, { costUpdatedAt: new Date().toISOString() });
             order.costOverrides = { ...order.costOverrides, ...costs };
             addAudit(state, { type: 'order_costs_updated', actor: auth.user.id, detail: { orderId: order.id, changedFields: Object.keys(costs) } });
-            return { order, profitability: calculateOrderProfit(order, state.economics || {}) };
+            const updated = inspectOrderPeriod(state, inspection.period);
+            return { order: editorOrderRecord(order), profitability: orderFinancialView(updated, updated.rows.find(row => row.order === order)) };
           });
           send(res, 200, result);
           return;
