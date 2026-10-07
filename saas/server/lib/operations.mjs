@@ -6,6 +6,7 @@ import {
   calculateOrderProfit,
   deriveLandedCost,
   hasAmount,
+  hasCataloguePrice,
   orderRevenue,
   sameUtcDay,
   settledOrder,
@@ -17,6 +18,10 @@ import {
 const require = createRequire(import.meta.url);
 let ebayCommercial = null;
 try { ebayCommercial = require('../../../ebay-manager/strategy.js'); } catch {}
+
+// Bump when deterministic reporting/detection semantics change, even if the
+// persisted source records are unchanged. Historical reports keep their version.
+export const OPERATIONS_CALCULATION_VERSION = 'catalogue-financial-eligibility/v1';
 
 export const SOCIAL_COMMERCE_CHANNELS = Object.freeze([
   { id: 'meta', name: 'Facebook & Instagram Shops', kind: 'social-commerce', capabilities: ['catalogue', 'listings', 'orders', 'ads'] },
@@ -81,7 +86,7 @@ export function flattenProducts(products = []) {
     externalId: variant.externalId || variant.id,
     sku: variant.sku || `${product.handle || product.id}-${variant.title || variant.id}`,
     title: variant.title || 'Default',
-    price: hasAmount(variant.price) ? amount(variant.price) : null,
+    price: hasCataloguePrice(variant.price) ? amount(variant.price) : null,
     inventory: variant.inventory === null || variant.inventory === undefined ? null : amount(variant.inventory),
     available: variant.available !== false,
     image: variant.image || product.image || null
@@ -198,9 +203,11 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
     return { ...item, ...result, ...(sales.get(item.sku) || { units30d: 0, revenue30d: 0 }) };
   });
   const covered = productRows.filter(item => item.complete);
+  const contributionKnown = covered.filter(item => hasCataloguePrice(item.price) && Number.isFinite(item.contribution));
+  const marginKnown = contributionKnown.filter(item => Number.isFinite(item.margin));
   const missingCosts = productRows.filter(item => !item.complete);
-  const lowMargin = covered.filter(item => item.margin < item.marginFloor);
-  const negativeMargin = covered.filter(item => item.contribution < 0);
+  const lowMargin = marginKnown.filter(item => item.margin < item.marginFloor);
+  const negativeMargin = contributionKnown.filter(item => item.contribution < 0);
   const stockRisks = productRows.filter(item =>
     String(item.productStatus).toLowerCase() === 'active' &&
     ((item.inventory !== null && item.inventory <= lowStockThreshold) || item.available === false)
@@ -216,7 +223,7 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
     .map(order => ({ ...order, profitability: calculateOrderProfit(order, economics) }));
   const refundedOrders = orders.filter(order => withinDays(order.createdAt, 30, now) && ((orderRevenue(order).refunds || 0) > 0 || String(order.financialStatus).includes('REFUND')));
 
-  const averageMargin = covered.length ? covered.reduce((sum, item) => sum + item.margin, 0) / covered.length : null;
+  const averageMargin = marginKnown.length ? marginKnown.reduce((sum, item) => sum + item.margin, 0) / marginKnown.length : null;
   const costCoverage = variants.length ? Math.round(covered.length / variants.length * 100) : 0;
   const positiveStock = productRows.filter(item => item.inventory > 0);
   const stockWithCost = positiveStock.filter(item => deriveLandedCost(economics[item.sku] || {}).complete);
@@ -277,9 +284,12 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
     missingCosts: missingCosts.length, missingCostItems: missingCosts.slice(0, 100),
     lowMargin: lowMargin.length, lowMarginItems: lowMargin.slice(0, 100),
     negativeMargin: negativeMargin.length, negativeMarginItems: negativeMargin.slice(0, 100),
-    mostProfitable: [...covered].sort((a, b) => b.contribution - a.contribution).slice(0, 10),
-    leastProfitable: [...covered].sort((a, b) => a.contribution - b.contribution).slice(0, 10),
+    mostProfitable: [...contributionKnown].sort((a, b) => b.contribution - a.contribution).slice(0, 10),
+    leastProfitable: [...contributionKnown].sort((a, b) => a.contribution - b.contribution).slice(0, 10),
     averageMargin: averageMargin === null ? null : Number(averageMargin.toFixed(1)), costCoverage,
+    marginCoveredVariants: marginKnown.length,
+    marginCoverage: variants.length ? Math.round(marginKnown.length / variants.length * 100) : 0,
+    averageMarginBasis: 'unweighted-known-catalogue-contribution-margins',
     seoIssues: seoIssues.length, seoIssueItems: seoIssues.slice(0, 100),
     customerServiceIssues: customerServiceItems.length, customerServiceItems: customerServiceItems.slice(0, 100),
     pendingApprovals: pendingApprovals.length, integrationIssues: integrationIssues.length,
@@ -307,7 +317,8 @@ export function buildDailyBrief(state, options = {}) {
   if (metrics.lowMargin) lines.push(`${metrics.lowMargin} fully costed variants are below their contribution-margin floor.`);
   if (metrics.pendingApprovals) lines.push(`${metrics.pendingApprovals} risk-sensitive actions are waiting for a decision.`);
   if (metrics.integrationIssues) lines.push(`${metrics.integrationIssues} channel connections need attention.`);
-  return compactDailyBrief({ id: `brief_${crypto.randomUUID()}`, ...metrics, summary: lines.join(' '), logic: 'deterministic-v2', topActions: metrics.recommendations.slice(0, 5) });
+  return compactDailyBrief({ id: `brief_${crypto.randomUUID()}`, ...metrics, summary: lines.join(' '), logic: 'deterministic-v2',
+    calculationVersion: OPERATIONS_CALCULATION_VERSION, topActions: metrics.recommendations.slice(0, 5) });
 }
 
 function cleanText(value, max, required = false) {

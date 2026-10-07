@@ -275,7 +275,7 @@
   function statusClass(status) {
     if (['connected', 'ready', 'configured', 'deterministic', 'internal', 'profitable', 'confirmed-costs'].includes(status)) return 'good';
     if (['error', 'failed', 'auth_expired', 'loss-making'].includes(status)) return 'bad';
-    if (['warning', 'needs approval', 'degraded', 'not_configured', 'dormant', 'configured_disabled', 'below-floor', 'missing-costs', 'incomplete', 'estimated-costs'].includes(status)) return 'warn';
+    if (['warning', 'needs approval', 'degraded', 'not_configured', 'dormant', 'configured_disabled', 'below-floor', 'missing-costs', 'missing-price', 'margin-unavailable', 'incomplete', 'estimated-costs'].includes(status)) return 'warn';
     return 'neutral';
   }
 
@@ -632,6 +632,7 @@
     $('#kpi-coverage').textContent = String(dashboard.costCoverage || 0) + '%';
     $('#kpi-missing-costs').textContent = String(dashboard.missingCosts || 0) + ' missing';
     $('#kpi-margin').textContent = percent(dashboard.averageMargin);
+    $('#kpi-margin-coverage').textContent = String(dashboard.marginCoveredVariants ?? 0) + ' of ' + String(dashboard.variants ?? 0) + ' catalogue variants · unweighted';
     $('#kpi-low-margin').textContent = String(dashboard.lowMargin || 0) + ' below floor';
     $('#kpi-loss').textContent = String(dashboard.negativeMargin || 0);
     $('#kpi-stock-value').textContent = money(dashboard.stockValue);

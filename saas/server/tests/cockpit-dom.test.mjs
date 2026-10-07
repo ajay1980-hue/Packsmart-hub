@@ -17,6 +17,10 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: 'ui-test-only-credential-key-more-than-32-characters', SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
   const state = seedWorkspaceState({}, { workspaceId: 'ui-test', email: 'ui@example.test', passwordHash: await hashPasswordAsync('GraphSessionTest!2026') });
   state.products = [{ id: 'p1', title: '<img src=x onerror=alert(1)>', status: 'active', variants: [{ id: 'v1', sku: 'SKU-1', price: 10, inventory: 1, available: true }] }];
+  state.products[0].variants.push({ id: 'known-margin', sku: 'KNOWN-MARGIN', price: 10, inventory: 50 }, { id: 'missing-price', sku: 'MISSING-PRICE', price: null, inventory: 50 });
+  const completeCosts = { landed: 6, packing: 0, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 };
+  state.economics['KNOWN-MARGIN'] = { ...completeCosts };
+  state.economics['MISSING-PRICE'] = { ...completeCosts };
   state.revenueEngine.quotes = [{ id: 'q1', status: 'draft', lines: [{ sku: 'SKU-1', quantity: 20, unitPrice: 12 }] }];
   detectOpportunities(state);
   const evidencedOpportunity = state.opportunities[0];
@@ -46,6 +50,13 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   };
   for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
+  assert.equal(document.querySelector('#kpi-margin').textContent, '40.0%');
+  assert.match(document.querySelector('#kpi-margin-coverage').textContent, /1 of 3 catalogue variants · unweighted/);
+  assert.match(document.querySelector('#kpi-margin').parentElement.textContent, /Mean known contribution margin/);
+  assert.equal(document.querySelector('#kpi-low-margin').textContent, '0 below floor');
+  const missingPriceRow = document.querySelector('.economics-row[data-sku="MISSING-PRICE"]');
+  assert.match(missingPriceRow.textContent, /Missing Price/);
+  assert.doesNotMatch(document.querySelector('#best-products').textContent, /MISSING-PRICE/);
   assert.ok(!calls.some(call => call.route === '/api/migrate-pilot'), 'a future tenant never imports the customer-zero browser cache');
   const investigate = document.querySelector('[data-investigate-opportunity="' + evidencedOpportunity.id + '"]');
   assert.ok(investigate, 'Command links the original durable opportunity');
