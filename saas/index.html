@@ -153,7 +153,7 @@
         </div>
 
         <div class="operating-grid">
-          <article class="card trajectory-panel"><div class="section-head"><div><p class="eyebrow">IMPORTED ORDER EVIDENCE</p><h2>Exact recorded cohorts</h2></div><span class="tag neutral">30 UTC days</span></div><div id="revenue-trajectory"></div></article>
+          <article class="card trajectory-panel"><div class="section-head"><div><p class="eyebrow">IMPORTED ORDER EVIDENCE</p><h2>Recorded order groups</h2></div><span class="tag neutral">30 UTC days</span></div><div id="revenue-trajectory"></div></article>
           <article class="card activity-panel"><div class="section-head"><div><p class="eyebrow">RUNVARA / IN MOTION</p><h2>Recorded operations</h2></div><button class="text-button" data-view-link="value">All work ↗</button></div><div id="operations-stream"></div></article>
         </div>
         <div class="analytics-grid">
@@ -269,26 +269,24 @@
           <article class="card kpi"><span>Attributed ROAS</span><strong id="analytics-roas">—</strong><small id="analytics-roas-note">currency, period and attribution unverified</small></article>
         </div>
 
-        <div class="analytics-grid analytics-page-grid">
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">IMPORTED ORDER EVIDENCE</p><h2>Provider, currency and status cohorts</h2></div><button class="text-button" data-view-link="channels">Manage connections ↗</button></div>
-            <div id="analytics-channel-table" class="analytics-table"></div>
-          </article>
-          <article class="card">
+        <article class="card analytics-cohorts-card">
+          <div class="section-head"><div><p class="eyebrow">IMPORTED ORDER EVIDENCE</p><h2>Provider, currency and status groups</h2></div><button class="text-button" data-view-link="channels">Manage connections ↗</button></div>
+          <div id="analytics-channel-table" class="analytics-table"></div>
+        </article>
+
+        <div class="analytics-grid analytics-page-grid analytics-secondary-grid">
+          <article class="card analytics-providers-card">
             <div class="section-head"><div><p class="eyebrow">RETAINED ORDER COUNTS</p><h2>Recorded providers</h2></div><span class="tag neutral">30 days</span></div>
             <div id="analytics-source-mix" class="source-mix"></div>
-            <p class="muted tiny">These are counts in retained provider records, not complete period totals or business sales shares. Provider labels do not establish traffic or campaign attribution.</p>
+            <p class="muted tiny">Source-period coverage is unverified. Counts describe retained records, not complete business sales or sales shares. No retained records does not establish zero sales. Provider labels do not establish traffic or campaign attribution.</p>
           </article>
-        </div>
-
-        <div class="analytics-grid analytics-page-grid">
-          <article class="card">
-            <div class="section-head"><div><p class="eyebrow">ADVERTISING RECORDS</p><h2>Recorded cost entries</h2></div><button class="text-button" data-view-link="marketing">Open Marketing Autopilot ↗</button></div>
-            <div id="analytics-marketing" class="analytics-table"></div>
-          </article>
-          <article class="card">
+          <article class="card analytics-coverage-card">
             <div class="section-head"><div><p class="eyebrow">DATA CONFIDENCE</p><h2>What Runvara can prove</h2></div></div>
             <div id="analytics-coverage" class="coverage-grid"></div>
+          </article>
+          <article class="card analytics-advertising-card">
+            <div class="section-head"><div><p class="eyebrow">ADVERTISING RECORDS</p><h2>Recorded cost entries</h2></div><button class="text-button" data-view-link="marketing">Open Marketing Autopilot ↗</button></div>
+            <div id="analytics-marketing" class="analytics-table"></div>
           </article>
         </div>
 

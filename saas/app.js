@@ -89,7 +89,7 @@
     return ratio ? countLabel(ratio.numerator) + ' / ' + countLabel(ratio.denominator) + ' retained orders' : 'Unavailable';
   }
 
-  function importedEvidenceTable(period, { details = false } = {}) {
+  function importedEvidenceTable(period, { details = false, collapsed = false } = {}) {
     const evidence = importedEvidence(period);
     if (!evidence) return '<p class="empty-state">Imported order evidence unavailable. Source-period coverage is unverified; business totals are unavailable.</p>';
     const completeness = evidence.completeness || {}, presentation = evidence.presentation || {};
@@ -98,19 +98,23 @@
     const truncatedAreas = Object.entries(completeness.truncated || {}).filter(([, value]) => value === true).map(([key]) => statusLabel(key));
     const clippingNote = clipped ? '<p class="missing-inputs">Partial grouped view: ' + escapeHtml(countLabel(presentation.groupsReturned)) + ' of ' + escapeHtml(countLabel(presentation.groupsAvailable)) + ' period groups returned. Other groups may be omitted; complete-cohort totals and value coverage are withheld.</p>' : '';
     const scanNote = truncatedAreas.length ? '<p class="missing-inputs">Bounded projection truncated: ' + escapeHtml(truncatedAreas.join(', ')) + '. Known subtotals describe only the scanned subset.</p>' : '';
-    const windowLabel = evidence.period ? evidence.period.startAt + ' ≤ recorded createdAt < ' + evidence.period.endAt : 'Period unavailable';
+    const windowLabel = evidence.period ? 'Recorded order dates: ' + evidence.period.startAt + ' (inclusive) to ' + evidence.period.endAt + ' (exclusive).' : 'Period unavailable';
     const retainedOrders = evidence.counts?.retainedOrders ?? (evidence.groups?.length === 1 ? evidence.groups[0].orders : undefined);
-    const providers = (evidence.sourcePeriods || []).map(item => statusLabel(item.provider) + ': source period unverified').join(' · ');
-    const note = clippingNote + scanNote + '<p class="signal-note">' + escapeHtml(windowLabel) + '</p><p class="muted tiny">' + escapeHtml(providers || 'Source period unverified') +
-      '. Normalized recorded amounts may contain importer defaults or derived values. Currency recognition and source currency are unverified. These are retained records, not business totals, collected cash or profit.</p>' +
-      '<p class="muted tiny">Retained orders: ' + escapeHtml(countLabel(retainedOrders)) + ' · Scan ' + (completeness.scanComplete ? 'complete' : 'incomplete') +
+    const providers = (evidence.sourcePeriods || []).map(item => '<li>' + escapeHtml(statusLabel(item.provider)) + '</li>').join('');
+    const unresolved = [!completeness.scanComplete && 'Scan incomplete', (!completeness.outputComplete || clipped) && 'Output incomplete', !completeness.eligibilityResolved && 'Eligibility unresolved'].filter(Boolean);
+    const note = '<p class="imported-evidence-warning">Retained recorded amounts only, not verified business revenue, profit or collected cash. Source period unverified.</p>' +
+      '<p class="signal-note">Retained orders: ' + escapeHtml(countLabel(retainedOrders)) + (unresolved.length ? ' · ' + escapeHtml(unresolved.join(' · ')) : '') + '</p>' + clippingNote + scanNote +
+      '<details class="evidence imported-evidence-provenance"><summary>Source period and evidence details</summary><p class="signal-note">' + escapeHtml(windowLabel) + '</p>' +
+      '<p class="muted tiny">Normalized recorded amounts may contain importer defaults or derived values. Currency recognition and source currency are unverified.</p>' +
+      '<p class="muted tiny">Scan ' + (completeness.scanComplete ? 'complete' : 'incomplete') +
       ' · Output ' + (completeness.outputComplete && !clipped ? 'complete' : 'incomplete') + ' · Eligibility ' + (completeness.eligibilityResolved ? 'resolved' : 'unresolved') +
-      '. Financial qualification unavailable. Numeric cost completeness does not establish historical cost assignment.</p>';
+      '. Financial qualification unavailable. Numeric cost completeness does not establish historical cost assignment.</p>' +
+      (providers ? '<p class="muted tiny">Source-period coverage is unverified for every provider listed here:</p><ul class="imported-source-list">' + providers + '</ul>' : '<p class="muted tiny">Source-period coverage is unverified.</p>') + '</details>';
     if (!evidence.groups?.length) return note + '<p class="empty-state">No retained order groups for this selection. An empty retained collection does not establish zero sales.</p>';
     const fields = [['total','Recorded total'],['currentTotal','Recorded current total'],['refunds','Recorded refunds'],['tax','Recorded original tax'],['currentTax','Recorded current tax'],['discounts','Recorded discounts'],['shippingCharged','Recorded shipping charged'],['netTotal','Normalized net total'],['netTotalExCurrentTax','Normalized net less current tax']];
     const rows = evidence.groups.map(group => {
       const costs = group.costNumbers || {}, coverage = completeAllowed ? costs.netTotalCoverage : null;
-      const extra = details ? '<details class="evidence"><summary>All recorded amounts and cost evidence</summary><dl>' + fields.map(([key,label]) => '<div><dt>' + label + '</dt><dd>' + recordedMetric(group.recordedAmounts?.[key], completeAllowed) + '</dd></div>').join('') +
+      const extra = details ? '<details class="evidence"><summary>Amounts and costs</summary><dl>' + fields.map(([key,label]) => '<div><dt>' + label + '</dt><dd>' + recordedMetric(group.recordedAmounts?.[key], completeAllowed) + '</dd></div>').join('') +
         '<div><dt>Net subtotal with numeric costs</dt><dd>' + recordedMetric(costs.coveredNetTotal, completeAllowed) + '</dd></div><div><dt>Exact numeric cost / net amount coverage</dt><dd>' +
         escapeHtml(coverage ? recordedDecimal(coverage.numerator) + ' / ' + recordedDecimal(coverage.denominator) : 'Unavailable') + '</dd></div></dl></details>' : '';
       return '<tr><td>' + escapeHtml(statusLabel(group.provider)) + '</td><td>' + escapeHtml(recordedCurrency(group)) + '</td><td>' + escapeHtml(statusLabel(group.financialStatus)) +
@@ -118,7 +122,8 @@
         '</td><td>' + recordedMetric(group.recordedAmounts?.refunds, completeAllowed) + '</td><td>' + escapeHtml(numericCostLabel(costs)) + '<small>' + escapeHtml(countLabel(costs.incompleteOrders)) +
         ' incomplete · retained cost cohort ' + (!completeAllowed ? 'unavailable' : costs.completeCohort === true ? 'complete' : costs.completeCohort === false ? 'incomplete' : 'unavailable') + '</small><small>Profit / margin / cash: unavailable</small></td></tr>';
     }).join('');
-    return note + '<div class="table-wrap table-scroll"><table class="imported-evidence-table"><caption>Exact normalized amounts by retained provider, currency, financial status and cancellation cohort</caption><thead><tr><th scope="col">Provider</th><th scope="col">Recorded currency</th><th scope="col">Recorded status</th><th scope="col">Cancellation</th><th scope="col">Orders</th><th scope="col">Recorded net amount</th><th scope="col">Recorded refunds</th><th scope="col">Numeric cost availability</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    const table = '<div class="table-wrap table-scroll"><table class="imported-evidence-table"><caption>Exact recorded amounts, grouped by provider, currency, status and cancellation</caption><thead><tr><th scope="col">Provider</th><th scope="col">Recorded currency</th><th scope="col">Recorded status</th><th scope="col">Cancellation</th><th scope="col">Orders</th><th scope="col">Recorded net amount</th><th scope="col">Recorded refunds</th><th scope="col">Numeric cost availability</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    return note + (collapsed ? '<details class="evidence imported-evidence-cohorts"><summary>Inspect exact recorded groups</summary>' + table + '</details>' : table);
   }
 
   function usd(value) {
@@ -376,7 +381,7 @@
   function renderTrajectory() {
     const dashboard = state.data.dashboard || {}, signals = dashboard.revenueSignals || {};
     const period = signals.periodRef === 'last30d' ? dashboard.last30d : signals.period || dashboard.last30d;
-    $('#revenue-trajectory').innerHTML = importedEvidenceTable(period, { details: true });
+    $('#revenue-trajectory').innerHTML = importedEvidenceTable(period, { details: true, collapsed: true });
   }
 
   function renderOperationsStream() {
@@ -472,9 +477,9 @@
     $('#analytics-ad-spend').textContent = 'Unavailable';
     $('#analytics-roas').textContent = 'Unavailable';
     $('#analytics-roas-note').textContent = 'Currency, period and attribution not qualified';
-    $('#analytics-summary').textContent = 'Runvara shows exact normalized order evidence by provider, recorded currency, status and cancellation. Source-period coverage, revenue, profit and collected cash remain unverified.';
+    $('#analytics-summary').textContent = 'Runvara shows retained orders by provider, currency, status and cancellation. Period coverage, revenue, profit and collected cash remain unverified.';
     $('#analytics-channel-table').innerHTML = importedEvidenceTable(month, { details: true });
-    $('#analytics-source-mix').innerHTML = salesChannels.length ? salesChannels.map(channel => '<div class="source-row"><div><span>' + escapeHtml(channel.name) + '</span><strong>' + escapeHtml(countLabel(channel.metrics30d?.orders)) + ' retained orders</strong></div><small>Source period unverified · not a share of business sales</small></div>').join('') : '<div class="empty-state">No channel evidence is available.</div>';
+    $('#analytics-source-mix').innerHTML = salesChannels.length ? salesChannels.map(channel => '<div class="source-row"><div><span>' + escapeHtml(channel.name) + '</span><strong>' + escapeHtml(countLabel(channel.metrics30d?.orders)) + ' retained orders</strong></div></div>').join('') : '<div class="empty-state">No channel evidence is available.</div>';
     $('#analytics-marketing').innerHTML = '<p class="muted tiny">All retained raw entries, with recorded dates shown. Currency, attribution and source-period coverage are unverified; totals and ROAS are unavailable.</p>' + (adCosts.length ? '<div class="table-wrap table-scroll"><table><thead><tr><th scope="col">Recorded date</th><th scope="col">Channel</th><th scope="col">Recorded currency</th><th scope="col">Recorded spend</th><th scope="col">Recorded attribution amount</th></tr></thead><tbody>' + adCosts.map(item => '<tr><td>' + escapeHtml(item.date || item.createdAt || 'Unknown') + '</td><td>' + escapeHtml(statusLabel(item.channel)) + '</td><td>' + escapeHtml(recordedCurrency(item)) + '</td><td>' + escapeHtml(recordedInput(item.spend)) + '</td><td>' + escapeHtml(recordedInput(item.attributableRevenue)) + '</td></tr>').join('') + '</tbody></table></div>' : '<div class="empty-state">No advertising cost entries retained. This does not establish zero spend.</div>');
     $('#analytics-coverage').innerHTML = [
       ['Source-period coverage', 'Unverified', 'A successful sync does not establish complete order coverage.'],

@@ -99,8 +99,8 @@ test('imported evidence keeps exact currency/status/cancellation cohorts and dis
   const unknown = rows.find(row => row.cells[1].textContent.startsWith('Unknown'));
   assert.equal(unknown.cells[5].querySelector('strong').textContent, 'Unknown');
   assert.match(unknown.cells[5].textContent, /1 known \/ 0 unknown/);
-  assert.match(root.textContent, /source period unverified/);
-  assert.match(root.textContent, /not business totals, collected cash or profit/);
+  assert.match(root.textContent, /Source period unverified/);
+  assert.match(root.textContent, /not verified business revenue, profit or collected cash/);
   assert.doesNotMatch(root.textContent, /£|\$|70%|£70|1e\+/);
   assert.equal(h.document.querySelector('[onerror]'), null);
   for (const id of ['today-revenue', 'today-profit', 'today-margin', 'hg-coverage', 'analytics-revenue', 'analytics-profit', 'analytics-margin', 'analytics-ad-spend', 'analytics-roas', 'orders-profit', 'orders-profit-coverage']) assert.equal(h.document.getElementById(id).textContent, 'Unavailable', id);
@@ -121,6 +121,37 @@ test('imported evidence keeps exact currency/status/cancellation cohorts and dis
   assert.equal(h.calls.every(call => call.method === 'GET'), true);
 });
 
+test('evidence stays concise at rest while disclosures preserve provenance and exact recorded groups', async t => {
+  const h = await harness(t), document = h.document;
+  for (const id of ['revenue-trajectory', 'analytics-channel-table']) {
+    const root = document.getElementById(id), provenance = root.querySelector(':scope > .imported-evidence-provenance');
+    assert.ok(provenance);
+    assert.equal(provenance.open, false);
+    assert.match(root.querySelector(':scope > .imported-evidence-warning').textContent, /not verified business revenue, profit or collected cash\. Source period unverified/);
+    assert.match(root.querySelector(':scope > .signal-note').textContent, /Retained orders: 5/);
+    assert.match(provenance.textContent, /2026-09-01T00:00:00\.000Z \(inclusive\) to 2026-10-01T00:00:00\.000Z \(exclusive\)/);
+    assert.match(provenance.textContent, /importer defaults or derived values/);
+    assert.match(provenance.textContent, /Currency recognition and source currency are unverified/);
+    assert.match(provenance.textContent, /Scan complete · Output complete · Eligibility resolved/);
+    assert.match(provenance.textContent, /historical cost assignment/);
+    assert.match(provenance.textContent, /Source-period coverage is unverified for every provider/);
+    assert.deepEqual([...provenance.querySelectorAll('li')].map(item => item.textContent), ['Ebay', 'Shopify']);
+  }
+  const command = document.querySelector('#revenue-trajectory > .imported-evidence-cohorts');
+  assert.equal(command.open, false);
+  assert.equal(command.querySelectorAll('tbody tr').length, 4);
+  assert.equal(document.querySelector('#analytics-channel-table > .table-wrap tbody').rows.length, 4);
+  assert.equal(document.querySelector('#analytics-channel-table').closest('.card').parentElement.id, 'view-analytics', 'cohorts have the full Analytics row');
+  const providers = document.querySelector('.analytics-providers-card');
+  assert.equal(providers.querySelectorAll('.source-row small').length, 0, 'provider rows share one coverage explanation');
+  assert.equal((providers.textContent.match(/Source-period coverage is unverified/g) || []).length, 1);
+  assert.match(providers.textContent, /No retained records does not establish zero sales/);
+  h.bootstrap.integrations[0].metrics30d.orders = null;
+  h.bootstrap.integrations[1].metrics30d.orders = 0;
+  await h.controls.reload({ migrate: false });
+  assert.deepEqual([...document.querySelectorAll('#analytics-source-mix strong')].map(item => item.textContent), ['Unknown retained orders', '0 retained orders']);
+});
+
 test('missing, empty and incomplete projections never fabricate monetary zero or complete financial periods', async t => {
   const h = await harness(t);
   for (const evidence of [null, projection([]), projection(h.rows, { orders: [...h.rows, { provider: 'shopify', currency: 'GBP' }] })]) {
@@ -132,7 +163,7 @@ test('missing, empty and incomplete projections never fabricate monetary zero or
     assert.equal(h.document.getElementById('today-revenue').textContent, 'Unavailable');
     if (!evidence) { assert.match(root.textContent, /evidence unavailable/); assert.equal(h.document.getElementById('today-orders').textContent, 'Unknown'); }
     else if (!evidence.groups.length) assert.match(root.textContent, /does not establish zero sales/);
-    else { assert.match(root.textContent, /Eligibility unresolved/); assert.doesNotMatch(root.textContent, /Complete retained cohort: (?:1000|100|0)(?:\D|$)/); }
+    else { assert.match(root.querySelector(':scope > .signal-note').textContent, /Eligibility unresolved/); assert.doesNotMatch(root.textContent, /Complete retained cohort: (?:1000|100|0)(?:\D|$)/); }
   }
 });
 
@@ -193,6 +224,7 @@ test('bounded presentations and shared period references retain provider scope a
   await h.controls.reload({ migrate: false });
   const root = h.document.getElementById('revenue-trajectory');
   assert.match(root.textContent, /Partial grouped view: 1 of 4 period groups returned/);
+  assert.match(root.querySelector(':scope > .missing-inputs').textContent, /Partial grouped view/);
   assert.match(root.textContent, /Complete retained cohort: Unavailable/);
   assert.doesNotMatch(root.textContent, /Complete retained cohort: 1000/);
   assert.match(root.textContent, /Exact numeric cost \/ net amount coverageUnavailable/);
@@ -206,6 +238,8 @@ test('bounded presentations and shared period references retain provider scope a
   evidence.completeness.retainedCohortComplete = false;
   await h.controls.reload({ migrate: false });
   assert.match(root.textContent, /Bounded projection truncated: Orders/);
+  assert.match([...root.querySelectorAll(':scope > .missing-inputs')].map(item => item.textContent).join(' '), /Bounded projection truncated: Orders/);
+  assert.match(root.querySelector(':scope > .signal-note').textContent, /Scan incomplete/);
   assert.match(root.textContent, /Known subtotals describe only the scanned subset/);
   assert.equal(h.calls.every(call => call.method === 'GET'), true);
 });

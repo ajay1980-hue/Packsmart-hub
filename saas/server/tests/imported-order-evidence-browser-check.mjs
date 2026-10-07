@@ -59,7 +59,22 @@ try {
     };
     const inspectCohorts = async selector => {
       const root = page.locator(selector);
+      const commandDetails = root.locator(':scope > .imported-evidence-cohorts');
+      if (await commandDetails.count()) {
+        assert.equal(await commandDetails.getAttribute('open'), null, 'Command keeps exact groups available on demand');
+        assert.equal(await root.locator('.imported-evidence-table').isVisible(), false);
+        await commandDetails.locator(':scope > summary').click();
+      }
       await root.locator('.imported-evidence-table').waitFor();
+      assert.equal(await root.locator(':scope > .imported-evidence-warning').isVisible(), true);
+      const provenance = root.locator(':scope > .imported-evidence-provenance');
+      assert.equal(await provenance.getAttribute('open'), null, 'detailed provenance is optional');
+      await provenance.locator('summary').click();
+      assert.equal(await provenance.locator('ul').isVisible(), true);
+      assert.match(await provenance.textContent(), /Recorded order dates: .* \(inclusive\) to .* \(exclusive\)/);
+      assert.match(await provenance.textContent(), /importer defaults or derived values/);
+      assert.match(await provenance.textContent(), /Source-period coverage is unverified for every provider/);
+      await provenance.locator('summary').click();
       assert.equal(await root.locator('svg').count(), 0, 'imported currencies cannot share a monetary plot');
       const rows = await root.locator('tbody > tr').evaluateAll(elements => elements.map(row => [...row.cells].map(cell => cell.textContent)));
       assert.equal(rows.length, 5, 'retained provider/currency/status/cancellation cohorts stay separate');
@@ -76,8 +91,8 @@ try {
       const zzz = byCurrency('ZZZ'); assert.equal(zzz[2], 'PENDING'); assert.equal(zzz[3], 'Cancelled'); assert.match(zzz[5], /^0Known subtotal/);
       const unknown = byCurrency('Unknown currency'); assert.match(unknown[5], /^UnknownKnown subtotal · 1 known \/ 0 unknown/);
       const text = await root.textContent();
-      assert.match(text, /source period unverified/);
-      assert.match(text, /not business totals, collected cash or profit/);
+      assert.match(text, /Source period unverified/);
+      assert.match(text, /not verified business revenue, profit or collected cash/);
       assert.match(text, /Financial qualification unavailable/);
       assert.doesNotMatch(text, /£|\$|€|Grand total|Combined revenue|Net revenue total|\.\.\.|…/i);
       assert.equal(await root.locator('tfoot').count(), 0, 'no cross-currency total row');
@@ -86,6 +101,22 @@ try {
       assert.match(await gbpDetails.textContent(), /Exact numeric cost \/ net amount coverage100 \/ 1000/);
       assert.match(await gbpDetails.textContent(), /Recorded current tax/);
       await gbpDetails.locator('summary').click();
+      await assertContained([selector, selector + ' .imported-evidence-cohorts']);
+      if (await commandDetails.count()) {
+        await commandDetails.locator(':scope > summary').click();
+        assert.equal(await root.locator('.imported-evidence-table').isVisible(), false);
+        assert.equal(await root.locator(':scope > .imported-evidence-warning').isVisible(), true, 'the warning stays visible when exact groups are closed');
+      }
+    };
+    const resetCapturePosition = async () => {
+      // Inspection scrolls tables and focuses controls. Capture the real at-rest view.
+      await page.evaluate(() => {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        for (const element of document.querySelectorAll('.view.active .table-wrap, .sidebar, main')) element.scrollTo({ left: 0, top: 0, behavior: 'instant' });
+        window.scrollTo({ left: 0, top: 0, behavior: 'instant' });
+      });
+      await page.waitForFunction(() => window.scrollX === 0 && window.scrollY === 0 && [...document.querySelectorAll('.view.active .table-wrap')].every(element => element.scrollLeft === 0 && element.scrollTop === 0));
+      assert.equal(await page.locator('.skip-link').evaluate(element => element.matches(':focus')), false, 'fixture focus does not appear in screenshots');
     };
     const assertContained = async selectors => {
       const dimensions = await page.evaluate(selectors => ({ page: document.documentElement.scrollWidth, width: innerWidth,
@@ -118,6 +149,8 @@ try {
       await page.locator('#week-metrics > details > summary').click();
       await page.locator('[data-period="month"]').click();
       assert.equal(await page.locator('#month-metrics').isVisible(), true);
+      assert.equal(await page.locator('#revenue-trajectory > .imported-evidence-cohorts').getAttribute('open'), null);
+      await resetCapturePosition();
       await page.screenshot({ path: `/tmp/runvara-imported-order-command-${width}.png`, fullPage: true });
 
       await navigate('analytics');
@@ -129,6 +162,22 @@ try {
       assert.match(await page.locator('#analytics-marketing').textContent(), /totals and ROAS are unavailable/);
       assert.doesNotMatch(await page.locator('#analytics-marketing').textContent(), /£|\$|×/);
       await assertContained(['#analytics-channel-table', '#analytics-marketing', '#analytics-coverage', '#view-analytics .kpi', '#view-analytics .card']);
+      const layout = await page.evaluate(() => {
+        const bounds = selector => { const rect = document.querySelector(selector).getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width }; };
+        return { view: bounds('#view-analytics'), cohorts: bounds('.analytics-cohorts-card'), secondary: bounds('.analytics-secondary-grid'),
+          providers: bounds('.analytics-providers-card'), coverage: bounds('.analytics-coverage-card'), advertising: bounds('.analytics-advertising-card'),
+          alignment: getComputedStyle(document.querySelector('.analytics-secondary-grid')).alignItems };
+      });
+      assert.ok(Math.abs(layout.cohorts.width - layout.view.width) <= 2, 'cohort evidence uses the full Analytics row');
+      assert.ok(layout.secondary.top >= layout.cohorts.bottom, 'secondary cards are below the complete evidence row');
+      assert.equal(layout.alignment, 'start', 'secondary cards keep independent heights');
+      if (width === 1200) {
+        assert.ok(Math.abs(layout.providers.top - layout.coverage.top) <= 2, 'provider counts and coverage share a compact desktop row');
+        assert.ok(layout.providers.right < layout.coverage.left, 'secondary cards use distinct desktop columns');
+        assert.ok(layout.advertising.top >= Math.max(layout.providers.bottom, layout.coverage.bottom), 'advertising follows the compact secondary cards');
+        assert.ok(Math.abs(layout.advertising.width - layout.view.width) <= 2, 'advertising columns have a readable full row');
+      }
+      await resetCapturePosition();
       await page.screenshot({ path: `/tmp/runvara-imported-order-analytics-${width}.png`, fullPage: true });
       await navigate('overview'); await navigate('analytics');
       assert.deepEqual(apiCalls, callsAfterBootstrap, 'navigation, period toggles and opening evidence never fetch or poll');

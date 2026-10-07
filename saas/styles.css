@@ -1687,6 +1687,15 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 .imported-evidence-table td { vertical-align: top; }
 .imported-evidence-table small { display: inline-block; color: var(--muted); margin-top: .3rem; line-height: 1.5; }
 .imported-evidence-table dd { margin: .2rem 0 .8rem; }
+.imported-evidence-warning { margin: .7rem 0 .4rem; color: var(--silver); font-size: .85rem; line-height: 1.55; }
+.imported-evidence-provenance { padding: .2rem .8rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-inset); }
+.imported-evidence-provenance summary, .imported-evidence-cohorts > summary { color: var(--blue); font-size: .8rem; }
+.imported-source-list { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; margin: .6rem 0 .8rem; padding-left: 1rem; color: var(--muted); font-size: .76rem; }
+.analytics-secondary-grid { align-items: start; }
+.analytics-advertising-card { grid-column: 1 / -1; }
+#analytics-source-mix { gap: .7rem; }
+#analytics-source-mix .source-row > div { margin-bottom: 0; }
+#analytics-marketing table { min-width: 34rem; }
 #view-overview .kpi > strong, #view-analytics .kpi > strong, #view-orders .kpi > strong { overflow-wrap: anywhere; }
 #today-revenue, #today-profit, #today-margin, #hg-coverage,
 #analytics-revenue, #analytics-profit, #analytics-margin, #analytics-ad-spend, #analytics-roas,
