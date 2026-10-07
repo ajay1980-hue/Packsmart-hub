@@ -86,12 +86,15 @@ test('complete recorded zero stays known zero, with explicit legacy scope and tr
   const h = await harness(t); await h.open();
   assert.equal(h.costKpi().querySelector('strong').textContent, '$0.0000');
   assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-text-status').length, 0, 'known numeric amounts retain the numeric KPI typography');
+  assert.deepEqual([...h.document.querySelectorAll('#fleet-kpis .kpi-monthly > span')].map(element => element.textContent), ['Legacy AI estimate · month', 'Plan value · month']);
   assert.equal(h.costKpi().querySelector('small').textContent, '0 recorded legacy requests');
   assert.equal(h.economics('Recorded legacy requests · month'), '0');
   assert.equal(h.economics('Recorded legacy cost estimate · USD'), '$0.0000');
   assert.equal(h.economics('Recorded ledger status'), 'Complete');
   assert.equal(h.economics('Snapshot usage coverage'), '1 complete · 0 incomplete · 0 unavailable');
   assert.equal(h.workspaceCost(), '$0.0000'); assert.match(h.workspaceRequests(), /^0 recorded legacy requests/);
+  assert.equal(h.workspace().querySelectorAll('.kpi-text-status').length, 0, 'known workspace amounts keep numeric typography');
+  assert.deepEqual([...h.workspace().querySelectorAll('.fleet-signal-monthly > span')].map(element => element.textContent), ['Legacy AI estimate · month', 'Plan value · month']);
   assert.equal(h.workspace().querySelector('[data-legacy-ai-usage-note]'), null);
   assert.equal(h.document.querySelector('#fleet-ai-provider-status').textContent, 'Provider configured');
   const fleetText = h.document.querySelector('#view-fleet').textContent;
@@ -130,10 +133,13 @@ test('partial and unavailable summaries withhold stale values at every Fleet cos
     assert.equal(h.costKpi().querySelector('strong').textContent, label);
     assert.equal(h.costKpi().querySelector('strong').classList.contains('kpi-text-status'), true);
     assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-text-status').length, 1, 'only the textual usage status receives text typography');
+    assert.deepEqual([...h.document.querySelectorAll('#fleet-kpis .kpi-monthly > span')].map(element => element.textContent), ['Legacy AI estimate · month', 'Plan value · month'], 'monthly card layout is stable across incomplete and unavailable states');
     assert.equal(h.economics('Recorded legacy requests · month'), label);
     assert.equal(h.economics('Recorded legacy cost estimate · USD'), label);
     assert.equal(h.economics('Recorded ledger status'), label);
     assert.equal(h.workspaceCost(), label);
+    assert.equal(h.workspace().querySelector('.fleet-signal-monthly > b').classList.contains('kpi-text-status'), true);
+    assert.equal(h.workspace().querySelectorAll('.fleet-signal-monthly').length, 2, 'monthly workspace layout is independent of usage completeness');
     assert.match(h.workspaceRequests(), new RegExp(`^Legacy requests ${label.toLowerCase()}`));
     assert.doesNotMatch(h.costKpi().textContent + h.workspaceRequests(), /\$|\b[089] (?:recorded|metered|model)/);
     const note = h.workspace().querySelector('[data-legacy-ai-usage-note]').textContent;
@@ -143,6 +149,9 @@ test('partial and unavailable summaries withhold stale values at every Fleet cos
   await h.refresh(fleetFixture({ cost: 1.25, requests: 3, usage: complete(1.25, 3) }));
   assert.equal(h.costKpi().querySelector('strong').textContent, '$1.25');
   assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-text-status').length, 0, 'refreshing to complete restores numeric typography');
+  assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-monthly').length, 2, 'complete monthly amounts retain the same monthly layout');
+  assert.equal(h.workspace().querySelectorAll('.kpi-text-status').length, 0, 'complete workspace values restore numeric typography');
+  assert.equal(h.workspace().querySelectorAll('.fleet-signal-monthly').length, 2);
 });
 
 test('mixed Fleet coverage hides its overall sum while retaining each complete workspace value', async t => {

@@ -10,6 +10,26 @@ import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
 
+async function usageTypography(locator, numericReference) {
+  return locator.evaluate((element, reference) => {
+    const style = getComputedStyle(element), range = document.createRange();
+    range.selectNodeContents(element);
+    const lineTops = [...new Set([...range.getClientRects()].filter(rect => rect.width && rect.height).map(rect => Math.round(rect.top * 100) / 100))];
+    const numericElement = reference ? document.querySelector(reference) : element.closest('.fleet-signal-grid').querySelector('div > b');
+    const result = { textStatus: element.classList.contains('kpi-text-status'), fontSize: parseFloat(style.fontSize), lineTops,
+      whiteSpace: style.whiteSpace, overflowWrap: style.overflowWrap, numericFontSize: parseFloat(getComputedStyle(numericElement).fontSize) };
+    if (result.textStatus) {
+      // Larger user text may wrap naturally, but must not be clipped or
+      // forced outside the card by a one-line-only presentation rule.
+      const originalFontSize = element.style.fontSize;
+      element.style.fontSize = `${result.fontSize * 2}px`;
+      result.enlarged = { width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight };
+      element.style.fontSize = originalFontSize;
+    }
+    return result;
+  }, numericReference);
+}
+
 const complete = (cost = 0, requests = 0) => ({ status: 'complete', reason: null, totals: { estimatedCostUsd: cost, requests }, byModel: [] });
 function fixture(status = 'partial') {
   const workspaces = [
@@ -71,23 +91,7 @@ try {
     for (const [status, label] of [['partial', 'Incomplete'], ['complete', '$0.0000'], ['unavailable', 'Unavailable']]) {
       await refresh(fixture(status));
       assert.equal(await cost.textContent(), label);
-      const typography = await cost.evaluate(element => {
-        const style = getComputedStyle(element), range = document.createRange();
-        range.selectNodeContents(element);
-        const lineTops = [...new Set([...range.getClientRects()].filter(rect => rect.width && rect.height).map(rect => Math.round(rect.top * 100) / 100))];
-        const result = { textStatus: element.classList.contains('kpi-text-status'), fontSize: parseFloat(style.fontSize), lineTops,
-          whiteSpace: style.whiteSpace, overflowWrap: style.overflowWrap,
-          numericFontSize: parseFloat(getComputedStyle(document.querySelector('#fleet-kpis .kpi:last-child > strong')).fontSize) };
-        if (result.textStatus) {
-          // Larger user text may wrap naturally, but must not be clipped or
-          // forced outside the card by a one-line-only presentation rule.
-          const originalFontSize = element.style.fontSize;
-          element.style.fontSize = `${result.fontSize * 2}px`;
-          result.enlarged = { width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight };
-          element.style.fontSize = originalFontSize;
-        }
-        return result;
-      });
+      const typography = await usageTypography(cost, '#fleet-kpis .kpi:last-child > strong');
       assert.equal(typography.textStatus, status !== 'complete', 'only text statuses use the semantic typography class');
       if (status === 'complete') {
         assert.equal(typography.fontSize, typography.numericFontSize, 'complete amounts retain the numeric KPI size');
@@ -102,16 +106,61 @@ try {
       assert.equal(await workspaceCost('packsmart-solutions').textContent(), status === 'unavailable' ? 'Unavailable' : '$0.0000');
       assert.equal(await workspaceCost('partial-tenant').textContent(), label);
       assert.equal(await workspaceCost('missing-tenant').textContent(), status === 'complete' ? '$0.0000' : 'Unavailable');
+      for (const id of ['packsmart-solutions', 'partial-tenant', 'missing-tenant']) {
+        const workspaceTypography = await usageTypography(workspaceCost(id));
+        const textStatus = status === 'unavailable' || (status === 'partial' && id !== 'packsmart-solutions');
+        assert.equal(workspaceTypography.textStatus, textStatus, 'only textual workspace usage values receive status typography');
+        if (textStatus) {
+          assert.equal(workspaceTypography.lineTops.length, 1, `workspace ${id} status must remain one readable line at ${width}px/${status}: ${JSON.stringify(workspaceTypography)}`);
+          assert.ok(workspaceTypography.fontSize >= 14, `workspace status text is too small at ${width}px: ${JSON.stringify(workspaceTypography)}`);
+          assert.equal(workspaceTypography.whiteSpace, 'normal', 'enlarged workspace text must be allowed to wrap');
+          assert.equal(workspaceTypography.overflowWrap, 'anywhere', 'workspace status retains overflow protection');
+          assert.ok(workspaceTypography.enlarged.scrollWidth <= workspaceTypography.enlarged.width + 2 && workspaceTypography.enlarged.scrollHeight <= workspaceTypography.enlarged.height + 2,
+            `workspace ${id} status clips at twice normal size at ${width}px: ${JSON.stringify(workspaceTypography.enlarged)}`);
+        } else {
+          assert.equal(workspaceTypography.fontSize, workspaceTypography.numericFontSize, 'complete workspace amounts retain numeric sizing');
+        }
+      }
       const requestLine = await page.locator('#fleet-kpis .kpi').nth(4).locator('small').textContent();
       assert.equal(requestLine, status === 'complete' ? '0 recorded legacy requests' : `Legacy requests ${label.toLowerCase()}`);
       assert.equal(await page.locator('#fleet-ai-provider-status').textContent(), status === 'complete' ? 'Provider configured' : 'Provider not configured');
       const dimensions = await page.evaluate(() => ({
         width: innerWidth, scroll: document.documentElement.scrollWidth,
+        kpiGridWidth: document.querySelector('#fleet-kpis').clientWidth,
+        monthlyCards: [...document.querySelectorAll('#fleet-kpis .kpi-monthly')].map(card => {
+          const rect = card.getBoundingClientRect();
+          return { width: rect.width, top: rect.top, bottom: rect.bottom };
+        }),
+        workspaceGrids: [...document.querySelectorAll('#fleet-workspaces .fleet-signal-grid')].map(grid => ({
+          width: grid.clientWidth,
+          monthlyCards: [...grid.querySelectorAll('.fleet-signal-monthly')].map(card => {
+            const rect = card.getBoundingClientRect();
+            return { width: rect.width, top: rect.top, bottom: rect.bottom };
+          }),
+          operatingBottom: Math.max(...[...grid.querySelectorAll(':scope > div:not(.fleet-signal-monthly)')].map(card => card.getBoundingClientRect().bottom))
+        })),
         panels: [...document.querySelectorAll('#view-fleet > .card, #view-fleet > .grid-2, #fleet-kpis .kpi, #fleet-workspaces .fleet-signal-grid > div')].map(panel => {
           const rect = panel.getBoundingClientRect();
           return { left: rect.left, right: rect.right, scroll: panel.scrollWidth, width: panel.clientWidth };
         })
       }));
+      assert.equal(dimensions.monthlyCards.length, 2, 'both monthly KPI cards have a stable layout in every usage state');
+      if (width < 360) {
+        for (const card of dimensions.monthlyCards) assert.ok(Math.abs(card.width - dimensions.kpiGridWidth) <= 2,
+          `monthly KPI must span the full narrow grid at ${width}px/${status}: ${JSON.stringify(dimensions)}`);
+        assert.ok(dimensions.monthlyCards[1].top >= dimensions.monthlyCards[0].bottom, 'monthly cards occupy separate rows below 360 px');
+      } else {
+        assert.ok(dimensions.monthlyCards.every(card => card.width < dimensions.kpiGridWidth - 2), 'wider viewports keep the monthly cards in the existing multicolumn grid');
+      }
+      for (const grid of dimensions.workspaceGrids) {
+        assert.equal(grid.monthlyCards.length, 2, 'workspace monthly layout is stable for every usage state');
+        if (width <= 680) {
+          assert.ok(grid.monthlyCards.every(card => Math.abs(card.width - grid.width) <= 2), `workspace monthly cards span the phone grid: ${JSON.stringify(grid)}`);
+          assert.ok(grid.monthlyCards[0].top >= grid.operatingBottom && grid.monthlyCards[1].top >= grid.monthlyCards[0].bottom, 'phone monthly rows follow the four operating counters');
+        } else {
+          assert.ok(grid.monthlyCards.every(card => card.width < grid.width - 2), 'desktop workspace monthly cards retain the multicolumn grid');
+        }
+      }
       assert.ok(dimensions.scroll <= width + 2, `Fleet page overflow at ${width}px/${status}: ${JSON.stringify(dimensions)}`);
       for (const panel of dimensions.panels) {
         assert.ok(panel.scroll <= panel.width + 2, `Fleet panel overflow at ${width}px/${status}: ${JSON.stringify(panel)}`);
