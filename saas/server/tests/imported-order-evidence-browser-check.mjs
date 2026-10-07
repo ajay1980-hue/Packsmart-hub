@@ -91,7 +91,8 @@ try {
       const dimensions = await page.evaluate(selectors => ({ page: document.documentElement.scrollWidth, width: innerWidth,
         panels: selectors.flatMap(selector => [...document.querySelectorAll(selector)].filter(element => element.getClientRects().length).map(element => {
           const rect = element.getBoundingClientRect();
-          return { selector, scroll: element.scrollWidth, available: element.clientWidth, left: rect.left, right: rect.right };
+          return { selector, element: element.tagName.toLowerCase(), id: element.id, className: element.className,
+            scroll: element.scrollWidth, available: element.clientWidth, left: rect.left, right: rect.right };
         })) }), selectors);
       assert.ok(dimensions.page <= width + 2, `page overflow at ${width}px: ${JSON.stringify(dimensions)}`);
       for (const panel of dimensions.panels) {
