@@ -25,9 +25,9 @@ The fixed-purpose publisher accepts reviewed identities/preconditions, never a r
 
 The source normalizer preserves explicit tenant markers. A foreign-tagged revenue container cannot become local by passing through `store.get` normalization before preparation.
 
-## Access changes requiring owner approval
+## Approved access boundary
 
-Do not apply this migration without the owner's explicit action-time approval of the concrete SQL and deployment.
+The owner's recorded PR74 approval was conditional on verified PR82 postdeployment health. That condition is now satisfied by the owner-supplied health screenshot described below. The approved migration was applied through the coordinating task as version `20261007100823`; this local alignment changes only the filename and evidence, not its SQL. Application deployment still follows the exact-head release gates.
 
 - Both new tables have RLS enabled, no public/browser-role access and SELECT-only access for the existing server role.
 - Only the existing server role may call the fixed-purpose `SECURITY DEFINER` publisher. It has an empty search path and no dynamic SQL; the existing trusted migration owner owns it. It cannot accept arbitrary state or arbitrary financial values from its request parameters.
@@ -52,11 +52,11 @@ The UI is collapsed and on demand. Repeated clicks coalesce, navigation/session 
 
 ## Rollout, verification and rollback
 
-The migration is prepared with the official Supabase CLI and must be reviewed/tested before application. After owner approval, apply it to the existing project, verify grants/RLS/functions and record the actual migration history timestamp; align the repository filename if the management tool assigns its own timestamp. Run the complete CI gates again on any alignment change before merging/deploying.
+The approved migration is recorded in production history as `20261007100823` (`business_outcome_publication`). The source filename is now aligned to that actual applied version. SQL SHA-256 remains `7f642f8d22b7827185998d4847fa3890992a8c0569c3100efe3b69d9c07c179f`, identical to the reviewed and published PR74 SQL. Run the complete CI gates on the aligned application head before merging/deploying.
 
 Required gates include the full Node suite, safety/static checks, real PostgreSQL concurrency/role/bootstrap/hash/rollback cases, API tenant/CSRF/session tests, and responsive browser flows at 320/390/1200 pixels. Local PostgreSQL-engine supplements do not replace real PostgreSQL concurrency/privilege CI. Local Chromium socket restrictions do not count as a browser pass.
 
-No live customer measurement, publication or withdrawal is created during verification. Verify the exact deployed commit and production health, then record evidence. PR82 is merged on main at `fa1823756565a356decb4e038af0bdd538484b75`; this incremental stage remains held until that exact deployed revision passes fresh postdeployment health. Preparing this stage does not apply its conditionally approved migration.
+No live customer measurement, publication or withdrawal is created during verification. Verify the exact deployed commit and production health, then record evidence. The owner-supplied PR82 health screenshot, relayed by the coordinating task, reports `checkedAt: 2026-10-07T10:04:12.035Z`, exact revision `fa1823756565a356decb4e038af0bdd538484b75`, and all required checks true. This clears the predecessor health condition. It does not verify an outcome application deployment: after the aligned outcome head passes CI and is released, fresh health for that exact deployed outcome revision is still required.
 
 `BUSINESS_OUTCOME_PUBLICATION_ENABLED=false` pauses new publication calls while preserving typed drafts and read access. Any non-`true` configured value fails closed. No production setting has been changed by preparing this switch. An uncertain previous submission remains uncertain until its original receipt/current state is inspected; pausing does not erase or refund anything.
 
@@ -66,3 +66,17 @@ Prefer a forward fix retaining the readers and qualification rules. Do not drop 
 ## Incremental compatibility evidence
 
 The six published PR74 commits are prepared on the actual merged PR82 main ancestry, preserving the narrow reporting CAS, payload/acknowledgement bounds and cache semantics. No PR75–81 features are included. Fresh local validation passed 708 Node22 tests, 25 outcome PostgreSQL tests, 73 reporting PostgreSQL tests, syntax and SaaS guards. A new two-session race covers reporting/publication in both lock orders; reporting grants are also rechecked after outcome migration and bootstrap resets. Both disposable PostgreSQL clusters stopped after testing. Browser/container and exact-head CI remain release gates. See [business-os-acceptance.md](business-os-acceptance.md) for source commits and current hold conditions.
+
+
+## Applied catalog and alignment evidence, 2026-10-07
+
+The coordinating task reports successful application of the approved outcome migration and these production catalog results:
+
+- Both `runvara_business_outcome_versions` and `runvara_business_outcome_heads` have RLS enabled. The existing service role has SELECT only; INSERT, UPDATE, DELETE and TRUNCATE are denied. `anon` and `authenticated` have no table access.
+- The publisher remains `SECURITY DEFINER`; the compact review reader remains `SECURITY INVOKER`. Both have a fixed empty search path and EXECUTE limited to the existing authorized server role (and privileged owner). Guard/helper permissions remain denied to application/browser roles.
+- The security advisor returned 25 INFO RLS-without-policy observations: 23 preexisting plus the two intentional server-only outcome tables. It reported no warning or error.
+
+This worker performed only local filename/document alignment and disposable-database verification. It did not issue the production migration, inspect production through another route, or mutate a remote branch. Fresh exact-head CI and the subsequent outcome deployment/health gate remain with the coordinating task. No live outcome measurement, publication or withdrawal was created by this alignment.
+
+
+Local alignment verification passed 141 focused Node22.23.3 tests, all 25 outcome PostgreSQL17.6 cases and all 73 reporting PostgreSQL17.6 cases, with zero failures/skips. Syntax, SaaS guards, whitespace and independent alignment review passed. Each database suite used a fresh disposable local cluster and both were stopped. These are affected checks on the renamed file; the earlier full 708-test preparation result does not replace fresh complete CI on this aligned head.
