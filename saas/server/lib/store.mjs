@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { compactDailyBrief, defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
+import { reportingStatusRequest, REPORTING_RESPONSE_MAX_BYTES } from './reporting-status.mjs';
 import { ensureControl } from './control.mjs';
 import { ensureMarketing } from './marketing.mjs';
 import { ensureAiEconomics } from './ai-economics.mjs';
@@ -707,8 +708,13 @@ class SupabaseStore {
   }
 
   async schedulerRevision(workspaceId) {
-    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=revision:state->>_revision&limit=1`);
-    return rows?.[0]?.revision || null;
+    const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=revision:state->>_revision&limit=1`, { maxResponseBytes: REPORTING_RESPONSE_MAX_BYTES });
+    if (!Array.isArray(rows) || rows.length > 1 || (rows.length === 1 &&
+      (rows[0] === null || typeof rows[0] !== 'object' || Array.isArray(rows[0]) || Object.keys(rows[0]).length !== 1 || !Object.hasOwn(rows[0], 'revision')
+        || !(rows[0].revision === null || typeof rows[0].revision === 'string' && rows[0].revision.length > 0)))) {
+      throw Object.assign(new Error('Persistence revision response is invalid'), { status: 503, code: 'SUPABASE_PERSISTENCE_RESPONSE_INVALID' });
+    }
+    return rows[0]?.revision ?? null;
   }
 
   async getForScheduler(workspaceId) {
@@ -1024,6 +1030,58 @@ class SupabaseStore {
     return errors;
   }
 
+  // Share the same CAS/ambiguous-ack recovery for primary and reporting writes.
+  // Every retry uses the original URL, body and revision fence. No business work
+  // is repeated, and revision reads never hydrate the workspace snapshot.
+  async commitRevision(workspaceId, nextRevision, expectedRevision, path, options) {
+    let rows;
+    try { rows = await this.request(path, options); }
+    catch (error) {
+      if (error.databaseCode === '57014') {
+        // PostgreSQL cancelled this statement. Retry the same revision-guarded
+        // write once; do not repeat any provider operation or business callback.
+        await new Promise(resolve => setTimeout(resolve, 250));
+        rows = await this.request(path, options);
+      } else if (error.code === 'SUPABASE_PERSISTENCE_FAILED' && !error.httpStatus) {
+        // A network timeout can happen after Postgres has already committed.
+        // Resolve the uncertainty by reading the authoritative revision before
+        // deciding whether to retry, accept success, or surface a conflict.
+        let currentRevision = null;
+        try { currentRevision = await this.schedulerRevision(workspaceId); } catch {}
+        if (currentRevision === nextRevision) {
+          rows = [{ workspace_id: workspaceId }];
+        } else if (currentRevision === expectedRevision || (!expectedRevision && !currentRevision)) {
+          await new Promise(resolve => setTimeout(resolve, 250));
+          try { rows = await this.request(path, options); }
+          catch (retryError) {
+            if (retryError.code !== 'SUPABASE_PERSISTENCE_FAILED' || retryError.httpStatus) throw retryError;
+            let retryRevision = null;
+            try { retryRevision = await this.schedulerRevision(workspaceId); } catch {}
+            if (retryRevision === nextRevision) rows = [{ workspace_id: workspaceId }];
+            else throw retryError;
+          }
+        } else if (currentRevision) {
+          throw conflict();
+        } else {
+          throw error;
+        }
+      } else {
+        throw error;
+      }
+    }
+    if (Array.isArray(rows) && rows.length === 0) throw conflict();
+    if (!Array.isArray(rows) || rows.length !== 1 || rows[0]?.workspace_id !== workspaceId || Object.keys(rows[0]).length !== 1) {
+      throw Object.assign(new Error('Persistence response is invalid'), { status: 503, code: 'SUPABASE_PERSISTENCE_RESPONSE_INVALID' });
+    }
+  }
+
+  async commitReportingStatus(workspaceId, report, expectedRevision, nextRevision) {
+    const body = reportingStatusRequest(workspaceId, expectedRevision, nextRevision, report, new Date().toISOString());
+    await this.commitRevision(workspaceId, nextRevision, expectedRevision, 'rpc/runvara_commit_reporting_status', {
+      method: 'POST', body, maxResponseBytes: REPORTING_RESPONSE_MAX_BYTES
+    });
+  }
+
   async commit(workspaceId, state, expectedRevision, existing) {
     const stateBytes = Buffer.byteLength(JSON.stringify(state));
     this.telemetry.stateBytes = stateBytes;
@@ -1042,42 +1100,7 @@ class SupabaseStore {
       const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
       const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
       const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
-      let rows;
-      try { rows = await this.request(path, options); }
-      catch (error) {
-        if (error.databaseCode === '57014') {
-          // PostgreSQL cancelled this statement. Retry the same revision-guarded
-          // write once; do not repeat any provider operation or business callback.
-          await new Promise(resolve => setTimeout(resolve, 250));
-          rows = await this.request(path, options);
-        } else if (error.code === 'SUPABASE_PERSISTENCE_FAILED' && !error.httpStatus) {
-          // A network timeout can happen after Postgres has already committed.
-          // Resolve the uncertainty by reading the authoritative revision before
-          // deciding whether to retry, accept success, or surface a conflict.
-          let currentRevision = null;
-          try { currentRevision = await this.schedulerRevision(workspaceId); } catch {}
-          if (currentRevision === state._revision) {
-            rows = [{ workspace_id: workspaceId }];
-          } else if (currentRevision === expectedRevision || (!expectedRevision && !currentRevision)) {
-            await new Promise(resolve => setTimeout(resolve, 250));
-            try { rows = await this.request(path, options); }
-            catch (retryError) {
-              if (retryError.code !== 'SUPABASE_PERSISTENCE_FAILED' || retryError.httpStatus) throw retryError;
-              let retryRevision = null;
-              try { retryRevision = await this.schedulerRevision(workspaceId); } catch {}
-              if (retryRevision === state._revision) rows = [{ workspace_id: workspaceId }];
-              else throw retryError;
-            }
-          } else if (currentRevision) {
-            throw conflict();
-          } else {
-            throw error;
-          }
-        } else {
-          throw error;
-        }
-      }
-      if (!rows?.length) throw conflict();
+      await this.commitRevision(workspaceId, state._revision, expectedRevision, path, options);
       this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
     } else {
       // Atomically create the FK parent, unique login identity and primary state.
@@ -1253,7 +1276,7 @@ class SupabaseStore {
     upgraded._revision = crypto.randomUUID();
     let reportingCommitted = false;
     try {
-      await this.commit(workspaceId, upgraded, expected, true);
+      await this.commitReportingStatus(workspaceId, report, expected, upgraded._revision);
       reportingCommitted = true;
       state._revision = upgraded._revision;
       state.integrationStatus = upgraded.integrationStatus;
@@ -1270,7 +1293,8 @@ class SupabaseStore {
       this.mirrorRevisions.delete(workspaceId);
       for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
     }
-    this.rememberSchedulerState(workspaceId, persisted);
+    if (reportingCommitted) this.rememberSchedulerState(workspaceId, persisted);
+    else this.invalidateSchedulerCache(workspaceId);
     return persisted;
   }
 

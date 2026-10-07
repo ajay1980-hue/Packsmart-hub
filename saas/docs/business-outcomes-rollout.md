@@ -56,8 +56,13 @@ The migration is prepared with the official Supabase CLI and must be reviewed/te
 
 Required gates include the full Node suite, safety/static checks, real PostgreSQL concurrency/role/bootstrap/hash/rollback cases, API tenant/CSRF/session tests, and responsive browser flows at 320/390/1200 pixels. Local PostgreSQL-engine supplements do not replace real PostgreSQL concurrency/privilege CI. Local Chromium socket restrictions do not count as a browser pass.
 
-No live customer measurement, publication or withdrawal is created during verification. Verify the exact deployed commit and production health, then record evidence. Current stage-10 public-health verification is blocked by cloud access restrictions; further production deployments remain held until that independent gate is resolved.
+No live customer measurement, publication or withdrawal is created during verification. Verify the exact deployed commit and production health, then record evidence. PR82 is merged on main at `fa1823756565a356decb4e038af0bdd538484b75`; this incremental stage remains held until that exact deployed revision passes fresh postdeployment health. Preparing this stage does not apply its conditionally approved migration.
 
 `BUSINESS_OUTCOME_PUBLICATION_ENABLED=false` pauses new publication calls while preserving typed drafts and read access. Any non-`true` configured value fails closed. No production setting has been changed by preparing this switch. An uncertain previous submission remains uncertain until its original receipt/current state is inspected; pausing does not erase or refund anything.
 
 Prefer a forward fix retaining the readers and qualification rules. Do not drop outcome tables, delete immutable history, rewrite heads manually, restore legacy ROI claims or treat archived/provisional rows as committed outcomes to make rollback easier.
+
+
+## Incremental compatibility evidence
+
+The six published PR74 commits are prepared on the actual merged PR82 main ancestry, preserving the narrow reporting CAS, payload/acknowledgement bounds and cache semantics. No PR75–81 features are included. Fresh local validation passed 708 Node22 tests, 25 outcome PostgreSQL tests, 73 reporting PostgreSQL tests, syntax and SaaS guards. A new two-session race covers reporting/publication in both lock orders; reporting grants are also rechecked after outcome migration and bootstrap resets. Both disposable PostgreSQL clusters stopped after testing. Browser/container and exact-head CI remain release gates. See [business-os-acceptance.md](business-os-acceptance.md) for source commits and current hold conditions.

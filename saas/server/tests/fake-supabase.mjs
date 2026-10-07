@@ -15,6 +15,15 @@ export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
       states.set(next.workspace.id, structuredClone(next));
       return new Response(null, { status: 204 });
     }
+    if (table === 'runvara_commit_reporting_status') {
+      const current = states.get(body.p_workspace_id);
+      if (!current || current.workspace?.id !== body.p_workspace_id || current._revision !== body.p_expected_revision) return Response.json([]);
+      const next = structuredClone(current);
+      next.integrationStatus.reporting = body.p_report;
+      next._revision = body.p_next_revision;
+      states.set(body.p_workspace_id, next);
+      return Response.json([{ workspace_id: body.p_workspace_id }]);
+    }
     if (table === 'saas_workspace_state') {
       const id = url.searchParams.get('workspace_id')?.slice(3);
       if (method === 'PATCH') {
