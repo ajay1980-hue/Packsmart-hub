@@ -45,8 +45,12 @@ async function captureRestriction(page, width, name) {
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-review-browser-'));
 const secret = 'objective-review-browser-test-only-more-than-thirty-two-characters';
-const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
-  SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
+// The real browser sends Origin on PUT. Configure the same dedicated loopback
+// origin before server creation, when the server captures its CSRF allowlist.
+const port = 18876, base = `http://127.0.0.1:${port}`;
+const fixtureEnv = { NODE_ENV: 'test', APP_PUBLIC_URL: base, SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+  SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' };
+const server = createPacksmartServer(fixtureEnv);
 let browser;
 try {
   const now = new Date().toISOString();
@@ -73,8 +77,9 @@ try {
   report.proposals[0].title = 'BoundedLongRecordedOpportunity' + 's'.repeat(130);
   await server.packsmart.store.save(state.workspace.id, state);
   const originalState = structuredClone(state);
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const base = `http://127.0.0.1:${server.address().port}`;
+  server.listen(port, '127.0.0.1'); await once(server, 'listening');
+  assert.equal(new URL(fixtureEnv.APP_PUBLIC_URL).origin, `http://${server.address().address}:${server.address().port}`,
+    'the configured CSRF origin must match the actual local browser server');
   const token = createSessionToken({ userId: state.users[0].id, workspaceId: state.workspace.id, email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
   browser = await chromium.launch({ headless: true });
   for (const width of [320,390,1200]) {
@@ -100,6 +105,8 @@ try {
           ? ['/api/auth/session', '/api/bootstrap', '/api/business-objectives', '/api/connections'].includes(url.pathname)
           : route.request().method() === 'PUT' && url.pathname === '/api/business-objectives';
         if (!permitted) { unexpected.push(apiCalls.at(-1)); return route.abort(); }
+        if (route.request().method() === 'PUT') assert.equal(await route.request().headerValue('origin'), base,
+          'real browser writes must carry their unchanged same-origin header');
         return route.continue();
       }
       calls.push({ path: url.pathname + url.search, method: route.request().method(), body: route.request().postData(), at: Date.now() });
