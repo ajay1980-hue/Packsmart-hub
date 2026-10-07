@@ -5,6 +5,11 @@ Local successor to the PR81 correction at
 order reads; it does not backfill retained orders or activate a sync. No schema,
 table, grant, provider query, provider call family or scheduled job is added.
 
+The subsequent [bounded updated-order window](shopify-updated-order-window.md)
+replaces the created-at selector in this same call with a frozen updated-at
+interval. It versions request evidence while preserving the source-money format,
+historical v1 manifests, byte ceilings and retry protections described here.
+
 ## Source values and compatibility
 
 The existing Admin GraphQL request selects `shopMoney.amount` and `currencyCode`.
@@ -45,11 +50,12 @@ The authoritative current application state remains `saas_workspace_state`
 (or the existing FileStore). One content-addressed descriptor is stored in
 `channelData.shopify.orderReads.manifests`, with one `sourceReadRef` per order.
 It records the tenant, request domain, requested API version, returned version
-header only when present, exact existing lower-bound query, observation times,
+header only when present, exact requested query, observation times,
 limits, page counts/flags, cursor digests and a digest of the captured source
 records. It records explicit exhaustion of every returned nested line connection.
 
-The request has no fixed upper bound. An exhausted connection only describes
+Historical v1 requests had no fixed upper bound; v2 records both frozen request
+bounds and the ascending update sort. An exhausted connection only describes
 the pages visible to that request. `sourceAccountId` is null, current scopes are
 `not_observed`, and `sourcePeriod` remains `unverified`. The normal order response
 does not prove the shop ID, permission scope or 90-day completeness. No identity
@@ -184,7 +190,10 @@ Doctor budget before dispatch and enforces durable generic attempt counters in
 the trusted application worker. Its specification separates admitted provider
 work from owner-created fresh jobs and existing database polling.
 
-## Reproducible local measurements
+## Original v1 local measurements
+
+These are the source-capture v1 baseline. Current v2 measurements are recorded
+in [bounded updated-order window](shopify-updated-order-window.md).
 
 Run `node tests/shopify-source-budget-check.mjs` from `saas/server` with Node 22.
 All provider and database responses are local synthetic fixtures. The fixture

@@ -1,15 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seedWorkspaceState } from '../lib/store.mjs';
-import { beginConnectionSync, connectionDue, connectionSettings, recoveryFor, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, shopifyOrderReadHold } from '../lib/connection-centre.mjs';
+import { beginConnectionSync, connectionDue, connectionSettings, recoveryFor, SHOPIFY_ORDER_READ_POLICY, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, isShopifyOrderReadAdmissionCurrent, shopifyOrderReadHold } from '../lib/connection-centre.mjs';
 import { classifyConnectionIssue, intelligentConnections } from '../lib/connection-intelligence.mjs';
 import { runConnectionDoctor, queueFirstSync, runFirstSync } from '../lib/connection-doctor.mjs';
 import { createScheduler, monitoredSync } from '../lib/scheduler.mjs';
 
 const SUCCESS_AT = '2026-09-20T10:00:00.000Z';
 const HOLD = { code: 'SHOPIFY_ORDER_SOURCE_SIZE_LIMIT', at: '2026-09-21T10:00:00.000Z' };
+const LEGACY_POLICY = 'shopify-orders-v1:90-day-created:10-pages:50-orders:100-lines';
+const PROTECTED_POLICIES = [SHOPIFY_ORDER_READ_POLICY, LEGACY_POLICY, 'unrecognized-order-policy'];
 const future = () => new Date(Date.now() + 2 * 3600000);
-function fixture({ held = false, areas = ['products', 'orders'], legacy = false } = {}) {
+function fixture({ held = false, areas = ['products', 'orders'], legacy = false, sourcePolicy = SHOPIFY_ORDER_READ_POLICY } = {}) {
   const state = seedWorkspaceState({}, { workspaceId: 'source-retry-fixture' });
   state.connections = [{ provider: 'shopify', encryptedCredentials: 'synthetic-fixture', status: 'connected', lastCheckedAt: SUCCESS_AT }];
   state.products = [{ provider: 'shopify', id: 'product-1', variants: [] }];
@@ -17,7 +19,7 @@ function fixture({ held = false, areas = ['products', 'orders'], legacy = false 
   state.integrationStatus = { shopify: { status: held ? 'error' : 'connected', lastSyncAt: SUCCESS_AT, lastSuccessfulSyncAt: SUCCESS_AT,
     areaSuccessAt: { products: SUCCESS_AT, orders: SUCCESS_AT }, ...(held ? { lastError: HOLD.code, lastFailureAt: HOLD.at, orderReadHold: structuredClone(HOLD) } : {}) } };
   if (!legacy) state.connectionSettings = { shopify: { ...connectionSettings(state, 'shopify'), areas, managedReadSchedule: true } };
-  if (held) state.integrationStatus.shopify.orderReadHold.binding = shopifyOrderReadBinding(state);
+  if (held) state.integrationStatus.shopify.orderReadHold.binding = { ...shopifyOrderReadBinding(state), sourcePolicy };
   for (const key of Object.keys(state.automations)) state.automations[key] = key === 'channelSync';
   state.autopilot.enabled = true;
   return state;
@@ -88,8 +90,8 @@ test('a failed source attempt replaces completed attempt diagnostics while retai
 });
 
 test('persisted holds suppress recurring scheduler claims and saves with current or legacy settings', async () => {
-  for (const legacy of [false, true]) {
-    const saved = fixture({ held: true, legacy });
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const legacy of [false, true]) {
+    const saved = fixture({ held: true, legacy, sourcePolicy });
     saved.integrationStatus.shopify.transient = true;
     saved.integrationStatus.shopify.upstreamStatus = 503;
     let calls = 0, saves = 0;
@@ -123,28 +125,31 @@ test('Auto-Doctor does not resume held first sync or refresh tokens, even with s
 });
 
 test('successful explicit order retry clears the adapter hold and restores due reads', async () => {
-  const state = fixture({ held: true });
-  let calls = 0;
-  const result = await monitoredSync(state, service(async (current, provider, { areas, automatic }) => {
-    calls++;
-    assert.equal(provider, 'shopify'); assert.equal(automatic, false); assert.deepEqual(areas, ['orders']);
-    current.orders.push({ provider, id: 'new-order', total: 11 });
-    // The source adapter clears only after validating and accepting orders.
-    return { status: 'connected', lastError: null, orderReadHold: null };
-  }), 'shopify', { areas: ['orders'] });
-  assert.equal(calls, 1);
-  assert.equal(result.orderReadHold, null);
-  assert.equal(result.lastError, null);
-  assert.equal(state.orders[0].actualShippingCost, 4);
-  assert.equal(state.orders.length, 2);
-  assert.notEqual(result.areaSuccessAt.orders, SUCCESS_AT);
-  assert.equal(classifyConnectionIssue(state, 'shopify'), null);
-  assert.equal(connectionDue(state, 'shopify', future()), true);
+  for (const sourcePolicy of PROTECTED_POLICIES) {
+    const state = fixture({ held: true, sourcePolicy });
+    let calls = 0;
+    const result = await monitoredSync(state, service(async (current, provider, { areas, automatic }) => {
+      calls++;
+      assert.equal(provider, 'shopify'); assert.equal(automatic, false); assert.deepEqual(areas, ['orders']);
+      current.orders.push({ provider, id: 'new-order', total: 11 });
+      // The source adapter clears only after validating and accepting orders.
+      return { status: 'connected', lastError: null, orderReadHold: null };
+    }), 'shopify', { areas: ['orders'] });
+    assert.equal(calls, 1);
+    assert.equal(result.orderReadHold, null);
+    assert.equal(result.lastError, null);
+    assert.equal(state.orders[0].actualShippingCost, 4);
+    assert.equal(state.orders.length, 2);
+    assert.notEqual(result.areaSuccessAt.orders, SUCCESS_AT);
+    assert.equal(classifyConnectionIssue(state, 'shopify'), null);
+    assert.equal(connectionDue(state, 'shopify', future()), true);
+  }
 });
 
 test('products-only success cannot clear a hold or claim a successful order read', async () => {
-  for (const automatic of [false, true]) {
-    const state = fixture({ held: true }), orders = structuredClone(state.orders);
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const automatic of [false, true]) {
+    const state = fixture({ held: true, sourcePolicy }), orders = structuredClone(state.orders);
+    const hold = structuredClone(state.integrationStatus.shopify.orderReadHold);
     let calls = 0;
     await monitoredSync(state, service(async (current, provider, { areas }) => {
       calls++; assert.deepEqual(areas, ['products']);
@@ -153,7 +158,7 @@ test('products-only success cannot clear a hold or claim a successful order read
       return current.integrationStatus.shopify;
     }), 'shopify', { areas: ['products'], automatic });
     assert.equal(calls, 1);
-    assert.deepEqual(state.integrationStatus.shopify.orderReadHold, { ...HOLD, binding: shopifyOrderReadBinding(state) });
+    assert.deepEqual(state.integrationStatus.shopify.orderReadHold, hold);
     assert.equal(state.integrationStatus.shopify.areaSuccessAt.orders, SUCCESS_AT);
     assert.notEqual(state.integrationStatus.shopify.areaSuccessAt.products, SUCCESS_AT);
     assert.deepEqual(state.orders, orders);
@@ -255,12 +260,13 @@ test('queued first sync still performs the requested import when periodic sync i
   assert.equal(state.connectionSettings.shopify.autoSync, false);
 });
 
-test('hold binding survives token rotation and schedule edits but changes with tenant, account, API or parser policy', () => {
+test('hold binding survives token rotation and policy migration but releases a known source replacement', () => {
   const state = fixture();
   Object.assign(state.connections[0], { id: 'connection-original', updatedAt: SUCCESS_AT, metadata: { accountId: 'gid://shopify/Shop/1', shopDomain: 'original.myshopify.com' } });
   const config = { domain: 'original.myshopify.com', apiVersion: '2026-07', cacheKey: 'secret-must-not-be-hashed-or-stored', accessToken: 'private-token' };
   const integrations = { shopifyConfig: current => ({ ...config, connection: current.connections[0] }) };
   const binding = shopifyOrderReadBinding(state, integrations);
+  assert.equal(binding.sourcePolicy, 'shopify-orders-v2:90-day-updated-window:10-pages:50-orders:100-lines');
   state.integrationStatus.shopify.orderReadHold = { ...HOLD, binding };
   state.connections[0].updatedAt = new Date().toISOString();
   state.connections[0].encryptedCredentials = 'rotated-private-credentials';
@@ -280,8 +286,66 @@ test('hold binding survives token rotation and schedule edits but changes with t
   config.apiVersion = '2026-07'; config.domain = 'replacement.myshopify.com';
   assert.equal(isShopifyOrderReadBindingCurrent(state, binding, integrations), false);
   config.domain = binding.domain;
-  assert.equal(isShopifyOrderReadBindingCurrent(state, { ...binding, sourcePolicy: 'old-parser' }, integrations), false);
+  for (const sourcePolicy of [LEGACY_POLICY, 'unknown-parser']) {
+    const previous = { ...binding, sourcePolicy };
+    assert.equal(isShopifyOrderReadBindingCurrent(state, previous, integrations), true);
+    assert.equal(isShopifyOrderReadAdmissionCurrent(state, previous, integrations), false, 'Protection matching must not admit an old or unknown policy');
+  }
+  assert.equal(isShopifyOrderReadAdmissionCurrent(state, binding, integrations), true);
   assert.equal(isShopifyOrderReadBindingCurrent(state, { ...binding, accessToken: 'unsafe' }, integrations), false);
+});
+
+test('v1 and unknown holds survive metadata loss, enrichment, token rotation and unavailable configuration without provider or save I/O', async () => {
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const change of ['token', 'configuration', 'account-loss', 'account-enrichment', 'connection-loss', 'connection-enrichment', 'domain-loss', 'domain-enrichment']) {
+    const state = fixture({ areas: ['orders'] });
+    const connection = state.connections[0];
+    Object.assign(connection, { id: 'connection-1', metadata: { accountId: 'shop-1', shopDomain: 'original.myshopify.com' } });
+    const integrations = { ...service(async () => assert.fail('A protected source must not be read')),
+      shopifyConfig: current => ({ connection: current.connections[0], domain: current.connections[0]?.metadata?.shopDomain || '', apiVersion: '2026-07' }) };
+    const identity = change.startsWith('account') ? [connection.metadata, 'accountId']
+      : change.startsWith('connection') ? [connection, 'id'] : [connection.metadata, 'shopDomain'];
+    const priorValue = identity[0][identity[1]];
+    if (change.endsWith('enrichment')) delete identity[0][identity[1]];
+    const binding = { ...shopifyOrderReadBinding(state, integrations), sourcePolicy };
+    const hold = { ...HOLD, binding };
+    state.integrationStatus.shopify.orderReadHold = hold;
+    state.connectionDoctor = { shopify: { attempts: 2, exhausted: false, orderReadBinding: structuredClone(binding) } };
+    if (change.endsWith('loss')) delete identity[0][identity[1]];
+    if (change.endsWith('enrichment')) identity[0][identity[1]] = priorValue;
+    if (change === 'token') connection.encryptedCredentials = 'rotated-token';
+    if (change === 'configuration') integrations.shopifyConfig = () => { throw new Error('Configuration unavailable'); };
+    assert.equal(shopifyOrderReadHold(state, 'shopify', integrations), hold, `${sourcePolicy}: ${change}`);
+    if (change !== 'token') assert.equal(isShopifyOrderReadAdmissionCurrent(state, binding, integrations), false);
+    const before = structuredClone(state);
+    const save = async () => assert.fail('A held check must not save');
+    await runConnectionDoctor(state, { integrations, readSync: monitoredSync, save, now: future() });
+    await assert.rejects(monitoredSync(state, integrations, 'shopify', { areas: ['orders'], automatic: true }), { code: HOLD.code });
+    const scheduler = createScheduler({ store: { get: async () => structuredClone(state), save }, integrations,
+      withWorkspaceLock: async (_id, action) => action(), currentBrief: () => ({}), enabled: false });
+    for (let attempt = 0; attempt < 3; attempt++) assert.equal((await scheduler.runWorkspace(state.workspace.id, { now: future() })).skipped, true);
+    assert.deepEqual(state, before);
+    await monitoredSync(state, { ...integrations, syncProvider: async () => ({ status: 'connected', lastError: null, orderReadHold: null }) }, 'shopify', { areas: ['products'] });
+    assert.deepEqual(state.integrationStatus.shopify.orderReadHold, hold, 'Products-only success cannot erase an uncertain identity hold');
+    assert.deepEqual(state.orders, before.orders);
+    assert.deepEqual(state.connectionDoctor, before.connectionDoctor);
+  }
+});
+
+test('unknown policy cannot establish replacement even if source metadata changes', () => {
+  const state = fixture({ held: true, sourcePolicy: 'unrecognized-order-policy' });
+  state.integrationStatus.shopify.orderReadHold.binding.domain = 'previous.myshopify.com';
+  state.connections[0].metadata = { shopDomain: 'replacement.myshopify.com' };
+  assert.equal(shopifyOrderReadHold(state, 'shopify'), state.integrationStatus.shopify.orderReadHold);
+  assert.equal(connectionDue(state, 'shopify', future()), false);
+});
+
+test('strict failure admission does not treat lost domain evidence as a matching source without an adapter config', () => {
+  const state = fixture();
+  state.connections[0].metadata = { shopDomain: 'original.myshopify.com' };
+  const binding = shopifyOrderReadBinding(state);
+  delete state.connections[0].metadata.shopDomain;
+  assert.equal(isShopifyOrderReadBindingCurrent(state, binding), true);
+  assert.equal(isShopifyOrderReadAdmissionCurrent(state, binding), false);
 });
 
 test('Doctor and scheduler compare current environment domain before claiming held reads', async () => {
@@ -320,6 +384,33 @@ test('late source failures cannot install a hold or replace status for a replace
       : monitoredSync(state, integrations, 'shopify', { areas: ['orders'] });
     await assert.rejects(run, error => error.holdDisposition === 'configuration_changed');
     assert.deepEqual(state.integrationStatus.shopify, replacementStatus);
+    assert.equal(state.orders[0].id, 'retained-order');
+  }
+});
+
+test('new source failures use strict admission rather than persisted protection matching', async () => {
+  for (const firstSync of [false, true]) for (const change of ['unavailable', 'account-loss', 'account-enrichment', 'legacy-policy', 'unknown-policy']) {
+    const state = fixture({ areas: ['orders'] });
+    Object.assign(state.connections[0], { id: 'original-connection', metadata: { accountId: 'shop-1', shopDomain: 'original.myshopify.com' } });
+    if (change === 'account-enrichment') delete state.connections[0].metadata.accountId;
+    if (firstSync) queueFirstSync(state, 'shopify', 'owner');
+    const priorStatus = structuredClone(state.integrationStatus.shopify);
+    const integrations = { ...service(async current => {
+      const binding = { ...shopifyOrderReadBinding(current, integrations) };
+      if (change === 'unavailable') integrations.shopifyConfig = () => { throw new Error('Configuration unavailable'); };
+      if (change === 'account-loss') delete current.connections[0].metadata.accountId;
+      if (change === 'account-enrichment') current.connections[0].metadata.accountId = 'shop-1';
+      if (change === 'legacy-policy') binding.sourcePolicy = LEGACY_POLICY;
+      if (change === 'unknown-policy') binding.sourcePolicy = 'unknown-policy';
+      assert.equal(isShopifyOrderReadBindingCurrent(current, binding, integrations), true, 'This binding would preserve an already-persisted protection');
+      assert.equal(isShopifyOrderReadAdmissionCurrent(current, binding, integrations), false, 'It cannot admit a newly observed failure');
+      throw sourceError(HOLD.code, { orderReadBinding: binding });
+    }), shopifyConfig: current => ({ connection: current.connections[0], domain: current.connections[0].metadata.shopDomain, apiVersion: '2026-07' }) };
+    const run = firstSync ? runFirstSync(state, 'shopify', { integrations, readSync: monitoredSync, save: async () => {} })
+      : monitoredSync(state, integrations, 'shopify', { areas: ['orders'] });
+    await assert.rejects(run, error => error.holdDisposition === 'configuration_changed');
+    assert.deepEqual(state.integrationStatus.shopify, priorStatus);
+    assert.equal(state.integrationStatus.shopify.orderReadHold, undefined);
     assert.equal(state.orders[0].id, 'retained-order');
   }
 });

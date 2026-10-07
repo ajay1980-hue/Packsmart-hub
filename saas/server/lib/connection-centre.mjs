@@ -26,9 +26,11 @@ export function connectionSettings(state, provider) {
   return { revision: 0, disconnected: false, autoSync: true, frequencyMinutes: 30, areas: definition.defaults.slice(), permissionMode: 'read_only', ...saved };
 }
 export const isShopifyOrderSourceFailure = (provider, code) => provider === 'shopify' && /^SHOPIFY_ORDER_SOURCE_[A-Z0-9_]+$/.test(String(code || ''));
-// Bind the failure to the stable source contract. Bump sourcePolicy when query
-// or admission semantics change; token rotation and the moving cutoff are not
-// a new source and must not release a structural hold.
+export const SHOPIFY_ORDER_READ_POLICY = 'shopify-orders-v2:90-day-updated-window:10-pages:50-orders:100-lines';
+const LEGACY_SHOPIFY_ORDER_READ_POLICY = 'shopify-orders-v1:90-day-created:10-pages:50-orders:100-lines';
+const recognizedShopifyOrderReadPolicy = policy => [LEGACY_SHOPIFY_ORDER_READ_POLICY, SHOPIFY_ORDER_READ_POLICY].includes(policy);
+// Bind failures to the source contract without making a query-policy migration
+// a fresh source. Token rotation and moving query bounds are not source identity.
 export function shopifyOrderReadBinding(state, integrations = null, config = undefined) {
   if (config === undefined && integrations?.shopifyConfig) {
     try { config = integrations.shopifyConfig(state); } catch { return null; }
@@ -39,16 +41,16 @@ export function shopifyOrderReadBinding(state, integrations = null, config = und
     domain: text(config?.domain || connection?.metadata?.shopDomain || integrations?.env?.SHOPIFY_STORE_DOMAIN)?.toLowerCase() ?? null,
     connectionId: text(connection?.id), accountId: text(connection?.metadata?.shopId || connection?.metadata?.accountId),
     apiVersion: text(config?.apiVersion || integrations?.env?.SHOPIFY_ADMIN_API_VERSION || '2026-07'),
-    sourcePolicy: 'shopify-orders-v1:90-day-created:10-pages:50-orders:100-lines' };
+    sourcePolicy: SHOPIFY_ORDER_READ_POLICY };
   return binding.workspaceId && Object.values(binding).every(value => value !== null) ? Object.freeze(binding) : null;
 }
-export function isShopifyOrderReadBindingCurrent(state, binding, integrations = null) {
-  if (!binding || binding.schema !== 'shopify-order-hold/v1' || binding.provider !== 'shopify') return false;
+// Admission is strict: a read must still belong to the exact configuration and
+// policy that started it. Conservative hold matching below is not admission.
+export function isShopifyOrderReadAdmissionCurrent(state, binding, integrations = null) {
+  if (!validShopifyOrderReadBinding(binding)) return false;
   const current = shopifyOrderReadBinding(state, integrations);
   if (!current) return false;
-  if (Object.keys(binding).length !== Object.keys(current).length || Object.keys(binding).some(key => !Object.hasOwn(current, key))) return false;
-  const keys = integrations?.shopifyConfig ? Object.keys(current) : ['schema', 'workspaceId', 'provider', 'connectionId', 'accountId', 'sourcePolicy', ...(current.domain ? ['domain'] : []), ...(integrations?.env ? ['apiVersion'] : [])];
-  return keys.every(key => current[key] === binding[key]);
+  return Object.keys(current).every(key => current[key] === binding[key]);
 }
 function validShopifyOrderReadBinding(binding) {
   if (!binding || typeof binding !== 'object' || Array.isArray(binding)) return false;
@@ -58,6 +60,20 @@ function validShopifyOrderReadBinding(binding) {
   if (!keys.every(key => Object.hasOwn(fields[key], 'value') && typeof fields[key].value === 'string'
     && fields[key].value.length <= 300 && !/[\u0000-\u001f\u007f]/.test(fields[key].value))) return false;
   return binding.schema === 'shopify-order-hold/v1' && binding.provider === 'shopify' && Boolean(binding.workspaceId);
+}
+function shopifyOrderSourceReplaced(previous, current, integrations) {
+  if (!validShopifyOrderReadBinding(previous) || !validShopifyOrderReadBinding(current)
+    || previous.workspaceId !== current.workspaceId
+    || !recognizedShopifyOrderReadPolicy(previous.sourcePolicy) || !recognizedShopifyOrderReadPolicy(current.sourcePolicy)) return false;
+  const identityFields = ['domain', 'connectionId', 'accountId', ...(integrations?.shopifyConfig || integrations?.env ? ['apiVersion'] : [])];
+  return identityFields.some(key => previous[key] && current[key] && previous[key] !== current[key]);
+}
+// A persisted protection remains applicable unless a known source identity is
+// positively replaced. v1 -> v2, unknown policies, unavailable configuration,
+// and missing/enriched metadata cannot silently release a hold or retry budget.
+export function isShopifyOrderReadBindingCurrent(state, binding, integrations = null) {
+  if (!validShopifyOrderReadBinding(binding) || binding.workspaceId !== state.workspace?.id) return false;
+  return !shopifyOrderSourceReplaced(binding, shopifyOrderReadBinding(state, integrations), integrations);
 }
 export function shopifyOrderReadHold(state, provider, integrations = null) {
   if (provider !== 'shopify') return null;
@@ -74,23 +90,31 @@ export function connectionDoctorState(state, provider, integrations = null) {
   // Losing/enriching an identity field is not proof of a different source.
   const previous = doctor.orderReadBinding;
   const current = provider === 'shopify' && validShopifyOrderReadBinding(previous) ? shopifyOrderReadBinding(state, integrations) : null;
-  const replacementFields = ['domain', 'connectionId', 'accountId', 'sourcePolicy', ...(integrations?.shopifyConfig || integrations?.env ? ['apiVersion'] : [])];
-  const replaced = validShopifyOrderReadBinding(current) && previous.workspaceId === current.workspaceId
-    && replacementFields.some(key => previous[key] && current[key] && previous[key] !== current[key]);
-  if (replaced) {
+  if (shopifyOrderSourceReplaced(previous, current, integrations)) {
     return { ...doctor, attempts: 0, exhausted: false, nextRetryAt: null, orderReadBinding: null };
   }
   return doctor;
 }
 export function completeShopifyOrderReadBudget(state, integrations, admittedBinding) {
   const doctor = state.connectionDoctor?.shopify;
-  if (!doctor?.orderReadBinding || !isShopifyOrderReadBindingCurrent(state, admittedBinding, integrations) || shopifyOrderReadHold(state, 'shopify', integrations)) return;
+  if (!doctor?.orderReadBinding || !isShopifyOrderReadAdmissionCurrent(state, admittedBinding, integrations) || shopifyOrderReadHold(state, 'shopify', integrations)) return;
   Object.assign(doctor, { attempts: 0, exhausted: false, nextRetryAt: null });
   delete doctor.orderReadBinding;
 }
-export function shopifyOrderReadBudgetExhausted(state, integrations) {
+function unknownShopifyOrderReadPolicy(doctor) {
+  const binding = doctor.orderReadBinding;
+  return Boolean(binding && (!validShopifyOrderReadBinding(binding) || !recognizedShopifyOrderReadPolicy(binding.sourcePolicy)));
+}
+// An unrecognized persisted contract cannot authorize automatic orders, even
+// with attempts left. Keep the original budget intact for explicit recovery;
+// products-only work and token refresh do not spend or release that budget.
+export function shopifyOrderReadPolicyBlocked(state, integrations, areas = connectionSettings(state, 'shopify').areas) {
+  return areas.includes('orders') && unknownShopifyOrderReadPolicy(connectionDoctorState(state, 'shopify', integrations));
+}
+export function shopifyOrderReadBudgetExhausted(state, integrations, areas = connectionSettings(state, 'shopify').areas) {
   const doctor = connectionDoctorState(state, 'shopify', integrations);
-  return Boolean(doctor.orderReadBinding && (doctor.exhausted === true || !Number.isSafeInteger(doctor.attempts) || doctor.attempts < 0 || doctor.attempts >= 5));
+  return Boolean(doctor.orderReadBinding && (doctor.exhausted === true || !Number.isSafeInteger(doctor.attempts) || doctor.attempts < 0 || doctor.attempts >= 5
+    || areas.includes('orders') && unknownShopifyOrderReadPolicy(doctor)));
 }
 export function validateAreas(provider, value) {
   const areas = connector(provider).areas;
@@ -173,6 +197,7 @@ export function recoveryFor(provider, status = {}, coverage = {}, orderHold = un
 export function beginConnectionSync(state, provider, { areas, automatic = false, actor = 'system', integrations = null } = {}) {
   const selected = validateAreas(provider, areas || connectionSettings(state, provider).areas);
   if (automatic && orderReadHeld(state, provider, selected, integrations)) throw Object.assign(connectionError('Shopify order source needs review. Existing data is retained.', shopifyOrderReadHold(state, provider, integrations).code, 422), { nonRetryable: true });
+  if (automatic && provider === 'shopify' && shopifyOrderReadPolicyBlocked(state, integrations, selected)) throw Object.assign(connectionError('Automatic Shopify order reads need review before another attempt.', 'SHOPIFY_ORDER_RETRY_EXHAUSTED', 409), { nonRetryable: true });
   state.connectionSyncs ||= [];
   const now = Date.now();
   for (const run of state.connectionSyncs.filter(item => item.provider === provider && item.status === 'running')) {
@@ -200,7 +225,7 @@ export function connectionDue(state, provider, now = new Date(), integrations = 
   if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;
   const doctor = connectionDoctorState(state, provider, integrations);
   if (state.connectionAuthAttention?.[provider]) return false;
-  if (doctor?.exhausted || provider === 'shopify' && doctor.orderReadBinding && (!Number.isSafeInteger(doctor.attempts) || doctor.attempts < 0 || doctor.attempts >= 5)
+  if (doctor?.exhausted || provider === 'shopify' && shopifyOrderReadBudgetExhausted(state, integrations, settings.areas)
     || Date.parse(doctor?.nextRetryAt) > now.getTime() || Date.parse(status.retryAt) > now.getTime()) return false;
   const recent = (state.connectionSyncs || []).find(run => run.provider === provider);
   if (recent?.status === 'running' && Date.parse(recent.leaseUntil) > now.getTime()) return false;

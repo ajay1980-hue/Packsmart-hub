@@ -1,7 +1,7 @@
 import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensureControl, finishAutomation } from './control.mjs';
 import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
-import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, orderReadHeld } from './connection-centre.mjs';
+import { beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, isShopifyOrderReadAdmissionCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
@@ -52,6 +52,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   const orderBinding = provider === 'shopify' ? shopifyOrderReadBinding(state, integrations) : null;
   const now = new Date().toISOString();
   if (automatic && orderReadHeld(state, provider, run?.areas || areas || connectionSettings(state, provider).areas, integrations)) throw Object.assign(new Error('Shopify order source needs review. Existing data is retained.'), { code: previousOrderHold.code, status: 422, nonRetryable: true });
+  if ((automatic || run?.automatic) && provider === 'shopify' && shopifyOrderReadPolicyBlocked(state, integrations, run?.areas || areas || connectionSettings(state, provider).areas)) throw Object.assign(new Error('Automatic Shopify order reads need review before another attempt.'), { code: 'SHOPIFY_ORDER_RETRY_EXHAUSTED', status: 409, nonRetryable: true });
   if (automatic && authFailure(previous.lastError)) throw Object.assign(new Error('Owner must repair authentication'), { code: 'AUTH_REPAIR_REQUIRED' });
   if (automatic && !connectionSettings(state, provider).autoSync) return previous;
   run ||= beginConnectionSync(state, provider, { automatic, areas, integrations });
@@ -76,7 +77,7 @@ export async function monitoredSync(state, integrations, provider, { automatic =
       if (retry && attempts < 2 && transient && !rateLimited && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
       const code = safeCode(error);
       const failedBinding = error.orderReadBinding === undefined ? orderBinding : error.orderReadBinding;
-      if (sourceFailure && !isShopifyOrderReadBindingCurrent(state, failedBinding, integrations)) {
+      if (sourceFailure && !isShopifyOrderReadAdmissionCurrent(state, failedBinding, integrations)) {
         finishConnectionSync(state, run, null, { code });
         throw Object.assign(new Error('Shopify configuration changed during the failed read; no hold was installed.'), { code, status: 422, nonRetryable: true, holdDisposition: 'configuration_changed' });
       }

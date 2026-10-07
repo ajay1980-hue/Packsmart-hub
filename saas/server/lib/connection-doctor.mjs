@@ -1,4 +1,4 @@
-import { CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, orderReadHeld } from './connection-centre.mjs';
+import { CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { addAudit } from './events.mjs';
 import { classifyConnectionIssue, recordFor, safeFailureCode } from './connection-intelligence.mjs';
 
@@ -13,7 +13,7 @@ function orderBudgetExhausted(doctor) {
 function reserveOrderAttempt(state, integrations) {
   const doctor = connectionDoctorState(state, 'shopify', integrations);
   const binding = shopifyOrderReadBinding(state, integrations), attempts = doctor.attempts ?? 0;
-  if (!binding || !Number.isSafeInteger(attempts) || attempts < 0 || attempts >= 5 || doctor.exhausted) throw connectionError('Automatic Shopify order reads need review before another attempt.', 'SHOPIFY_ORDER_RETRY_EXHAUSTED', 409);
+  if (!binding || !Number.isSafeInteger(attempts) || attempts < 0 || attempts >= 5 || doctor.exhausted || shopifyOrderReadPolicyBlocked(state, integrations, ['orders'])) throw connectionError('Automatic Shopify order reads need review before another attempt.', 'SHOPIFY_ORDER_RETRY_EXHAUSTED', 409);
   Object.assign(doctor, { attempts: attempts + 1, exhausted: attempts + 1 >= 5, orderReadBinding: binding });
   state.connectionDoctor = { ...state.connectionDoctor, shopify: doctor };
 }
@@ -83,7 +83,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
   if (!first || !first.identityVerifiedAt || connectionSettings(state, provider).disconnected) return;
   const areas = Object.keys(first.areas).filter(a => !retryFailedOnly || first.areas[a] !== 'completed');
   if (automatic && orderReadHeld(state, provider, areas, integrations)) return first;
-  if (automatic && provider === 'shopify' && areas.includes('orders') && orderBudgetExhausted(connectionDoctorState(state, provider, integrations))) return first;
+  if (automatic && provider === 'shopify' && areas.includes('orders') && (orderBudgetExhausted(connectionDoctorState(state, provider, integrations)) || shopifyOrderReadPolicyBlocked(state, integrations, areas))) return first;
   first.status = 'running';
   await save();
   for (const group of readGroups(provider, areas)) {
@@ -148,6 +148,11 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     // discovery of an expired read must not add issue audits or workspace saves.
     if (provider === 'shopify' && doctor.orderReadBinding && orderBudgetExhausted(doctor)) continue;
     const first = state.connectionFirstSync?.[provider];
+    const expiry = Date.parse(integrations.connectionAccessExpiry?.(record) || '');
+    const refresh = Number.isFinite(expiry) && expiry - now.getTime() <= 15 * 60000 && integrations.refreshSupported?.(state, provider);
+    const pendingReadAreas = first && first.status !== 'completed' && !orderHold
+      ? Object.keys(first.areas).filter(area => first.areas[area] !== 'completed') : settings.areas;
+    if (provider === 'shopify' && !refresh && shopifyOrderReadPolicyBlocked(state, integrations, pendingReadAreas)) continue;
     const issue = classifyConnectionIssue(state, provider, now, record, integrations);
     const commerceOnly = provider === 'ebay' && issue?.kind === 'provider_restriction' && state.ebay?.coverage?.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077');
     const signature = issue?.kind || null;
@@ -166,8 +171,6 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     if (commerceOnly && !settings.areas.some(area => area !== 'promotions')) continue;
     const running = (state.connectionSyncs || []).some(r => r.provider === provider && r.status === 'running' && Date.parse(r.leaseUntil) > now.getTime());
     if (running || Date.parse(doctor.leaseUntil) > now.getTime() || Date.parse(doctor.nextRetryAt) > now.getTime() || Date.parse(state.integrationStatus?.[provider]?.retryAt) > now.getTime() || (provider === 'shopify' ? orderBudgetExhausted(doctor) : doctor.exhausted)) continue;
-    const expiry = Date.parse(integrations.connectionAccessExpiry?.(record) || '');
-    const refresh = Number.isFinite(expiry) && expiry - now.getTime() <= 15 * 60000 && integrations.refreshSupported?.(state, provider);
     const resume = first && ['queued','running'].includes(first.status) && !orderHold;
     const scheduled = settings.managedReadSchedule && settings.autoSync && connectionDue(state, provider, now, integrations);
     const repairRead = settings.autoSync && issue?.repair === 'read';

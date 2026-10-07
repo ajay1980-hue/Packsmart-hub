@@ -5,9 +5,9 @@ import { decryptCredentials } from './security.mjs';
 import { connectorMethods } from './connector-oauth.mjs';
 import { dispatchConnectionMutation } from './connection-dispatch.mjs';
 import { metaMethods } from './meta-commerce.mjs';
-import { connectionSettings, connectionError, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, completeShopifyOrderReadBudget } from './connection-centre.mjs';
+import { connectionSettings, connectionError, shopifyOrderReadBinding, isShopifyOrderReadAdmissionCurrent, completeShopifyOrderReadBudget } from './connection-centre.mjs';
 import { assertShopifySourceScope, captureShopifyOrderMoney, inspectShopifyOrderPage, prepareShopifyOrderRead,
-  recordShopifyOrderReadFailure, shopifyOrderSourceError, sourceResponseVersion, stageShopifyOrderRead, validateRetainedShopifyOrderState } from './shopify-order-source.mjs';
+  recordShopifyOrderReadFailure, shopifyOrderSourceError, shopifyOrderReadWindow, sourceResponseVersion, stageShopifyOrderRead, validateRetainedShopifyOrderState } from './shopify-order-source.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -58,7 +58,7 @@ export const SHOPIFY_PRODUCTS_QUERY = `
 
 export const SHOPIFY_ORDERS_QUERY = `
   query PacksmartOpsOrders($first: Int!, $after: String, $query: String) {
-    orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT, reverse: true) {
+    orders(first: $first, after: $after, query: $query, sortKey: UPDATED_AT, reverse: false) {
       nodes {
         id
         name
@@ -633,8 +633,10 @@ export class IntegrationService {
     const orders = [], legacy = [], pages = [], identities = new Set(), cursors = new Set();
     let after = null;
     const startedAt = new Date().toISOString();
-    const cutoff = new Date(Date.now() - 90 * 86400000).toISOString().slice(0, 10);
-    const query = `created_at:>=${cutoff}`;
+    // A bounded replay of accessible updated orders, not a durable watermark or
+    // provider snapshot. Freeze both bounds before the first page; each later
+    // attempt replays the rolling 90-day UTC-date lookback from scratch.
+    const window = shopifyOrderReadWindow(startedAt), { query } = window;
     for (let page = 0; page < 10; page += 1) {
       let apiVersion = null;
       const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query }, config, { onReadResponse: metadata => { apiVersion = metadata.apiVersion; } });
@@ -653,7 +655,7 @@ export class IntegrationService {
       if (page === 9) throw shopifyOrderSourceError('PAGE_LIMIT');
       after = connection.cursor;
     }
-    return prepareShopifyOrderRead(config, orders, pages, { query, startedAt, legacyBytes: Buffer.byteLength(JSON.stringify(legacy)) });
+    return prepareShopifyOrderRead(config, orders, pages, { query, startedAt, window, legacyBytes: Buffer.byteLength(JSON.stringify(legacy)) });
   }
 
   async fetchPublicShopifyProducts(state) {
@@ -691,7 +693,7 @@ export class IntegrationService {
     const orderReadBinding = areas.includes('orders') ? shopifyOrderReadBinding(state, this) : null;
     const recordReadFailure = error => {
       if (orderReadBinding) error.orderReadBinding = orderReadBinding;
-      if (isShopifyOrderReadBindingCurrent(state, orderReadBinding, this)) recordShopifyOrderReadFailure(state, error, new Date().toISOString(), orderReadBinding);
+      if (isShopifyOrderReadAdmissionCurrent(state, orderReadBinding, this)) recordShopifyOrderReadFailure(state, error, new Date().toISOString(), orderReadBinding);
     };
     if (areas.includes('orders')) {
       try { validateRetainedShopifyOrderState(state); }
@@ -708,7 +710,7 @@ export class IntegrationService {
           areas.includes('orders') ? this.fetchShopifyOrders(config) : null,
           areas.includes('customers') ? this.fetchShopifyCustomers(config) : null
         ]);
-        if (orderRead && !isShopifyOrderReadBindingCurrent(state, orderReadBinding, this)) throw shopifyOrderSourceError('CONFIGURATION_CHANGED');
+        if (orderRead && !isShopifyOrderReadAdmissionCurrent(state, orderReadBinding, this)) throw shopifyOrderSourceError('CONFIGURATION_CHANGED');
         // No successful/partial candidate is installed before detached admission.
         const candidate = structuredClone(state);
         if (products) candidate.products = mergeSelectedShopify(candidate.products || [], products, areas);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { seedWorkspaceState } from '../lib/store.mjs';
-import { connectionDoctorState, connectionDue, connectionSettings, shopifyOrderReadBinding } from '../lib/connection-centre.mjs';
+import { beginConnectionSync, connectionDoctorState, connectionDue, connectionSettings, SHOPIFY_ORDER_READ_POLICY, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted } from '../lib/connection-centre.mjs';
 import { queueFirstSync, runConnectionDoctor, runFirstSync } from '../lib/connection-doctor.mjs';
 import { createScheduler, monitoredSync } from '../lib/scheduler.mjs';
 import { IntegrationService } from '../lib/integrations.mjs';
@@ -15,6 +15,17 @@ const KEY = 'admission-fixture-encryption-key-thirty-two';
 const TOKEN = 'synthetic-admission-token';
 const SOURCE_CODE = 'SHOPIFY_ORDER_SOURCE_SHAPE_INVALID';
 const HOUR = 3600000;
+const LEGACY_POLICY = 'shopify-orders-v1:90-day-created:10-pages:50-orders:100-lines';
+const PROTECTED_POLICIES = [SHOPIFY_ORDER_READ_POLICY, LEGACY_POLICY, 'unrecognized-order-policy'];
+const INVALID_BOUND_POLICIES = [
+  binding => ({ ...binding, sourcePolicy: 'unknown-policy' }),
+  binding => ({ ...binding, sourcePolicy: '' }),
+  binding => ({ ...binding, sourcePolicy: null }),
+  binding => ({ ...binding, sourcePolicy: 42 }),
+  binding => ({ ...binding, sourcePolicy: {} }),
+  binding => { const changed = { ...binding }; delete changed.sourcePolicy; return changed; },
+  () => 'malformed-binding'
+];
 
 function fixture(areas = ['orders']) {
   const state = seedWorkspaceState({}, { workspaceId: 'shopify-admission-fixture' });
@@ -41,9 +52,9 @@ function service(syncProvider = async () => ({ status: 'connected', lastError: n
     ...extra };
 }
 
-function budget(state, integrations, attempts = 3) {
+function budget(state, integrations, attempts = 3, sourcePolicy = SHOPIFY_ORDER_READ_POLICY) {
   state.connectionDoctor.shopify = { attempts, exhausted: attempts >= 5,
-    orderReadBinding: shopifyOrderReadBinding(state, integrations) };
+    orderReadBinding: { ...shopifyOrderReadBinding(state, integrations), sourcePolicy } };
   return state.connectionDoctor.shopify;
 }
 
@@ -117,7 +128,7 @@ for (const firstSync of [false, true]) test(`${firstSync ? 'first-sync' : 'direc
   for (const key of ['attempts', 'exhausted', 'orderReadBinding']) delete withoutCharge.connectionDoctor.shopify[key];
   const addedBytes = Buffer.byteLength(JSON.stringify(preRead)) - Buffer.byteLength(JSON.stringify(withoutCharge));
   // Exact fixture overhead, measured in the already-required serialized save.
-  assert.equal(addedBytes, 336);
+  assert.equal(addedBytes, 343);
   assert.doesNotMatch(JSON.stringify(preRead.connectionDoctor.shopify.orderReadBinding), /synthetic|token|credential/i);
   t.diagnostic(`${firstSync ? 'first-sync' : 'direct'}: ${disk.snapshots.length} existing saves; ${addedBytes} added pre-read bytes`);
 });
@@ -257,14 +268,14 @@ test('a failed pre-read save never invokes Shopify, and a later durable retry sp
 
 test('token rotation, products-only success, and token refresh cannot erase a consumed order budget', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: NOW });
-  for (const action of ['products', 'refresh']) {
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const action of ['products', 'refresh']) {
     const state = fixture(action === 'products' ? ['products'] : ['orders']);
     let reads = 0, refreshes = 0;
     const integrations = service(async () => { reads++; return { status: 'connected', lastError: null }; }, action === 'refresh' ? {
       refreshSupported: () => true, connectionAccessExpiry: () => new Date(Date.now() - 1000).toISOString(),
       testConnection: async () => { refreshes++; state.connections[0].encryptedCredentials = 'rotated-token'; return { ok: true }; }
     } : {});
-    const existing = budget(state, integrations), binding = structuredClone(existing.orderReadBinding);
+    const existing = budget(state, integrations, 3, sourcePolicy), binding = structuredClone(existing.orderReadBinding);
     state.connections[0].encryptedCredentials = 'new-ciphertext-same-account';
     state.connections[0].updatedAt = new Date().toISOString();
     state.connectionSettings.shopify.revision++;
@@ -281,17 +292,19 @@ test('token rotation, products-only success, and token refresh cannot erase a co
 });
 
 test('same-account products-only queue preserves the budget; an explicit orders queue resets it', () => {
-  const state = fixture(['products']), integrations = service();
-  const previous = budget(state, integrations, 5);
-  queueFirstSync(state, 'shopify', 'owner');
-  assert.equal(state.connectionDoctor.shopify, previous);
-  assert.equal(state.connectionDoctor.shopify.attempts, 5);
-  state.connections[0].encryptedCredentials = 'rotated-token';
-  queueFirstSync(state, 'shopify', 'owner');
-  assert.equal(state.connectionDoctor.shopify, previous);
-  state.connectionSettings.shopify.areas = ['orders'];
-  queueFirstSync(state, 'shopify', 'owner');
-  assert.deepEqual(state.connectionDoctor.shopify, {});
+  for (const sourcePolicy of PROTECTED_POLICIES) {
+    const state = fixture(['products']), integrations = service();
+    const previous = budget(state, integrations, 5, sourcePolicy);
+    queueFirstSync(state, 'shopify', 'owner');
+    assert.equal(state.connectionDoctor.shopify, previous);
+    assert.equal(state.connectionDoctor.shopify.attempts, 5);
+    state.connections[0].encryptedCredentials = 'rotated-token';
+    queueFirstSync(state, 'shopify', 'owner');
+    assert.equal(state.connectionDoctor.shopify, previous);
+    state.connectionSettings.shopify.areas = ['orders'];
+    queueFirstSync(state, 'shopify', 'owner');
+    assert.deepEqual(state.connectionDoctor.shopify, {});
+  }
 });
 
 test('only a verified stable source change releases exhaustion; unavailable configuration fails closed', async t => {
@@ -300,14 +313,13 @@ test('only a verified stable source change releases exhaustion; unavailable conf
     account: state => { state.connections[0].metadata.shopId = 'shop-2'; },
     connection: state => { state.connections[0].id = 'connection-2'; },
     domain: state => { state.connections[0].metadata.shopDomain = 'replacement.myshopify.com'; },
-    api: (_state, integrations) => { integrations.shopifyConfig = current => ({ connection: current.connections[0], domain: current.connections[0].metadata.shopDomain, apiVersion: '2026-10' }); },
-    parser: state => { state.connectionDoctor.shopify.orderReadBinding = { ...state.connectionDoctor.shopify.orderReadBinding, sourcePolicy: 'previous-parser' }; }
+    api: (_state, integrations) => { integrations.shopifyConfig = current => ({ connection: current.connections[0], domain: current.connections[0].metadata.shopDomain, apiVersion: '2026-10' }); }
   };
-  for (const [name, mutate] of Object.entries(mutations)) {
+  for (const sourcePolicy of [SHOPIFY_ORDER_READ_POLICY, LEGACY_POLICY]) for (const [name, mutate] of Object.entries(mutations)) {
     const state = fixture();
     let calls = 0;
     const integrations = service(async () => { calls++; return { status: 'connected', lastError: null }; });
-    budget(state, integrations, 5);
+    budget(state, integrations, 5, sourcePolicy);
     mutate(state, integrations);
     assert.equal(connectionDoctorState(state, 'shopify', integrations).exhausted, false, name);
     assert.equal(connectionDue(state, 'shopify', new Date(), integrations), true, name);
@@ -325,6 +337,143 @@ test('only a verified stable source change releases exhaustion; unavailable conf
   assert.equal(connectionDoctorState(state, 'shopify', integrations), state.connectionDoctor.shopify);
   for (let check = 0; check < 3; check++) await runDoctor(state, integrations, async () => assert.fail('Unknown configuration cannot save a fresh claim'));
   assert.deepEqual(state, before);
+});
+
+test('v1 migration and unknown policies preserve exhausted durable attempts across token rotation and scheduler reloads', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const firstSync of [false, true]) for (const legacy of [false, true]) {
+    const state = fixture();
+    if (firstSync) queueFirstSync(state, 'shopify', 'owner');
+    const integrations = service(async () => assert.fail('An exhausted source must not be called'));
+    budget(state, integrations, 5, sourcePolicy);
+    state.connections[0].encryptedCredentials = 'rotated-token';
+    state.connections[0].updatedAt = new Date().toISOString();
+    if (legacy) { delete state.connectionSettings; delete state.connectionSyncs; }
+    state.autopilot.enabled = true;
+    for (const key of Object.keys(state.automations)) state.automations[key] = key === 'channelSync';
+    const disk = persisted(state), before = disk.load();
+    const save = async () => assert.fail('An exhausted reload must not save a fresh claim');
+    const scheduler = createScheduler({ store: { get: async () => disk.load(), save }, integrations,
+      withWorkspaceLock: async (_id, action) => action(), currentBrief: () => ({}), enabled: false });
+    for (let check = 0; check < 3; check++) {
+      t.mock.timers.tick(HOUR);
+      const reloaded = disk.load();
+      assert.equal(connectionDoctorState(reloaded, 'shopify', integrations), reloaded.connectionDoctor.shopify);
+      assert.equal(connectionDue(reloaded, 'shopify', new Date(), integrations), false);
+      await runDoctor(reloaded, integrations, save);
+      if (firstSync) await runFirstSync(reloaded, 'shopify', { integrations, readSync: monitoredSync, save, automatic: true });
+      assert.equal((await scheduler.runWorkspace(state.workspace.id, { now: new Date() })).skipped, true);
+      assert.deepEqual(reloaded, before);
+    }
+    assert.deepEqual(disk.load(), before);
+    assert.equal(disk.snapshots.length, 0);
+  }
+});
+
+test('unknown order policy cannot release consumed attempts through a changed account or API', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  const state = fixture(), integrations = service(async () => assert.fail('Unknown policy must fail closed'));
+  const doctor = budget(state, integrations, 5, 'previous-parser');
+  state.connections[0].metadata.shopId = 'replacement-shop';
+  integrations.shopifyConfig = current => ({ connection: current.connections[0], domain: current.connections[0].metadata.shopDomain, apiVersion: '2026-10' });
+  const before = structuredClone(state);
+  assert.equal(connectionDoctorState(state, 'shopify', integrations), doctor);
+  await runDoctor(state, integrations, async () => assert.fail('Unknown policy cannot save a replacement claim'));
+  assert.deepEqual(state, before);
+});
+
+test('unknown or malformed bound policies with attempts left block every automatic orders entry before provider calls or saves', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  for (const corrupt of INVALID_BOUND_POLICIES) for (const route of ['doctor', 'first-sync', 'scheduler', 'legacy-scheduler', 'monitored', 'provided-run', 'claim']) {
+    const state = fixture();
+    if (route === 'first-sync') queueFirstSync(state, 'shopify', 'owner');
+    const integrations = service(async () => assert.fail(`${route}: An unknown policy cannot authorize an automatic orders request`));
+    let run;
+    if (route === 'provided-run') {
+      run = beginConnectionSync(state, 'shopify', { areas: ['orders'], integrations });
+      run.automatic = true;
+    }
+    if (route.endsWith('scheduler')) {
+      state.connections = [];
+      state.autopilot.enabled = true;
+      for (const key of Object.keys(state.automations)) state.automations[key] = key === 'channelSync';
+      if (route === 'legacy-scheduler') { delete state.connectionSettings; delete state.connectionSyncs; }
+    }
+    const doctor = budget(state, integrations, 1);
+    doctor.orderReadBinding = corrupt(doctor.orderReadBinding);
+    const before = structuredClone(state);
+    const save = async () => assert.fail(`${route}: Blocked discovery cannot save a claim or audit`);
+    assert.equal(connectionDue(state, 'shopify', new Date(), integrations), false);
+    assert.equal(shopifyOrderReadBudgetExhausted(state, integrations), true, 'Job and legacy discovery must also see the blocked admission');
+    if (route === 'doctor') await runDoctor(state, integrations, save);
+    else if (route === 'first-sync') await runFirstSync(state, 'shopify', { integrations, readSync: monitoredSync, save, automatic: true });
+    else if (route.endsWith('scheduler')) {
+      const scheduler = createScheduler({ store: { get: async () => structuredClone(state), save }, integrations,
+        withWorkspaceLock: async (_id, action) => action(), currentBrief: () => ({}), enabled: false });
+      for (let reload = 0; reload < 3; reload++) assert.equal((await scheduler.runWorkspace(state.workspace.id, { now: new Date() })).skipped, true);
+    } else if (route === 'claim') assert.throws(() => beginConnectionSync(state, 'shopify', { areas: ['orders'], automatic: true, integrations }), error => error.code === 'SHOPIFY_ORDER_RETRY_EXHAUSTED' && error.nonRetryable === true);
+    else await assert.rejects(monitoredSync(state, integrations, 'shopify', { areas: ['orders'], automatic: route === 'monitored', run }), error => error.code === 'SHOPIFY_ORDER_RETRY_EXHAUSTED' && error.nonRetryable === true);
+    assert.deepEqual(state, before);
+    assert.equal(doctor.attempts, 1);
+    assert.equal(doctor.exhausted, false, 'Blocking an unknown policy must not rewrite its consumed-attempt evidence');
+  }
+});
+
+test('malformed policy budgets still permit products-only work and token refresh without releasing protection', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  for (const corrupt of INVALID_BOUND_POLICIES) for (const action of ['products', 'refresh', 'remaining-products']) {
+    const state = fixture(action === 'products' ? ['products'] : ['orders']);
+    if (action === 'remaining-products') {
+      state.connectionSettings.shopify.areas = ['products', 'orders'];
+      queueFirstSync(state, 'shopify', 'owner');
+      state.connectionFirstSync.shopify.areas.orders = 'completed';
+    }
+    let reads = 0, refreshes = 0;
+    const integrations = service(async (_current, _provider, { areas }) => {
+      reads++; assert.deepEqual(areas, ['products']); return { status: 'connected', lastError: null };
+    }, action === 'refresh' ? { refreshSupported: () => true, connectionAccessExpiry: () => new Date(Date.now() - 1000).toISOString(),
+      testConnection: async () => { refreshes++; return { ok: true }; } } : {});
+    const doctor = budget(state, integrations, 1);
+    doctor.orderReadBinding = corrupt(doctor.orderReadBinding);
+    const binding = structuredClone(doctor.orderReadBinding), disk = persisted(state);
+    await runDoctor(state, integrations, disk.save);
+    assert.equal(reads, action === 'refresh' ? 0 : 1);
+    assert.equal(refreshes, action === 'refresh' ? 1 : 0);
+    assert.equal(doctor.attempts, 1);
+    assert.equal(doctor.exhausted, false);
+    assert.deepEqual(doctor.orderReadBinding, binding);
+  }
+});
+
+test('explicit admitted orders recover unknown or malformed unexhausted policy budgets without a structural hold', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  for (const corrupt of INVALID_BOUND_POLICIES) {
+    const state = fixture();
+    let calls = 0;
+    const integrations = actualService(state, async () => { calls++; return sourceResponse(); });
+    const doctor = budget(state, integrations, 1);
+    doctor.orderReadBinding = corrupt(doctor.orderReadBinding);
+    await integrations.syncShopify(state, { areas: ['orders'] });
+    assert.equal(calls, 1);
+    assert.equal(doctor.attempts, 0);
+    assert.equal(doctor.exhausted, false);
+    assert.equal(doctor.orderReadBinding, undefined);
+    assert.ok(state.orders.some(order => order.sourceReadRef));
+  }
+});
+
+test('recognized v1 policy spends its remaining attempts instead of resetting or blocking them', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: NOW });
+  const state = fixture();
+  let calls = 0;
+  const integrations = service(async () => { calls++; return { status: 'connected', lastError: null }; });
+  budget(state, integrations, 1, LEGACY_POLICY);
+  const disk = persisted(state);
+  assert.equal(connectionDue(state, 'shopify', new Date(), integrations), true);
+  await runDoctor(state, integrations, disk.save);
+  assert.equal(calls, 1);
+  assert.equal(disk.load().connectionDoctor.shopify.attempts, 2);
+  assert.equal(disk.load().connectionDoctor.shopify.orderReadBinding.sourcePolicy, SHOPIFY_ORDER_READ_POLICY);
 });
 
 test('malformed persisted attempt counts fail closed without another claim, provider call, or save', async t => {
@@ -365,10 +514,10 @@ test('malformed prior source bindings never establish replacement or release con
 
 test('missing or newly enriched account identity cannot prove source replacement or erase products-only reconnect budgets', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: NOW });
-  for (const change of ['remove', 'enrich']) {
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const change of ['remove', 'enrich']) {
     const state = fixture(['products']), integrations = service(async () => assert.fail('Identity metadata changes cannot release exhaustion'));
     if (change === 'enrich') delete state.connections[0].metadata.shopId;
-    const doctor = budget(state, integrations, 5);
+    const doctor = budget(state, integrations, 5, sourcePolicy);
     if (change === 'remove') state.connections[0].metadata = { shopDomain: state.connections[0].metadata.shopDomain };
     else state.connections[0].metadata.shopId = 'shop-1';
     assert.equal(connectionDoctorState(state, 'shopify', integrations), doctor);
@@ -383,12 +532,12 @@ test('missing or newly enriched account identity cannot prove source replacement
 
 test('actual admitted orders reset the existing Doctor object in the existing successful save', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: NOW });
-  for (const firstSync of [false, true]) {
+  for (const sourcePolicy of [SHOPIFY_ORDER_READ_POLICY, LEGACY_POLICY]) for (const firstSync of [false, true]) {
     const state = fixture();
     if (firstSync) queueFirstSync(state, 'shopify', 'owner');
     let calls = 0;
     const integrations = actualService(state, async () => { calls++; return sourceResponse(); });
-    const existing = budget(state, integrations, 4), disk = persisted(state);
+    const existing = budget(state, integrations, 4, sourcePolicy), disk = persisted(state);
     await runDoctor(state, integrations, disk.save);
     assert.equal(calls, 1);
     assert.equal(state.connectionDoctor.shopify, existing);
@@ -408,22 +557,25 @@ test('actual admitted orders reset the existing Doctor object in the existing su
 
 test('actual admitted manual orders recover after account identity metadata was lost or enriched', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: NOW });
-  for (const change of ['remove', 'enrich']) {
+  for (const sourcePolicy of PROTECTED_POLICIES) for (const change of ['remove', 'enrich']) {
     const state = fixture();
     if (change === 'enrich') delete state.connections[0].metadata.shopId;
     let calls = 0;
     const integrations = actualService(state, async () => { calls++; return sourceResponse(); });
-    const doctor = budget(state, integrations, 5);
+    const doctor = budget(state, integrations, 5, sourcePolicy);
+    state.integrationStatus.shopify.orderReadHold = { code: SOURCE_CODE, at: EARLIER, binding: structuredClone(doctor.orderReadBinding) };
     if (change === 'remove') delete state.connections[0].metadata.shopId;
     else state.connections[0].metadata.shopId = 'shop-1';
     assert.equal(connectionDoctorState(state, 'shopify', integrations), doctor);
     assert.equal(doctor.exhausted, true, 'Metadata changes alone cannot release the budget');
+    assert.equal(shopifyOrderReadHold(state, 'shopify', integrations), state.integrationStatus.shopify.orderReadHold);
     await integrations.syncShopify(state, { areas: ['orders'] });
     assert.equal(calls, 1);
     assert.equal(state.connectionDoctor.shopify, doctor);
     assert.equal(doctor.attempts, 0);
     assert.equal(doctor.exhausted, false);
     assert.equal(doctor.orderReadBinding, undefined);
+    assert.equal(shopifyOrderReadHold(state, 'shopify', integrations), null);
     assert.ok(state.orders.some(order => order.sourceReadRef));
   }
 });

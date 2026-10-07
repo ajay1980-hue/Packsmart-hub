@@ -19,13 +19,17 @@ const state=seedWorkspaceState({}, {workspaceId:WS});state.orders=legacy;
 await store.save(WS,state);
 function requestBudget(start){const calls=db.calls.slice(start),groups={};for(const call of calls){const key=call.method+' '+call.url.pathname.split('/').pop();groups[key]??={requests:0,bodyBytes:0};groups[key].requests++;groups[key].bodyBytes+=call.body?Buffer.byteLength(call.body):0;}return{requests:calls.length,bodyBytes:calls.reduce((sum,call)=>sum+(call.body?Buffer.byteLength(call.body):0),0),groups};}
 let start=db.calls.length;await store.save(WS,state);const baselineWarm=requestBudget(start),beforeBytes=bytes(state);
-let providerRequests=0;
+let providerRequests=0,providerRequestBytes=0,providerResponseBytes=0;
 const service=new IntegrationService({SHOPIFY_ENV_WORKSPACE_ID:WS,SHOPIFY_STORE_DOMAIN:'fixture.myshopify.com',SHOPIFY_ADMIN_API_VERSION:'2026-07',SHOPIFY_ADMIN_ACCESS_TOKEN:'synthetic-token'}, {fetchImpl:async(_url,options)=>{
   providerRequests++;const body=JSON.parse(options.body);assert.match(body.query,/query PacksmartOpsOrders/);assert.doesNotMatch(body.query,/\bmutation\b|ConnectionIdentity/);
+  assert.match(body.query,/sortKey: UPDATED_AT, reverse: false/);assert.match(body.variables.query,/^updated_at:>='[\dT:.-]+Z' AND updated_at:<'[\dT:.-]+Z'$/);
   const offset=body.variables.after?Number(body.variables.after):0,nodes=raw.slice(offset,offset+50),next=offset+nodes.length;
-  return Response.json({data:{orders:{nodes,pageInfo:{hasNextPage:next<raw.length,endCursor:next<raw.length?String(next):null}}}},{headers:{'X-Shopify-API-Version':'2026-07'}});
+  const response={data:{orders:{nodes,pageInfo:{hasNextPage:next<raw.length,endCursor:next<raw.length?String(next):null}}}};
+  providerRequestBytes+=Buffer.byteLength(options.body);providerResponseBytes+=bytes(response);
+  return Response.json(response,{headers:{'X-Shopify-API-Version':'2026-07'}});
 }});
 await service.syncShopify(state,{areas:['orders']});const afterBytes=bytes(state),map=state.channelData.shopify.orderReads;
+const sourceRead={requests:providerRequests,requestBodyBytes:providerRequestBytes,responseBodyBytes:providerResponseBytes};
 start=db.calls.length;await store.save(WS,state);const firstCapture=requestBudget(start);
 assert.equal(providerRequests,10);assert.equal(state.orders.length,500);assert.equal(state.orders[0].total,'100.25');
 assert.equal(firstCapture.groups['POST order_financials']?.requests,1);assert.equal(firstCapture.groups['POST orders'],undefined);
@@ -33,5 +37,5 @@ assert.ok(!Object.keys(firstCapture.groups).some(key=>key.includes('runvara_hist
 await service.syncShopify(state,{areas:['orders']});start=db.calls.length;await store.save(WS,state);const repeatedCapture=requestBudget(start);
 assert.equal(repeatedCapture.groups['POST order_financials'],undefined);assert.equal(repeatedCapture.groups['POST orders'],undefined);
 const cold=createStore(storeEnv,{fetchImpl:db.fetchImpl});start=db.calls.length;await cold.save(WS,state);const coldCapture=requestBudget(start);
-console.log(JSON.stringify({fixture:{orders:500,lines:2000},sourceRequestsPerRead:10,beforeSnapshotBytes:beforeBytes,afterSnapshotBytes:afterBytes,addedSnapshotBytes:afterBytes-beforeBytes,
+console.log(JSON.stringify({fixture:{orders:500,lines:2000},sourceRequestsPerRead:10,sourceRead,beforeSnapshotBytes:beforeBytes,afterSnapshotBytes:afterBytes,addedSnapshotBytes:afterBytes-beforeBytes,
   manifestMapBytes:bytes(map),referenceBytes:state.orders.reduce((sum,order)=>sum+bytes({sourceReadRef:order.sourceReadRef})-1,0),baselineWarm,firstCapture,repeatedCapture,coldCapture},null,2));

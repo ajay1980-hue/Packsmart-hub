@@ -4,12 +4,13 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import { IntegrationService, mergeProviderRecords } from '../lib/integrations.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
 import { monitoredSync } from '../lib/scheduler.mjs';
-import { SHOPIFY_ORDER_SOURCE_LIMITS as LIMITS, inspectShopifyOrderSource, stageShopifyOrderRead, orderReportingCurrency } from '../lib/shopify-order-source.mjs';
+import { SHOPIFY_ORDER_SOURCE_LIMITS as LIMITS, inspectShopifyOrderSource, prepareShopifyOrderRead, shopifyOrderReadWindow, stageShopifyOrderRead, orderFinancialMirrorRow, orderReportingCurrency } from '../lib/shopify-order-source.mjs';
 
 const WS = 'source-capture-test', NOW = '2026-10-07T10:00:00.000Z';
 const money = (amount = '100.00', currencyCode = 'GBP') => ({ shopMoney: { amount, currencyCode } });
@@ -28,11 +29,105 @@ function fixture(rows = [raw()], workspaceId = WS) {
   state.integrationStatus.shopify = { status: 'connected', lastSyncAt: '2026-10-01T00:00:00.000Z', lastSuccessfulSyncAt: '2026-10-01T00:00:00.000Z', areaSuccessAt: { orders: '2026-10-01T00:00:00.000Z' } };
   let reply = (index, query) => query.includes('PacksmartOpsProducts') ? { data: { products: { nodes: [], pageInfo: { hasNextPage: false } } } } : responsePage(rows);
   const env = { SHOPIFY_ENV_WORKSPACE_ID: workspaceId, SHOPIFY_STORE_DOMAIN: 'fixture.myshopify.com', SHOPIFY_ADMIN_ACCESS_TOKEN: 'synthetic-token', SHOPIFY_ADMIN_API_VERSION: '2026-07' };
-  const fetchImpl = async (url, options) => { const body = JSON.parse(options.body); calls.push({ url, body }); const result = reply(calls.length - 1, body.query); return result instanceof Response ? result : Response.json(result, { headers: { 'X-Shopify-API-Version': '2026-07' } }); };
+  const fetchImpl = async (url, options) => { const body = JSON.parse(options.body); calls.push({ url, body }); const result = reply(calls.length - 1, body.query, body); return result instanceof Response ? result : Response.json(result, { headers: { 'X-Shopify-API-Version': '2026-07' } }); };
   const service = new IntegrationService(env, { fetchImpl });
   return { state, service, calls, env, fetchImpl, setReply(value) { reply = value; }, sync: () => service.syncShopify(state, { areas: ['orders'] }) };
 }
 function preserved(state) { return structuredClone({ orders: state.orders, products: state.products, channelData: state.channelData, lastSuccessfulSyncAt: state.integrationStatus.shopify.lastSuccessfulSyncAt, areaSuccessAt: state.integrationStatus.shopify.areaSuccessAt }); }
+
+// Synthetic provider applies the real selector, rather than returning every
+// fixture regardless of the requested field. Cursor contents are opaque to the
+// importer, including when several orders share one update timestamp.
+function filteredReply(rows, beforePage = () => {}) {
+  const positions = new Map();
+  return (index, operation, { variables }) => {
+    beforePage(index, variables);
+    assert.match(operation, /sortKey: UPDATED_AT, reverse: false/);
+    const bounds = /^updated_at:>='([^']+)' AND updated_at:<'([^']+)'$/.exec(variables.query);
+    assert.ok(bounds, 'one quoted updated_at interval is required');
+    const matching = rows.filter(row => Date.parse(row.updatedAt) >= Date.parse(bounds[1]) && Date.parse(row.updatedAt) < Date.parse(bounds[2]))
+      .sort((left, right) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+    const offset = variables.after === null ? 0 : positions.get(variables.after);
+    assert.ok(Number.isSafeInteger(offset), 'provider cursor must round-trip unchanged');
+    const nodes = matching.slice(offset, offset + variables.first), next = offset + nodes.length;
+    const cursor = next < matching.length ? `opaque:/provider/+${index}==` : null;
+    if (cursor) positions.set(cursor, next);
+    return responsePage(nodes, Boolean(cursor), cursor);
+  };
+}
+
+test('filter-aware replay refreshes an old-created accessible order and retains all owner costs and absent/foreign rows', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const changed = raw('old-created'); changed.createdAt = '2026-01-01T00:00:00.000Z'; changed.updatedAt = '2026-10-06T10:00:00.000Z';
+  changed.currentTotalPriceSet = money('72.125000'); changed.displayFinancialStatus = 'PARTIALLY_REFUNDED';
+  const f = fixture(), absent = structuredClone(f.state.orders[0]);
+  const costs = { actualShippingCost: 0, paymentFees: 2.1, channelFees: 3.2, advertisingCost: 4.3, otherVariableCosts: 5.4 };
+  const foreign = { id: changed.id, provider: 'ebay', total: 7, lineItems: [], costOverrides: { actualShippingCost: 8 } };
+  f.state.orders.push({ ...absent, id: changed.id, externalId: changed.id, ...costs, costOverrides: costs, createdAt: changed.createdAt }, foreign);
+  f.setReply(filteredReply([changed])); await f.sync();
+  assert.equal(f.calls.length, 1);
+  const captured = f.state.orders.find(order => order.id === changed.id && order.provider === 'shopify');
+  assert.equal(captured.currentTotal, '72.125000'); assert.equal(captured.financialStatus, 'PARTIALLY_REFUNDED');
+  assert.equal(captured.createdAt, changed.createdAt); assert.deepEqual(captured.costOverrides, costs);
+  for (const [key, value] of Object.entries(costs)) assert.equal(captured[key], value, key);
+  assert.deepEqual(f.state.orders.find(order => order.id === absent.id), absent);
+  assert.deepEqual(f.state.orders.find(order => order.provider === 'ebay'), foreign);
+});
+
+test('the whole cursor read freezes its window across clock changes and tied update timestamps', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const rows = Array.from({ length: 52 }, (_, index) => ({ ...raw(`tied-${index}`), updatedAt: '2026-10-06T23:00:00.000Z' }));
+  const f = fixture(); f.setReply(filteredReply(rows, () => t.mock.timers.tick(86400000))); await f.sync();
+  assert.equal(f.calls.length, 2); assert.equal(f.state.orders.length, 53);
+  const expected = "updated_at:>='2026-07-09T00:00:00.000Z' AND updated_at:<'2026-10-07T10:00:00.000Z'";
+  for (const { body } of f.calls) assert.equal(body.variables.query, expected);
+  assert.equal(f.calls[0].body.variables.after, null); assert.equal(f.calls[1].body.variables.after, 'opaque:/provider/+0==');
+  const reads = f.state.channelData.shopify.orderReads, manifest = reads.manifests[reads.lastSuccess];
+  assert.equal(manifest.requestedLowerBound, '2026-07-09T00:00:00.000Z'); assert.equal(manifest.requestedUpperBound, NOW);
+  assert.equal(manifest.finishedAt, '2026-10-09T10:00:00.000Z'); assert.equal(manifest.pages.length, 2);
+  assert.doesNotMatch(JSON.stringify(reads), /opaque:|checkpoint|maxUpdatedAt|nextCursor/);
+});
+
+test('lower bound is inclusive, upper bound is exclusive and the next attempt replays rather than advances', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const rows = [['before', '2026-07-08T23:59:59.999Z'], ['lower', '2026-07-09T00:00:00.000Z'], ['upper', NOW]]
+    .map(([id, updatedAt]) => ({ ...raw(id), createdAt: '2026-01-01T00:00:00.000Z', updatedAt }));
+  const f = fixture(); f.setReply(filteredReply(rows)); await f.sync();
+  assert.deepEqual(f.state.orders.filter(order => order.sourceReadRef).map(order => order.id), [rows[1].id]);
+  const firstRef = f.state.orders[0].sourceReadRef;
+  t.mock.timers.tick(1); await f.sync();
+  assert.deepEqual(f.state.orders.filter(order => order.sourceReadRef).map(order => order.id), [rows[1].id, rows[2].id]);
+  assert.notEqual(f.state.orders[0].sourceReadRef, firstRef);
+  assert.equal(f.calls[1].body.variables.after, null);
+  assert.equal(f.calls[1].body.variables.query, "updated_at:>='2026-07-09T00:00:00.000Z' AND updated_at:<'2026-10-07T10:00:00.001Z'");
+});
+
+test('moving updates and late visibility remain unverified observations and are replayed on the next attempt', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const rows = Array.from({ length: 51 }, (_, index) => ({ ...raw(`moving-${index}`), updatedAt: '2026-10-06T23:00:00.000Z' }));
+  const f = fixture(), last = rows[50];
+  f.state.orders.push({ id: last.id, provider: 'shopify', total: 1, lineItems: [], actualShippingCost: 7, costOverrides: { actualShippingCost: 7 } });
+  f.setReply(filteredReply(rows, index => { if (index === 1) last.updatedAt = '2026-10-07T10:01:00.000Z'; }));
+  await f.sync(); assert.equal(f.calls.length, 2);
+  assert.equal(f.state.orders.find(order => order.id === last.id).total, 1, 'a moving row omitted by the provider is retained');
+  let reads = f.state.channelData.shopify.orderReads, manifest = reads.manifests[reads.lastSuccess];
+  assert.equal(manifest.sourcePeriod, 'unverified'); assert.equal(manifest.queryExhaustion, 'observed_exhausted');
+  assert.equal(manifest.ordersRead, 50); assert.equal(manifest.pages[1].rows, 0);
+  t.mock.timers.tick(120000); f.setReply(filteredReply(rows)); await f.sync();
+  const refreshed = f.state.orders.find(order => order.id === last.id);
+  assert.equal(refreshed.total, '100.00'); assert.equal(refreshed.actualShippingCost, 7);
+  reads = f.state.channelData.shopify.orderReads; manifest = reads.manifests[reads.lastSuccess];
+  assert.equal(manifest.ordersRead, 51); assert.equal(manifest.requestedLowerBound, '2026-07-09T00:00:00.000Z');
+});
+
+test('empty exhaustion records only the requested interval and retains prior orders', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const f = fixture([]), previous = structuredClone(f.state.orders); await f.sync();
+  assert.deepEqual(f.state.orders, previous); assert.equal(f.calls.length, 1);
+  const reads = f.state.channelData.shopify.orderReads, manifest = reads.manifests[reads.lastSuccess];
+  assert.equal(manifest.ordersRead, 0); assert.equal(manifest.linesRead, 0); assert.equal(manifest.pages.length, 1);
+  assert.equal(manifest.sourcePeriod, 'unverified'); assert.equal(manifest.requestedUpperBound, NOW);
+});
 
 test('existing order call captures exact strings, one shared observation and real returned API metadata', async () => {
   const one = raw('large', 2), two = raw('zero');
@@ -42,7 +137,8 @@ test('existing order call captures exact strings, one shared observation and rea
   await f.sync();
   assert.equal(f.calls.length, 1); assert.match(f.calls[0].body.query, /query PacksmartOpsOrders/); assert.doesNotMatch(f.calls[0].body.query, /ConnectionIdentity|\bmutation\b/);
   assert.deepEqual(Object.keys(f.calls[0].body.variables).sort(), ['after', 'first', 'query']);
-  assert.equal(f.calls[0].body.variables.first, 50); assert.match(f.calls[0].body.variables.query, /^created_at:>=\d{4}-\d\d-\d\d$/);
+  assert.equal(f.calls[0].body.variables.first, 50); assert.match(f.calls[0].body.variables.query, /^updated_at:>='[\dT:.-]+Z' AND updated_at:<'[\dT:.-]+Z'$/);
+  assert.match(f.calls[0].body.query, /sortKey: UPDATED_AT, reverse: false/);
   const [large, zero] = f.state.orders;
   assert.equal(large.total, '123456789012.123456'); assert.equal(large.currentTotal, '-0.000001'); assert.equal(zero.currentTotal, '0'); assert.equal(zero.currentTax, null);
   assert.equal(large.tax, null); assert.equal(large.refunds, null); assert.equal(large.lineItems[0].net, '24.00');
@@ -50,7 +146,8 @@ test('existing order call captures exact strings, one shared observation and rea
   const reads = f.state.channelData.shopify.orderReads, manifest = reads.manifests[large.sourceReadRef];
   assert.equal(Object.keys(reads.manifests).length, 1); assert.equal(manifest.ordersRead, 2); assert.equal(manifest.linesRead, 3);
   assert.equal(manifest.pages[0].apiVersion, '2026-07'); assert.equal(manifest.requestDomain, 'fixture.myshopify.com');
-  assert.equal(manifest.sourceAccountId, null); assert.equal(manifest.currentScopes, 'not_observed'); assert.equal(manifest.requestedUpperBound, null);
+  assert.equal(manifest.sourceAccountId, null); assert.equal(manifest.currentScopes, 'not_observed'); assert.equal(manifest.requestedUpperBound, manifest.startedAt);
+  assert.equal(manifest.schema, 'shopify-order-read/v2'); assert.equal(manifest.sortKey, 'UPDATED_AT'); assert.equal(manifest.reverse, false);
   assert.equal(manifest.sourcePeriod, 'unverified'); assert.equal(manifest.queryExhaustion, 'observed_exhausted');
   assert.equal(f.state.integrationStatus.shopify.orderReadHold, null);
   assert.deepEqual(f.state.orders.find(order => order.id === 'historical'), old, 'no legacy backfill');
@@ -206,6 +303,97 @@ test('manifest retention stays capped without discarding orders, and changed sou
   assert.equal(inspectShopifyOrderSource(f.state, f.state.orders[0], WS).manifestStatus, 'retained');
 });
 
+test('v1 and v2 manifests coexist unchanged, with unchanged source money and financial mirror encoding', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const f = fixture(), config = f.service.shopifyConfig(f.state);
+  const fresh = await f.service.fetchShopifyOrders(config);
+  const oldOrder = { ...fresh.orders[0], id: 'older-observation', externalId: 'older-observation' };
+  const options = { query: 'created_at:>=2026-07-09', startedAt: NOW, finishedAt: NOW, legacyBytes: 2 };
+  const historical = prepareShopifyOrderRead(config, [oldOrder], fresh.manifest.pages, options);
+  assert.match(historical.ref, /^sor1:/); assert.equal(historical.manifest.schema, 'shopify-order-read/v1');
+  const oldBytes = JSON.stringify(historical.manifest);
+  f.state.orders.push(...historical.orders);
+  f.state.channelData = { shopify: { orderReads: { schema: 'shopify-order-reads/v1', workspaceId: WS,
+    manifests: { [historical.ref]: historical.manifest }, lastSuccess: historical.ref } } };
+  await f.sync();
+  const retained = f.state.orders.find(order => order.id === oldOrder.id);
+  assert.equal(retained.sourceReadRef, historical.ref); assert.equal(inspectShopifyOrderSource(f.state, retained, WS).manifestStatus, 'retained');
+  const reads = f.state.channelData.shopify.orderReads;
+  assert.equal(JSON.stringify(reads.manifests[historical.ref]), oldBytes);
+  assert.match(reads.lastSuccess, /^sor2:/); assert.equal(Object.keys(reads.manifests).length, 2);
+  const sameV1 = prepareShopifyOrderRead(config, fresh.orders, fresh.manifest.pages, options);
+  assert.deepEqual(orderFinancialMirrorRow(WS, sameV1.orders[0], NOW), orderFinancialMirrorRow(WS, fresh.orders[0], NOW));
+  assert.equal(orderFinancialMirrorRow(WS, fresh.orders[0], NOW).financial_data.sourceFormat, 'shopify-order-read/v1');
+  assert.equal(sameV1.manifest.recordsDigest, fresh.manifest.recordsDigest, 'request version does not change source-money evidence');
+  assert.notEqual(sameV1.ref, fresh.ref);
+  const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+  for (const [key, value] of [['requestedLowerBound', fresh.manifest.requestedLowerBound], ['sortKey', 'UPDATED_AT'], ['reverse', false]]) {
+    const manifest = { ...historical.manifest, [key]: value };
+    const ref = `sor1:${createHash('sha256').update(JSON.stringify(canonical(manifest))).digest('hex')}`;
+    const candidate = structuredClone(f.state), order = candidate.orders.find(order => order.id === oldOrder.id);
+    order.sourceReadRef = ref; candidate.channelData.shopify.orderReads.manifests[ref] = manifest;
+    assert.equal(inspectShopifyOrderSource(candidate, order, WS).manifestStatus, 'invalid', `v1 cannot advertise v2 ${key}`);
+  }
+});
+
+test('rehashed v2 manifest tampering cannot establish a different window, timestamp, policy or direction', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const f = fixture(); await f.sync();
+  const canonical = value => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+  const invalid = [
+    manifest => { manifest.requestedLowerBound = '2026-07-10T00:00:00.000Z'; },
+    manifest => { manifest.requestedUpperBound = '2026-10-07T10:00:00.001Z'; },
+    manifest => { manifest.query = manifest.query.replace("updated_at:<'", "updated_at:<='"); },
+    manifest => { manifest.sortKey = 'CREATED_AT'; },
+    manifest => { manifest.reverse = true; },
+    manifest => { delete manifest.requestedLowerBound; },
+    manifest => { manifest.startedAt = '2026-02-30T00:00:00.000Z'; },
+    manifest => { manifest.startedAt = '2026-10-07T10:00:00+00:00'; },
+    manifest => { manifest.finishedAt = '2026-10-07T09:59:59.999Z'; },
+    manifest => { manifest.schema = 'shopify-order-read/v3'; },
+    manifest => { manifest.pages[0].apiVersion = 'unknown'; }
+  ];
+  for (const mutate of invalid) {
+    const candidate = structuredClone(f.state), order = candidate.orders[0], reads = candidate.channelData.shopify.orderReads;
+    const manifest = reads.manifests[order.sourceReadRef]; mutate(manifest);
+    const ref = `sor2:${createHash('sha256').update(JSON.stringify(canonical(manifest))).digest('hex')}`;
+    reads.manifests = { [ref]: manifest }; order.sourceReadRef = ref; reads.lastSuccess = ref;
+    assert.equal(inspectShopifyOrderSource(candidate, order, WS).manifestStatus, 'invalid');
+    const before = preserved(candidate), calls = f.calls.length;
+    await assert.rejects(() => f.service.syncShopify(candidate, { areas: ['orders'] }), { code: 'SHOPIFY_ORDER_SOURCE_RETAINED_METADATA_INVALID' });
+    assert.equal(f.calls.length - calls, 1); assert.deepEqual(preserved(candidate), before);
+  }
+  for (const value of [null, '', '0000-01-01T00:00:00.000Z', '2026-02-30T00:00:00.000Z', '2026-10-07T10:00:00Z', 0]) {
+    assert.throws(() => shopifyOrderReadWindow(value), { code: 'SHOPIFY_ORDER_SOURCE_WINDOW_INVALID' });
+  }
+});
+
+test('mixed-version manifest eviction keeps old rows and exact source money within the unchanged map cap', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse(NOW) });
+  const f = fixture(), config = f.service.shopifyConfig(f.state), fresh = await f.service.fetchShopifyOrders(config);
+  const manifests = {}, retained = [];
+  for (let index = 0; index < 8; index++) {
+    const order = { ...fresh.orders[0], id: `v1-${index}`, externalId: `v1-${index}` };
+    const read = prepareShopifyOrderRead(config, [order], fresh.manifest.pages, { query: 'created_at:>=2026-07-09',
+      startedAt: NOW, finishedAt: NOW, legacyBytes: 2 });
+    manifests[read.ref] = read.manifest; retained.push(...read.orders);
+  }
+  f.state.orders = retained;
+  f.state.channelData = { shopify: { orderReads: { schema: 'shopify-order-reads/v1', workspaceId: WS, manifests,
+    lastSuccess: retained[7].sourceReadRef } } };
+  const oldRows = structuredClone(retained); await f.sync();
+  const reads = f.state.channelData.shopify.orderReads;
+  assert.equal(Object.keys(reads.manifests).length, 8); assert.ok(Buffer.byteLength(JSON.stringify(reads)) <= LIMITS.manifestMapBytes);
+  assert.match(reads.lastSuccess, /^sor2:/); assert.equal(f.state.orders.length, 9);
+  for (const previous of oldRows) {
+    const order = f.state.orders.find(row => row.id === previous.id); assert.deepEqual(order, previous);
+    assert.ok(['retained', 'unavailable'].includes(inspectShopifyOrderSource(f.state, order, WS).manifestStatus));
+  }
+  assert.equal(oldRows.filter(order => !reads.manifests[order.sourceReadRef]).length, 1);
+});
+
 test('merge refreshes invalidate stale references but preserve separately recorded owner costs', async () => {
   const f = fixture(); await f.sync(); const captured = f.state.orders[0]; captured.actualShippingCost = 9; captured.costOverrides = { actualShippingCost: 9 };
   captured.sourceCurrencyOverrides = { total: 'USD' };
@@ -230,7 +418,7 @@ test('authenticated manual API capture preserves source through cost edits and r
   assert.equal((await request(route, { areas: ['orders'] }, { tokenCsrf: 'invalid' })).status, 403); assert.equal(f.calls.length, 0);
   assert.equal((await request(route, { areas: ['orders'], workspaceId: 'foreign', sourceReadRef: 'forged' })).status, 200); assert.equal(f.calls.length, 1);
   const stored = await server.packsmart.store.get(WS), captured = stored.orders[0], reference = captured.sourceReadRef;
-  assert.match(reference, /^sor1:[a-f0-9]{64}$/); assert.equal(captured.total, '100.00');
+  assert.match(reference, /^sor2:[a-f0-9]{64}$/); assert.equal(captured.total, '100.00');
   const edited = await request(`/api/orders/${encodeURIComponent(captured.id)}/economics`, { actualShippingCost: 5, total: '999', currentTotal: '999', sourceReadRef: 'forged', sourceCurrencyOverrides: { total: 'USD' } }, { method: 'PUT' });
   assert.equal(edited.status, 200); const afterEdit = await server.packsmart.store.get(WS); const afterOrder = afterEdit.orders[0];
   assert.equal(afterOrder.total, '100.00'); assert.equal(afterOrder.currentTotal, '100.00'); assert.equal(afterOrder.sourceReadRef, reference); assert.equal(afterOrder.sourceCurrencyOverrides, undefined); assert.equal(afterOrder.actualShippingCost, 5);
