@@ -71,6 +71,34 @@ try {
     for (const [status, label] of [['partial', 'Incomplete'], ['complete', '$0.0000'], ['unavailable', 'Unavailable']]) {
       await refresh(fixture(status));
       assert.equal(await cost.textContent(), label);
+      const typography = await cost.evaluate(element => {
+        const style = getComputedStyle(element), range = document.createRange();
+        range.selectNodeContents(element);
+        const lineTops = [...new Set([...range.getClientRects()].filter(rect => rect.width && rect.height).map(rect => Math.round(rect.top * 100) / 100))];
+        const result = { textStatus: element.classList.contains('kpi-text-status'), fontSize: parseFloat(style.fontSize), lineTops,
+          whiteSpace: style.whiteSpace, overflowWrap: style.overflowWrap,
+          numericFontSize: parseFloat(getComputedStyle(document.querySelector('#fleet-kpis .kpi:last-child > strong')).fontSize) };
+        if (result.textStatus) {
+          // Larger user text may wrap naturally, but must not be clipped or
+          // forced outside the card by a one-line-only presentation rule.
+          const originalFontSize = element.style.fontSize;
+          element.style.fontSize = `${result.fontSize * 2}px`;
+          result.enlarged = { width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight };
+          element.style.fontSize = originalFontSize;
+        }
+        return result;
+      });
+      assert.equal(typography.textStatus, status !== 'complete', 'only text statuses use the semantic typography class');
+      if (status === 'complete') {
+        assert.equal(typography.fontSize, typography.numericFontSize, 'complete amounts retain the numeric KPI size');
+      } else {
+        assert.equal(typography.lineTops.length, 1, `${label} must remain one readable line at ${width}px: ${JSON.stringify(typography)}`);
+        assert.ok(typography.fontSize >= 14, `status text is too small at ${width}px: ${JSON.stringify(typography)}`);
+        assert.equal(typography.whiteSpace, 'normal', 'enlarged text must be allowed to wrap');
+        assert.equal(typography.overflowWrap, 'anywhere', 'status text retains overflow protection');
+        assert.ok(typography.enlarged.scrollWidth <= typography.enlarged.width + 2 && typography.enlarged.scrollHeight <= typography.enlarged.height + 2,
+          `status text clips at twice its normal size at ${width}px: ${JSON.stringify(typography.enlarged)}`);
+      }
       assert.equal(await workspaceCost('packsmart-solutions').textContent(), status === 'unavailable' ? 'Unavailable' : '$0.0000');
       assert.equal(await workspaceCost('partial-tenant').textContent(), label);
       assert.equal(await workspaceCost('missing-tenant').textContent(), status === 'complete' ? '$0.0000' : 'Unavailable');

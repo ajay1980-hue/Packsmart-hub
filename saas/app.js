@@ -1090,6 +1090,7 @@
       AI_USAGE_VOLATILE_STORE: 'This store keeps usage in process memory, which resets on restart.'
     };
     return {
+      complete,
       label,
       cost: complete ? usd(estimatedCostUsd) : label,
       requests: complete ? String(requests) : label,
@@ -1121,9 +1122,9 @@
       ['Running', totals.running || 0, 'jobs now'],
       ['Queued', totals.queued || 0, 'waiting safely'],
       ['Blocked', totals.blocked || 0, 'needs attention'],
-      ['Legacy AI estimate · month', aiMonth.cost, aiMonth.requestDescription],
+      ['Legacy AI estimate · month', aiMonth.cost, aiMonth.requestDescription, !aiMonth.complete],
       ['Plan value · month', money(totals.planMonthlyValueGbp || 0), 'GBP list/billing value']
-    ].map(item => '<article class="card kpi"><span>' + escapeHtml(item[0]) + '</span><strong>' + escapeHtml(item[1]) + '</strong><small>' + escapeHtml(item[2]) + '</small></article>').join('');
+    ].map(item => '<article class="card kpi"><span>' + escapeHtml(item[0]) + '</span><strong' + (item[3] ? ' class="kpi-text-status"' : '') + '>' + escapeHtml(item[1]) + '</strong><small>' + escapeHtml(item[2]) + '</small></article>').join('');
 
     $('#fleet-worker-detail').innerHTML = [
       ['Worker ID', worker.workerId || '—'],

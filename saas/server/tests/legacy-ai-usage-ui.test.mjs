@@ -85,6 +85,7 @@ async function harness(t, fleet = fleetFixture(), { launchAdmin = true } = {}) {
 test('complete recorded zero stays known zero, with explicit legacy scope and truthful configuration/catalogue labels', async t => {
   const h = await harness(t); await h.open();
   assert.equal(h.costKpi().querySelector('strong').textContent, '$0.0000');
+  assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-text-status').length, 0, 'known numeric amounts retain the numeric KPI typography');
   assert.equal(h.costKpi().querySelector('small').textContent, '0 recorded legacy requests');
   assert.equal(h.economics('Recorded legacy requests · month'), '0');
   assert.equal(h.economics('Recorded legacy cost estimate · USD'), '$0.0000');
@@ -110,6 +111,7 @@ test('complete nonzero usage shows its estimate without combining any governed l
   fleet.providerUsage = { scopes: [{ scopeKey: 'tenant', settled: { costMicros: 9000000, requests: 99 } }, { scopeKey: 'provider:openai', settled: { costMicros: 9000000, requests: 99 } }] };
   const h = await harness(t, fleet); await h.open();
   assert.equal(h.costKpi().querySelector('strong').textContent, '$1.25');
+  assert.equal(h.costKpi().querySelector('strong').classList.contains('kpi-text-status'), false);
   assert.equal(h.workspaceCost(), '$1.25'); assert.match(h.workspaceRequests(), /^3 recorded legacy requests/);
   assert.equal(h.economics('Recorded legacy requests · month'), '3');
   assert.equal(h.economics('Monthly plan value'), '£79.00 GBP');
@@ -126,6 +128,8 @@ test('partial and unavailable summaries withhold stale values at every Fleet cos
     // Even stale numbers in an incomplete response must not become visible.
     await h.refresh(fleetFixture({ status, cost: 9, requests: 8, usage: { status, reason, totals: { estimatedCostUsd: 9, requests: 8 } }, configured: false }));
     assert.equal(h.costKpi().querySelector('strong').textContent, label);
+    assert.equal(h.costKpi().querySelector('strong').classList.contains('kpi-text-status'), true);
+    assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-text-status').length, 1, 'only the textual usage status receives text typography');
     assert.equal(h.economics('Recorded legacy requests · month'), label);
     assert.equal(h.economics('Recorded legacy cost estimate · USD'), label);
     assert.equal(h.economics('Recorded ledger status'), label);
@@ -136,6 +140,9 @@ test('partial and unavailable summaries withhold stale values at every Fleet cos
     assert.match(note, status === 'partial' ? /process memory, which resets on restart/ : /could not be read/);
     assert.equal(h.document.querySelector('#fleet-ai-provider-status').textContent, 'Provider not configured');
   }
+  await h.refresh(fleetFixture({ cost: 1.25, requests: 3, usage: complete(1.25, 3) }));
+  assert.equal(h.costKpi().querySelector('strong').textContent, '$1.25');
+  assert.equal(h.document.querySelectorAll('#fleet-kpis .kpi-text-status').length, 0, 'refreshing to complete restores numeric typography');
 });
 
 test('mixed Fleet coverage hides its overall sum while retaining each complete workspace value', async t => {
