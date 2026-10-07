@@ -1555,7 +1555,7 @@
       '; maximum monthly ad budget ' + (limits.maxMonthlyAdBudget ?? 'not specified') + '; minimum stock cover days ' + (limits.minStockCoverDays ?? 'not specified') +
       '; profit first ' + (limits.profitFirst ? 'yes' : 'no') + '; additional approval kinds ' + ((limits.approvalRequiredKinds || []).map(statusLabel).join(', ') || 'none') + '. Saved restriction: ' + describeRestriction(policy) + '.';
     const blocked = limits.profitFirst || ['minGrossMarginPercent','maxMonthlyAdBudget','minStockCoverDays'].some(key => limits[key] != null);
-    $('#objective-restriction-status').textContent = (blocked ? 'Matching changes remain blocked: qualified profit, money or stock evidence is unavailable for these saved conditions, including any explicit zero limit. ' : 'Other restrictions and exact approval may still block a change. ') +
+    $('#objective-restriction-status').textContent = (blocked ? 'When this objective’s restriction applies, matching changes are blocked because qualified financial or stock evidence is unavailable for these saved conditions, including any explicit zero limit. ' : 'Other restrictions and exact approval may still block a change. ') +
       (source.effectiveStatus !== 'active' ? 'This objective is outside its active status/window, which also blocks matching changes while restricted. ' : '') +
       'This editor changes no goal, financial limit, stock limit, date or approval requirement.';
     $('#objective-restriction-error').textContent = '';
