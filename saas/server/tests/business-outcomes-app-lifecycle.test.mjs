@@ -1,0 +1,141 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { once } from 'node:events';
+import { JSDOM, VirtualConsole } from 'jsdom';
+import { createPacksmartServer } from '../server.mjs';
+import { seedWorkspaceState } from '../lib/store.mjs';
+import { createSessionToken } from '../lib/security.mjs';
+import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
+import { createBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
+
+const workspaceId = 'outcome-app-lifecycle', experimentId = 'experiment_one', actorId = 'owner_one';
+const now = '2026-10-06T20:00:00.000Z';
+const measurement = prepareExperimentOutcomeMeasurement({ expectedRevision: 0, amount: '10', currency: 'GBP',
+  window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' },
+  coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' },
+  observedAt: '2026-10-06T12:00:00.000Z', report: { description: 'Synthetic owner-reconciled contribution.', costsComplete: true }
+}, { workspaceId, experimentId, actorId, now, previousMeasurement: null });
+const detail = { workspaceId, workspaceRevision: 'fixture_revision', experiment: { id: experimentId, title: 'Recorded experiment', status: 'measured' },
+  measurement, assessment: assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId, now }), currentPublication: null };
+const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
+async function until(predicate) {
+  for (let n = 0; n < 200; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 5)); }
+  assert.fail('Outcome app lifecycle did not settle');
+}
+const expired = () => Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 });
+
+async function harness(t) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-outcome-app-'));
+  const secret = 'outcome-app-lifecycle-fixture-over-thirty-two-characters';
+  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false'
+  }, { schedulerEnabled: false, agentOpsEnabled: false });
+  const state = seedWorkspaceState({}, { workspaceId, userId: actorId, email: 'owner@outcome-app.test', passwordHash: 'synthetic-only' });
+  state.products = []; state.revenueEngine.experiments = [detail.experiment];
+  await server.packsmart.store.save(workspaceId, state);
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const token = createSessionToken({ workspaceId, userId: actorId, email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/bootstrap`, { headers: { Cookie: `packsmart_session=${token}` } });
+  assert.equal(response.status, 200); const bootstrap = await response.json();
+  await new Promise(r => server.close(r));
+  const errors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', e => errors.push(e.message));
+  const html = await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8');
+  const dom = new JSDOM(html, { url: 'https://outcome-app.test', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole });
+  const w = dom.window, d = w.document;
+  w.Headers = Headers; w.AbortController = AbortController; w.scrollTo = () => {}; w.HTMLElement.prototype.scrollIntoView = () => {};
+  w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  w.HTMLDialogElement.prototype.close = function () { this.open = false; };
+  t.after(async () => { await new Promise(r => setTimeout(r, 15)); dom.window.close(); await fs.rm(directory, { recursive: true, force: true }); assert.deepEqual(errors, []); });
+  const h = { w, d, calls: [], handler: null, logout: null, $: id => d.getElementById(id) };
+  w.fetch = async (route, config = {}) => {
+    h.calls.push({ route, config });
+    if (route === '/api/bootstrap') return Response.json(bootstrap);
+    if (['/api/auth/session', '/api/auth/login'].includes(route)) return Response.json({ user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf });
+    if (route === '/api/auth/signup-options') return Response.json({ enabled: false });
+    if (route === '/api/auth/logout') return h.logout ? h.logout.promise : Response.json({ ok: true });
+    if (route.startsWith('/api/business-outcomes')) {
+      const held = h.handler?.(route, config); if (held) return held;
+      if (route === '/api/business-outcomes') return Response.json({ workspaceId, current: [], summary: { groups: [], coverage: { complete: true } } });
+      return Response.json(detail);
+    }
+    throw new Error('Unexpected fixture route ' + route);
+  };
+  for (const file of ['presentation.js', 'control-ui.js', 'outcomes-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
+  await until(() => !h.$('app-shell').classList.contains('hidden'));
+  h.panel = h.$('business-outcomes-panel');
+  h.navigate = view => d.querySelector(`#main-nav [data-view="${view}"]`).click();
+  h.open = async () => {
+    h.navigate('revenue-engine'); h.panel.open = true;
+    await until(() => h.$('business-outcomes-summary').textContent.includes('Reviewed results loaded'));
+  };
+  h.load = async () => {
+    h.$('business-outcomes-experiment').value = experimentId; h.$('business-outcomes-load').click();
+    await until(() => !h.$('business-outcomes-load').disabled && h.$('business-outcomes-detail').textContent.includes('Recorded experiment'));
+  };
+  h.confirm = () => {
+    h.$('business-outcomes-attest').checked = true;
+    h.$('business-outcomes-attest').dispatchEvent(new w.Event('change', { bubbles: true }));
+    h.$('business-outcomes-confirm').click();
+  };
+  h.begin = async kind => {
+    await h.open(); if (kind !== 'read') await h.load();
+    const hold = deferred(); h.handler = () => hold.promise;
+    if (kind === 'read') h.$('business-outcomes-refresh').click();
+    else if (kind === 'save') h.$('business-outcomes-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+    else { d.querySelector('[data-outcome-action="publish"]').click(); h.confirm(); }
+    return { hold, request: h.calls.at(-1) };
+  };
+  h.signedIn = () => !h.$('app-shell').classList.contains('hidden');
+  return h;
+}
+
+for (const kind of ['read', 'save', 'publish']) {
+  test(`${kind} response after same-task panel close cannot expire the current session`, async t => {
+    const h = await harness(t), { hold, request } = await h.begin(kind);
+    assert.equal(request.config.isCurrent(), true); assert.equal(request.config.signal.aborted, false);
+    h.panel.open = false;
+    assert.equal(request.config.signal.aborted, false, 'exercise the interval before the details-toggle listener runs');
+    hold.resolve(expired());
+    await new Promise(r => setTimeout(r, 15));
+    assert.equal(h.signedIn(), true); assert.equal(request.config.isCurrent(), false);
+    const count = h.calls.length;
+    await new Promise(r => setTimeout(r, 15)); assert.equal(h.calls.length, count, 'no automatic mutation or read retry');
+    if (kind === 'save') assert.equal(h.$('business-outcomes-form').elements.amount.disabled, true, 'unconfirmed save requires a fresh review');
+    if (kind === 'publish') {
+      h.panel.open = true; await until(() => h.$('business-outcomes-confirm')?.textContent.includes('Retry same'));
+      assert.equal(h.$('business-outcomes-confirm').disabled, true, 'fresh attestation is required');
+      const retry = deferred(); h.handler = () => retry.promise; h.confirm();
+      assert.equal(h.calls.at(-1).config.body, request.config.body, 'closing does not cancel or replace the original publication identity');
+      const payload = JSON.parse(request.config.body);
+      const version = createBusinessOutcomeCandidate({ source: { type: 'experiment_measurement', experimentId,
+        measurementRevision: measurement.revision, measurementDigest: measurement.digest },
+        ...Object.fromEntries(['metric','amount','currency','window','coverage','method','provenance','links'].map(key => [key, measurement[key]])),
+        verification: { kind: 'owner_attestation', actorId, verifiedAt: now, measurementDigest: measurement.digest }
+      }, { workspaceId, now });
+      retry.resolve(Response.json({ publication: { version, head: { workspaceId, versionId: version.versionId, digest: version.digest, status: 'published', publicationId: payload.publicationId } }, replayed: true, isCurrent: true }));
+      await until(() => h.$('business-outcomes-status').textContent.includes('Review saved'));
+    }
+  });
+
+  test(`${kind} response after navigation or replacement session is ignored while current 401 still signs out`, async t => {
+    let h = await harness(t); const first = await h.begin(kind);
+    h.navigate('overview');
+    assert.equal(first.request.config.signal.aborted, true); assert.equal(first.request.config.isCurrent(), false);
+    first.hold.resolve(expired()); await new Promise(r => setTimeout(r, 10)); assert.equal(h.signedIn(), true);
+    h = await harness(t);
+    const old = await h.begin(kind);
+    h.logout = deferred(); h.$('logout').click();
+    assert.equal(old.request.config.signal.aborted, true, 'logout invalidates outcomes before waiting for its transport');
+    h.logout.resolve(Response.json({ ok: true })); await until(() => !h.signedIn());
+    h.handler = null; h.logout = null;
+    const form = h.$('login-form'); Object.defineProperty(form, 'email', { value: form.elements.email }); Object.defineProperty(form, 'password', { value: form.elements.password });
+    form.elements.email.value = 'owner@outcome-app.test'; form.elements.password.value = 'synthetic-only';
+    form.dispatchEvent(new h.w.Event('submit', { bubbles: true, cancelable: true })); await until(h.signedIn);
+    old.hold.resolve(expired()); await new Promise(r => setTimeout(r, 10)); assert.equal(h.signedIn(), true);
+    const active = await h.begin(kind); active.hold.resolve(expired()); await until(() => !h.signedIn());
+    assert.equal(h.panel.open, false);
+  });
+}

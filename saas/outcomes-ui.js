@@ -76,7 +76,7 @@
   async function read(name, path, apply) {
     if (busy.has(name)) return;
     const t = ticket(), controller = new AbortController(); controllers.add(controller); busy.add(name); controls();
-    try { const result = await api.request(path, { signal: controller.signal }); if (active(t)) apply(result); }
+    try { const result = await api.request(path, { signal: controller.signal, isCurrent: () => active(t) }); if (active(t)) apply(result); }
     catch (error) { if (active(t)) status(error.status === 401 ? 'Sign in again to read business results.' : 'Could not load business results. Select Refresh to try again.', true); }
     finally { controllers.delete(controller); if (active(t)) { busy.delete(name); controls(); } }
   }
@@ -143,7 +143,7 @@
     pending = null; renderReview(); const t = ticket(), id = selected.experiment.id, controller = new AbortController(); controllers.add(controller);
     busy.add('save'); controls(); status('Saving measurement…');
     try {
-      const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/measurement', { method: 'PUT', body: JSON.stringify(body), signal: controller.signal });
+      const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/measurement', { method: 'PUT', body: JSON.stringify(body), signal: controller.signal, isCurrent: () => active(t) });
       if (!active(t)) return;
       if (result.workspaceId !== context().workspaceId || result.measurement?.experimentId !== id) throw new Error('Unexpected measurement response');
       selected = { ...selected, ...result }; renderDetail(); populateForm(); status('Draft saved. Owner review is still required.');
@@ -178,7 +178,7 @@
     if (p.action === 'withdraw' && !p.attempted) { p.payload.withdrawalReason = $('business-outcomes-reason').value.trim(); if (!p.payload.withdrawalReason) return status('Give a reason for this withdrawal.', true); }
     p.attempted = true; const t = ticket(), controller = new AbortController(); controllers.add(controller); busy.add('publish'); controls(); status('Submitting the reviewed action…');
     try {
-      const result = await api.request('/api/business-outcomes/publish', { method: 'POST', body: JSON.stringify(p.payload), signal: controller.signal });
+      const result = await api.request('/api/business-outcomes/publish', { method: 'POST', body: JSON.stringify(p.payload), signal: controller.signal, isCurrent: () => active(t) });
       if (!active(t)) { p.uncertain = true; return; }
       if (!validPublication(result.publication) || result.publication.head.publicationId !== p.payload.publicationId) throw new Error('Publication response did not match the reviewed action');
       pending = null; stale = true; renderDetail(result.isCurrent === true && p.action !== 'withdraw' && result.publication.version.source?.measurementDigest === selected?.measurement?.digest); renderReview(); status(result.isCurrent === false ? 'This action was recorded; a newer result is now available. Refresh the experiment and results.' : 'Review saved. Refresh the experiment and results to see the latest version.');
