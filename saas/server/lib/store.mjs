@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { compactDailyBrief, defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
@@ -60,6 +61,91 @@ async function boundedResponseText(response, maxBytes) {
     }
     return Buffer.concat(chunks,total).toString('utf8');
   } finally { reader.releaseLock(); }
+}
+const CONNECTION_WRITE_CONTEXT_MAX_BYTES = 32768;
+const CONNECTION_WRITE_CONTEXT_FIELDS = ['revision', 'provider', 'writeId', 'connectionId', 'actorId', 'approverId', 'approvalId',
+  'writeIndex', 'connectionIndex', 'actorIndex', 'approverIndex', 'approvalIndex'];
+const CONNECTION_WRITE_ROOT_SCOPE = ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id', 'tenant'];
+const contextUnavailable = () => Object.assign(new Error('Connection-write context is unavailable. Review the request and try again.'),
+  { code: 'WRITE_CONTEXT_UNAVAILABLE', status: 503 });
+const contextObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+  && [Object.prototype, null].includes(Object.getPrototypeOf(value));
+const contextIdentity = value => typeof value === 'string' && value.length > 0 && value.length <= 256
+  && value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+const contextIndex = value => Number.isSafeInteger(value) && value >= 0 && value <= 4095;
+function validateConnectionWriteContextInput(workspaceId, input) {
+  if (!contextIdentity(workspaceId) || !contextObject(input)) throw contextUnavailable();
+  const fields = Reflect.ownKeys(input), descriptors = Object.getOwnPropertyDescriptors(input);
+  if (fields.length !== CONNECTION_WRITE_CONTEXT_FIELDS.length
+    || fields.some(field => !CONNECTION_WRITE_CONTEXT_FIELDS.includes(field) || !Object.hasOwn(descriptors[field], 'value'))
+    || !['shopify', 'meta'].includes(input.provider)
+    || !['revision', 'writeId', 'connectionId', 'actorId', 'approverId'].every(field => contextIdentity(input[field]))
+    || !['writeIndex', 'connectionIndex', 'actorIndex', 'approverIndex'].every(field => contextIndex(input[field]))
+    || (input.actorId === input.approverId) !== (input.actorIndex === input.approverIndex)
+    || !(input.approvalId === null && input.approvalIndex === null
+      || contextIdentity(input.approvalId) && contextIndex(input.approvalIndex))) throw contextUnavailable();
+}
+function assertConnectionContextScope(value, workspaceId, depth = 0) {
+  if (depth > 64) throw contextUnavailable();
+  if (value === null || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertConnectionContextScope(item, workspaceId, depth + 1);
+    return;
+  }
+  if (!contextObject(value)) throw contextUnavailable();
+  for (const key of ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id']) {
+    if (Object.hasOwn(value, key) && value[key] !== workspaceId) throw contextUnavailable();
+  }
+  for (const key of ['workspace', 'tenant']) {
+    if (Object.hasOwn(value, key) && (contextObject(value[key]) ? value[key].id : value[key]) !== workspaceId) throw contextUnavailable();
+  }
+  for (const item of Object.values(value)) assertConnectionContextScope(item, workspaceId, depth + 1);
+}
+function connectionWriteContextResult(rows, workspaceId, input) {
+  const objectFields = ['workspace', 'settings', 'actor', 'approver', 'connection', 'write',
+    ...(input.approvalId === null ? [] : ['approval'])];
+  const fields = ['workspace_id', 'revision', ...CONNECTION_WRITE_ROOT_SCOPE.map(key => `scope_${key}`), ...objectFields];
+  if (!Array.isArray(rows) || rows.length !== 1 || Buffer.byteLength(JSON.stringify(rows)) > CONNECTION_WRITE_CONTEXT_MAX_BYTES) throw contextUnavailable();
+  const row = rows[0];
+  if (!contextObject(row) || Object.keys(row).length !== fields.length || fields.some(field => !Object.hasOwn(row, field))
+    || row.workspace_id !== workspaceId || row.revision !== input.revision
+    || !objectFields.every(field => contextObject(row[field]))
+    || row.workspace.id !== workspaceId || row.actor.id !== input.actorId || row.approver.id !== input.approverId
+    || row.connection.id !== input.connectionId || row.connection.provider !== input.provider
+    || row.write.id !== input.writeId || row.write.provider !== input.provider || row.write.connectionId !== input.connectionId
+    || !contextObject(row.connection.metadata) || !Array.isArray(row.connection.metadata.grantedScopes)
+    || !row.connection.metadata.grantedScopes.every(contextIdentity) || !contextObject(row.write.input)
+    || (input.actorId === input.approverId && !isDeepStrictEqual(row.actor, row.approver))) throw contextUnavailable();
+  // JSON projection maps both absent root properties and JSON null to null.
+  // Their distinction was checked on the caller's full snapshot; revision
+  // equality preserves it here. Selected complete records keep own properties.
+  for (const key of CONNECTION_WRITE_ROOT_SCOPE) {
+    const value = row[`scope_${key}`];
+    if (value !== null && (key === 'tenant' && contextObject(value) ? value.id : value) !== workspaceId) throw contextUnavailable();
+  }
+  for (const key of ['metaPageIds', 'metaCatalogIds']) {
+    if (Object.hasOwn(row.settings, key) && (!Array.isArray(row.settings[key]) || !row.settings[key].every(contextIdentity))) throw contextUnavailable();
+  }
+  if (Object.hasOwn(row.settings, 'consent') && row.settings.consent !== null && !contextObject(row.settings.consent)) throw contextUnavailable();
+  for (const key of ['providerState', 'dispatchClaim']) {
+    if (Object.hasOwn(row.write, key) && row.write[key] !== null && !contextObject(row.write[key])) throw contextUnavailable();
+  }
+  if (input.approvalId === null) {
+    if (row.write.approvalId != null || row.write.requiresApproval !== false || input.provider !== 'shopify'
+      || row.write.input.operation !== 'internal_note' || row.settings.permissionMode !== 'automatic'
+      || !contextObject(row.settings.consent) || row.settings.consent.mode !== 'automatic'
+      || row.settings.consent.actor !== input.approverId) throw contextUnavailable();
+  } else if (row.approval.id !== input.approvalId || row.write.approvalId !== input.approvalId
+    || row.approval.decidedBy !== input.approverId || !contextObject(row.approval.payload)
+    || row.approval.payload.connectionWriteId !== input.writeId) throw contextUnavailable();
+  for (const record of [row.settings, row.approval]) {
+    if (record && Object.hasOwn(record, 'provider') && record.provider !== input.provider) throw contextUnavailable();
+  }
+  assertConnectionContextScope(row, workspaceId);
+  return { _revision: row.revision, workspace: row.workspace,
+    users: input.actorId === input.approverId ? [row.actor] : [row.actor, row.approver],
+    connectionSettings: { [input.provider]: row.settings }, connections: [row.connection],
+    approvals: input.approvalId === null ? [] : [row.approval], connectionWrites: [row.write] };
 }
 const JOB_FIELDS = 'id,workspace_id,type,provider,status,priority,attempts,max_attempts,ai_units,concurrency_limit,idempotency_key,actor,ai_provider,ai_model,ai_tier,available_at,lease_until,worker_id,error_code,created_at,updated_at,completed_at';
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
@@ -283,6 +369,11 @@ class FileStore {
   }
 
   get provider() { return 'file'; }
+
+  async getConnectionWriteContext() {
+    // File snapshots cannot establish the durable, current dispatch authority.
+    throw contextUnavailable();
+  }
 
   async readAll() {
     try {
@@ -533,6 +624,26 @@ class SupabaseStore {
   }
 
   get provider() { return 'supabase'; }
+
+  async getConnectionWriteContext(workspaceId, input) {
+    try {
+      validateConnectionWriteContextInput(workspaceId, input);
+      input = Object.freeze({ ...input });
+      // Only trusted server-selected indexes are accepted. The caller checks
+      // array uniqueness once; an exact revision binds every subsequent read
+      // to that same array membership and order. Never normalize or fall back
+      // to the full workspace snapshot at this dispatch boundary.
+      const select = ['workspace_id', 'revision:state->>_revision', 'workspace:state->workspace',
+        ...CONNECTION_WRITE_ROOT_SCOPE.map(key => `scope_${key}:state->${key}`),
+        `settings:state->connectionSettings->${input.provider}`, `actor:state->users->${input.actorIndex}`,
+        `approver:state->users->${input.approverIndex}`, `connection:state->connections->${input.connectionIndex}`,
+        ...(input.approvalId === null ? [] : [`approval:state->approvals->${input.approvalIndex}`]),
+        `write:state->connectionWrites->${input.writeIndex}`].join(',');
+      const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=eq.${encodeURIComponent(input.revision)}&select=${select}&limit=2`,
+        { maxResponseBytes: CONNECTION_WRITE_CONTEXT_MAX_BYTES });
+      return connectionWriteContextResult(rows, workspaceId, input);
+    } catch { throw contextUnavailable(); }
+  }
 
   async getOperatorBriefContext(workspaceId, jobId) {
     validateJobIdentity(workspaceId, jobId);
