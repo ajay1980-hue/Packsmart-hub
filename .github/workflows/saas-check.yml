@@ -62,12 +62,18 @@ jobs:
             /tmp/runvara-business-graph-*.png
             /tmp/runvara-business-objectives-*.png
             /tmp/runvara-provider-usage-*.png
-            /tmp/runvara-legacy-ai-usage-*.png
             /tmp/runvara-objective-review-*.png
             /tmp/runvara-automation-history-*.png
             /tmp/runvara-business-outcomes-*.png
             /tmp/runvara-activity-*.png
             /tmp/runvara-imported-order-*.png
+          if-no-files-found: ignore
+      - name: Upload legacy usage verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-legacy-ai-usage-responsive
+          path: /tmp/runvara-legacy-ai-usage-*.png
           if-no-files-found: ignore
       - name: Build production container
         run: docker build -f saas/server/Dockerfile -t packsmart-ops:test .
