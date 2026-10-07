@@ -4,6 +4,7 @@
   const LIMIT = 20;
   let api, generation = 0, scope = null, session = null, selected = null, overview = null;
   let pending = null, stale = false, busy = new Set(), controllers = new Set();
+  let relationship = null;
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;');
   const bounded = (value, max = 1000) => String(value ?? '').slice(0, max);
@@ -36,7 +37,8 @@
   const active = ticket => ticket.generation === generation && ticket.scope === key(context()) && ticket.session === context().session && context().view === 'revenue-engine' && $('business-outcomes-panel').open;
   const ticket = () => ({ generation, scope: key(context()), session: context().session });
   function status(text, error = false) { $('business-outcomes-status').textContent = text; $('business-outcomes-status').classList.toggle('outcome-error', error); }
-  function invalidate() { generation++; controllers.forEach(c => c.abort()); controllers.clear(); for (const name of busy) if (!['save', 'publish'].includes(name)) busy.delete(name); }
+  function clearRelationship() { relationship = null; $('business-outcomes-relationship')?.remove(); }
+  function invalidate() { generation++; clearRelationship(); controllers.forEach(c => c.abort()); controllers.clear(); for (const name of busy) if (!['save', 'publish'].includes(name)) busy.delete(name); }
   function controls() {
     $('business-outcomes-refresh').disabled = busy.has('overview');
     $('business-outcomes-load').disabled = busy.has('detail') || busy.has('save') || busy.has('publish');
@@ -60,6 +62,67 @@
   }
   function validPublication(value) {
     return value?.head?.workspaceId === context().workspaceId && value?.version?.workspaceId === context().workspaceId && value.head.versionId === value.version.versionId && value.head.digest === value.version.digest && typeof value.version.versionId === 'string' && value.version.versionId.length <= 180;
+  }
+  // This display-only projection cannot grant authority or qualify any other
+  // result. Accept it only alongside a matching selected-detail read.
+  function selectedRelationship(detail) {
+    const exact = (value, fields) => value !== null && typeof value === 'object' && !Array.isArray(value)
+      && Reflect.ownKeys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field)
+        && Object.getOwnPropertyDescriptor(value, field)?.enumerable && Object.hasOwn(Object.getOwnPropertyDescriptor(value, field), 'value'));
+    const hash = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+    const ref = (value, kind) => typeof value === 'string' && value.startsWith(kind + '_') && hash(value.slice(kind.length + 1));
+    const unresolved = value => exact(value, ['status', 'reason', 'identityHash']) && value.status === 'unresolved'
+      && value.reason === 'separate_graph_not_resolved' && hash(value.identityHash);
+    const r = detail.relationships, p = detail.currentPublication, m = detail.measurement;
+    if (!exact(r, ['schema', 'scope', 'snapshot', 'publication', 'nodes', 'edges', 'coverage', 'safeguards'])
+      || r.schema !== 'runvara-selected-outcome-relationships/v1' || r.scope !== 'selected_experiment_only'
+      || !exact(r.snapshot, ['id', 'workspaceRevisionRef', 'readCompletedAt'])
+      || !ref(r.snapshot.id, 'selected_snapshot') || !ref(r.snapshot.workspaceRevisionRef, 'selected_revision')
+      || typeof r.snapshot.readCompletedAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(r.snapshot.readCompletedAt)
+      || !Number.isFinite(Date.parse(r.snapshot.readCompletedAt))
+      || !exact(r.coverage, ['selectedExperimentConfirmed', 'currentHeadChecked', 'wholeGraphSynchronized', 'otherOutcomesChecked', 'crossOutcomeComparabilityChecked'])
+      || r.coverage.selectedExperimentConfirmed !== true || r.coverage.currentHeadChecked !== true
+      || r.coverage.wholeGraphSynchronized !== false || r.coverage.otherOutcomesChecked !== false || r.coverage.crossOutcomeComparabilityChecked !== false
+      || !exact(r.safeguards, ['causalAttribution', 'forecastingAuthorized', 'learningAuthorized', 'executionAuthorized', 'rawIdentifiersIncluded', 'amountsIncluded'])
+      || Object.values(r.safeguards).some(value => value !== false)
+      || !exact(r.publication, ['state', 'qualification', 'versionDigest', 'draftRelationship', 'draftDigest'])
+      || !Array.isArray(r.nodes) || r.nodes.length !== (p ? 2 : 1) || !Array.isArray(r.edges) || r.edges.length !== (p ? 1 : 0)) return null;
+    const expectedDraft = !m ? 'no_draft' : !p ? 'no_publication'
+      : m.revision === p.version.source?.measurementRevision && m.digest === p.version.source?.measurementDigest ? 'matches_publication' : 'different_from_publication';
+    if ((m && !hash(m.digest)) || r.publication.draftDigest !== (m?.digest ?? null) || r.publication.draftRelationship !== expectedDraft) return null;
+    const experiment = r.nodes[0];
+    if (!exact(experiment, ['id', 'type', 'canonicalGraphRef']) || !ref(experiment.id, 'selected_experiment')
+      || experiment.type !== 'experiment_reference' || !unresolved(experiment.canonicalGraphRef)) return null;
+    if (!p) return r.publication.state === 'none' && r.publication.qualification === 'none' && r.publication.versionDigest === null ? 'none' : null;
+    const { head, version } = p, source = version.source, verification = version.verification;
+    if (!validPublication(p) || !hash(version.digest) || r.publication.versionDigest !== version.digest
+      || source?.type !== 'experiment_measurement' || source.experimentId !== detail.experiment.id || !hash(source.measurementDigest)
+      || verification?.kind !== 'owner_attestation' || verification.measurementDigest !== source.measurementDigest
+      || !['published', 'withdrawn'].includes(head.status) || r.publication.state !== head.status
+      || version.status !== (head.status === 'withdrawn' ? 'withdrawn' : 'recorded')) return null;
+    const complete = typeof version.amount === 'string' && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(version.amount)
+      && typeof version.currency === 'string' && /^[A-Z]{3}$/.test(version.currency)
+      && typeof version.window?.startsAt === 'string' && typeof version.window.endsAt === 'string'
+      && version.coverage?.status === 'complete' && ['reconciled_manual', 'before_after', 'holdout'].includes(version.method?.kind)
+      && typeof version.provenance?.observationId === 'string' && Array.isArray(version.provenance.sourceRefs)
+      && version.provenance.sourceRefs.length > 0 && typeof version.provenance.observedAt === 'string';
+    const qualification = head.status === 'withdrawn' ? 'withdrawn' : complete ? 'owner_attested_measurement' : 'unqualified';
+    const outcome = r.nodes[1], edge = r.edges[0];
+    if (r.publication.qualification !== qualification
+      || !exact(outcome, ['id', 'type', 'qualification', 'sourceVersionRef', 'canonicalGraphRef'])
+      || !ref(outcome.id, 'selected_outcome') || !ref(outcome.sourceVersionRef, 'selected_version')
+      || outcome.type !== (head.status === 'withdrawn' ? 'withdrawn_measurement_reference' : 'published_measurement_reference')
+      || outcome.qualification !== qualification || !unresolved(outcome.canonicalGraphRef)
+      || !exact(edge, ['id', 'from', 'to', 'relation', 'basis']) || !ref(edge.id, 'selected_edge')
+      || edge.from !== outcome.id || edge.to !== experiment.id || edge.relation !== 'measurement_recorded_for_experiment' || edge.basis !== 'same_review_snapshot') return null;
+    return qualification;
+  }
+  function relationshipText() {
+    const text = labelFrom({ none: 'No owner-reviewed result was found for this experiment when loaded.',
+      owner_attested_measurement: 'An owner-reviewed result was linked to this experiment when loaded.',
+      withdrawn: 'This experiment’s reviewed result was withdrawn and no longer qualifies.',
+      unqualified: 'This experiment’s reviewed result is missing required measurement details.' }, relationship, '');
+    return text ? `<p id="business-outcomes-relationship" class="muted">${text} Only this experiment was checked; the rest of the workspace was not.</p>` : '';
   }
   function renderOverview() {
     if (!overview) return;
@@ -98,7 +161,7 @@
     const d = selected; if (!d) { $('business-outcomes-detail').replaceChildren(); $('business-outcomes-form').classList.add('hidden'); return; }
     const m = d.measurement, publication = d.currentPublication;
     const blockers = Array.isArray(d.assessment?.blockers) ? d.assessment.blockers : [];
-    let html = `<h3>${esc(bounded(d.experiment.title || d.experiment.id, 180))}</h3><p class="muted">${m ? `Saved measurement · version ${esc(m.revision)}` : 'No business result recorded yet.'} · Earlier legacy reviews do not count as reviewed business results.</p>`;
+    let html = `<h3>${esc(bounded(d.experiment.title || d.experiment.id, 180))}</h3>${relationshipText()}<p class="muted">${m ? `Saved measurement · version ${esc(m.revision)}` : 'No business result recorded yet.'} · Earlier legacy reviews do not count as reviewed business results.</p>`;
     if (m) html += facts(m) + `<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : m.report?.costsComplete === false ? 'No' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
     const alreadyReviewed = justReviewed || (m && publication?.head.status === 'published' && m.revision === publication.version.source.measurementRevision && m.digest === publication.version.source.measurementDigest);
     const reviewStatus = alreadyReviewed ? 'This saved version has already been reviewed. Save an updated draft to request a correction.'
@@ -120,11 +183,11 @@
     if (busy.has('detail') || busy.has('save') || busy.has('publish')) return;
     const id = $('business-outcomes-experiment').value; if (!id) return status('Choose an experiment.');
     if (pending?.attempted) return status('Finish checking the pending action before editing this result. Retrying keeps the same request.', true);
-    generation++; controllers.forEach(c => c.abort()); controllers.clear(); busy.clear(); pending = null; renderReview();
+    generation++; clearRelationship(); controllers.forEach(c => c.abort()); controllers.clear(); busy.clear(); pending = null; renderReview();
     selected = null; renderDetail(); status('Loading the selected experiment…');
     return read('detail', '/api/business-outcomes/experiments/' + encodeURIComponent(id), result => {
       if (result.workspaceId !== context().workspaceId || result.experiment?.id !== id || (result.measurement && (result.measurement.workspaceId !== result.workspaceId || result.measurement.experimentId !== id)) || (result.currentPublication && !validPublication(result.currentPublication))) throw new Error('Mismatched experiment');
-      selected = result; stale = false; renderDetail(); populateForm(); status('Experiment loaded. Edit a draft or review the saved measurement.');
+      selected = result; relationship = selectedRelationship(result); stale = false; renderDetail(); populateForm(); status('Experiment loaded. Edit a draft or review the saved measurement.');
     });
   }
   function measurementInput() {
@@ -141,7 +204,7 @@
     event.preventDefault(); if (!selected || !canPrepare() || stale || pending?.attempted || busy.has('save') || busy.has('publish')) return;
     let body; try { body = measurementInput(); } catch (error) { status(error.message, true); return; }
     pending = null; renderReview(); const t = ticket(), id = selected.experiment.id, controller = new AbortController(); controllers.add(controller);
-    busy.add('save'); controls(); status('Saving measurement…');
+    clearRelationship(); busy.add('save'); controls(); status('Saving measurement…');
     try {
       const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/measurement', { method: 'PUT', body: JSON.stringify(body), signal: controller.signal, isCurrent: () => active(t) });
       if (!active(t)) return;
@@ -176,7 +239,7 @@
     if (!pending || busy.has('publish') || role() !== 'owner' || !$('business-outcomes-attest')?.checked) return;
     const p = pending;
     if (p.action === 'withdraw' && !p.attempted) { p.payload.withdrawalReason = $('business-outcomes-reason').value.trim(); if (!p.payload.withdrawalReason) return status('Give a reason for this withdrawal.', true); }
-    p.attempted = true; const t = ticket(), controller = new AbortController(); controllers.add(controller); busy.add('publish'); controls(); status('Submitting the reviewed action…');
+    p.attempted = true; clearRelationship(); const t = ticket(), controller = new AbortController(); controllers.add(controller); busy.add('publish'); controls(); status('Submitting the reviewed action…');
     try {
       const result = await api.request('/api/business-outcomes/publish', { method: 'POST', body: JSON.stringify(p.payload), signal: controller.signal, isCurrent: () => active(t) });
       if (!active(t)) { p.uncertain = true; return; }

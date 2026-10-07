@@ -8,7 +8,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
-import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
+import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { createActivityMeter } from '../lib/activity-meter.mjs';
 
@@ -21,6 +21,13 @@ const measurement = prepareExperimentOutcomeMeasurement({ expectedRevision: 0, a
 }, { workspaceId, experimentId, actorId, now, previousMeasurement: null });
 const detail = { workspaceId, workspaceRevision: 'fixture_revision', experiment: { id: experimentId, title: 'Recorded experiment', status: 'measured' },
   measurement, assessment: assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId, now }), currentPublication: null };
+const opaque = (kind, value) => `${kind}_${digestMeasurementValue([workspaceId, kind, value])}`;
+detail.relationships = { schema: 'runvara-selected-outcome-relationships/v1', scope: 'selected_experiment_only',
+  snapshot: { id: opaque('selected_snapshot', 'fixture'), workspaceRevisionRef: opaque('selected_revision', detail.workspaceRevision), readCompletedAt: now },
+  publication: { state: 'none', qualification: 'none', versionDigest: null, draftRelationship: 'no_publication', draftDigest: measurement.digest },
+  nodes: [{ id: opaque('selected_experiment', experimentId), type: 'experiment_reference', canonicalGraphRef: { status: 'unresolved', reason: 'separate_graph_not_resolved', identityHash: digestMeasurementValue(['experiment', experimentId]) } }], edges: [],
+  coverage: { selectedExperimentConfirmed: true, currentHeadChecked: true, wholeGraphSynchronized: false, otherOutcomesChecked: false, crossOutcomeComparabilityChecked: false },
+  safeguards: { causalAttribution: false, forecastingAuthorized: false, learningAuthorized: false, executionAuthorized: false, rawIdentifiersIncluded: false, amountsIncluded: false } };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 async function until(predicate) {
   for (let n = 0; n < 200; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 5)); }
@@ -135,6 +142,20 @@ test('outcome and activity navigation discard each other’s stale 401 without s
   assert.equal(h.$('workspace-activity-result').textContent, '');
   h.logout.resolve(Response.json({ ok: true }));
   await until(() => !h.signedIn());
+});
+
+test('real app navigation and logout immediately clear selected relationship checks without automatic detail reads', async t => {
+  const h = await harness(t); await h.open(); await h.load();
+  assert.match(h.$('business-outcomes-relationship').textContent, /No owner-reviewed result was found/);
+  const detailReads = () => h.calls.filter(c => c.route === '/api/business-outcomes/experiments/' + experimentId).length;
+  assert.equal(detailReads(), 1); h.navigate('overview');
+  assert.equal(h.$('business-outcomes-relationship'), null, 'navigation hides the check synchronously');
+  await h.open(); assert.equal(h.$('business-outcomes-relationship'), null); assert.equal(detailReads(), 1);
+  await h.load(); assert.ok(h.$('business-outcomes-relationship')); assert.equal(detailReads(), 2);
+  h.logout = deferred(); h.$('logout').click();
+  assert.equal(h.$('business-outcomes-relationship'), null, 'logout hides the check before transport completes');
+  h.logout.resolve(Response.json({ ok: true })); await until(() => !h.signedIn());
+  assert.equal(h.$('business-outcomes-relationship'), null); assert.equal(detailReads(), 2);
 });
 
 for (const kind of ['read', 'save', 'publish']) {

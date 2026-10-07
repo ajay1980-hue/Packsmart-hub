@@ -9,8 +9,29 @@ import { chromium } from 'playwright';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, hashPassword } from '../lib/security.mjs';
-import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
+import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary, aggregateBusinessOutcomes } from '../lib/business-outcomes.mjs';
+import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
+
+async function selectedReviewPayload({ workspaceId, workspaceRevision, experiment, measurement, publication, now }) {
+  let reads = 0;
+  const adapter = createBusinessOutcomePersistence({ now: () => new Date(now), request: async (pathname, options) => {
+    reads++;
+    assert.equal(pathname, 'rpc/runvara_read_business_outcome_review');
+    assert.equal(options.method, 'POST'); assert.equal(options.maxResponseBytes, 128 * 1024);
+    assert.deepEqual(JSON.parse(options.body), { p_workspace_id: workspaceId, p_experiment_id: experiment.id });
+    const { head, version } = publication || {};
+    const current = publication ? { workspace_id: workspaceId, outcome_id: head.outcomeId, version_id: head.versionId,
+      version: { workspace_id: workspaceId, outcome_id: head.outcomeId, version_id: head.versionId, revision: version.revision,
+        digest: version.digest, status: version.status, payload: version, publication_id: head.publicationId,
+        intent_digest: digestMeasurementValue(['synthetic_browser_review', head.publicationId]), committed_at: head.committedAt, commit_revision: head.commitRevision } } : null;
+    // The real review RPC bounds its title; bootstrap retains the long fixture.
+    return structuredClone({ workspaceId, workspaceRevision, experiment: { ...experiment, title: experiment.title.slice(0, 180) }, measurement, current });
+  } });
+  const result = await adapter.review(workspaceId, experiment.id);
+  assert.equal(reads, 1, 'selected relationships use the existing single review snapshot');
+  return result;
+}
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-outcomes-browser-'));
 const secret = 'business-outcomes-browser-fixture-more-than-thirty-two-characters';
@@ -116,7 +137,8 @@ try {
       let response;
       if (gate && gate.status !== 200) response = { status: gate.status, json: { error: 'Synthetic expired request', code: 'AUTH_REQUIRED' } };
       else if (method === 'GET' && url.pathname === '/api/business-outcomes') response = { json: summaryPayload() };
-      else if (method === 'GET' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}`) response = { json: detailPayload() };
+      else if (method === 'GET' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}`) response = {
+        json: await selectedReviewPayload({ workspaceId: state.workspace.id, workspaceRevision, experiment, measurement, publication, now }) };
       else if (method === 'PUT' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}/measurement`) {
         const input = request.postDataJSON();
         measurement = prepareExperimentOutcomeMeasurement(input, { workspaceId: state.workspace.id,
@@ -156,7 +178,7 @@ try {
     const summary = page.locator('#business-outcomes-summary'), detail = page.locator('#business-outcomes-detail');
     const select = page.locator('#business-outcomes-experiment'), load = page.locator('#business-outcomes-load');
     const refresh = page.locator('#business-outcomes-refresh'), form = page.locator('#business-outcomes-form');
-    const review = page.locator('#business-outcomes-review');
+    const review = page.locator('#business-outcomes-review'), relationship = page.locator('#business-outcomes-relationship');
     const callCount = (method, pathname) => calls.filter(call => call.method === method && (!pathname || call.path === pathname)).length;
     const open = async () => {
       if (await panel.getAttribute('open') === null) await panel.locator(':scope > summary').click();
@@ -192,6 +214,9 @@ try {
     assert.equal(await load.isDisabled(), true);
     await releaseRequest(detailRead); await form.waitFor({ state: 'visible' });
     assert.match(await detail.textContent(), /No business result recorded yet/);
+    assert.match(await relationship.textContent(), /No owner-reviewed result was found for this experiment when loaded/);
+    assert.match(await relationship.textContent(), /Only this experiment was checked; the rest of the workspace was not/);
+    assert.equal(calls.length, openedCalls + 1, 'the selected relationship adds no browser request');
     assert.equal(await form.locator('[name="amount"]').inputValue(), '', 'unknown amount is blank, never an inferred zero');
     assert.equal(await form.locator('[name="currency"]').inputValue(), '', 'measurement currency is not inferred from workspace defaults');
     assert.equal(callCount('PUT'), 0); assert.equal(callCount('POST'), 0);
@@ -208,7 +233,7 @@ try {
       await form.locator(`[name="${name}"]`).fill(value);
     for (const [name, value] of Object.entries({ coverageStatus: 'complete', method: 'reconciled_manual', costsComplete: 'true' }))
       await form.locator(`[name="${name}"]`).selectOption(value);
-    const savePath = `${detailPath}/measurement`, draftSave = holdRequest('PUT', savePath);
+    const savePath = `${detailPath}/measurement`, draftSave = holdRequest('PUT', savePath), readsBeforeSave = callCount('GET');
     await form.evaluate(element => {
       element.requestSubmit();
       element.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
@@ -216,9 +241,12 @@ try {
     });
     await waitUntil(() => draftSave.seen, 'explicit save requests a typed measurement');
     assert.equal(callCount('PUT', savePath), 1, 'repeated draft submits coalesce');
+    assert.equal(await relationship.count(), 0, 'saving immediately removes the previous selected relationship check');
     assert.deepEqual(calls.find(call => call.method === 'PUT').body, input);
     assert.equal(callCount('POST'), 0, 'draft preparation never publishes');
     await releaseRequest(draftSave); await status.getByText('Draft saved.', { exact: false }).waitFor();
+    assert.equal(await relationship.count(), 0, 'saving cannot restore a selected relationship without a detail refresh');
+    assert.equal(callCount('GET'), readsBeforeSave, 'relationship invalidation never refreshes or polls automatically');
     assert.match(await detail.textContent(), /-12\.004 GBP/);
     assert.match(await detail.textContent(), /ready for owner review/);
     assert.equal(await detail.locator('img,script,[onerror]').count(), 0);
@@ -250,6 +278,7 @@ try {
     assert.match(await detail.textContent(), /This saved version has already been reviewed/);
     assert.doesNotMatch(await detail.textContent(), /ready for owner review/);
     assert.equal(await detail.locator('[data-outcome-action="publish"]').isDisabled(), true);
+    assert.equal(await relationship.count(), 0, 'publication success still needs explicit selected-detail refresh');
     await refresh.click();
     // Wait for the actual result heading, not the previous empty-state sentence.
     await summary.getByRole('heading', { name: 'Owner-reviewed result · version 1', exact: true }).waitFor();
@@ -274,6 +303,12 @@ try {
     assert.equal(await page.evaluate(() => window.outcomeInjected), undefined);
     await tripleClick(evidence);
     assert.equal(callCount('GET', sourcePath), 1, 'successfully loaded evidence is reused');
+    const beforeRelationshipRefresh = calls.length;
+    await loadExperiment();
+    assert.equal(calls.length, beforeRelationshipRefresh + 1, 'one explicit detail refresh also loads its relationship');
+    assert.match(await relationship.textContent(), /An owner-reviewed result was linked to this experiment when loaded/);
+    assert.match(await relationship.textContent(), /Only this experiment was checked; the rest of the workspace was not/);
+    assert.doesNotMatch(await relationship.evaluate(element => element.outerHTML), /outcomes-browser|user_outcomes_owner|experiment_browser_outcome|-12\.004|GBP|Synthetic retained evidence|selected_snapshot|selected_revision|selected_outcome|digest|qualification|canonical|forecast|learning|execution/);
     await assertNoOverflow(page, width, 'committed result and retained evidence');
     await panel.screenshot({ path: `/tmp/runvara-business-outcomes-${width}.png` });
 
@@ -281,7 +316,12 @@ try {
     await page.evaluate(() => { window.__holdOutcomePastCancellation = true; });
     const navigation401 = holdRequest('GET', '/api/business-outcomes', 401);
     await refresh.click(); await waitUntil(() => navigation401.seen, 'navigation race request must be in flight');
-    await navigate(page, 'overview'); await navigate(page, 'revenue-engine'); await open();
+    const beforeNavigation = calls.length;
+    await navigate(page, 'overview');
+    assert.equal(await relationship.count(), 0, 'navigation removes the checked relationship before returning');
+    await navigate(page, 'revenue-engine'); await open();
+    assert.equal(await relationship.count(), 0, 'reopening cannot restore a stale selected relationship');
+    assert.equal(calls.length, beforeNavigation, 'clearing and reopening relationships sends no extra request');
     await refresh.click(); await status.getByText('Results loaded.', { exact: false }).waitFor();
     await loadExperiment();
     const freshDetail = await detail.textContent(), freshSummary = await summary.textContent();

@@ -164,6 +164,15 @@ test('summary, review and exact evidence use compact auth/reads without whole st
     const result = await f.request(route); assert.equal(result.status,200,JSON.stringify(result.body)); assert.ok(result.bytes < 32768);
     assert.ok(!JSON.stringify(result.body).includes('never-download-the-whole-workspace'));
     assert.equal(result.headers.get('cache-control'),'no-store');
+    if (route === REVIEW) {
+      const { relationships, ...original } = result.body;
+      assert.equal(relationships.schema, 'runvara-selected-outcome-relationships/v1');
+      assert.equal(relationships.publication.versionDigest, result.body.currentPublication.version.digest);
+      assert.equal(relationships.publication.draftDigest, result.body.measurement.digest);
+      assert.equal(relationships.nodes.length, 2); assert.equal(relationships.edges.length, 1);
+      assert.equal(relationships.coverage.wholeGraphSynchronized, false);
+      assert.ok(result.bytes - Buffer.byteLength(JSON.stringify(original)) <= 4096);
+    } else assert.equal(Object.hasOwn(result.body, 'relationships'), false, 'overview and historical reads never inherit selected proof');
   }
   assert.equal(f.counts.identities,3); assert.equal(f.calls.length,3); assert.equal(f.counts.saves,0); assert.equal(f.counts.providerCalls,0);
   assert.equal(f.calls[0].options.maxResponseBytes,2*1024*1024); assert.equal(f.calls[0].options.headers.Prefer,'count=exact');

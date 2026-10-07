@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { createBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
-import { businessOutcomePublicationParams, createBusinessOutcomePersistence, OUTCOME_READ_BYTES } from '../lib/business-outcome-store.mjs';
+import { aggregateBusinessOutcomes, createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
+import { businessOutcomePublicationParams, createBusinessOutcomePersistence, OUTCOME_READ_BYTES, SELECTED_OUTCOME_RELATIONSHIPS_MAX_BYTES } from '../lib/business-outcome-store.mjs';
 import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 import { createStore } from '../lib/store.mjs';
+import { deriveBusinessGraph } from '../lib/business-graph.mjs';
 
 const NOW = '2026-10-06T20:00:00.000Z', WS = 'tenant-a';
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -234,6 +235,123 @@ test('review refuses foreign identities, copied current records and malformed so
   }
   await assert.rejects(adapter(async () => { throw Object.assign(new Error('missing private source'), { databaseCode: 'P0O09' }); })
     .review(WS, 'experiment_1'), { code: 'OUTCOME_SOURCE_NOT_FOUND' });
+});
+
+function reviewResult(current = fixture().joined, measurement = null) {
+  return { workspaceId: WS, workspaceRevision: 'state_reviewed', experiment: { id: 'experiment_1', title: 'PRIVATE_EXPERIMENT_TITLE', status: 'completed' }, measurement, current };
+}
+function joinedVersion(version) {
+  const f = fixture();
+  return { workspace_id: WS, outcome_id: version.outcomeId, version_id: version.versionId, version: {
+    ...f.row, outcome_id: version.outcomeId, revision: version.revision, version_id: version.versionId, digest: version.digest,
+    status: version.status, payload: version, committed_at: NOW
+  } };
+}
+function measurementInput(amount, expectedRevision = 0) {
+  return { expectedRevision, amount, currency: 'GBP', window: fixture().version.window,
+    coverage: { status: 'complete', observedCount: 10, expectedCount: 10 }, method: { kind: 'reconciled_manual' },
+    observedAt: '2026-10-06T12:00:00.000Z', report: { description: 'PRIVATE_MEASUREMENT_REPORT', costsComplete: true } };
+}
+function candidateInput(measurement) {
+  return { source: { type: 'experiment_measurement', experimentId: measurement.experimentId,
+    measurementRevision: measurement.revision, measurementDigest: measurement.digest },
+    ...Object.fromEntries(['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'links'].map(key => [key, measurement[key]])),
+    verification: { kind: 'owner_attestation', actorId: actor.id, verifiedAt: NOW, measurementDigest: measurement.digest } };
+}
+
+test('selected relationship proof is private, bounded and adds no lookup or transferable publication authority', async () => {
+  const f = fixture(1, '987654321.123456'), response = reviewResult(f.joined); let calls = 0;
+  const service = adapter(async (path, options) => {
+    calls++; assert.equal(path, 'rpc/runvara_read_business_outcome_review');
+    assert.equal(options.maxResponseBytes, 131072);
+    assert.deepEqual(JSON.parse(options.body), { p_workspace_id: WS, p_experiment_id: 'experiment_1' });
+    return structuredClone(response);
+  });
+  const result = await service.review(WS, 'experiment_1'), p = result.relationships;
+  assert.equal(calls, 1); assert.equal(p.scope, 'selected_experiment_only');
+  assert.equal(p.publication.state, 'published'); assert.equal(p.publication.qualification, 'owner_attested_measurement');
+  assert.equal(p.publication.versionDigest, f.version.digest); assert.equal(p.publication.draftRelationship, 'no_draft');
+  assert.equal(p.nodes.length, 2); assert.equal(p.edges.length, 1);
+  assert.equal(p.edges[0].from, p.nodes[1].id); assert.equal(p.edges[0].to, p.nodes[0].id);
+  assert.ok(p.nodes.every(node => node.canonicalGraphRef.status === 'unresolved'));
+  assert.deepEqual(p.coverage, { selectedExperimentConfirmed: true, currentHeadChecked: true, wholeGraphSynchronized: false, otherOutcomesChecked: false, crossOutcomeComparabilityChecked: false });
+  assert.ok(Object.values(p.safeguards).every(value => value === false));
+  const json = JSON.stringify(p);
+  for (const privateValue of [WS, 'experiment_1', 'PRIVATE_EXPERIMENT_TITLE', actor.id, '987654321.123456', f.version.versionId, f.version.outcomeId, 'state_reviewed']) assert.equal(json.includes(JSON.stringify(privateValue)), false, privateValue);
+  assert.equal(Object.hasOwn(p, 'publicationBoundary'), false);
+  assert.throws(() => aggregateBusinessOutcomes([f.version], { workspaceId: WS, now: NOW, publicationBoundary: p }), { code: 'PUBLICATION_PROOF_REQUIRED' });
+  assert.throws(() => { p.nodes[0].canonicalGraphRef.status = 'resolved'; }, TypeError);
+  const { relationships, ...without } = result;
+  assert.ok(Buffer.byteLength(JSON.stringify({ relationships })) <= SELECTED_OUTCOME_RELATIONSHIPS_MAX_BYTES);
+  assert.ok(Buffer.byteLength(JSON.stringify(result)) - Buffer.byteLength(JSON.stringify(without)) <= 4096);
+  assert.equal(p.snapshot.readCompletedAt, NOW);
+  const again = await service.review(WS, 'experiment_1');
+  assert.deepEqual(again.relationships.nodes, p.nodes); assert.deepEqual(again.relationships.edges, p.edges);
+  assert.notEqual(again.relationships.snapshot.id, p.snapshot.id, 'a later explicit read has its own snapshot identity');
+});
+
+test('no selected head is distinct from global absence and incomplete publication remains unqualified', async () => {
+  for (const current of [null, fixture(1, null).joined]) {
+    const result = await adapter(async () => reviewResult(current)).review(WS, 'experiment_1'), p = result.relationships;
+    assert.equal(p.publication.state, current ? 'published' : 'none');
+    assert.equal(p.publication.qualification, current ? 'unqualified' : 'none');
+    assert.equal(p.nodes.length, current ? 2 : 1); assert.equal(p.edges.length, current ? 1 : 0);
+    assert.equal(p.coverage.otherOutcomesChecked, false); assert.equal(p.coverage.wholeGraphSynchronized, false);
+    assert.equal(Object.hasOwn(p, 'totalOutcomes'), false);
+  }
+});
+
+test('new drafts, corrections and withdrawal preserve the exact selected publication source', async () => {
+  const first = prepareExperimentOutcomeMeasurement(measurementInput('10'), { workspaceId: WS, experimentId: 'experiment_1', actorId: actor.id, now: NOW, previousMeasurement: null });
+  const v1 = createBusinessOutcomeCandidate(candidateInput(first), { workspaceId: WS, now: NOW });
+  const second = prepareExperimentOutcomeMeasurement(measurementInput('-1', 1), { workspaceId: WS, experimentId: 'experiment_1', actorId: actor.id, now: NOW, previousMeasurement: first });
+  let current = joinedVersion(v1), measurement = first;
+  const service = adapter(async () => reviewResult(current, measurement));
+  const matched = (await service.review(WS, 'experiment_1')).relationships;
+  assert.equal(matched.publication.draftRelationship, 'matches_publication');
+  measurement = second;
+  const draft = (await service.review(WS, 'experiment_1')).relationships;
+  assert.equal(draft.publication.draftRelationship, 'different_from_publication');
+  assert.equal(draft.publication.versionDigest, v1.digest); assert.equal(draft.publication.draftDigest, second.digest);
+  assert.deepEqual(draft.nodes, matched.nodes, 'an unpublished draft cannot replace the current publication reference');
+  const v2 = correctBusinessOutcomeCandidate(v1, candidateInput(second), { workspaceId: WS, now: NOW });
+  current = joinedVersion(v2);
+  const corrected = (await service.review(WS, 'experiment_1')).relationships;
+  assert.equal(corrected.publication.draftRelationship, 'matches_publication');
+  assert.equal(corrected.nodes[1].id, matched.nodes[1].id, 'logical selected outcome remains the same');
+  assert.notEqual(corrected.nodes[1].sourceVersionRef, matched.nodes[1].sourceVersionRef);
+  const v3 = withdrawBusinessOutcomeCandidate(v2, { reason: 'incorrect_measurement', verification: candidateInput(second).verification }, { workspaceId: WS, now: NOW });
+  current = joinedVersion(v3);
+  const withdrawn = (await service.review(WS, 'experiment_1')).relationships;
+  assert.equal(withdrawn.publication.state, 'withdrawn'); assert.equal(withdrawn.publication.qualification, 'withdrawn');
+  assert.equal(withdrawn.nodes[1].type, 'withdrawn_measurement_reference');
+  assert.equal(withdrawn.edges.length, 1, 'withdrawal retains the real source relationship, not qualification');
+  assert.equal(withdrawn.publication.draftDigest, second.digest);
+  assert.equal(matched.publication.versionDigest, v1.digest, 'earlier response stays its own immutable historical snapshot');
+});
+
+test('selected references never guess canonical graph positions or alias-dependent duplicate ordinals', async () => {
+  const state = { workspace: { id: WS }, revenueEngine: { experiments: [
+    { externalId: 'experiment_1', status: 'completed' }, { id: 'experiment_1', status: 'completed' }
+  ] } };
+  const graph = deriveBusinessGraph(state), experiments = graph.nodes.filter(row => row.type === 'experiment');
+  assert.equal(experiments.length, 2);
+  const p = (await adapter(async () => reviewResult()).review(WS, 'experiment_1')).relationships;
+  assert.ok(!experiments.some(row => row.id === p.nodes[0].id));
+  assert.equal(p.nodes[0].canonicalGraphRef.status, 'unresolved');
+  assert.equal(JSON.stringify(p).includes('/revenueEngine/experiments/'), false);
+  assert.ok(p.edges.every(edge => p.nodes.some(row => row.id === edge.from) && p.nodes.some(row => row.id === edge.to)));
+});
+
+test('copied relationship JSON and source failures cannot mint a selected review context', async () => {
+  const good = await adapter(async () => reviewResult()).review(WS, 'experiment_1');
+  await assert.rejects(adapter(async () => ({ ...reviewResult(), relationships: structuredClone(good.relationships) })).review(WS, 'experiment_1'), { code: 'OUTCOME_REVIEW_INVALID' });
+  await assert.rejects(adapter(async () => structuredClone(good)).review(WS, 'experiment_1'), { code: 'OUTCOME_REVIEW_INVALID' });
+  for (const cause of [Object.assign(new Error('missing or duplicate source'), { databaseCode: 'P0O09' }), new Error('unavailable')]) {
+    let calls = 0;
+    await assert.rejects(adapter(async () => { calls++; throw cause; }).review(WS, 'experiment_1'));
+    assert.equal(calls, 1, 'no retry, fallback graph read or alternate current-head read');
+  }
 });
 
 test('strict shared transport preserves outcome cardinality and withholds read success for undecodable evidence', async () => {

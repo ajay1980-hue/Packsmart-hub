@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { aggregateBusinessOutcomes, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
+import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
 import { assessExperimentOutcomeMeasurement, digestMeasurementValue, validateExperimentOutcomeMeasurement } from './experiment-measurements.mjs';
 
 export const OUTCOME_CURRENT_LIMIT = 50;
 export const OUTCOME_READ_BYTES = 2 * 1024 * 1024;
+export const SELECTED_OUTCOME_RELATIONSHIPS_MAX_BYTES = 4096;
 const VERSION_COLUMNS = 'workspace_id,outcome_id,revision,version_id,digest,status,payload,publication_id,intent_digest,committed_at,commit_revision';
 const CURRENT_COLUMNS = `workspace_id,outcome_id,version_id,version:runvara_business_outcome_versions!runvara_outcome_head_version_fk(${VERSION_COLUMNS})`;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -61,6 +62,70 @@ function freezeRecorded(value) {
 function readError(cause) {
   if (['42P01', '42883', 'PGRST200', 'PGRST202', 'PGRST205'].includes(cause?.databaseCode)) return failure('OUTCOME_STORAGE_UNAVAILABLE');
   return failure('OUTCOME_READ_UNAVAILABLE');
+}
+
+// Separate, private proof for one validated review RPC snapshot. It cannot be
+// serialized into an aggregate publication boundary or minted by a client DTO.
+const selectedReviewContexts = new WeakMap();
+function selectedReviewRelationships(token) {
+  const context = selectedReviewContexts.get(token);
+  if (!context) throw failure('OUTCOME_REVIEW_INVALID');
+  const { workspaceId, workspaceRevision, experiment, measurement, currentPublication, at } = context;
+  const opaque = (kind, ...parts) => `${kind}_${digestMeasurementValue([workspaceId, kind, ...parts])}`;
+  const experimentRef = opaque('selected_experiment', experiment.id);
+  const canonicalGraphRef = identityHash => ({ status: 'unresolved', reason: 'separate_graph_not_resolved', identityHash });
+  const nodes = [{ id: experimentRef, type: 'experiment_reference',
+    canonicalGraphRef: canonicalGraphRef(digestMeasurementValue([workspaceId, 'revenueEngine.experiments', experiment.id])) }];
+  const edges = [];
+  const state = currentPublication?.head.status || 'none';
+  let qualification = 'none';
+  if (currentPublication) {
+    const { head, version } = currentPublication;
+    // A selected source is not the whole graph's indexed experiment collection:
+    // do not guess its duplicate ordinal, array pointer or canonical node ID.
+    if (version.source.experimentId !== experiment.id) throw failure('OUTCOME_REVIEW_INVALID');
+    qualification = head.status === 'withdrawn' ? 'withdrawn'
+      : assessBusinessOutcomeCandidate(version, { workspaceId, now: at }).measurementComplete ? 'owner_attested_measurement' : 'unqualified';
+    const outcomeRef = opaque('selected_outcome', head.outcomeId);
+    nodes.push({ id: outcomeRef, type: head.status === 'withdrawn' ? 'withdrawn_measurement_reference' : 'published_measurement_reference',
+      qualification, sourceVersionRef: opaque('selected_version', head.versionId, head.digest),
+      canonicalGraphRef: canonicalGraphRef(digestMeasurementValue([workspaceId, 'runvara_business_outcome_versions', head.versionId])) });
+    edges.push({ id: opaque('selected_edge', experiment.id, head.outcomeId, head.versionId), from: outcomeRef, to: experimentRef,
+      relation: 'measurement_recorded_for_experiment', basis: 'same_review_snapshot' });
+  }
+  const source = currentPublication?.version.source;
+  const draftRelationship = !measurement ? 'no_draft' : !source ? 'no_publication'
+    : measurement.revision === source.measurementRevision && measurement.digest === source.measurementDigest
+      ? 'matches_publication' : 'different_from_publication';
+  const projection = {
+    schema: 'runvara-selected-outcome-relationships/v1', scope: 'selected_experiment_only',
+    snapshot: { id: opaque('selected_snapshot', randomUUID()), workspaceRevisionRef: opaque('selected_revision', workspaceRevision),
+      readCompletedAt: new Date(at).toISOString() },
+    publication: { state, qualification, versionDigest: currentPublication?.version.digest ?? null,
+      draftRelationship, draftDigest: measurement?.digest ?? null },
+    nodes, edges,
+    coverage: { selectedExperimentConfirmed: true, currentHeadChecked: true, wholeGraphSynchronized: false,
+      otherOutcomesChecked: false, crossOutcomeComparabilityChecked: false },
+    safeguards: { causalAttribution: false, forecastingAuthorized: false, learningAuthorized: false,
+      executionAuthorized: false, rawIdentifiersIncluded: false, amountsIncluded: false }
+  };
+  // The complete added property envelope is at most 4 KiB; the existing RPC's
+  // 128 KiB response bound remains unchanged. The projection has no report bodies.
+  bounded({ relationships: projection }, SELECTED_OUTCOME_RELATIONSHIPS_MAX_BYTES);
+  return freezeRecorded(projection);
+}
+
+function projectValidatedSelectedReview(review, at) {
+  const token = Object.freeze({});
+  // Capture a detached immutable snapshot only after the adapter has validated
+  // the database response. Retain the publication for validation, but omit draft
+  // report text and experiment titles. There is no public constructor or input.
+  selectedReviewContexts.set(token, freezeRecorded({ workspaceId: review.workspaceId, workspaceRevision: review.workspaceRevision,
+    experiment: { id: review.experiment.id }, measurement: review.measurement
+      ? { revision: review.measurement.revision, digest: review.measurement.digest } : null,
+    currentPublication: structuredClone(review.currentPublication), at: new Date(at).toISOString() }));
+  try { return selectedReviewRelationships(token); }
+  finally { selectedReviewContexts.delete(token); }
 }
 
 /** Authenticated identity is a separate server argument, never body data. */
@@ -243,7 +308,8 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
         if (row.outcome_id !== currentPublication.head.outcomeId || row.version_id !== currentPublication.head.versionId
           || currentPublication.version.source.experimentId !== experimentId) throw failure('OUTCOME_PUBLICATION_INVALID');
       }
-      return { workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
+      const review = { workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
+      return { ...review, relationships: projectValidatedSelectedReview(review, at) };
     } catch { throw failure('OUTCOME_REVIEW_INVALID'); }
   }
   return { publish, current, one, evidence, review };
