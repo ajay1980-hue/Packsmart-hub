@@ -341,6 +341,23 @@
           <p class="muted">Record a measurable goal and planning limits. Prepare an internal diagnostic from an active saved objective. Reviews use recorded evidence and never execute business actions; Approval Centre remains in control. Existing goals remain planning-only. An explicitly configured owner restriction applies to its named Shopify content changes, including manual requests; missing financial evidence blocks execution.</p>
           <button id="load-business-objectives" class="secondary" type="button">Load saved objectives</button>
           <div id="business-objectives-list" class="status-list" aria-live="polite"></div>
+          <section id="business-objective-restriction" class="objective-review hidden" aria-labelledby="objective-restriction-title">
+            <h3 id="objective-restriction-title">Save a restriction for manual Shopify content changes</h3>
+            <p id="objective-restriction-context" class="muted"></p>
+            <p id="objective-restriction-status" role="status"></p>
+            <form id="objective-restriction-form" class="record-form" aria-busy="false">
+              <label class="wide">Restriction mode<select id="objective-restriction-mode"><option value="preparation_only">Planning only · no restriction from this objective</option><option value="enforce">Restrict manual Shopify product-content changes</option></select></label>
+              <label class="wide">Exact saved Shopify account<select id="objective-restriction-connection" aria-describedby="objective-restriction-account-help"></select></label>
+              <p id="objective-restriction-account-help" class="muted tiny wide">Saved account references only. Connectivity and write permissions are checked separately. Choose an account explicitly when adding or moving a restriction.</p>
+              <p id="objective-restriction-consequence" class="wide"></p>
+              <label class="wide"><span class="check-label"><input id="objective-restriction-ack" type="checkbox"> I have reviewed this exact change and its saved conditions.</span></label>
+              <button id="save-objective-restriction" class="primary" type="submit">Save restriction</button>
+              <button id="cancel-objective-restriction" class="secondary" type="button">Cancel restriction editing</button>
+              <button id="reload-objective-restriction" class="secondary wide" type="button">Discard draft and reload saved objective/accounts</button>
+              <p id="objective-restriction-error" class="form-error wide" role="alert"></p>
+            </form>
+            <p class="muted tiny">A restriction save never creates an approval or executes a change. Customer-facing publishing still requires exact approval in Approval Centre, and other restrictions may apply. Paused, disabled, completed, cancelled, future or expired restricted objectives continue to block matching changes; use planning-only mode to explicitly remove this objective’s restriction.</p>
+          </section>
           <section id="business-objective-review" class="objective-review hidden" aria-labelledby="business-objective-review-title" aria-live="polite" aria-busy="false">
             <h3 id="business-objective-review-title">Objective review</h3>
             <p id="business-objective-review-status" class="muted"></p>

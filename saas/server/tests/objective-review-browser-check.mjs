@@ -8,9 +8,40 @@ import { chromium } from 'playwright';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
-import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
+import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import { buildObjectiveReview } from '../lib/objective-review.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
+
+async function captureRestriction(page, width, name) {
+  const panel = page.locator('#business-objective-restriction');
+  const assertFits = async label => {
+    const dimensions = await panel.evaluate(element => ({ page: document.documentElement.scrollWidth,
+      panel: element.scrollWidth, available: element.clientWidth }));
+    assert.ok(dimensions.page <= width + 2 && dimensions.panel <= dimensions.available + 2,
+      `restriction ${label} overflow at ${width}px: ${JSON.stringify(dimensions)}`);
+  };
+  await assertFits(name);
+  await panel.screenshot({ path: `/tmp/runvara-business-objectives-${name}-${width}.png` });
+  // Double each computed text size once, without widening the viewport or
+  // cascading 200% through nested elements. This is a text-resizing fixture.
+  const styles = await panel.evaluate(element => Array.from(element.querySelectorAll('*'), node => {
+    const computed = getComputedStyle(node);
+    return { style: node.getAttribute('style'), fontSize: parseFloat(computed.fontSize), lineHeight: parseFloat(computed.lineHeight) };
+  }));
+  try {
+    await panel.evaluate((element, sizes) => Array.from(element.querySelectorAll('*')).forEach((node, index) => {
+      node.style.fontSize = `${sizes[index].fontSize * 2}px`;
+      if (Number.isFinite(sizes[index].lineHeight)) node.style.lineHeight = `${sizes[index].lineHeight * 2}px`;
+    }), styles);
+    await assertFits(`${name} at 200% text`);
+    await panel.screenshot({ path: `/tmp/runvara-business-objectives-${name}-${width}-large-text.png` });
+  } finally {
+    await panel.evaluate((element, originals) => Array.from(element.querySelectorAll('*')).forEach((node, index) => {
+      if (originals[index].style === null) node.removeAttribute('style');
+      else node.setAttribute('style', originals[index].style);
+    }), styles);
+  }
+}
 
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-review-browser-'));
 const secret = 'objective-review-browser-test-only-more-than-thirty-two-characters';
@@ -21,6 +52,12 @@ try {
   const now = new Date().toISOString();
   const state = seedWorkspaceState({}, { workspaceId: 'review-browser', name: 'Synthetic objective review', email: 'review@example.test', passwordHash: 'fixture-only' });
   state.settings = { ...state.settings, currency: 'GBP', growthCapacityHours: 4, maxConcurrentGrowthExperiments: 2 };
+  state.connections = [
+    { id: 'restriction-browser-a', provider: 'shopify', status: 'disconnected', label: 'Synthetic saved account <img src=x onerror="window.restrictionInjected=true">',
+      metadata: { shopDomain: 'restriction-browser-a.myshopify.com' } },
+    { id: 'restriction-browser-b', provider: 'shopify', status: 'disconnected', label: 'Synthetic separate saved account with a deliberately long descriptive label',
+      metadata: { shopDomain: 'restriction-browser-b.myshopify.com' } }
+  ];
   state.products = [{ id: 'product_review_fixture', provider: 'shopify', title: 'Synthetic packaging product', status: 'active', variants: [{ id: 'variant_review_fixture', sku: 'REVIEW-FIXTURE', price: 10, inventory: 1, available: true }] }];
   state.approvals = []; state.decisions = []; state.exceptions = []; state.opportunities = [];
   detectOpportunities(state);
@@ -35,14 +72,20 @@ try {
   report.evidenceGaps.push({ message: hostile });
   report.proposals[0].title = 'BoundedLongRecordedOpportunity' + 's'.repeat(130);
   await server.packsmart.store.save(state.workspace.id, state);
+  const originalState = structuredClone(state);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
   const token = createSessionToken({ userId: state.users[0].id, workspaceId: state.workspace.id, email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
   browser = await chromium.launch({ headless: true });
   for (const width of [320,390,1200]) {
+    // Policy saves below are real local API writes. Each viewport starts with
+    // the same isolated fixture revision, so the diagnostic binding stays exact.
+    const resetState = structuredClone(originalState);
+    resetState._revision = (await server.packsmart.store.get(state.workspace.id))._revision;
+    await server.packsmart.store.save(state.workspace.id, resetState);
     const context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.addCookies([{ name: 'packsmart_session', value: token, url: base, httpOnly: true, sameSite: 'Strict' }]);
-    const page = await context.newPage(), errors = [], calls = [], external = [];
+    const page = await context.newPage(), errors = [], calls = [], external = [], apiCalls = [], unexpected = [];
     page.on('pageerror', error => errors.push(error.message));
     let statusReads = 0;
     const job = { id: 'job_browser_review', type: 'objective_prepare', status: 'queued', objectiveId: objective.id, objectiveRevision: objective.revision,
@@ -50,7 +93,15 @@ try {
     await page.route('**/*', async route => {
       const url = new URL(route.request().url());
       if (url.origin !== base) { external.push(url.origin); return route.abort(); }
-      if (!url.pathname.startsWith('/api/business-objectives/reviews')) return route.continue();
+      if (!url.pathname.startsWith('/api/')) return route.continue();
+      apiCalls.push({ path: url.pathname + url.search, method: route.request().method(), body: route.request().postData() });
+      if (!url.pathname.startsWith('/api/business-objectives/reviews')) {
+        const permitted = route.request().method() === 'GET'
+          ? ['/api/auth/session', '/api/bootstrap', '/api/business-objectives', '/api/connections'].includes(url.pathname)
+          : route.request().method() === 'PUT' && url.pathname === '/api/business-objectives';
+        if (!permitted) { unexpected.push(apiCalls.at(-1)); return route.abort(); }
+        return route.continue();
+      }
       calls.push({ path: url.pathname + url.search, method: route.request().method(), body: route.request().postData(), at: Date.now() });
       if (route.request().method() === 'POST') {
         assert.deepEqual(route.request().postDataJSON(), { objectiveId: objective.id, objectiveRevision: objective.revision });
@@ -63,6 +114,8 @@ try {
     });
     await page.goto(base); await page.locator('#app-shell:not(.hidden)').waitFor();
     assert.equal(calls.length, 0, 'startup never prepares or polls reviews');
+    assert.equal(apiCalls.filter(call => ['/api/business-objectives', '/api/connections'].includes(call.path)).length, 0,
+      'startup does not fetch objective or account references separately');
     if (await page.locator('#mobile-menu').isVisible()) await page.locator('#mobile-menu').click();
     await page.locator('#main-nav [data-view="ai-team"]').click();
     const details = page.locator('.business-objectives-panel'); await details.locator('summary').click();
@@ -94,10 +147,99 @@ try {
     await page.locator('#view-opportunities.active').waitFor();
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-opportunity-record')), originalOpportunityId);
     assert.equal(calls.length, before, 'investigation only navigates to the existing opportunity');
+
+    if (await page.locator('#mobile-menu').isVisible()) await page.locator('#mobile-menu').click();
+    const beforeReturn = apiCalls.length;
+    await page.locator('#main-nav [data-view="ai-team"]').click();
+    assert.equal(apiCalls.length, beforeReturn, 'returning to the objective panel does not fetch or mutate a restriction');
+    if (!await details.evaluate(element => element.open)) await details.locator('summary').click();
+    const manage = page.locator(`[data-manage-objective-restriction="${objective.id}"]`);
+    const panel = page.locator('#business-objective-restriction');
+    const form = page.locator('#objective-restriction-form');
+    const mode = page.locator('#objective-restriction-mode');
+    const account = page.locator('#objective-restriction-connection');
+    const acknowledge = page.locator('#objective-restriction-ack');
+    const saveButton = page.locator('#save-objective-restriction');
+    const policyWrites = () => apiCalls.filter(call => call.path === '/api/business-objectives' && call.method === 'PUT');
+    const openRestriction = async () => {
+      const count = apiCalls.length;
+      await manage.click(); await panel.waitFor({ state: 'visible' });
+      assert.equal(apiCalls.length, count, 'opening uses the existing public bootstrap references without a request');
+      assert.equal(await acknowledge.isChecked(), false);
+      assert.equal(await panel.locator('img,script,[onerror]').count(), 0);
+      assert.equal(await page.evaluate(() => window.restrictionInjected), undefined);
+    };
+    const policyFor = connection => ({ schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: {
+      provider: 'shopify', operation: 'product_content', connectionId: connection.id, account: connection.metadata.shopDomain } });
+    const saveRestriction = async (revision, executionPolicy) => {
+      await acknowledge.check();
+      const previous = policyWrites().length;
+      const responsePromise = page.waitForResponse(response => response.url() === `${base}/api/business-objectives` && response.request().method() === 'PUT');
+      await saveButton.click();
+      const response = await responsePromise;
+      assert.equal(response.status(), 200);
+      const payload = await response.json();
+      assert.equal(payload.objective.revision, revision + 1);
+      assert.deepEqual(payload.objective.executionPolicy, executionPolicy);
+      assert.equal(policyWrites().length, previous + 1);
+      assert.deepEqual(JSON.parse(policyWrites().at(-1).body), { id: objective.id, revision, executionPolicy });
+      const { updatedAt, revision: savedRevision, executionPolicy: savedPolicy, ...definition } = payload.objective;
+      const { updatedAt: originalUpdatedAt, revision: originalRevision, ...originalDefinition } = objective;
+      assert.deepEqual(definition, originalDefinition, 'policy-only browser saves keep every recorded objective condition');
+      await panel.waitFor({ state: 'hidden' });
+    };
+
+    await openRestriction();
+    assert.equal(await mode.inputValue(), 'preparation_only');
+    await mode.selectOption('enforce');
+    assert.equal(await account.inputValue(), '', 'no saved account is implicitly selected for a new restriction');
+    assert.equal(await saveButton.isDisabled(), true);
+    await account.selectOption(state.connections[0].id); await acknowledge.check();
+    await account.selectOption(state.connections[1].id);
+    assert.equal(await acknowledge.isChecked(), false, 'a different exact account requires fresh acknowledgement');
+    await page.locator('#cancel-objective-restriction').click();
+    await panel.waitFor({ state: 'hidden' });
+    assert.equal(policyWrites().length, 0, 'cancel does not write');
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-manage-objective-restriction')), objective.id);
+
+    await openRestriction(); await mode.selectOption('enforce');
+    assert.equal(await account.inputValue(), '', 'cancel discards the unsaved account choice');
+    await account.selectOption(state.connections[0].id);
+    await captureRestriction(page, width, 'add-restriction');
+    await saveRestriction(1, policyFor(state.connections[0]));
+
+    await openRestriction();
+    assert.equal(await account.inputValue(), state.connections[0].id);
+    const beforeNoop = policyWrites().length;
+    await form.evaluate(element => element.requestSubmit());
+    assert.equal(policyWrites().length, beforeNoop, 'keyboard/form submission of an unchanged policy makes no PUT');
+    await account.selectOption(state.connections[1].id);
+    const consequence = await page.locator('#objective-restriction-consequence').textContent();
+    for (const connection of state.connections) assert.ok(consequence.includes(connection.metadata.shopDomain), 'rebinding names both exact accounts');
+    await captureRestriction(page, width, 'move-restriction');
+    await saveRestriction(2, policyFor(state.connections[1]));
+
+    await openRestriction();
+    const withoutConnection = await server.packsmart.store.get(state.workspace.id);
+    withoutConnection.connections = withoutConnection.connections.filter(connection => connection.id !== state.connections[1].id);
+    await server.packsmart.store.save(state.workspace.id, withoutConnection);
+    const beforeReload = apiCalls.length;
+    await page.locator('#reload-objective-restriction').click();
+    await page.waitForFunction(() => !document.querySelector('#reload-objective-restriction').disabled);
+    assert.deepEqual(apiCalls.slice(beforeReload).map(call => [call.method, call.path]).sort(),
+      [['GET', '/api/business-objectives'], ['GET', '/api/connections']], 'explicit reload only reads saved definitions and public references');
+    assert.equal(await mode.inputValue(), 'enforce');
+    assert.ok((await panel.textContent()).includes(state.connections[1].metadata.shopDomain), 'the removed binding remains visible');
+    assert.equal(await acknowledge.isChecked(), false);
+    await mode.selectOption('preparation_only');
+    await captureRestriction(page, width, 'remove-unavailable-restriction');
+    await saveRestriction(3, { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' });
+    assert.equal(calls.length, before, 'restriction editing does not request another diagnostic, approval, or job');
+    assert.deepEqual(unexpected, [], 'only the bounded local fixture routes were requested');
     assert.deepEqual(errors, []); assert.deepEqual(external, []);
     await context.close();
   }
-  console.log('Objective review browser checks passed at 320, 390 and 1200 pixels with synthetic diagnostics.');
+  console.log('Objective review and owner restriction browser checks passed at 320, 390 and 1200 pixels with synthetic diagnostics and normal/200% text screenshots.');
 } finally {
   if (browser) await browser.close();
   if (server.listening) await new Promise(resolve => server.close(resolve));

@@ -11,6 +11,7 @@
     productQuery: '', productStatus: 'active', productSort: 'product',
     orderFilter: 'all', approvalFilter: 'pending'
   };
+  const objectiveUI = { epoch: 0, editor: null, read: null, mutation: null, snapshotContext: null, referenceCache: null, planningBaseline: '', needsReload: false, unknownSave: false };
   let invitationToken = '';
   let ownerActivationToken = '';
   try {
@@ -191,6 +192,7 @@
   }
 
   function showLogin() {
+    resetObjectiveEditing(true);
     resetBusinessGraph(true);
     resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     closeWorkspaceSearch();
@@ -209,6 +211,7 @@
   }
 
   function showPasswordSetup() {
+    resetObjectiveEditing(true);
     resetBusinessGraph(true);
     resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     closeWorkspaceSearch();
@@ -249,6 +252,8 @@
   }
 
   async function loadBootstrap(options) {
+    objectiveUI.referenceCache = null;
+    resetObjectiveEditing();
     resetBusinessGraph();
     const config = Object.assign({ migrate: true }, options || {});
     if (config.migrate) {
@@ -257,7 +262,7 @@
     }
     const data = await request('/api/bootstrap');
     resetBusinessGraph();
-    if (state.data?.workspace?.id !== data.workspace.id) resetObjectiveForm();
+    if (state.data?.workspace?.id !== data.workspace.id || state.data?.user?.id !== data.user?.id || state.data?.user?.role !== data.user?.role) resetObjectiveEditing(true);
     state.data = data; state.csrf = data.csrf || state.csrf;
     state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     $('#business-graph-result').replaceChildren();
@@ -286,6 +291,7 @@
   }
 
   function setView(view) {
+    if (view !== state.view) resetObjectiveEditing();
     if (view !== 'overview') resetBusinessGraph(true);
     if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); }
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
@@ -1413,22 +1419,311 @@
     if (button) investigateOpportunity(button.dataset.investigateReviewOpportunity);
   });
 
+  const restrictionSchema = 'runvara-objective-execution-policy/v1';
+  const preparationPolicy = () => ({ schema: restrictionSchema, mode: 'preparation_only' });
+  const objectiveCopy = value => JSON.parse(JSON.stringify(value));
+  function freezeObjective(value) {
+    if (value && typeof value === 'object') { Object.values(value).forEach(freezeObjective); Object.freeze(value); }
+    return value;
+  }
+  function objectiveContext() {
+    return { session: state.session, data: state.data, csrf: state.csrf, sessionCsrf: state.session?.csrf,
+      userId: state.session?.user?.id, workspaceId: state.data?.workspace?.id,
+      sessionWorkspaceId: state.session?.workspace?.id, generation: state.graphGeneration };
+  }
+  function sameObjectiveSession(context, owner = false) {
+    const session = state.session, data = state.data;
+    return Boolean(context && session && data && context.session === session && context.data === data &&
+      context.csrf === state.csrf && context.sessionCsrf === session.csrf && context.generation === state.graphGeneration &&
+      context.userId === session.user?.id && context.userId === data.user?.id &&
+      context.workspaceId === data.workspace?.id && context.workspaceId === session.workspace?.id &&
+      context.sessionWorkspaceId === session.workspace?.id && !session.user?.passwordChangeRequired && !data.user?.passwordChangeRequired &&
+      session.user?.active !== false && data.user?.active !== false &&
+      (!owner || (session.user?.role === 'owner' && data.user?.role === 'owner')));
+  }
+  function canPlanObjective() {
+    return sameObjectiveSession(objectiveContext()) && ['owner','admin'].includes(state.session.user.role) && state.session.user.role === state.data.user.role;
+  }
+  function planningSignature() {
+    return JSON.stringify(Array.from($('#business-objective-form').elements).filter(field => field.name).map(field => [field.name, field.type === 'checkbox' ? field.checked : field.value]));
+  }
+  function planningDraftOpen() {
+    return Boolean($('#business-objective-form').dataset.objectiveId) || planningSignature() !== objectiveUI.planningBaseline;
+  }
+  function restrictionVisible() {
+    return state.view === 'ai-team' && $('.business-objectives-panel').open && !document.hidden && !$('#app-shell').classList.contains('hidden');
+  }
+  function currentRestriction(editor) {
+    clearClosedObjectivePanel(objectivePanelObserver.takeRecords());
+    if (objectiveUI.editor !== editor || editor?.epoch !== objectiveUI.epoch) return false;
+    if (!sameObjectiveSession(editor.context, true)) { resetObjectiveEditing(true); return false; }
+    const rows = editor.bootstrapReferences ? state.data.connections : editor.referenceRows;
+    if (!editor.stale && JSON.stringify(exactRestrictionConnections(rows, editor.context.workspaceId)) !== editor.referenceKey) {
+      staleRestriction(editor, 'The saved account references changed. Your choices remain visible. Reload the objective/accounts and review a deliberate account choice before saving.');
+    }
+    return restrictionVisible();
+  }
+  function resetObjectiveEditing(clearPrivate = false) {
+    const editor = objectiveUI.editor;
+    // Leaving a sent PUT does not cancel the saved change. Require a fresh read.
+    if (objectiveUI.mutation) { objectiveUI.needsReload = true; objectiveUI.unknownSave = true; }
+    objectiveUI.epoch++;
+    editor?.controller?.abort();
+    objectiveUI.editor = null;
+    objectiveUI.read?.controller.abort(); objectiveUI.read = null;
+    if (objectiveUI.mutation) { objectiveUI.mutation.controller?.abort(); objectiveUI.mutation = null; }
+    const form = $('#objective-restriction-form');
+    form.reset(); form.setAttribute('aria-busy', 'false');
+    $('#objective-restriction-connection').replaceChildren();
+    for (const id of ['context','status','consequence','error']) $('#objective-restriction-' + id).textContent = '';
+    $('#business-objective-restriction').classList.add('hidden');
+    Array.from($('#business-objective-form').elements).forEach(field => { field.disabled = false; });
+    setBusy($('#business-objective-form').querySelector('button[type=submit]'), false);
+    setBusy($('#load-business-objectives'), false);
+    $('#business-objective-form').classList.toggle('hidden', !canPlanObjective());
+    if (clearPrivate) { objectiveUI.needsReload = false; objectiveUI.unknownSave = false; objectiveUI.snapshotContext = null; objectiveUI.referenceCache = null; state.objectiveSnapshot = null; resetObjectiveForm(); $('#business-objectives-list').replaceChildren(); }
+    else if (objectiveUI.needsReload) {
+      objectiveUI.snapshotContext = null; state.objectiveSnapshot = null;
+      $('#business-objectives-list').textContent = (objectiveUI.unknownSave ? 'The objective save outcome is unknown. ' : '') + 'Load saved objectives and review the saved state before another change.';
+    }
+  }
+  function exactRestrictionConnections(rows, workspaceId) {
+    if (!Array.isArray(rows)) return [];
+    const shopify = rows.filter(row => row && row.provider === 'shopify');
+    return shopify.filter(row => typeof row.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(row.id) &&
+      shopify.filter(other => other.id === row.id).length === 1 &&
+      [row.workspaceId, row.workspace_id, row.tenantId, row.tenant_id, row.workspace?.id, row.tenant?.id, typeof row.workspace === 'string' ? row.workspace : undefined, typeof row.tenant === 'string' ? row.tenant : undefined].every(value => value === undefined || value === workspaceId) &&
+      typeof row.metadata?.shopDomain === 'string' && row.metadata.shopDomain.length <= 253 && /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(row.metadata.shopDomain))
+      .map(row => Object.freeze({ id: row.id, account: row.metadata.shopDomain }));
+  }
+  function restrictionPolicy(editor) {
+    const mode = $('#objective-restriction-mode').value;
+    if (mode === 'preparation_only') return preparationPolicy();
+    if (mode !== 'enforce') return null;
+    const connection = editor.connections.find(row => row.id === $('#objective-restriction-connection').value);
+    if (!connection) return null;
+    return { schema: restrictionSchema, mode: 'enforce', scope: { provider: 'shopify', operation: 'product_content', connectionId: connection.id, account: connection.account } };
+  }
+  function policyKey(policy) {
+    if (!policy || policy.mode === 'preparation_only') return 'preparation_only';
+    return JSON.stringify([policy.schema, policy.mode, policy.scope?.provider, policy.scope?.operation, policy.scope?.connectionId, policy.scope?.account]);
+  }
+  function confirmedRestrictionPolicy(actual, proposed) {
+    if (!actual || actual.schema !== restrictionSchema || actual.mode !== proposed.mode || policyKey(actual) !== policyKey(proposed)) return false;
+    if (actual.mode === 'preparation_only') return Object.keys(actual).sort().join(',') === 'mode,schema';
+    return Object.keys(actual).sort().join(',') === 'mode,schema,scope' && actual.scope &&
+      Object.keys(actual.scope).sort().join(',') === 'account,connectionId,operation,provider';
+  }
+  function savedObjectiveDefinition(item) {
+    const { revision, updatedAt, effectiveStatus, executionPolicy, ...definition } = item || {};
+    // Compare named fields independently of JSON property insertion order.
+    return JSON.stringify(Object.keys(definition).sort().map(key => [key, definition[key]]));
+  }
+  function restrictionChoiceKey() {
+    return JSON.stringify([$('#objective-restriction-mode').value, $('#objective-restriction-connection').value]);
+  }
+  function describeRestriction(policy) {
+    return policy?.mode === 'enforce' ? policy.scope.account + ' (saved connection ' + policy.scope.connectionId + ')' : 'planning only';
+  }
+  function renderRestrictionChoice(editor) {
+    const proposed = restrictionPolicy(editor), previous = editor.source.executionPolicy || preparationPolicy();
+    const unchanged = proposed && policyKey(previous) === policyKey(proposed);
+    const mode = $('#objective-restriction-mode').value;
+    let consequence;
+    if (unchanged) consequence = 'No change to the saved restriction. No save is needed.';
+    else if (!proposed) consequence = 'Choose an available exact saved account before reviewing a restriction. An unavailable saved binding is never replaced automatically.';
+    else if (proposed.mode === 'preparation_only') consequence = 'Remove this objective’s extra restriction from ' + describeRestriction(previous) + '. Other restrictions, write permissions and mandatory approval still apply. Existing approval authority is not refreshed.';
+    else if (previous.mode === 'enforce') consequence = 'Move this objective’s restriction from ' + describeRestriction(previous) + ' to ' + describeRestriction(proposed) + '. The previous account loses this objective’s extra restriction. Saved conditions apply to the new account; previously bound requests may be stale.';
+    else consequence = 'Apply this objective’s saved conditions to manual Shopify product-content changes at ' + describeRestriction(proposed) + '. Matching changes without the required conditions are blocked, and older unbound pending proposals become invalid.';
+    $('#objective-restriction-consequence').textContent = consequence;
+    const busy = Boolean(editor.busy), blocked = busy || editor.stale;
+    $('#objective-restriction-mode').disabled = blocked;
+    $('#objective-restriction-connection').disabled = blocked || mode !== 'enforce';
+    $('#objective-restriction-ack').disabled = blocked || !proposed || unchanged;
+    $('#save-objective-restriction').disabled = blocked || !proposed || unchanged || !$('#objective-restriction-ack').checked || editor.ackKey !== restrictionChoiceKey();
+    $('#save-objective-restriction').textContent = editor.busy === 'save' ? 'Saving restriction…' : 'Save restriction';
+    // During GET, cancellation remains available. During PUT its outcome is unknown.
+    $('#cancel-objective-restriction').disabled = editor.busy === 'save';
+    $('#reload-objective-restriction').disabled = busy;
+    $('#objective-restriction-form').setAttribute('aria-busy', String(busy));
+  }
+  function populateRestriction(editor) {
+    const source = editor.source, limits = source.limits || {}, policy = source.executionPolicy || preparationPolicy();
+    $('#objective-restriction-context').textContent = source.title + ' · Revision ' + source.revision + ' · Saved status: ' + statusLabel(source.status) + ' · Current window: ' + statusLabel(source.effectiveStatus) +
+      '. UTC window: ' + source.startsAt + ' to ' + source.endsAt + '. Metric: ' + statusLabel(source.metric) + '; baseline: ' + (source.baseline ?? 'unknown') + '; target: ' + source.target + '; direction: ' + source.direction +
+      '. Saved limits: currency ' + (limits.currency ?? 'not specified') + '; minimum gross margin ' + (limits.minGrossMarginPercent == null ? 'not specified' : limits.minGrossMarginPercent + '%') +
+      '; maximum monthly ad budget ' + (limits.maxMonthlyAdBudget ?? 'not specified') + '; minimum stock cover days ' + (limits.minStockCoverDays ?? 'not specified') +
+      '; profit first ' + (limits.profitFirst ? 'yes' : 'no') + '; additional approval kinds ' + ((limits.approvalRequiredKinds || []).map(statusLabel).join(', ') || 'none') + '. Saved restriction: ' + describeRestriction(policy) + '.';
+    const blocked = limits.profitFirst || ['minGrossMarginPercent','maxMonthlyAdBudget','minStockCoverDays'].some(key => limits[key] != null);
+    $('#objective-restriction-status').textContent = (blocked ? 'Matching changes remain blocked: qualified profit, money or stock evidence is unavailable for these saved conditions, including any explicit zero limit. ' : 'Other restrictions and exact approval may still block a change. ') +
+      (source.effectiveStatus !== 'active' ? 'This objective is outside its active status/window, which also blocks matching changes while restricted. ' : '') +
+      'This editor changes no goal, financial limit, stock limit, date or approval requirement.';
+    $('#objective-restriction-error').textContent = '';
+    $('#objective-restriction-mode').value = policy.mode;
+    const select = $('#objective-restriction-connection');
+    select.replaceChildren(new Option('Choose an exact saved Shopify account', ''));
+    for (const row of editor.connections) select.add(new Option(row.account + ' · ' + row.id + ' · saved reference', row.id));
+    if (policy.mode === 'enforce') {
+      const exact = editor.connections.find(row => row.id === policy.scope.connectionId && row.account === policy.scope.account);
+      if (exact) select.value = exact.id;
+      else {
+        const option = new Option('Unavailable saved binding: ' + describeRestriction(policy), '__unavailable__'); option.disabled = true; select.add(option); select.value = option.value;
+        $('#objective-restriction-status').textContent += ' The saved account is missing, replaced or changed. Review a different exact account or explicitly remove this restriction.';
+      }
+    } else select.value = '';
+    if (!editor.connections.length) $('#objective-restriction-status').textContent += ' No eligible saved Shopify account references are available.';
+    $('#objective-restriction-ack').checked = false; editor.ackKey = null; editor.initialChoice = restrictionChoiceKey();
+    renderRestrictionChoice(editor);
+  }
+  function objectiveReferences() {
+    const cache = objectiveUI.referenceCache;
+    return cache && sameObjectiveSession(cache.context, true) ? cache.rows : state.data?.connections;
+  }
+  function openRestriction(item, focus = true, connections = objectiveReferences()) {
+    const context = objectiveContext();
+    if (!sameObjectiveSession(context, true) || !restrictionVisible() || objectiveUI.mutation || !sameObjectiveSession(objectiveUI.snapshotContext, true)) return;
+    const source = freezeObjective(objectiveCopy(item));
+    const references = exactRestrictionConnections(connections, context.workspaceId);
+    const editor = { context, epoch: ++objectiveUI.epoch, source, connections: references, referenceRows: connections, referenceKey: JSON.stringify(references), bootstrapReferences: connections === state.data.connections, busy: null, stale: false, ackKey: null };
+    objectiveUI.editor = editor;
+    $('#business-objective-restriction').classList.remove('hidden'); $('#business-objective-form').classList.add('hidden');
+    populateRestriction(editor);
+    if (focus) $('#objective-restriction-mode').focus();
+  }
+  function staleRestriction(editor, message) {
+    editor.stale = true; editor.ackKey = null; $('#objective-restriction-ack').checked = false;
+    $('#objective-restriction-error').textContent = message; renderRestrictionChoice(editor);
+  }
+  function validObjectiveSnapshot(snapshot) {
+    return snapshot?.workspaceId === state.data?.workspace?.id && Array.isArray(snapshot.objectives) && snapshot.objectives.length <= 50 &&
+      snapshot.objectives.every(item => typeof item?.id === 'string' && item.workspaceId === snapshot.workspaceId && Number.isSafeInteger(item.revision) && item.revision > 0) &&
+      new Set(snapshot.objectives.map(item => item.id)).size === snapshot.objectives.length;
+  }
+  $('#objective-restriction-form').addEventListener('change', event => {
+    const editor = objectiveUI.editor;
+    if (!editor || !currentRestriction(editor) || editor.busy || editor.stale) return;
+    if (event.target.id === 'objective-restriction-ack') editor.ackKey = event.target.checked ? restrictionChoiceKey() : null;
+    else { editor.ackKey = null; $('#objective-restriction-ack').checked = false; }
+    renderRestrictionChoice(editor);
+  });
+  $('#cancel-objective-restriction').addEventListener('click', () => {
+    const editor = objectiveUI.editor;
+    if (!editor || !currentRestriction(editor) || editor.busy === 'save') return;
+    const id = editor.source.id; resetObjectiveEditing();
+    Array.from(document.querySelectorAll('[data-manage-objective-restriction]')).find(button => button.dataset.manageObjectiveRestriction === id)?.focus();
+  });
+  $('#reload-objective-restriction').addEventListener('click', async () => {
+    const editor = objectiveUI.editor;
+    if (!editor || !currentRestriction(editor) || editor.busy || objectiveUI.mutation) return;
+    editor.busy = 'reload'; editor.ackKey = null; $('#objective-restriction-ack').checked = false;
+    editor.controller = new AbortController(); renderRestrictionChoice(editor);
+    $('#objective-restriction-error').textContent = ''; $('#objective-restriction-status').textContent = 'Reading the saved objective and current account references. This discards the previous draft.';
+    try {
+      const config = { signal: editor.controller.signal, isCurrent: () => currentRestriction(editor) };
+      const [snapshot, publicReferences] = await Promise.all([request('/api/business-objectives', config), request('/api/connections', config)]);
+      if (!currentRestriction(editor)) return;
+      if (!validObjectiveSnapshot(snapshot) || !Array.isArray(publicReferences?.connections)) throw new Error('A matching saved objective and account snapshot was not returned.');
+      const item = snapshot.objectives.find(row => row.id === editor.source.id);
+      if (!item) throw new Error('This objective is no longer present. Cancel editing and load saved objectives.');
+      const references = exactRestrictionConnections(publicReferences.connections, editor.context.workspaceId)
+        .map(row => ({ id: row.id, provider: 'shopify', metadata: { shopDomain: row.account } }));
+      objectiveUI.referenceCache = { context: objectiveContext(), rows: freezeObjective(references) };
+      editor.busy = null; objectiveUI.editor = null; objectiveUI.needsReload = false; objectiveUI.unknownSave = false;
+      renderBusinessObjectives(snapshot); openRestriction(item, false);
+      $('#objective-restriction-status').textContent += ' Reloaded saved state. Review it and acknowledge any new change before saving.';
+      $('#objective-restriction-mode').focus();
+    } catch (error) {
+      if (!currentRestriction(editor)) return;
+      if (error.status === 401 || error.status === 403) { resetObjectiveEditing(true); showMessage('Restriction editing is unavailable for this session. Sign in or refresh your workspace before continuing.', 'error'); }
+      else staleRestriction(editor, 'Could not reload the saved state: ' + error.message + ' Reload and review before saving.');
+    } finally {
+      if (objectiveUI.editor === editor && currentRestriction(editor)) { editor.busy = null; editor.controller = null; renderRestrictionChoice(editor); }
+    }
+  });
+  $('#objective-restriction-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const editor = objectiveUI.editor;
+    if (!editor || !currentRestriction(editor) || editor.busy || editor.stale || objectiveUI.mutation) return;
+    const proposed = restrictionPolicy(editor);
+    if (!proposed || policyKey(proposed) === policyKey(editor.source.executionPolicy) || !$('#objective-restriction-ack').checked || editor.ackKey !== restrictionChoiceKey()) return;
+    const saved = state.objectiveSnapshot?.objectives?.find(row => row.id === editor.source.id);
+    if (!sameObjectiveSession(objectiveUI.snapshotContext, true) || JSON.stringify(saved) !== JSON.stringify(editor.source)) { staleRestriction(editor, 'Saved objective data changed. Discard the draft and reload/review before saving.'); return; }
+    editor.busy = 'save'; editor.controller = new AbortController();
+    const ticket = { kind: 'restriction', editor, controller: editor.controller }; objectiveUI.mutation = ticket;
+    ++state.objectiveGeneration; objectiveUI.read?.controller.abort(); objectiveUI.read = null; setBusy($('#load-business-objectives'), false);
+    $('#objective-restriction-error').textContent = ''; renderRestrictionChoice(editor);
+    const payload = { id: editor.source.id, revision: editor.source.revision, executionPolicy: proposed };
+    try {
+      const result = await request('/api/business-objectives', { method: 'PUT', body: JSON.stringify(payload), signal: editor.controller.signal, isCurrent: () => currentRestriction(editor) });
+      if (!currentRestriction(editor) || objectiveUI.mutation !== ticket) return;
+      const returned = result?.objective, rows = result?.snapshot?.objectives;
+      const snapshotRow = Array.isArray(rows) ? rows.find(row => row.id === payload.id) : null;
+      if (!validObjectiveSnapshot(result?.snapshot) || returned?.workspaceId !== editor.context.workspaceId || returned?.id !== payload.id || returned?.revision !== payload.revision + 1 ||
+        !confirmedRestrictionPolicy(returned.executionPolicy, proposed) || snapshotRow?.revision !== returned.revision || !confirmedRestrictionPolicy(snapshotRow?.executionPolicy, proposed) ||
+        savedObjectiveDefinition(returned) !== savedObjectiveDefinition(editor.source) || savedObjectiveDefinition(snapshotRow) !== savedObjectiveDefinition(returned) || snapshotRow?.updatedAt !== returned.updatedAt) {
+        throw Object.assign(new Error('The response did not confirm the exact saved restriction.'), { code: 'RESTRICTION_RESULT_UNKNOWN' });
+      }
+      objectiveUI.mutation = null; objectiveUI.needsReload = false; objectiveUI.unknownSave = false; resetObjectiveEditing(); renderBusinessObjectives(result.snapshot);
+      showMessage('Restriction saved. Exact approval and all other safeguards remain required.');
+      Array.from(document.querySelectorAll('[data-manage-objective-restriction]')).find(button => button.dataset.manageObjectiveRestriction === payload.id)?.focus();
+    } catch (error) {
+      if (!currentRestriction(editor) || objectiveUI.mutation !== ticket) return;
+      if (error.status === 401 || error.status === 403) { resetObjectiveEditing(true); showMessage('Restriction editing is unavailable for this session. Sign in or refresh your workspace before continuing.', 'error'); return; }
+      objectiveUI.needsReload = true;
+      objectiveUI.unknownSave = error.code === 'REQUEST_UNAVAILABLE' || error.code === 'RESTRICTION_RESULT_UNKNOWN' || error.status >= 500;
+      const message = ['OBJECTIVE_CONFLICT','STATE_CONFLICT'].includes(error.code) ? 'The saved objective or workspace changed. Your choices remain visible but cannot be saved. Discard the draft and reload/review the current saved state.' :
+        error.code === 'OBJECTIVE_POLICY_CONNECTION_REQUIRED' ? 'The saved account reference changed or is missing. Your exact old and proposed bindings remain visible. Reload the saved objective/accounts, deliberately choose a current reference and review again.' :
+        error.code === 'REQUEST_UNAVAILABLE' || error.code === 'RESTRICTION_RESULT_UNKNOWN' || error.status >= 500 ? 'The restriction save outcome is unknown. It may have been saved. Reload the saved objective and review its current state before another save; this request will not be retried.' :
+        'The restriction was not confirmed: ' + error.message + ' Reload the saved objective and review before another save.';
+      staleRestriction(editor, message);
+    } finally {
+      if (objectiveUI.mutation === ticket) objectiveUI.mutation = null;
+      if (objectiveUI.editor === editor && currentRestriction(editor)) { editor.busy = null; editor.controller = null; renderRestrictionChoice(editor); }
+    }
+  });
+  const objectivePanel = $('.business-objectives-panel');
+  function clearClosedObjectivePanel(changes) {
+    if (changes.some((change, index) => change.oldValue !== null &&
+      (index + 1 < changes.length ? changes[index + 1].oldValue : objectivePanel.getAttribute('open')) === null)) resetObjectiveEditing();
+  }
+  const objectivePanelObserver = new MutationObserver(clearClosedObjectivePanel);
+  objectivePanelObserver.observe(objectivePanel, { attributes: true, attributeFilter: ['open'], attributeOldValue: true });
+  objectivePanel.querySelector('summary').addEventListener('click', () => { if (objectivePanel.open) resetObjectiveEditing(); });
+  objectivePanel.addEventListener('toggle', () => { if (!objectivePanel.open) resetObjectiveEditing(); });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) return;
+    const editor = objectiveUI.editor;
+    if (!editor || editor.busy === 'save' || !sameObjectiveSession(editor.context, true)) { resetObjectiveEditing(); return; }
+    // Merely switching tabs keeps unsent choices, but never their acknowledgement
+    // or a read ticket. A new object prevents old reload callbacks from reviving.
+    editor.controller?.abort(); objectiveUI.read?.controller.abort(); objectiveUI.read = null;
+    const paused = { ...editor, epoch: ++objectiveUI.epoch, busy: null, controller: null, ackKey: null };
+    objectiveUI.editor = paused;
+    staleRestriction(paused, 'The tab was hidden. Your unsent choices remain visible. Discard the draft and reload/review the saved objective before saving.');
+  });
+  window.addEventListener('popstate', () => resetObjectiveEditing());
+  window.addEventListener('pagehide', () => resetObjectiveEditing());
+
   function resetObjectiveForm() {
     const form = $('#business-objective-form');
     form.reset(); Object.keys(form.dataset).forEach(key => { delete form.dataset[key]; });
     $('#cancel-objective-edit').classList.add('hidden');
     $('#business-objective-error').textContent = '';
+    objectiveUI.planningBaseline = planningSignature();
   }
   function renderBusinessObjectives(snapshot) {
     state.objectiveSnapshot = snapshot;
-    const root = $('#business-objectives-list'), canEdit = ['owner','admin'].includes(state.data?.user?.role);
+    objectiveUI.snapshotContext = objectiveContext();
+    const editor = objectiveUI.editor;
+    if (editor && JSON.stringify(snapshot.objectives?.find(row => row.id === editor.source.id)) !== JSON.stringify(editor.source)) staleRestriction(editor, 'Saved objective data changed. Discard the draft and reload/review before saving.');
+    const root = $('#business-objectives-list'), canEdit = canPlanObjective(), owner = sameObjectiveSession(objectiveContext(), true);
     root.innerHTML = (snapshot.objectives || []).length ? snapshot.objectives.map(item => {
       const limits = item.limits || {};
       const enforced = item.executionPolicy?.mode === 'enforce';
       const editable = canEdit && (!enforced || state.data?.user?.role === 'owner');
       const scopeNote = enforced ? 'Owner execution restriction: Shopify content at ' + item.executionPolicy.scope.account : 'Planning only; no execution restriction';
       const policies = [limits.minGrossMarginPercent == null ? null : 'Margin ≥ ' + limits.minGrossMarginPercent + '%', limits.maxMonthlyAdBudget == null ? null : 'Ads ≤ ' + limits.maxMonthlyAdBudget + ' ' + limits.currency + '/month', limits.minStockCoverDays == null ? null : 'Stock ≥ ' + limits.minStockCoverDays + ' days', limits.profitFirst ? 'Profit first' : null].filter(Boolean).join(' · ');
-      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small><small>' + escapeHtml(scopeNote) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (editable ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + (canEdit && item.effectiveStatus === 'active' ? '<button class="secondary" type="button" data-prepare-objective-review="' + escapeHtml(item.id) + '" data-objective-revision="' + escapeHtml(item.revision) + '">Prepare review</button>' : '') + '</div>';
+      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small><small>' + escapeHtml(scopeNote) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (editable ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + (owner ? '<button class="secondary" type="button" data-manage-objective-restriction="' + escapeHtml(item.id) + '">Manage restriction</button>' : '') + (canEdit && item.effectiveStatus === 'active' ? '<button class="secondary" type="button" data-prepare-objective-review="' + escapeHtml(item.id) + '" data-objective-revision="' + escapeHtml(item.revision) + '">Prepare review</button>' : '') + '</div>';
     }).join('') : '<p class="muted">No saved objectives yet.</p>';
     const active = objectiveReview.active;
     if (active) {
@@ -1437,18 +1732,33 @@
       renderObjectiveReview();
     }
   }
-  $('#cancel-objective-edit').addEventListener('click', resetObjectiveForm);
+  $('#cancel-objective-edit').addEventListener('click', () => { if (!objectiveUI.mutation && !objectiveUI.editor) resetObjectiveForm(); });
+  for (const type of ['input','change']) $('#business-objective-form').addEventListener(type, () => { if (planningDraftOpen()) $('#cancel-objective-edit').classList.remove('hidden'); });
   $('#business-objectives-list').addEventListener('click', event => {
+    const manage = event.target.closest('[data-manage-objective-restriction]');
+    if (manage) {
+      if (!sameObjectiveSession(objectiveUI.snapshotContext, true) || objectiveUI.mutation || objectiveUI.read || objectiveUI.needsReload || !restrictionVisible()) return;
+      if (planningDraftOpen()) { $('#business-objective-error').textContent = 'Save or cancel your planning edits before managing a restriction.'; $('#cancel-objective-edit').classList.remove('hidden'); return; }
+      if (objectiveUI.editor) {
+        if (!currentRestriction(objectiveUI.editor) || objectiveUI.editor.busy) return;
+        if (objectiveUI.editor.stale || restrictionChoiceKey() !== objectiveUI.editor.initialChoice) { $('#objective-restriction-error').textContent = 'Save, reload or cancel this restriction draft before opening another objective.'; return; }
+      }
+      const item = state.objectiveSnapshot?.objectives?.find(row => row.id === manage.dataset.manageObjectiveRestriction);
+      if (item) openRestriction(item);
+      return;
+    }
     const prepare = event.target.closest('[data-prepare-objective-review]');
     if (prepare) {
       const item = state.objectiveSnapshot?.objectives?.find(row => row.id === prepare.dataset.prepareObjectiveReview);
-      if (!prepare.disabled && !$('#business-objective-form').querySelector('button[type=submit]').disabled && item?.effectiveStatus === 'active' && item.revision === Number(prepare.dataset.objectiveRevision) && state.objectiveSnapshot.workspaceId === state.data?.workspace?.id) prepareObjectiveReview(item);
+      if (!objectiveUI.editor && !objectiveUI.mutation && !prepare.disabled && !$('#business-objective-form').querySelector('button[type=submit]').disabled && item?.effectiveStatus === 'active' && item.revision === Number(prepare.dataset.objectiveRevision) && state.objectiveSnapshot.workspaceId === state.data?.workspace?.id) prepareObjectiveReview(item);
       return;
     }
     const button = event.target.closest('[data-edit-objective]');
-    if (!button || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;
+    if (!button || !canPlanObjective() || !sameObjectiveSession(objectiveUI.snapshotContext) || objectiveUI.mutation || objectiveUI.needsReload || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;
+    if (objectiveUI.editor) { $('#objective-restriction-error').textContent = 'Save or cancel restriction editing before changing planning fields.'; return; }
     const item = state.objectiveSnapshot?.objectives?.find(row => row.id === button.dataset.editObjective);
-    if (!item || state.objectiveSnapshot.workspaceId !== state.data?.workspace?.id) return;
+    if (!item || state.objectiveSnapshot.workspaceId !== state.data?.workspace?.id || (item.executionPolicy?.mode === 'enforce' && !sameObjectiveSession(objectiveUI.snapshotContext, true))) return;
+    if (planningDraftOpen() && planningSignature() !== objectiveUI.planningBaseline) { $('#business-objective-error').textContent = 'Save or cancel your current planning edits before opening another objective.'; return; }
     const form = $('#business-objective-form'), fields = form.elements;
     form.dataset.objectiveId = item.id; form.dataset.revision = String(item.revision);
     for (const key of ['title','metric','direction','status','baseline','target']) fields[key].value = item[key] ?? '';
@@ -1456,6 +1766,7 @@
     if (item.limits.currency && !Array.from(fields.currency.options).some(option => option.value === item.limits.currency)) { const option = document.createElement('option'); option.value = item.limits.currency; option.textContent = item.limits.currency; fields.currency.append(option); }
     for (const key of ['currency','minGrossMarginPercent','maxMonthlyAdBudget','minStockCoverDays']) fields[key].value = item.limits[key] ?? '';
     fields.profitFirst.checked = item.limits.profitFirst;
+    objectiveUI.planningBaseline = planningSignature();
     $('#cancel-objective-edit').classList.remove('hidden');
     fields.title.focus();
   });
@@ -1471,21 +1782,34 @@
   });
 
   $('#load-business-objectives').addEventListener('click', async event => {
-    const button = event.currentTarget, generation = state.graphGeneration, csrf = state.csrf;
-    if (button.disabled || $('#business-objective-form').querySelector('button[type=submit]').disabled) return;
-    const objectiveGeneration = ++state.objectiveGeneration;
+    clearClosedObjectivePanel(objectivePanelObserver.takeRecords());
+    const button = event.currentTarget;
+    if (objectiveUI.read || objectiveUI.mutation || button.disabled) return;
+    if (objectiveUI.editor) { $('#objective-restriction-error').textContent = 'Use Discard draft and reload saved objective/accounts, or cancel restriction editing first.'; return; }
+    const ticket = { context: objectiveContext(), epoch: objectiveUI.epoch, generation: ++state.objectiveGeneration, controller: new AbortController() };
+    if (!sameObjectiveSession(ticket.context)) return;
+    objectiveUI.read = ticket;
+    const current = () => objectiveUI.read === ticket && ticket.epoch === objectiveUI.epoch && ticket.generation === state.objectiveGeneration && sameObjectiveSession(ticket.context);
     setBusy(button, true, 'Loading…');
     try {
-      const snapshot = await request('/api/business-objectives');
-      if (generation === state.graphGeneration && csrf === state.csrf && objectiveGeneration === state.objectiveGeneration) renderBusinessObjectives(snapshot);
-    } catch(error) { if (generation === state.graphGeneration && csrf === state.csrf && objectiveGeneration === state.objectiveGeneration) $('#business-objectives-list').textContent = error.message; }
-    finally { setBusy(button, false); }
+      const snapshot = await request('/api/business-objectives', { signal: ticket.controller.signal, isCurrent: current });
+      if (!current()) return;
+      if (!validObjectiveSnapshot(snapshot)) throw new Error('A matching saved objective snapshot was not returned.');
+      objectiveUI.needsReload = false; objectiveUI.unknownSave = false; renderBusinessObjectives(snapshot);
+    } catch(error) { if (current()) $('#business-objectives-list').textContent = error.message; }
+    finally { if (objectiveUI.read === ticket) { objectiveUI.read = null; setBusy(button, false); } }
   });
   $('#business-objective-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget, fields = form.elements, button = form.querySelector('button'), error = $('#business-objective-error');
-    if (button.disabled) return;
-    const generation = state.graphGeneration, csrf = state.csrf, objectiveGeneration = ++state.objectiveGeneration;
+    if (button.disabled || !canPlanObjective() || objectiveUI.mutation || objectiveUI.editor) return;
+    if (objectiveUI.needsReload) { error.textContent = 'Load saved objectives and review the saved restriction state before another change.'; return; }
+    const existing = state.objectiveSnapshot?.objectives?.find(row => row.id === form.dataset.objectiveId);
+    if (form.dataset.objectiveId && (!sameObjectiveSession(objectiveUI.snapshotContext) || !existing || (existing.executionPolicy?.mode === 'enforce' && !sameObjectiveSession(objectiveUI.snapshotContext, true)))) return;
+    const ticket = { kind: 'planning', context: objectiveContext(), generation: ++state.objectiveGeneration, controller: new AbortController() };
+    objectiveUI.mutation = ticket;
+    objectiveUI.read?.controller.abort(); objectiveUI.read = null; setBusy($('#load-business-objectives'), false);
+    const current = () => objectiveUI.mutation === ticket && ticket.generation === state.objectiveGeneration && sameObjectiveSession(ticket.context) && canPlanObjective();
     const number = name => fields[name].value.trim() === '' ? null : Number(fields[name].value);
     const timestamp = name => form.dataset[name + 'Original'] && fields[name].value === form.dataset[name + 'Display'] ? form.dataset[name + 'Original'] : new Date(fields[name].value).toISOString();
     error.textContent = ''; setBusy(button, true, 'Saving…');
@@ -1494,11 +1818,11 @@
       const body = {...(form.dataset.objectiveId ? {id:form.dataset.objectiveId,revision:Number(form.dataset.revision)} : {}), title:fields.title.value, status:fields.status.value, metric:fields.metric.value, baseline:number('baseline'), target:number('target'), direction:fields.direction.value,
         startsAt:timestamp('startsAt'), endsAt:timestamp('endsAt'),
         limits:{currency:fields.currency.value || null, minGrossMarginPercent:number('minGrossMarginPercent'), maxMonthlyAdBudget:number('maxMonthlyAdBudget'), minStockCoverDays:number('minStockCoverDays'), profitFirst:fields.profitFirst.checked}};
-      const result = await request('/api/business-objectives', {method:'PUT',body:JSON.stringify(body)});
-      if (generation !== state.graphGeneration || csrf !== state.csrf || objectiveGeneration !== state.objectiveGeneration) return;
+      const result = await request('/api/business-objectives', {method:'PUT',body:JSON.stringify(body), signal: ticket.controller.signal, isCurrent: current});
+      if (!current()) return;
       renderBusinessObjectives(result.snapshot); resetObjectiveForm(); showMessage('Objective saved. Approval and execution safeguards remain in force.');
-    } catch(cause) { if (generation === state.graphGeneration && csrf === state.csrf) error.textContent = cause.message; }
-    finally { Array.from(fields).forEach(field => { field.disabled = false; }); setBusy(button, false); }
+    } catch(cause) { if (current()) error.textContent = cause.message; }
+    finally { if (objectiveUI.mutation === ticket) { objectiveUI.mutation = null; Array.from(fields).forEach(field => { field.disabled = false; }); setBusy(button, false); } }
   });
 
   function resetBusinessGraph(closePanel = false) {
@@ -2052,12 +2376,13 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
+    resetObjectiveEditing(true);
     resetBusinessGraph();
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
-    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
+    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });

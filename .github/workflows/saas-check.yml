@@ -59,7 +59,6 @@ jobs:
           name: runvara-mobile-onboarding
           path: |
             /tmp/runvara-onboarding-mobile.png
-            /tmp/runvara-business-objectives-*.png
             /tmp/runvara-provider-usage-*.png
             /tmp/runvara-objective-review-*.png
             /tmp/runvara-automation-history-*.png
@@ -73,6 +72,13 @@ jobs:
         with:
           name: runvara-current-outcome-graph-responsive
           path: /tmp/runvara-business-graph-*.png
+          if-no-files-found: ignore
+      - name: Upload objective restriction verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-restrictions-responsive
+          path: /tmp/runvara-business-objectives-*.png
           if-no-files-found: ignore
       - name: Upload legacy usage verification images
         if: always()

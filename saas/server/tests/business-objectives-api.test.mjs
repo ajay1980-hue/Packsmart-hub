@@ -103,3 +103,98 @@ test('execution restrictions require explicit owner configuration and cannot be 
   assert.equal(disabled.status, 200); assert.equal(disabled.body.objective.revision, 2);
   assert.equal((await request({ id: row.id, revision: 1, executionPolicy })).status, 409);
 });
+
+test('saved restriction patches preserve definitions and legacy omissions; stale or missing-account updates never relax policy', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-policy-patch-api-'));
+  const secret = 'objective-policy-patch-synthetic-secret-more-than-thirty-two-characters';
+  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
+  const state = seedWorkspaceState({}, { workspaceId: 'policy-patch', userId: 'patch-owner', email: 'owner@example.test', passwordHash: 'fixture-only' });
+  state.users.push({ ...state.users[0], id: 'patch-admin', role: 'admin', email: 'admin@example.test' });
+  state.connections = [{ id: 'patch-shopify', provider: 'shopify', status: 'disconnected', metadata: { shopDomain: 'patch-fixture.myshopify.com' } }];
+  await server.packsmart.store.save(state.workspace.id, state);
+  const tokens = Object.fromEntries(state.users.map(user => [user.id, createSessionToken({ workspaceId: state.workspace.id,
+    userId: user.id, email: user.email, role: user.role, sessionVersion: 1 }, secret)]));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+  const request = async (body, actor = 'patch-owner') => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/business-objectives`, { method: body === undefined ? 'GET' : 'PUT',
+      headers: { Cookie: `packsmart_session=${tokens[actor]}`, 'Content-Type': 'application/json',
+        'X-CSRF-Token': verifySessionToken(tokens[actor], secret).csrf }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+  const getState = () => server.packsmart.store.get(state.workspace.id);
+  const policy = { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: {
+    provider: 'shopify', operation: 'product_content', connectionId: 'patch-shopify', account: 'patch-fixture.myshopify.com' } };
+  const preparationOnly = { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' };
+  const definition = { title: 'Keep every saved field', metric: 'contribution_profit', baseline: -12.75, target: 83.125, direction: 'increase',
+    startsAt: '2026-09-07T06:01:02.345Z', endsAt: '2027-01-09T07:08:09.876Z', status: 'paused',
+    limits: { currency: 'JPY', maxMonthlyAdBudget: 0, minGrossMarginPercent: null, minStockCoverDays: 4.125,
+      profitFirst: false, approvalRequiredKinds: ['supplier_order', 'customer_facing_publish'] } };
+  const unchangedDefinition = ({ revision, updatedAt, executionPolicy, ...saved }) => saved;
+  const assertRejectedWithoutMutation = async (body, status, code, actor) => {
+    const before = await getState();
+    const result = await request(body, actor);
+    assert.equal(result.status, status); assert.equal(result.body.code, code);
+    assert.deepEqual(await getState(), before, `${code} does not persist an objective or audit update`);
+  };
+
+  const created = await request(definition);
+  assert.equal(created.status, 200);
+  const original = created.body.objective;
+  assert.equal(Object.hasOwn(original, 'executionPolicy'), false, 'new planning objectives retain the legacy absent-policy shape');
+  const enabled = await request({ id: original.id, revision: original.revision, executionPolicy: policy });
+  assert.equal(enabled.status, 200, 'an exact saved reference can be restricted while disconnected');
+  assert.equal(enabled.body.objective.revision, original.revision + 1);
+  assert.deepEqual(unchangedDefinition(enabled.body.objective), unchangedDefinition(original));
+  assert.deepEqual((await getState()).businessObjectives[0], enabled.body.objective);
+  assert.deepEqual(enabled.body.snapshot.objectives[0], { ...enabled.body.objective, effectiveStatus: 'paused' });
+
+  const ownerPlanning = await request({ id: original.id, revision: 2, title: 'Legacy owner planning edit' });
+  assert.equal(ownerPlanning.status, 200);
+  assert.deepEqual(ownerPlanning.body.objective.executionPolicy, policy, 'omission by an old owner client preserves enforcement');
+  assert.deepEqual(unchangedDefinition(ownerPlanning.body.objective), { ...unchangedDefinition(original), title: 'Legacy owner planning edit' });
+  await assertRejectedWithoutMutation({ id: original.id, revision: 2, executionPolicy: preparationOnly }, 409, 'OBJECTIVE_CONFLICT');
+  await assertRejectedWithoutMutation({ id: original.id, revision: 3, executionPolicy: null }, 400, 'VALIDATION_FAILED');
+
+  const adminCreated = await request({ ...definition, title: 'Legacy admin planning', baseline: null,
+    limits: { currency: 'CHF', maxMonthlyAdBudget: null, minGrossMarginPercent: 0, minStockCoverDays: null,
+      profitFirst: true, approvalRequiredKinds: [] } }, 'patch-admin');
+  assert.equal(adminCreated.status, 200);
+  const adminUpdated = await request({ id: adminCreated.body.objective.id, revision: 1, title: 'Legacy admin revision' }, 'patch-admin');
+  assert.equal(adminUpdated.status, 200);
+  assert.equal(Object.hasOwn(adminUpdated.body.objective, 'executionPolicy'), false, 'admin omission does not emit an owner-only field');
+  assert.deepEqual(adminUpdated.body.objective.limits, adminCreated.body.objective.limits);
+  assert.equal(adminUpdated.body.objective.baseline, null);
+  await assertRejectedWithoutMutation({ id: adminUpdated.body.objective.id, revision: 2, executionPolicy: preparationOnly }, 403, 'OWNER_APPROVAL_REQUIRED', 'patch-admin');
+  const nullableRestricted = await request({ id: adminUpdated.body.objective.id, revision: 2, executionPolicy: policy });
+  assert.equal(nullableRestricted.status, 200);
+  assert.deepEqual(unchangedDefinition(nullableRestricted.body.objective), unchangedDefinition(adminUpdated.body.objective),
+    'a policy-only update also preserves an unknown baseline, null budget/stock, explicit zero margin and profit-first true');
+
+  const missingConnection = await getState();
+  missingConnection.connections = [];
+  await server.packsmart.store.save(state.workspace.id, missingConnection);
+  const unavailable = await request();
+  assert.deepEqual(unavailable.body.objectives.find(row => row.id === original.id).executionPolicy, policy, 'reads keep the unavailable binding visible');
+  await assertRejectedWithoutMutation({ id: original.id, revision: 3, title: 'Cannot silently drop enforcement' }, 409, 'OBJECTIVE_POLICY_CONNECTION_REQUIRED');
+  await assertRejectedWithoutMutation({ id: original.id, revision: 3, executionPolicy: policy }, 409, 'OBJECTIVE_POLICY_CONNECTION_REQUIRED');
+  await assertRejectedWithoutMutation({ id: original.id, revision: 3, executionPolicy: preparationOnly }, 403, 'OWNER_APPROVAL_REQUIRED', 'patch-admin');
+
+  const beforeRemoval = (await getState()).businessObjectives.find(row => row.id === original.id);
+  const removed = await request({ id: original.id, revision: 3, executionPolicy: preparationOnly });
+  assert.equal(removed.status, 200, 'the owner can explicitly remove a restriction after its saved account disappears');
+  assert.deepEqual(removed.body.objective.executionPolicy, preparationOnly);
+  assert.equal(Object.hasOwn(removed.body.objective.executionPolicy, 'scope'), false);
+  assert.equal(removed.body.objective.revision, 4);
+  assert.deepEqual(unchangedDefinition(removed.body.objective), unchangedDefinition(beforeRemoval));
+  await assertRejectedWithoutMutation({ id: original.id, revision: 3, executionPolicy: policy }, 409, 'OBJECTIVE_CONFLICT');
+
+  const save = server.packsmart.store.save.bind(server.packsmart.store);
+  let saveAttempts = 0;
+  server.packsmart.store.save = async () => { saveAttempts++; throw Object.assign(new Error('Synthetic workspace revision changed'), { status: 409, code: 'STATE_CONFLICT' }); };
+  try {
+    await assertRejectedWithoutMutation({ id: original.id, revision: 4, executionPolicy: preparationOnly }, 409, 'STATE_CONFLICT');
+    assert.equal(saveAttempts, 1, 'a workspace conflict is returned without retrying or substituting a revision');
+  } finally { server.packsmart.store.save = save; }
+});
