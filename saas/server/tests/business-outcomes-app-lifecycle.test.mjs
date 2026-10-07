@@ -57,7 +57,8 @@ async function harness(t) {
     if (['/api/auth/session', '/api/auth/login'].includes(route)) return Response.json({ user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf });
     if (route === '/api/auth/signup-options') return Response.json({ enabled: false });
     if (route === '/api/auth/logout') return h.logout ? h.logout.promise : Response.json({ ok: true });
-    if (route === '/api/audit') return Response.json({ entries: [] });
+    if (route === '/api/audit?limit=250') return Response.json({ events: [] });
+    if (route === '/api/billing') return Response.json({});
     if (route === '/api/activity') return h.activityHandler ? h.activityHandler() : Response.json(createActivityMeter({ dbAvailable: false }).snapshot(workspaceId));
     if (route.startsWith('/api/business-outcomes')) {
       const held = h.handler?.(route, config); if (held) return held;
@@ -108,6 +109,7 @@ test('outcome and activity navigation discard each other’s stale 401 without s
   assert.equal(oldOutcome.request.config.isCurrent(), false);
   assert.equal(activityPanel.open, true);
   assert.match(h.$('workspace-activity-result').textContent, /Database activity tracking is unavailable/);
+  assert.equal(h.$('global-error').classList.contains('hidden'), true, 'audit navigation must settle without an unexpected-route error');
 
   const activityHold = deferred(); h.activityHandler = () => activityHold.promise;
   h.$('workspace-activity-refresh').click();
@@ -122,6 +124,7 @@ test('outcome and activity navigation discard each other’s stale 401 without s
   assert.equal(oldActivity.config.isCurrent(), false);
   assert.equal(h.panel.open, true);
   assert.match(h.$('business-outcomes-summary').textContent, /Reviewed results loaded/);
+  assert.equal(h.$('global-error').classList.contains('hidden'), true);
   const count = h.calls.length;
   await new Promise(resolve => setTimeout(resolve, 15));
   assert.equal(h.calls.length, count, 'navigation never automatically retries a stale read or mutation');

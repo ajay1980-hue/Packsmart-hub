@@ -312,9 +312,15 @@ function project(state, options, summaryOnly) {
     assertScope(raw);
     const metricFields = METRICS.filter(field => numeric(raw[field]));
     if (!metricFields.length) return;
-    const verified = raw.verified === true || raw.status === 'verified';
+    const legacyReviewed = raw.verified === true || raw.status === 'verified';
     const relativePath = ref.pointer.startsWith(item.ref.pointer) ? ref.pointer.slice(item.ref.pointer.length) : ref.pointer;
-    const node = addNode('outcome', [item.node?.id || item.ref.pointer, relativePath, ref.field || null], ref, { verified, realised: Boolean(verified && terminal), terminalSource: Boolean(terminal), metricFields });
+    // These retained snapshot fields have no committed outcome/current-head
+    // proof. A recorded review and terminal source status cannot qualify them.
+    // Keep the legacy booleans for consumers, but never promote them to results.
+    const node = addNode('outcome', [item.node?.id || item.ref.pointer, relativePath, ref.field || null], ref, {
+      verified: false, realised: false, qualified: false, qualification: 'legacy_unqualified',
+      legacyReviewed, terminalSource: Boolean(terminal), metricFields
+    });
     edge(item.node, node, 'has_recorded_outcome', ref, 'recorded-measurement');
   }
   for (const item of [...opportunities, ...approvals, ...work, ...experiments]) {
@@ -351,7 +357,12 @@ function project(state, options, summaryOnly) {
   const result = {
     schema: 'runvara-business-graph/v1', mode: summaryOnly ? 'summary' : 'detail', workspaceId,
     persistence: { mode: 'projection-of-authoritative-persisted-records', separateGraphStored: false, sourceOfTruth: 'existing-workspace-state', writesPerformed: 0, note: 'References are rebuilt from the retained tenant snapshot on demand; this response is not a separately persisted graph or a complete history of provider data.' },
-    summary: { nodes: nodes.length, edges: edges.length, nodesByType: byType, edgesByRelation: byRelation, unknownMappings: unknownTotal, unknownByReason, verifiedOutcomeRecords: nodes.filter(item => item.type === 'outcome' && item.attributes.realised).length, countsAreProjectionOnly: true, outcomeCountsAreSourceRecords: true },
+    summary: { nodes: nodes.length, edges: edges.length, nodesByType: byType, edgesByRelation: byRelation, unknownMappings: unknownTotal, unknownByReason,
+      recordedOutcomeRecords: byType.outcome || 0,
+      legacyReviewedOutcomeRecords: nodes.filter(item => item.type === 'outcome' && item.attributes.legacyReviewed).length,
+      verifiedOutcomeRecords: 0, countsAreProjectionOnly: true, outcomeCountsAreSourceRecords: true },
+    outcomeCoverage: { publicationProofAvailable: false, complete: false, unavailableReason: 'COMMITTED_OUTCOME_SNAPSHOT_NOT_SUPPLIED', completeLifetimeHistoryClaimed: false,
+      note: 'Outcome nodes are unqualified legacy source records. Recorded reviews and terminal statuses do not establish realised commercial results. This projection does not read current committed outcome heads; a zero verified count does not establish that no qualified outcomes exist.' },
     coverage: { truncated, complete: !truncated && sourceCoverage.every(item => !item.invalid), scannedRecords: scanned, droppedNodes: omittedNodes.size, droppedEdges, omittedUnknownMappings: unknownTotal - unknownMappings.length, sources: sourceCoverage, scope: 'retained-records-in-this-workspace', ordering: 'source-array-order; duplicate-ID ordinals are snapshot-local', note: 'Missing mappings and truncated indexes never establish a relationship. Shared SKU evidence does not establish product equivalence; channel evidence does not establish campaign attribution.' },
     limits,
     safeguards: { tenantScope: workspaceId, readOnly: true, externalWrites: false, providerRequests: false, rawSourceRecordsIncluded: false, rawCustomerIdentityIncluded: false, rawRecordIdsIncluded: false, credentialsIncluded: false, promptBodiesIncluded: false, inferredProductEquivalence: false, inferredCampaignAttribution: false, unknownProfitConvertedToZero: false }

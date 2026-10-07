@@ -28,13 +28,13 @@ Each invocation of the Supabase request boundary records one API request attempt
 
 Tenant attribution comes from a separate trusted store-call context. URLs, payload fields, response rows and headers cannot assign attribution. Scoped identity/state reads, primary/reporting commits, governed-counter reads/reserve/settle calls, known job reads/writes and archive/reporting operations provide context. Global queue claims, account lookup, workspace enumeration, pings and any uninstrumented direct request remain unattributed. There is no provider attribution guessed from a table name or request URL.
 
-Known retry categories are `upsert_network`, `primary_statement_cancelled`, `primary_network_reconciled`, `reporting_statement_cancelled` and `reporting_network_reconciled`. Primary full-state writes and narrow reporting-status writes retain separate operation and retry counters. A retry is another API attempt with another body-byte observation. A read used to reconcile a write is a read, not a retry. Explicit user retries, SDK/internal retries and provider-side retries are not inferred. Instrumentation does not add or alter retries.
+Known retry categories are `upsert_network`, `primary_statement_cancelled`, `primary_network_reconciled`, `reporting_statement_cancelled` and `reporting_network_reconciled`. Primary full-state writes and narrow reporting-status writes have separate operation and retry counters. A retry is another API attempt with another body-byte observation. A read used to reconcile a write is a read, not a retry. Explicit user retries, SDK/internal retries and provider-side retries are not inferred. Instrumentation does not add or alter retries.
 
 Body fields contain `{bytes, knownObservations, unknownObservations}`. Request strings are measured as UTF-8; fully consumed response text is measured after HTTP decoding. Headers, TLS, compression effects and other network overhead are excluded. Empty permitted responses and HEAD have known zero body bytes. Interrupted or oversized responses have unknown body length; partial consumed bytes are not guessed. Only integer sizes are retained, never request/response content.
 
 Job values count matched, acknowledged finish/reschedule/manual-retry transitions observed by this instance. They are not unique-job totals, queue depth, lifetime failures or a full durable transition history. Global lease-recovery transitions are not inferred from claim results. FileStore does not report database request totals.
 
-Hot-state samples contain `{bytes, previousBytes, deltaBytes, observedAt, observations}`. Attempted save payloads are separate from acknowledged committed payloads. A failed or conflicting write cannot update `confirmed`. `integrityRead` comes only from an existing full saved-state integrity read. Delta compares two serialized samples of the same kind, including metadata/compaction changes. The narrow reporting-status RPC does not create a full hot-state sample: its compact request bytes belong only to request-body observations. It is not archive growth, physical storage, continuous growth rate or a forecast.
+Hot-state samples contain `{bytes, previousBytes, deltaBytes, observedAt, observations}`. Attempted save payloads are separate from acknowledged committed payloads. A failed or conflicting write cannot update `confirmed`. `integrityRead` comes only from an existing full saved-state integrity read. Delta compares two serialized samples of the same kind, including metadata/compaction changes. Compact reporting-status RPC payloads do not create full hot-state samples; their sizes are request-body observations only. It is not archive growth, physical storage, continuous growth rate or a forecast.
 
 ## Bounds and volume
 
@@ -42,7 +42,7 @@ The meter retains at most 64 tenant records and 2 global records, 128 inflight t
 
 The endpoint admits at most 10 GET inspection attempts per signed-session workspace per minute in this server process, shared across its users, and has a 32 KiB JSON response ceiling. A precheck uses only the verified, unexpired signed session's workspace; invalid signatures and expired sessions allocate no tenant quota entries and perform no database reads. Above-quota requests perform no identity read. Every admitted request still performs the existing single compact identity read and fresh role, session-version, password-change, request-shape and general API checks. Attempts denied by those checks or returning unavailable observations consume the workspace quota. This process-local limiter resets on restart and is not a persistent or cross-replica budget. Snapshot creation adds no DB/provider calls. There is no periodic refresh or all-workspace fan-out.
 
-The stress test with 64 tenant records and 128 inflight tokens measured a largest tenant DTO of approximately 3.2 KiB; all tenant DTOs plus the internal diagnostic DTO were approximately 202 KiB serialized. These are serialization measurements, not heap measurements. The structural caps bound retained state; no physical memory-byte claim is made.
+Tests exercise the 64-tenant retention and 128-inflight limits, and require detached tenant responses to remain below 32 KiB without retaining supplied payloads or errors. These are bounded-contract and serialization checks, not physical heap measurements. No physical memory-byte claim is made.
 
 A representative unchanged Supabase save still performs three requests: one full primary state CAS, one narrow reporting-status CAS RPC and the existing variants read. Activity capture adds zero requests or storage writes. Reporting/archive POST bodies retain their existing batching and limits.
 
@@ -56,9 +56,50 @@ Existing governed usage remains the separate durable reserve/settle accounting s
 
 ## Prepared release gates
 
-The combined local backend/frontend suite passed 628 tests, including the
-pre-authentication resource guard. Syntax, SaaS security guards and whitespace
-checks passed. Responsive browser and container verification remain CI gates.
-This stage depends on the store-health corrections in PR76 and adds no schema
-or permissions. Production remains held pending ordinary functional verification
-of stage 10; no new telemetry or UI has been deployed by this preparation.
+The activity-only source is `1810612631d55c0d5d32918fe82a31808a96149c`
+above `72310bc02e420de9867a3aeebf126862c71058b4`. Only that range was
+replayed onto actual PR76 main
+`75131e70afd569365d84a2baf4cc314f38bf0c42`; the old PR76 commit was not applied
+again. PR78–81 features remain excluded.
+
+Fresh full Node22.23.3 validation passed **1,000 tests**, zero failures/skips,
+including pre-authentication quota, exact attempt/byte accounting, reporting
+retry isolation and outcome/activity lifecycle regressions. Syntax, SaaS security
+guards and whitespace checks passed. Separate fresh PostgreSQL17.6 clusters
+passed **25 outcome** and **73 reporting** cases and both stopped. These verify
+existing predecessor contracts; this activity stage adds no schema, permission,
+persistent metadata, recurring work or polling.
+
+Both outcome and activity responsive browser commands/screenshots are retained,
+as are all existing checks. When PR77 is retargeted from its old feature branch
+to main, Android Build must pass on the exact new head in addition to required
+SaaS/database/browser/container CI. Local Chromium is absent; no browser or
+Docker workaround was attempted. PR77 release remains held until PR76 deployment
+and fresh exact-revision health. No production or remote mutation occurred in
+this preparation.
+
+
+## Incremental compatibility decisions
+
+The shared CAS helper receives trusted primary/reporting context, meters each
+actual attempt once, and uses separate fixed retry categories. Compact revision
+reads retain strict 4 KiB shape/size validation and trusted state-read attribution.
+Response metering occurs around the existing single decode; safe database codes,
+Content-Range metadata, primary-health flags, exact CAS acknowledgements and
+cache invalidation retain their established behavior. Metering introduces no
+additional request or retry.
+
+Outcome persistence and dispatch-context methods retain their prior direct
+request calls and are explicitly unattributed in tenant activity. Tests require
+this behavior: neither URL filters, RPC bodies nor returned tenant fields can
+assign activity scope. These omissions remain part of the process-local coverage
+limits and are not presented as complete tenant totals.
+
+App conflicts preserve both lifecycle modules across login, password setup,
+bootstrap, logout and navigation, plus both script/style and no-cache allowlist
+entries. The compact-auth route union preserves outcome/dispatch guards and adds
+the signed-session pre-auth activity quota. No new tenant selector is introduced.
+The real-app combined lifecycle test now provides the actual Audit/Billing route
+responses and asserts that navigation produces no unrelated error banner while
+late 401s are discarded. Existing outcome save/publication tests are reused with
+both modules loaded, without duplicating their cases.

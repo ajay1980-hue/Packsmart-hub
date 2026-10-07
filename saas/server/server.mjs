@@ -247,7 +247,8 @@ function accountingCsv(state) {
     'recorded_tax', 'recorded_current_tax', 'recorded_discounts', 'recorded_shipping_charged',
     'recorded_net_total', 'recorded_net_ex_current_tax', 'known_recorded_amounts', 'unknown_recorded_amounts',
     'excluded_conflicting_identities', 'scan_complete', 'output_complete', 'eligibility_resolved',
-    'excluded_scope_rows', 'missing_identity_rows', 'invalid_date_orders', 'available_source_rows', 'scanned_source_rows'
+    'excluded_scope_rows', 'missing_identity_rows', 'invalid_date_orders', 'available_source_rows', 'scanned_source_rows',
+    'refund_field_basis', 'tax_field_basis'
   ];
   const evidence = inspection.evidence;
   if (!inspection.rows.length && !evidence?.completeness.retainedCohortComplete) throw Object.assign(new Error('Recorded evidence export unavailable: no eligible rows and scan, identity or collection evidence is incomplete'), { status: 409, code: 'ORDER_EVIDENCE_INCOMPLETE' });
@@ -261,7 +262,8 @@ function accountingCsv(state) {
       ...['total', 'currentTotal', 'refunds', 'tax', 'currentTax', 'discounts', 'shippingCharged', 'netTotal', 'netTotalExCurrentTax'].map(field => values[field]),
       monetary.filter(value => value !== null).length, monetary.filter(value => value === null).length,
       evidence.counts.conflictingIdentities, evidence.completeness.scanComplete, evidence.completeness.outputComplete, evidence.completeness.eligibilityResolved,
-      evidence.counts.invalidScopeRows + evidence.counts.invalidLineScopeOrders, evidence.counts.missingIdentityRows, evidence.counts.invalidDateOrders, evidence.counts.availableOrders, evidence.counts.scannedOrders
+      evidence.counts.invalidScopeRows + evidence.counts.invalidLineScopeOrders, evidence.counts.missingIdentityRows, evidence.counts.invalidDateOrders, evidence.counts.availableOrders, evidence.counts.scannedOrders,
+      'unverified_may_be_derived', 'unverified_original_or_current'
     ].map(csvCell).join(',');
   });
   return [headings.join(','), ...rows].join('\r\n') + '\r\n';
@@ -1390,9 +1392,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireOwner(auth);
           const body = await jsonBody(req, 16384);
           const result = await mutate(auth, async state => {
-            const objective = upsertBusinessObjective(state, body, {workspaceId:auth.session.workspaceId});
+            const objective = upsertBusinessObjective(state, body, {workspaceId:auth.session.workspaceId, actorId:auth.user.id});
             addAudit(state, {type:'business_objective_configured', actor:auth.user.id,
-              detail:{objectiveId:objective.id, revision:objective.revision, metric:objective.metric, status:objective.status, externalWrites:false}});
+              detail:{objectiveId:objective.id, revision:objective.revision, metric:objective.metric, status:objective.status,
+                executionPolicyMode:objective.executionPolicy?.mode || 'preparation_only', externalWrites:false}});
             return {objective, snapshot:businessObjectivesSnapshot(state, {workspaceId:auth.session.workspaceId})};
           });
           send(res, 200, result); return;

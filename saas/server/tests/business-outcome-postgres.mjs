@@ -23,6 +23,7 @@ const require = createRequire(new URL('./atomic-usage/package.json', import.meta
 const { Client } = require('pg');
 const clients = new Set();
 const REVIEW_SIGNATURE = 'public.runvara_read_business_outcome_review(text,text)';
+const REPORTING_SIGNATURE = 'public.runvara_commit_reporting_status(text,text,text,jsonb,timestamp with time zone)';
 let admin, baseline, originalLedgerAcl;
 async function connect(role = 'service_role') {
   const c = new Client({ connectionString, ssl: false, options: '', connectionTimeoutMillis: 5000, statement_timeout: 20_000, application_name: 'runvara-outcome-test' });
@@ -103,6 +104,10 @@ before(async () => {
   }
   originalLedgerAcl = await ledgerAcl();
   const dir = new URL('../supabase/migrations/', import.meta.url);
+  // The incremental outcome release follows the already-installed reporting
+  // repair. Exercise that actual predecessor without changing either migration.
+  const reporting = (await readdir(dir)).filter(x => /^\d{14}_reporting_status_cas\.sql$/.test(x)); assert.equal(reporting.length, 1);
+  await admin.query(await readFile(new URL(reporting[0], dir), 'utf8'));
   const matches = (await readdir(dir)).filter(x => /^\d{14}_business_outcome_publication\.sql$/.test(x)); assert.equal(matches.length, 1);
   await admin.query(await readFile(new URL(matches[0], dir), 'utf8'));
 }, { timeout: 30_000 });
@@ -162,6 +167,57 @@ test('real publication matches pure candidate exactly; targeted CAS and immutabl
   assert.ok(!JSON.stringify(r).includes('secretNeverReturned'));
   assert.equal((await joined(f))[0].version.source_measurement, undefined);
   validateBusinessOutcomeCandidate(r.publication.version, { workspaceId: f.workspaceId, now: r.publication.head.committedAt });
+});
+
+test('reporting and outcome publishers serialize on the same revision without overwriting each other', async () => {
+  for (const first of ['reporting', 'outcome']) {
+    const f = await fixture();
+    f.state.integrationStatus = { shopify: { sentinel: 'unrelated integration' }, reporting: { status: 'degraded', detail: 'previous status' } };
+    await setState(f, f.state);
+    const report = { status: 'connected', detail: 'Synthetic reporting refresh.', lastSyncAt: '2026-10-07T07:00:00.000Z', lastFailureAt: null, lastError: null, failures: [] };
+    const reportRevision = randomUUID();
+    const writeReport = async (c, expected, next = reportRevision) => (await c.query(
+      'SELECT * FROM public.runvara_commit_reporting_status($1,$2,$3,$4::jsonb,$5::timestamptz)',
+      [f.workspaceId, expected, next, JSON.stringify(report), report.lastSyncAt])).rows;
+    const a = await connect(), b = await connect();
+    let pending;
+    try {
+      await a.query('BEGIN');
+      await a.query('SELECT state FROM public.saas_workspace_state WHERE workspace_id=$1 FOR UPDATE', [f.workspaceId]);
+      const apid = (await a.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+      const bpid = (await b.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+      pending = (first === 'reporting' ? publish(request(f), b) : writeReport(b, f.state._revision))
+        .then(value => ({ value }), error => ({ error }));
+      await blocked(bpid, apid);
+      const winner = first === 'reporting' ? await writeReport(a, f.state._revision) : await publish(request(f), a);
+      await a.query('COMMIT');
+      const loser = await pending;
+      if (first === 'reporting') {
+        assert.deepEqual(winner, [{ workspace_id: f.workspaceId }]);
+        assert.equal(loser.error?.code, 'P0O04', 'stale publication requires a new review of the reporting-updated revision');
+        const expected = structuredClone(f.state); expected._revision = reportRevision; expected.integrationStatus.reporting = report;
+        await unchanged(f, expected);
+        const fresh = await publish(request(f, { workspaceRevision: reportRevision }));
+        assert.equal((await state(f))._revision, fresh.publication.head.commitRevision);
+        assert.deepEqual((await state(f)).integrationStatus, expected.integrationStatus);
+      } else {
+        assert.deepEqual(loser.value, [], 'stale reporting CAS cannot replace the publication revision');
+        const publishedState = await state(f), publishedRows = await joined(f);
+        assert.equal(publishedState._revision, winner.publication.head.commitRevision);
+        assert.deepEqual(publishedState.integrationStatus, f.state.integrationStatus);
+        assert.deepEqual(await writeReport(a, publishedState._revision), [{ workspace_id: f.workspaceId }]);
+        const expected = structuredClone(publishedState); expected._revision = reportRevision; expected.integrationStatus.reporting = report;
+        assert.deepEqual(await state(f), expected);
+        assert.deepEqual(await joined(f), publishedRows, 'reporting cannot rewrite immutable outcome versions or current heads');
+      }
+      assert.equal((await admin.query('SELECT count(*)::int n FROM public.audit_events WHERE workspace_id=$1', [f.workspaceId])).rows[0].n, 1);
+      assert.equal((await joined(f)).length, 1);
+    } finally {
+      await a.query('ROLLBACK').catch(() => {});
+      if (pending) await pending;
+      await close(a); await close(b);
+    }
+  }
 });
 
 test('owner-only authorization and session rotation, including replay, are checked after locking', async () => {
@@ -468,6 +524,12 @@ test('service has SELECT plus sole publisher capability; browsers/generic mutati
     const reader = (await admin.query('SELECT prosecdef,provolatile,proconfig FROM pg_proc WHERE oid=$1::regprocedure', [REVIEW_SIGNATURE])).rows[0];
     assert.equal(reader.prosecdef, false); assert.equal(reader.provolatile, 's'); assert.ok(reader.proconfig.includes('search_path=\"\"'));
     assert.equal(definer.prosecdef, true); assert.equal(definer.owner, 'postgres'); assert.ok(definer.proconfig.includes('search_path=""'));
+    const reporter = (await admin.query('SELECT prosecdef,proconfig FROM pg_proc WHERE oid=$1::regprocedure', [REPORTING_SIGNATURE])).rows[0];
+    assert.equal(reporter.prosecdef, false); assert.ok(reporter.proconfig.includes('search_path=""'));
+    for (const role of ['service_role', 'anon', 'authenticated']) {
+      const allowed = (await admin.query('SELECT has_function_privilege($1,$2,\'EXECUTE\') allowed', [role, REPORTING_SIGNATURE])).rows[0].allowed;
+      assert.equal(allowed, role === 'service_role', 'outcome migration/bootstrap must preserve reporting function access');
+    }
   }
   await admin.query('REVOKE SELECT ON public.saas_workspace_state FROM service_role');
   try { await assert.rejects(review(f), code('42501')); } finally { await admin.query('GRANT SELECT ON public.saas_workspace_state TO service_role'); }

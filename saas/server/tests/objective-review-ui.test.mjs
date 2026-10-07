@@ -110,6 +110,18 @@ test('review preparation is explicit, owner/admin-only, revision-bound, and rapi
   assert.equal(admin.document.querySelector('[data-prepare-objective-review]'), null);
 });
 
+test('objective UI distinguishes preparation from enforced account scope and hides admin restriction editing', async t => {
+  const owner = await harness(t); await owner.open();
+  assert.match(owner.document.querySelector('#business-objectives-list').textContent, /Planning only; no execution restriction/);
+  const admin = await harness(t, { role: 'admin' });
+  admin.snapshot.objectives[0].executionPolicy = { schema: 'runvara-objective-execution-policy/v1', mode: 'enforce',
+    scope: { provider: 'shopify', operation: 'product_content', connectionId: 'fixture-shopify', account: 'fixture.myshopify.com' } };
+  await admin.open();
+  assert.match(admin.document.querySelector('#business-objectives-list').textContent, /Owner execution restriction: Shopify content at fixture\.myshopify\.com/);
+  assert.equal(admin.document.querySelector('[data-edit-objective]'), null);
+  assert.ok(admin.document.querySelector('[data-prepare-objective-review]'), 'read-only preparation remains available to the admin');
+});
+
 test('status polling backs off, makes at most eight status reads, and resumes only with an explicit click', async t => {
   const h = await harness(t); await h.open(); await h.start();
   for (let i = 0; i < 8; i++) await h.tick();

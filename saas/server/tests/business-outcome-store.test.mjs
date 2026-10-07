@@ -236,37 +236,30 @@ test('review refuses foreign identities, copied current records and malformed so
     .review(WS, 'experiment_1'), { code: 'OUTCOME_SOURCE_NOT_FOUND' });
 });
 
-test('metered transport preserves outcome cardinality and decoding failures without deriving tenant attribution', async () => {
-  const joined = fixture().joined, calls = [];
-  let contentRange = '0-0/1', malformed = false;
-  const store = createStore({ NODE_ENV: 'test', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only-key' }, {
-    fetchImpl: async (url, options) => {
-      calls.push({ url, options });
-      assert.equal(Object.hasOwn(options, 'includeResponseMetadata'), false);
-      assert.equal(options.headers.Prefer, 'count=exact');
-      return new Response(malformed ? 'private malformed body' : JSON.stringify([joined]), { headers: { 'content-range': contentRange } });
+test('strict shared transport preserves outcome cardinality and withholds read success for undecodable evidence', async () => {
+  const joined=fixture().joined;
+  let contentRange='0-0/1',invalid=false,calls=0;
+  const store=createStore({NODE_ENV:'test',SUPABASE_URL:'https://outcome-fixture.invalid',SUPABASE_SERVICE_ROLE_KEY:'synthetic-only'}, {
+    fetchImpl:async(_url,options)=>{
+      calls++;assert.equal(Object.hasOwn(options,'includeResponseMetadata'),false);assert.equal(options.headers.Prefer,'count=exact');
+      assert.equal(options.method,undefined,'outcome inspection remains read-only');
+      return new Response(invalid?'private invalid outcome evidence':JSON.stringify([joined]),{headers:{'content-range':contentRange}});
     }
   });
-  const complete = await store.businessOutcomeSummary(WS);
-  assert.equal(complete.summary.coverage.complete, true);
-  assert.equal(complete.summary.groups[0].amount, '10');
-  contentRange = '0-0/2';
-  const partial = await store.businessOutcomeSummary(WS);
-  assert.equal(partial.summary.coverage.complete, false);
-  assert.equal(partial.summary.coverage.totalCurrentHeads, 2);
-  assert.equal(partial.summary.groups[0].amount, null);
-  const lastSuccessfulReadAt = store.telemetry.lastSuccessfulReadAt;
-  malformed = true;
-  await assert.rejects(store.businessOutcomeSummary(WS), { code: 'OUTCOME_READ_UNAVAILABLE' });
-  assert.equal(store.telemetry.lastSuccessfulReadAt, lastSuccessfulReadAt);
-  assert.equal(store.telemetry.lastFailureCode, 'SUPABASE_RESPONSE_INVALID');
-  assert.equal(calls.length, 3, 'one transport attempt per explicit read');
-  assert.equal(store.activitySnapshot(WS).db.attempted, null, 'URL tenant filters are not a trusted activity attribution context');
-  const internal = store.activityMeter.instanceSnapshot().unattributed;
-  assert.equal(internal.db.attempted, 3);
-  assert.equal(internal.db.succeeded, 2);
-  assert.equal(internal.db.outcomes.invalid_response, 1);
-  assert.doesNotMatch(JSON.stringify(store.activitySnapshot(WS)), /private malformed body|measurement_|report_/);
+  const complete=await store.businessOutcomeSummary(WS);
+  assert.equal(complete.summary.coverage.complete,true);assert.equal(complete.summary.groups[0].amount,'10');
+  contentRange='0-0/2';
+  const partial=await store.businessOutcomeSummary(WS);
+  assert.equal(partial.summary.coverage.complete,false);assert.equal(partial.summary.coverage.totalCurrentHeads,2);
+  assert.equal(partial.summary.groups[0].amount,null);
+  store.telemetry.lastSuccessfulReadAt='2026-01-01T00:00:00.000Z';invalid=true;
+  await assert.rejects(store.businessOutcomeSummary(WS),{code:'OUTCOME_READ_UNAVAILABLE'});
+  assert.equal(store.telemetry.lastSuccessfulReadAt,'2026-01-01T00:00:00.000Z');
+  assert.equal(store.telemetry.lastFailureCode,'SUPABASE_RESPONSE_INVALID');
+  assert.equal(calls,3);assert.doesNotMatch(JSON.stringify(store.diagnostics()),/private invalid outcome evidence/);
+  assert.equal(store.activitySnapshot(WS).db.attempted,null,'tenant filters do not create trusted activity attribution');
+  const observed=store.activityMeter.instanceSnapshot().unattributed;
+  assert.equal(observed.db.attempted,3);assert.equal(observed.db.succeeded,2);assert.equal(observed.db.outcomes.invalid_response,1);
 });
 
 test('metered outcome RPC preserves safe rejection codes and never repeats an uncertain mutation', async () => {

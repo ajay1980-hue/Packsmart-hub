@@ -82,12 +82,17 @@ exists here.
 `refunds`, `tax`, `currentTax`, `discounts`, `shippingCharged`) and two explicitly
 derived fields:
 
+The stored `refunds` field may itself be an importer-derived total difference;
+it is not provider-refund, receipt or completed-action proof. The stored `tax`
+field may repeat `currentTax`; it does not establish original tax. These fields
+remain inspectable with explicit ambiguous-basis provenance and labels.
+
 - `netTotal`: recorded `currentTotal`, or `total - refunds` only when
   `currentTotal` is absent/null and both inputs are known. An invalid explicit
   `currentTotal` cannot trigger a fallback. No clamping or status-based refund
   fabrication occurs.
-- `netTotalExCurrentTax`: `netTotal - currentTax`, requiring both values. Original
-  `tax` is not substituted for current tax after a refund.
+- `netTotalExCurrentTax`: `netTotal - currentTax`, requiring both values. The
+  ambiguous `tax` field is not substituted for current tax after a refund.
 
 Each metric has `knownCount`, `unknownCount`, `knownSubtotal`,
 `completeCohortTotal` and `complete`. All amounts are canonical decimal strings
@@ -237,7 +242,7 @@ floating values to aggregate them.
 
 ## Active consumer contract
 
-The calculation version is `imported-order-analytics/v2`. Existing `today`,
+The calculation version is `imported-order-analytics/v3`. Existing `today`,
 `last7d`, `last30d`, channel and business-state compatibility fields remain in
 place, with unsupported revenue, gross profit, contribution, margin, refund-money
 and financial profit-coverage scalars set to null. No missing coverage becomes
@@ -250,8 +255,12 @@ Today starts at UTC midnight; at exactly midnight it is an explicitly empty
 interval with no monetary zero and no fabricated source observation. Missing or
 malformed order collections have unknown counts. A recorded empty array is
 separate and still cannot establish a business zero. Fulfilment is a normalized
-recorded status; unknown statuses cannot become known open orders. Positive
-recorded refunds and refund status both support recorded follow-up counts.
+recorded status; unknown statuses cannot become known open orders. Only recorded
+`PARTIALLY_REFUNDED` or `REFUNDED` status supports refund review counts, across
+every provider. A positive ambiguous refund field or a historical boolean cannot
+establish that cue. A recorded status still does not verify refund money,
+receipts or completed external actions. The compatibility names
+`hasRecordedRefund` and `refundedOrders` now describe this status-only review cue.
 
 The internal `inspectImportedOrderEvidence` returns bounded reconciled source
 rows to authorized server consumers. Public evidence never exposes those raw
@@ -425,4 +434,27 @@ requests, contained tables/panels and screenshot artifacts. Existing browser gat
 are preserved. Local Chromium is unavailable, so that new real-browser gate has
 not been run locally; CI must run it before release. No browser installation,
 Docker build, production request, remote write or remote CI run is claimed here.
-All 636 server tests pass locally, along with syntax checks, SaaS guards and whitespace checks. The final CSV/override-scope refinement also passes its 10 focused consumer/API tests. Local Node is v24.19.0; release CI uses Node 22.
+The original isolated source passed 636 server tests on Node v24.19.0, syntax, SaaS guards and whitespace checks; its final CSV/override-scope refinement passed 10 focused consumer/API tests. Those historical results do not establish the incremental integration below.
+
+
+## Incremental integration after PR80, 2026-10-07
+
+The local stage starts from tested PR80 `76c8bbf71ef8d0a8ff8f138c6dc5be319d15fcdc` on `codex/runvara-imported-orders-after-health`. It applies only these PR81 commits, in order:
+
+- `f3472b650cfc2bbe36e400a8047bfe7632e5710e`
+- `177e046c47b98549036bf78ce6a72ea790e31a39`
+- `919d9a09dfc639c1e571b616a0263f0939941f1d`
+
+The original source parent `c9ab79ffecf00b99c245d4cdde2e99079810a3de` is the already-present catalogue stage and is not replayed. Actual predecessor-main ancestry must be aligned after its release; the local PR80 ancestry is not presented as actual new main.
+
+Five conflicts were reviewed explicitly. Command retains the owner-result exact currency/window boundary, unqualified legacy counters and unavailable unscoped value/time fields, while adding the imported historical-cost/currency/tax caveat. Revenue normalization retains all explicit tenant aliases and the legacy experiment qualification caveat. Syntax checks include reporting, outcomes, activity and imported-order modules. CSS keeps outcome/activity lifecycle panels and the two imported-layout refinements. The SaaS workflow retains all eight responsive gates and their screenshot paths. Automatically merged bootstrap, business-state, connection-doctor and cache tests were also reviewed.
+
+Three additional integration regressions prove that a corrected current-head owner outcome of `-0.000001 GBP` remains separate from incomplete GBP and USD imported groups; unavailable imported profit cannot become economic zero, ranking evidence or execution authority; and real-app Command keeps both owner-result and imported-source disclosures after bootstrap refresh. The existing FileStore/Supabase cache test now freezes the prior catalogue calculation version and still verifies one primary plus one bounded reporting write, separate activity attribution, full hot-state samples, read-only reuse and preserved typed measurement/history. Existing outcome/activity stale-session, dispatch and strict-health tests remain intact.
+
+Independent review found and closed a raw-display gap: supported spellings such as `+0`, `.5`, `-.5` and `+12.50` were shown as Unknown even though the projection/editor accepted them. The browser now preserves those spellings under the same 33-character, six-fractional-place, 24-significant-integer-digit and safe-number bounds. A real-app regression failed before the fix and checks order quantity/net plus advertising spend/attribution, exact large decimals, explicit zero, invalid/exponent/unsafe inputs, unavailable financial KPIs and GET-only rendering.
+
+Fresh validation passed **1,103 Node22.23.3 tests**, **25 outcome PostgreSQL17.6 cases**, and **73 reporting PostgreSQL17.6 cases**, with zero failures or skips, plus syntax, SaaS security/tenant guards and whitespace. Both disposable PostgreSQL clusters stopped afterward. Applied SQL names `20261007100823_business_outcome_publication.sql` and `20261007074031_reporting_status_cas.sql`, and their content hashes, are unchanged. No new migration, schema permission, dependency or recurring work is added.
+
+The current Node22 synthetic payload pass measured 1,235,108 bytes of bootstrap, 13,351 bytes of period evidence and 27,322 bytes of brief for 500 orders/100 variants; the 2,000-order/2,000-variant fixture measured 3,590,316, 40,120 and 41,428 bytes respectively. These generated fixture measurements are not production observations or whole-bootstrap budgets. Prior Node24 timing/comparison tables remain historical; the current run did not establish a baseline savings percentage.
+
+Independent integration review found no remaining blocker after the decimal-display fix; its focused Node22 UI rerun passed all nine tests. Release still requires actual predecessor-main ancestry, predecessor deployment health, fresh exact-head CI (including the real Chromium, Android, container and required database gates), authorized release and fresh postdeployment health. Local Chromium remains unavailable and no install or Docker workaround was attempted. No remote write or production action occurred here; this stage does not establish original OS completion or successor blueprint completion.

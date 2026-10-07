@@ -153,7 +153,7 @@ test('presentation and order detail caps suppress completeness without losing ex
   assert.ok(Buffer.byteLength(JSON.stringify(deriveBusinessState(state, { now }))) < 85000);
 });
 
-test('rejected or malformed source rows never reach the raw editor and paid refunds remain follow-up evidence', () => {
+test('rejected source rows never reach the editor and ambiguous refund fields cannot create follow-up evidence', () => {
   const state = fixture();
   state.orders = [null, order('foreign', '777', { workspaceId: 'other', customerEmail: 'foreign-secret@example.invalid' }),
     order('line-foreign', '888', { lineItems: [{ sku: 'A', quantity: 1, workspaceId: 'other' }] }),
@@ -161,8 +161,10 @@ test('rejected or malformed source rows never reach the raw editor and paid refu
   const metrics = deriveOperations(state, { now });
   assert.equal(metrics.orderProfitability.length, 1);
   assert.equal(metrics.orderProfitability[0].id, 'paid-refund');
-  assert.equal(metrics.customerServiceIssues, 1);
-  assert.equal(metrics.customerServiceItems[0].id, 'paid-refund');
+  assert.equal(metrics.customerServiceIssues, 0);
+  assert.deepEqual(metrics.customerServiceItems, []);
+  assert.equal(metrics.orderProfitability[0].recordedStatus.hasRecordedRefund, false);
+  assert.equal(metrics.orderProfitability[0].refunds, '1', 'stored amount remains inspectable');
   assert.equal(metrics.orderDetailCoverage.truncated, true);
   assert.doesNotMatch(JSON.stringify(metrics), /foreign-secret|private@example/);
   assert.match(buildDailyBrief(state, { now }).summary, /eligibility unresolved.*partial scanned cohort/);
@@ -240,6 +242,8 @@ test('accounting export and order-cost API preserve records while withholding qu
   assert.ok(headings.includes('operating_contribution'));
   const csvRows = lines.map(line => { assert.equal(line.length, headings.length); return Object.fromEntries(headings.map((key, index) => [key, line[index]])); });
   assert.equal(csvRows.length, 3);
+  assert.deepEqual(headings.slice(-2), ['refund_field_basis', 'tax_field_basis'], 'provenance is appended without moving compatibility columns');
+  assert.ok(csvRows.every(row => row.refund_field_basis === 'unverified_may_be_derived' && row.tax_field_basis === 'unverified_original_or_current'));
   assert.ok(csvRows.every(row => row.gross_revenue === '' && row.net_revenue === '' && row.operating_contribution === '' && row.source_period_status === 'unverified' && row.financial_qualification === 'unavailable'));
   assert.deepEqual(csvRows.map(row => [row.channel, row.recorded_currency, row.recorded_net_total]), [['shopify', 'GBP', '100'], ['shopify', 'GBP', '200'], ['ebay', 'USD', '300']]);
   const update = async (id, csrf = bootstrap.csrf) => fetch(base + `/api/orders/${id}/economics`, { method: 'PUT', headers: { Cookie: cookie, 'X-CSRF-Token': csrf, 'Content-Type': 'application/json' }, body: JSON.stringify({ actualShippingCost: 5 }) });

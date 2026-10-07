@@ -101,6 +101,10 @@ test('imported evidence keeps exact currency/status/cancellation cohorts and dis
   assert.match(unknown.cells[5].textContent, /1 known \/ 0 unknown/);
   assert.match(root.textContent, /Source period unverified/);
   assert.match(root.textContent, /not verified business revenue, profit or collected cash/);
+  assert.match(root.textContent, /Stored refund field/);
+  assert.match(root.textContent, /Stored tax field · basis unverified/);
+  assert.match(root.textContent, /refund field may be a derived total difference/);
+  assert.doesNotMatch(root.textContent, /Recorded original tax|Recorded refunds/);
   assert.doesNotMatch(root.textContent, /£|\$|70%|£70|1e\+/);
   assert.equal(h.document.querySelector('[onerror]'), null);
   for (const id of ['today-revenue', 'today-profit', 'today-margin', 'hg-coverage', 'analytics-revenue', 'analytics-profit', 'analytics-margin', 'analytics-ad-spend', 'analytics-roas', 'orders-profit', 'orders-profit-coverage']) assert.equal(h.document.getElementById(id).textContent, 'Unavailable', id);
@@ -119,6 +123,37 @@ test('imported evidence keeps exact currency/status/cancellation cohorts and dis
   assert.match(h.document.getElementById('economics-body').textContent, /sales and stock cover unavailable/);
   assert.match(h.document.getElementById('economics-body').textContent, /£55\.00/,'catalogue economics remains separate');
   assert.equal(h.calls.every(call => call.method === 'GET'), true);
+});
+
+test('raw order and advertising evidence preserves supported decimal spellings without financial qualification', async t => {
+  const h = await harness(t);
+  const cases = [
+    ['+0', '+0'], ['.5', '.5'], ['-.5', '-.5'], ['+12.50', '+12.50'],
+    ['999999999999999999999999.123456', '999999999999999999999999.123456'],
+    [0, '0'], [-0.5, '-0.5'], [null, 'Unknown'], [true, 'Unknown'], ['', 'Unknown'],
+    ['1e3', 'Unknown'], ['.1234567', 'Unknown'], ['1' + '0'.repeat(24), 'Unknown'],
+    [Number.MAX_SAFE_INTEGER + 1, 'Unknown'], ['<img src=x onerror=alert(1)>', 'Unknown']
+  ];
+  const rows = cases.map(([value], index) => order(`spelling-${index}`, {
+    lineItems: [{ sku: 'COSTED', name: 'Recorded decimal', quantity: value, net: value }]
+  }));
+  h.bootstrap.dashboard.orderProfitability = rows.map(row => ({ ...row,
+    profitability: { importedOrderEvidence: projection([row]) } }));
+  h.bootstrap.advertisingCosts = cases.map(([value], index) => ({ id: `ad-${index}`,
+    date: '2026-09-20', channel: 'shopify', currency: 'GBP', spend: value, attributableRevenue: value }));
+  await h.controls.reload({ migrate: false });
+  for (const [index, [, expected]] of cases.entries()) {
+    const line = h.document.querySelector(`[data-order-id="spelling-${index}"] .line-item-list > div`);
+    assert.equal(line.querySelector('span small').textContent, `COSTED · recorded quantity ${expected}`);
+    assert.equal(line.querySelector('strong').firstChild.textContent, expected);
+    const ad = h.document.querySelectorAll('#analytics-marketing tbody tr')[index];
+    assert.equal(ad.cells[3].textContent, expected);
+    assert.equal(ad.cells[4].textContent, expected);
+  }
+  assert.equal(h.document.querySelector('[onerror]'), null);
+  for (const id of ['orders-profit', 'analytics-ad-spend', 'analytics-roas'])
+    assert.equal(h.document.getElementById(id).textContent, 'Unavailable');
+  assert.ok(h.calls.every(call => call.method === 'GET'));
 });
 
 test('Command keeps owner-result boundaries beside imported evidence disclosures after a bootstrap refresh', async t => {
@@ -269,12 +304,15 @@ test('bounded presentations and shared period references retain provider scope a
 });
 
 
-test('order filters use reconciled refund, cancellation and fulfilment evidence; unavailable counts stay unknown', async t => {
+test('order filters use recorded refund status without upgrading derived fields or stale flags across providers', async t => {
   const h = await harness(t), document = h.document;
   const rows = [order('open', { fulfillmentStatus: 'UNFULFILLED' }),
     order('cancelled', { fulfillmentStatus: 'UNFULFILLED', cancelledAt: false }),
     order('unknown-fulfillment', { fulfillmentStatus: null }),
-    order('paid-refund', { fulfillmentStatus: 'FULFILLED', refunds: '1', currentTotal: '99' })];
+    order('paid-refund', { fulfillmentStatus: 'FULFILLED', refunds: '1', currentTotal: '99' }),
+    order('paid-refund-other', { provider: 'ebay', refunds: '7', recordedStatus: { financialStatus: 'PAID', fulfillmentStatus: 'FULFILLED', cancelled: false, hasRecordedRefund: true } }),
+    order('status-refund', { financialStatus: 'REFUNDED', refunds: null }),
+    order('status-refund-other', { provider: 'ebay', financialStatus: 'PARTIALLY_REFUNDED', refunds: '0' })];
   h.bootstrap.dashboard.orderProfitability = rows.map(row => ({ ...row, profitability: { importedOrderEvidence: projection([row]) } }));
   h.bootstrap.dashboard.customerServiceIssues = null;
   await h.controls.reload({ migrate: false });
@@ -283,7 +321,7 @@ test('order filters use reconciled refund, cancellation and fulfilment evidence;
   filter.value = 'open'; filter.dispatchEvent(new h.window.Event('change', { bubbles: true }));
   assert.deepEqual([...document.querySelectorAll('#order-list [data-order-id]')].map(row => row.dataset.orderId), ['open']);
   filter.value = 'refunded'; filter.dispatchEvent(new h.window.Event('change', { bubbles: true }));
-  assert.deepEqual([...document.querySelectorAll('#order-list [data-order-id]')].map(row => row.dataset.orderId), ['paid-refund']);
+  assert.deepEqual([...document.querySelectorAll('#order-list [data-order-id]')].map(row => row.dataset.orderId), ['status-refund', 'status-refund-other']);
   filter.value = 'all'; filter.dispatchEvent(new h.window.Event('change', { bubbles: true }));
   assert.match(document.querySelector('[data-order-id="cancelled"]').textContent, /Cancelled/);
 });

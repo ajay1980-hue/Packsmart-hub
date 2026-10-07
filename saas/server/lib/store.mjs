@@ -835,7 +835,7 @@ class SupabaseStore {
     const succeededAt = new Date().toISOString();
     if (['GET', 'HEAD'].includes(method)) this.telemetry.lastSuccessfulReadAt = succeededAt;
     else this.telemetry.lastSuccessfulWriteAt = succeededAt;
-    // Bounded readers retain cardinality only after the response has decoded.
+    // Bounded readers receive cardinality only after the response has decoded.
     return includeResponseMetadata ? { data, contentRange: response.headers.get('content-range') } : data;
   }
 

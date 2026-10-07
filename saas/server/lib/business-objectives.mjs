@@ -97,7 +97,24 @@ function limits(value, workspaceId) {
   if (result.maxMonthlyAdBudget !== null && result.currency === null) throw invalid('A monthly ad budget requires a currency');
   return result;
 }
-const OBJECTIVE_FIELDS = ['id', 'revision', 'workspaceId', 'tenantId', 'title', 'metric', 'baseline', 'target', 'direction', 'startsAt', 'endsAt', 'status', 'limits'];
+export const OBJECTIVE_EXECUTION_POLICY_SCHEMA = 'runvara-objective-execution-policy/v1';
+function executionPolicy(value, workspaceId) {
+  assertScope(workspaceId, value);
+  record(value, 'execution policy', ['schema', 'mode', 'scope']);
+  if (value.schema !== OBJECTIVE_EXECUTION_POLICY_SCHEMA || !['preparation_only', 'enforce'].includes(value.mode)) throw invalid('Unsupported execution policy');
+  if (value.mode === 'preparation_only') {
+    if (own(value, 'scope')) throw invalid('A preparation-only policy has no execution scope');
+    return { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' };
+  }
+  record(value.scope, 'execution scope', ['provider', 'operation', 'connectionId', 'account']);
+  if (value.scope.provider !== 'shopify' || value.scope.operation !== 'product_content'
+    || typeof value.scope.connectionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value.scope.connectionId)
+    || typeof value.scope.account !== 'string' || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(value.scope.account)
+    || value.scope.account.length > 253) throw invalid('Execution restrictions support one exact Shopify account and product-content action');
+  return { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: { ...value.scope } };
+}
+
+const OBJECTIVE_FIELDS = ['id', 'revision', 'workspaceId', 'tenantId', 'title', 'metric', 'baseline', 'target', 'direction', 'startsAt', 'endsAt', 'status', 'limits', 'executionPolicy'];
 function definition(input, workspaceId) {
   assertScope(workspaceId, input);
   record(input, 'objective', OBJECTIVE_FIELDS);
@@ -115,7 +132,8 @@ function definition(input, workspaceId) {
   if (metric === 'gross_margin_percent' && normalizedLimits.minGrossMarginPercent !== null && target < normalizedLimits.minGrossMarginPercent) throw invalid('Margin target is below the objective minimum');
   if (metric === 'stock_cover_days' && normalizedLimits.minStockCoverDays !== null && target < normalizedLimits.minStockCoverDays) throw invalid('Stock target is below the objective minimum');
   return { workspaceId, title: text(input.title, 'Objective title', 160), metric, baseline, target, direction, startsAt, endsAt,
-    status: enumValue(own(input, 'status') ? input.status : 'active', OBJECTIVE_STATUSES, 'objective status'), limits: normalizedLimits };
+    status: enumValue(own(input, 'status') ? input.status : 'active', OBJECTIVE_STATUSES, 'objective status'), limits: normalizedLimits,
+    ...(own(input, 'executionPolicy') ? { executionPolicy: executionPolicy(input.executionPolicy, workspaceId) } : {}) };
 }
 function storedObjectives(state, workspaceId) {
   const rows = state.businessObjectives === undefined ? [] : state.businessObjectives;
@@ -154,12 +172,25 @@ export function upsertBusinessObjective(state, input, options = {}) {
   if (previous && input.revision !== previous.revision) throw fail('Objective changed; reload before editing', 'OBJECTIVE_CONFLICT', 409);
   if (!previous && own(input, 'revision')) throw invalid('Revision is assigned by the server');
   if (!previous && rows.length >= MAX_BUSINESS_OBJECTIVES) throw fail('A workspace supports at most 50 objectives', 'OBJECTIVE_LIMIT_REACHED', 409);
+  if (own(input, 'executionPolicy') || previous?.executionPolicy?.mode === 'enforce') {
+    const actors = (state.users || []).filter(user => user.id === options.actorId);
+    if (actors.length !== 1 || actors[0].role !== 'owner' || actors[0].active === false || actors[0].passwordChangeRequired) {
+      throw fail('Only the current workspace owner can configure or edit an execution restriction', 'OWNER_APPROVAL_REQUIRED', 403);
+    }
+  }
   const { createdAt: _createdAt, updatedAt: _updatedAt, ...previousDefinition } = previous || {};
   const candidate = { ...previousDefinition, ...input, limits: { ...(previous?.limits || {}), ...(input.limits || {}) } };
   // Do not allow malformed/null limits to disappear through object spreading.
   if (own(input, 'limits')) record(input.limits, 'limits', ['minGrossMarginPercent', 'maxMonthlyAdBudget', 'currency', 'minStockCoverDays', 'profitFirst', 'approvalRequiredKinds']);
   const result = { id: previous?.id || `objective_${randomUUID()}`, ...definition(candidate, workspaceId),
     revision: (previous?.revision || 0) + 1, createdAt: previous?.createdAt || now, updatedAt: now };
+  if (result.executionPolicy?.mode === 'enforce') {
+    const policy = result.executionPolicy, connections = (state.connections || []).filter(row => row.id === policy.scope.connectionId && row.provider === 'shopify');
+    if (connections.length !== 1 || connections[0].metadata?.shopDomain !== policy.scope.account) {
+      throw fail('Select the exact existing Shopify connection for this restriction', 'OBJECTIVE_POLICY_CONNECTION_REQUIRED', 409);
+    }
+    assertScope(workspaceId, connections[0]);
+  }
   state.businessObjectives = previous ? rows.map(row => row.id === previous.id ? result : row) : [...rows, result];
   return structuredClone(result);
 }

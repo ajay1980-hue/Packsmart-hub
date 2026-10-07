@@ -295,6 +295,13 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
   assert.equal(detailedGraph.response.status, 200);
   assert.ok(detailedGraph.payload.nodes.length <= 200, 'caller cannot expand server limits');
   assert.ok(detailedGraph.payload.edges.length <= 400);
+  for (const result of [graph.payload, detailedGraph.payload]) {
+    assert.equal(result.summary.verifiedOutcomeRecords, 0);
+    assert.equal(typeof result.summary.recordedOutcomeRecords, 'number');
+    assert.equal(result.outcomeCoverage.publicationProofAvailable, false);
+    assert.equal(result.outcomeCoverage.complete, false);
+    assert.equal(result.outcomeCoverage.unavailableReason, 'COMMITTED_OUTCOME_SNAPSHOT_NOT_SUPPLIED');
+  }
   assert.equal(redundantBootstrapSaves, 0, 'graph reads must never write persistence');
   assert.equal(JSON.stringify(detailedGraph.payload).includes('passwordHash'), false);
   server.packsmart.store.save = originalSave;

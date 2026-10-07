@@ -54,8 +54,12 @@
 
   function recordedInput(value) {
     // Raw editor evidence keeps its spelling and is never a qualified financial amount.
-    return typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value) ? value
-      : typeof value === 'number' && Number.isFinite(value) ? String(value) : 'Unknown';
+    if (typeof value === 'number' && (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER)) return 'Unknown';
+    if (typeof value !== 'string' && typeof value !== 'number') return 'Unknown';
+    const raw = String(value);
+    if (raw.length > 33 || !/^[+-]?(?:\d+(?:\.\d{1,6})?|\.\d{1,6})$/.test(raw)) return 'Unknown';
+    const whole = raw.replace(/^[+-]/, '').split('.')[0];
+    return (whole.replace(/^0+/, '') || '0').length <= 24 ? raw : 'Unknown';
   }
 
   function importedEvidence(period) {
@@ -106,12 +110,13 @@
       '<p class="signal-note">Retained orders: ' + escapeHtml(countLabel(retainedOrders)) + (unresolved.length ? ' · ' + escapeHtml(unresolved.join(' · ')) : '') + '</p>' + clippingNote + scanNote +
       '<details class="evidence imported-evidence-provenance"><summary>Source period and evidence details</summary><p class="signal-note">' + escapeHtml(windowLabel) + '</p>' +
       '<p class="muted tiny">Normalized recorded amounts may contain importer defaults or derived values. Currency recognition and source currency are unverified.</p>' +
+      '<p class="muted tiny">The refund field may be a derived total difference, and the tax field may repeat current tax. Neither proves a provider refund or original tax. Refund review uses recorded financial status only; it does not verify a refund payment or completed action.</p>' +
       '<p class="muted tiny">Scan ' + (completeness.scanComplete ? 'complete' : 'incomplete') +
       ' · Output ' + (completeness.outputComplete && !clipped ? 'complete' : 'incomplete') + ' · Eligibility ' + (completeness.eligibilityResolved ? 'resolved' : 'unresolved') +
       '. Financial qualification unavailable. Numeric cost completeness does not establish historical cost assignment.</p>' +
       (providers ? '<p class="muted tiny">Source-period coverage is unverified for every provider listed here:</p><ul class="imported-source-list">' + providers + '</ul>' : '<p class="muted tiny">Source-period coverage is unverified.</p>') + '</details>';
     if (!evidence.groups?.length) return note + '<p class="empty-state">No retained order groups for this selection. An empty retained collection does not establish zero sales.</p>';
-    const fields = [['total','Recorded total'],['currentTotal','Recorded current total'],['refunds','Recorded refunds'],['tax','Recorded original tax'],['currentTax','Recorded current tax'],['discounts','Recorded discounts'],['shippingCharged','Recorded shipping charged'],['netTotal','Normalized net total'],['netTotalExCurrentTax','Normalized net less current tax']];
+    const fields = [['total','Recorded total'],['currentTotal','Recorded current total'],['refunds','Stored refund field · basis unverified'],['tax','Stored tax field · basis unverified'],['currentTax','Recorded current tax'],['discounts','Recorded discounts'],['shippingCharged','Recorded shipping charged'],['netTotal','Normalized net total'],['netTotalExCurrentTax','Normalized net less current tax']];
     const rows = evidence.groups.map(group => {
       const costs = group.costNumbers || {}, coverage = completeAllowed ? costs.netTotalCoverage : null;
       const extra = details ? '<details class="evidence"><summary>Amounts and costs</summary><dl>' + fields.map(([key,label]) => '<div><dt>' + label + '</dt><dd>' + recordedMetric(group.recordedAmounts?.[key], completeAllowed) + '</dd></div>').join('') +
@@ -122,7 +127,7 @@
         '</td><td>' + recordedMetric(group.recordedAmounts?.refunds, completeAllowed) + '</td><td>' + escapeHtml(numericCostLabel(costs)) + '<small>' + escapeHtml(countLabel(costs.incompleteOrders)) +
         ' incomplete · retained cost cohort ' + (!completeAllowed ? 'unavailable' : costs.completeCohort === true ? 'complete' : costs.completeCohort === false ? 'incomplete' : 'unavailable') + '</small><small>Profit / margin / cash: unavailable</small></td></tr>';
     }).join('');
-    const table = '<div class="table-wrap table-scroll"><table class="imported-evidence-table"><caption>Exact recorded amounts, grouped by provider, currency, status and cancellation</caption><thead><tr><th scope="col">Provider</th><th scope="col">Recorded currency</th><th scope="col">Recorded status</th><th scope="col">Cancellation</th><th scope="col">Orders</th><th scope="col">Recorded net amount</th><th scope="col">Recorded refunds</th><th scope="col">Numeric cost availability</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+    const table = '<div class="table-wrap table-scroll"><table class="imported-evidence-table"><caption>Exact recorded amounts, grouped by provider, currency, status and cancellation</caption><thead><tr><th scope="col">Provider</th><th scope="col">Recorded currency</th><th scope="col">Recorded status</th><th scope="col">Cancellation</th><th scope="col">Orders</th><th scope="col">Recorded net amount</th><th scope="col">Stored refund field</th><th scope="col">Numeric cost availability</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
     return note + (collapsed ? '<details class="evidence imported-evidence-cohorts"><summary>Inspect exact recorded groups</summary>' + table + '</details>' : table);
   }
 
@@ -714,13 +719,13 @@
   }
 
   function recordedOrderStatus(order) {
-    if (order.recordedStatus) return order.recordedStatus;
+    if (order.recordedStatus) return { ...order.recordedStatus,
+      hasRecordedRefund: ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(order.recordedStatus.financialStatus) };
     const group = importedEvidence(order.profitability)?.groups?.[0];
     const status = typeof order.fulfillmentStatus === 'string' ? order.fulfillmentStatus.toUpperCase() : 'UNKNOWN';
     const fulfillmentStatus = ['FULFILLED','UNFULFILLED','PARTIAL','PARTIALLY_FULFILLED','RESTOCKED','IN_PROGRESS','ON_HOLD','OPEN','SCHEDULED'].includes(status) ? status : 'UNKNOWN';
-    const refunds = group?.recordedAmounts?.refunds?.knownSubtotal;
     return { fulfillmentStatus, financialStatus: group?.financialStatus || 'UNKNOWN', cancelled: group?.cancelled === true,
-      hasRecordedRefund: ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(group?.financialStatus) || (typeof refunds === 'string' && /^\d+(?:\.\d+)?$/.test(refunds) && refunds !== '0') };
+      hasRecordedRefund: ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(group?.financialStatus) };
   }
 
   function orderMatches(order) {
@@ -1383,8 +1388,11 @@
     const root = $('#business-objectives-list'), canEdit = ['owner','admin'].includes(state.data?.user?.role);
     root.innerHTML = (snapshot.objectives || []).length ? snapshot.objectives.map(item => {
       const limits = item.limits || {};
+      const enforced = item.executionPolicy?.mode === 'enforce';
+      const editable = canEdit && (!enforced || state.data?.user?.role === 'owner');
+      const scopeNote = enforced ? 'Owner execution restriction: Shopify content at ' + item.executionPolicy.scope.account : 'Planning only; no execution restriction';
       const policies = [limits.minGrossMarginPercent == null ? null : 'Margin ≥ ' + limits.minGrossMarginPercent + '%', limits.maxMonthlyAdBudget == null ? null : 'Ads ≤ ' + limits.maxMonthlyAdBudget + ' ' + limits.currency + '/month', limits.minStockCoverDays == null ? null : 'Stock ≥ ' + limits.minStockCoverDays + ' days', limits.profitFirst ? 'Profit first' : null].filter(Boolean).join(' · ');
-      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (canEdit ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + (canEdit && item.effectiveStatus === 'active' ? '<button class="secondary" type="button" data-prepare-objective-review="' + escapeHtml(item.id) + '" data-objective-revision="' + escapeHtml(item.revision) + '">Prepare review</button>' : '') + '</div>';
+      return '<div><span>' + escapeHtml(item.title) + '<small>' + escapeHtml(statusLabel(item.metric)) + ' · ' + escapeHtml(statusLabel(item.effectiveStatus)) + '</small><small>' + escapeHtml(policies) + '</small><small>' + escapeHtml(scopeNote) + '</small></span><b>' + escapeHtml(item.baseline == null ? 'Unknown' : item.baseline) + ' → ' + escapeHtml(item.target) + '</b>' + (editable ? '<button class="text-button" type="button" data-edit-objective="' + escapeHtml(item.id) + '">Edit</button>' : '') + (canEdit && item.effectiveStatus === 'active' ? '<button class="secondary" type="button" data-prepare-objective-review="' + escapeHtml(item.id) + '" data-objective-revision="' + escapeHtml(item.revision) + '">Prepare review</button>' : '') + '</div>';
     }).join('') : '<p class="muted">No saved objectives yet.</p>';
     const active = objectiveReview.active;
     if (active) {

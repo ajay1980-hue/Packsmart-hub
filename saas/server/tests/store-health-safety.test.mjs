@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { once } from 'node:events';
@@ -112,6 +113,41 @@ test('reporting-status follow-up can neither clear an unrelated primary failure 
   store.primaryPersistenceHealthy=false;store.telemetry.lastPrimaryFailureAt='2026-01-01T00:00:00.000Z';store.telemetry.lastPrimaryWriteAt='2025-01-01T00:00:00.000Z';
   await store.commit('tenant-one',state(),'old',true,{primary:false});
   assert.equal(store.diagnostics().primaryPersistence,false);assert.equal(store.diagnostics().lastPrimaryWriteAt,'2025-01-01T00:00:00.000Z');
+});
+
+test('narrow reporting RPC decode failures neither claim transport success nor change primary health', async () => {
+  const report = { status:'connected',detail:'Synthetic reporting result.',lastSyncAt:'2026-10-07T10:00:00.000Z',lastFailureAt:null,lastError:null,failures:[] };
+  for (const primaryHealthy of [false,true]) for (const [expectedCode,response] of [
+    ['SUPABASE_RESPONSE_INVALID',() => new Response(`private malformed report ${key}`)],
+    ['SUPABASE_RESPONSE_INVALID',() => new Response(null,{status:204})],
+    ['SUPABASE_RESPONSE_INVALID',() => new Response(new ReadableStream({start(controller){controller.error(new Error(key));}}))],
+    ['SUPABASE_RESPONSE_TOO_LARGE',() => new Response('x'.repeat(4097))],
+    [null,() => Response.json([{workspace_id:'tenant-one'}])]
+  ]) {
+    let calls=0;
+    const store=factory(async(url,options)=>{
+      calls++;assert.equal(new URL(url).pathname,'/rest/v1/rpc/runvara_commit_reporting_status');assert.equal(options.method,'POST');
+      assert.ok(Buffer.byteLength(options.body)<=16384);assert.equal(Object.hasOwn(JSON.parse(options.body),'state'),false);
+      return response();
+    });
+    store.primaryPersistenceHealthy=primaryHealthy;
+    store.telemetry.lastPrimaryFailureAt='2026-01-02T00:00:00.000Z';
+    store.telemetry.lastPrimaryWriteAt='2026-01-01T00:00:00.000Z';
+    store.telemetry.lastSuccessfulWriteAt='2026-01-03T00:00:00.000Z';
+    let error;
+    try { await store.commitReportingStatus('tenant-one',report,randomUUID(),randomUUID()); } catch (caught) { error=caught; }
+    assert.equal(error?.code??null,expectedCode);
+    assert.equal(calls,1,'unverified response decoding does not authorize an automatic mutation retry');
+    assert.equal(store.diagnostics().primaryPersistence,primaryHealthy);
+    assert.equal(store.telemetry.lastPrimaryFailureAt,'2026-01-02T00:00:00.000Z');
+    assert.equal(store.telemetry.lastPrimaryWriteAt,'2026-01-01T00:00:00.000Z');
+    if(error){
+      assert.ok(['SUPABASE_RESPONSE_INVALID','SUPABASE_RESPONSE_TOO_LARGE'].includes(error.code));
+      assert.equal(store.telemetry.lastSuccessfulWriteAt,'2026-01-03T00:00:00.000Z');
+      assert.equal(store.telemetry.lastFailureCode,error.code);
+      assert.doesNotMatch(JSON.stringify(store.diagnostics()),/private malformed report|private-test-key/);
+    } else assert.notEqual(store.telemetry.lastSuccessfulWriteAt,'2026-01-03T00:00:00.000Z');
+  }
 });
 
 

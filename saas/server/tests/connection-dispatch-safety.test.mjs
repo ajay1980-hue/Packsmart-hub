@@ -8,6 +8,12 @@ import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { IntegrationService } from '../lib/integrations.mjs';
 import { executeConnectionWrite, proposeConnectionWrite } from '../lib/connection-writes.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
+import { deriveOperations } from '../lib/operations.mjs';
+import { deriveImpact } from '../lib/impact-engine.mjs';
+import { deriveLearning } from '../lib/learning-engine.mjs';
+import { deriveBusinessGraph } from '../lib/business-graph.mjs';
+import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary } from '../lib/business-outcomes.mjs';
 
 const WORKSPACE = 'dispatch-safety-fixture';
 const PRODUCT = 'gid://shopify/Product/71';
@@ -37,7 +43,16 @@ async function reached(g, running) {
 // real FileStore-backed production dispatch is separately required to deny it.
 // Supabase fixtures exercise its adapter against mocked conditional PATCHes,
 // not a live Postgres instance. All provider and storage traffic is synthetic.
-async function fixture(t, { provider = 'shopify', operation = 'product_content', baseline = false, storage = 'file' } = {}) {
+function installPolicy(state, patch = {}) {
+  const now = Date.now();
+  return upsertBusinessObjective(state, { title: 'Synthetic dispatch restriction', metric: 'orders', baseline: 1, target: 2, direction: 'increase',
+    startsAt: new Date(now - 60000).toISOString(), endsAt: new Date(now + 86400000).toISOString(), limits: { profitFirst: false },
+    executionPolicy: { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: {
+      provider: 'shopify', operation: 'product_content', connectionId: 'shopify-fixture', account: SHOP } }, ...patch },
+  { actorId: state.users[0].id, now: new Date(now) });
+}
+
+async function fixture(t, { provider = 'shopify', operation = 'product_content', baseline = false, storage = 'file', policy = null } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-dispatch-safety-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const database = storage === 'mock-supabase' ? fakeSupabase() : null;
@@ -56,6 +71,7 @@ async function fixture(t, { provider = 'shopify', operation = 'product_content',
   ];
   seeded.connectionSettings = { shopify: { permissionMode: 'approval_gated' },
     meta: { permissionMode: 'approval_gated', metaPageIds: [PAGE], metaCatalogIds: [CATALOG] } };
+  if (policy) installPolicy(seeded, policy === true ? {} : policy);
   seeded.channelData = { meta: { products: [{ id: META_PRODUCT, catalogId: CATALOG }] } };
   if (operation === 'facebook_update') seeded.connectionWrites = [{ id: 'previous-facebook-write', provider: 'meta', status: 'completed',
     input: { operation: 'facebook_publish', pageId: PAGE }, result: { externalId: `${PAGE}_909` } }];
@@ -947,6 +963,113 @@ test('Supabase dispatch uses only trusted bounded context selectors after the in
   assert.ok(reads.every(call => call.url.searchParams.get('select') !== 'state'));
 });
 
+test('dispatch preserves exact claims when narrow reporting is deferred or a lost reporting reply is reconciled', async t => {
+  for (const failure of ['denied-reporting', 'lost-reporting-reply']) await t.test(failure, async t => {
+    const f = await fixture(t, { storage: 'mock-supabase' });
+    const originalFetch = f.store.fetch, reports = [], before = f.database.calls.length;
+    f.store.fetch = async (url, options = {}) => {
+      if (new URL(url).pathname.endsWith('/rpc/runvara_commit_reporting_status')) {
+        reports.push({ body: options.body });
+        if (failure === 'denied-reporting') return Response.json({ code: '42501' }, { status: 403 });
+        await originalFetch(url, options);
+        throw new TypeError('synthetic lost reporting reply');
+      }
+      return originalFetch(url, options);
+    };
+    const result = await f.run();
+    assert.equal(result.status, 'completed');
+    assert.equal(f.mutations.length, 1, 'reporting recovery must never repeat the approved external mutation');
+    assert.equal(f.mutations[0].body.variables.product.title, 'Approved title');
+    const storageCalls = f.database.calls.slice(before);
+    assert.equal(storageCalls.filter(call => call.method === 'PATCH').length, 3, 'initial claim, phase claim and terminal result each save full state once');
+    assert.equal(reports.length, 3, 'there is one narrow follow-up per full state save, without full-state fallback');
+    for (const call of reports) {
+      const body = JSON.parse(call.body);
+      assert.ok(Buffer.byteLength(call.body) <= 16384);
+      assert.deepEqual(Object.keys(body).sort(), ['p_expected_revision', 'p_next_revision', 'p_report', 'p_updated_at', 'p_workspace_id']);
+      assert.equal(Object.hasOwn(body, 'state'), false);
+    }
+    assert.equal(storageCalls.filter(call => call.url.searchParams.get('select') === 'revision:state->>_revision').length,
+      failure === 'lost-reporting-reply' ? 3 : 0);
+    const saved = f.database.states.get(WORKSPACE);
+    assert.equal(saved.connectionWrites[0].status, 'completed');
+    assert.equal(saved.connectionDispatchAdmissions.length, 1);
+    assert.equal(saved.approvals[0].executedExternally, true);
+    assert.equal(saved._revision, f.state._revision);
+    if (failure === 'denied-reporting') assert.match(saved.integrationStatus.reporting.detail, /pending/);
+    else assert.equal(saved.integrationStatus.reporting.status, 'connected');
+  });
+});
+
+test('an unverifiable reporting reply after the phase claim cannot permit mutation or replay the claimed phase', async t => {
+  for (const kind of ['malformed', 'oversized']) await t.test(kind, async t => {
+    const f = await fixture(t, { storage: 'mock-supabase' });
+    const originalFetch = f.store.fetch;
+    let reports = 0;
+    f.store.fetch = async (url, options = {}) => {
+      const response = await originalFetch(url, options);
+      if (new URL(url).pathname.endsWith('/rpc/runvara_commit_reporting_status') && ++reports === 2) {
+        return new Response(kind === 'malformed' ? 'private unverified reporting acknowledgement' : 'x'.repeat(4097));
+      }
+      return response;
+    };
+    const result = await f.observe();
+    assertBlocked(result, f.mutations);
+    assert.equal(result.code, 'STATE_CONFLICT');
+    assert.equal(reports, 2);
+    const durable = await f.replica.get(WORKSPACE);
+    assert.equal(durable.connectionWrites[0].status, 'executing');
+    assert.equal(durable.connectionWrites[0].dispatchClaim.phases.shopify_mutation.status, 'dispatching');
+    assert.notEqual(durable._revision, f.state._revision);
+    const before = f.database.calls.length;
+    const replay = await executeConnectionWrite(durable, f.write.id, durable.users[0].id, f.service,
+      () => f.replica.save(WORKSPACE, durable), { ...f.options,
+        loadFreshState: context => f.replica.getConnectionWriteContext(WORKSPACE, context) }).catch(error => error);
+    assertBlocked(replay, f.mutations);
+    assert.equal(f.database.calls.length, before, 'an already-claimed phase cannot acquire fresh dispatch authority by retrying');
+  });
+});
+
+test('undecodable final dispatch proof neither advances read success nor permits the claimed provider mutation', async t => {
+  const failures={
+    empty:()=>new Response(null,{status:204}),
+    malformed:()=>new Response('private malformed dispatch proof'),
+    oversized:()=>new Response('x'.repeat(32769)),
+    stream:()=>new Response(new ReadableStream({start(controller){controller.error(new Error('private interrupted proof'));}}))
+  };
+  for(const [kind,response] of Object.entries(failures)) await t.test(kind,async t=>{
+    const f=await fixture(t,{storage:'mock-supabase'}),originalFetch=f.store.fetch;
+    let proofReads=0,diagnosticsAtRejection;
+    f.store.fetch=async(url,options={})=>{
+      const select=new URL(url).searchParams.get('select')||'';
+      if(select.includes('scope_workspaceId:')&&++proofReads===2)return response();
+      return originalFetch(url,options);
+    };
+    const result=await f.observe(f.persist,{...f.options,loadFreshState:async context=>{
+      const sentinel='2026-01-01T00:00:00.000Z';
+      if(proofReads===1)f.store.telemetry.lastSuccessfulReadAt=sentinel;
+      try{return await f.store.getConnectionWriteContext(WORKSPACE,context);}
+      catch(error){diagnosticsAtRejection=f.store.diagnostics();throw error;}
+    }});
+    assertBlocked(result,f.mutations);
+    assert.equal(result.errorCode,'WRITE_CONTEXT_UNAVAILABLE');
+    assert.equal(proofReads,2);
+    assert.equal(diagnosticsAtRejection.lastSuccessfulReadAt,'2026-01-01T00:00:00.000Z');
+    assert.equal(diagnosticsAtRejection.lastFailureCode,kind==='oversized'?'SUPABASE_RESPONSE_TOO_LARGE':'SUPABASE_RESPONSE_INVALID');
+    assert.equal(diagnosticsAtRejection.primaryPersistence,true,'failed evidence reads do not revoke an acknowledged primary state commit');
+    assert.doesNotMatch(JSON.stringify(diagnosticsAtRejection),/private malformed dispatch proof|private interrupted proof/);
+    const durable=await f.replica.get(WORKSPACE);
+    assert.equal(durable.connectionWrites[0].dispatchClaim.phases.shopify_mutation.status,'dispatching');
+    assert.equal(durable.connectionWrites[0].status,'failed');
+    const before=f.database.calls.length;
+    const retry=await executeConnectionWrite(durable,f.write.id,durable.users[0].id,f.service,()=>f.replica.save(WORKSPACE,durable),{
+      ...f.options,loadFreshState:context=>f.replica.getConnectionWriteContext(WORKSPACE,context)
+    }).catch(error=>error);
+    assertBlocked(retry,f.mutations);assert.equal(retry.code,'WRITE_ALREADY_ATTEMPTED');
+    assert.equal(f.database.calls.length,before);
+  });
+});
+
 test('Instagram status observation failures retain the acknowledged container through cooldown and later publish once', async t => {
   const raw = 'PRIVATE provider diagnostic with synthetic credentials';
   const cases = {
@@ -1123,4 +1246,207 @@ test('an in-place admitted-vector reset during a pending Supabase save cannot co
       loadFreshState:context => f.replica.getConnectionWriteContext(WORKSPACE, context)}).catch(error => error);
   assertBlocked(replay, f.mutations);
   assert.equal(replay.code, 'WRITE_ALREADY_ATTEMPTED');
+});
+
+test('an explicitly scoped owner restriction binds one approved Shopify content mutation without extra context reads', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase', policy: true });
+  assert.equal(f.write.objectivePolicyProposal.policies.length, 1);
+  assert.equal(f.state.approvals[0].payload.objectivePolicyProposalDigest, f.write.objectivePolicyProposal.digest);
+  const reads = []; const original = f.options.loadFreshState;
+  const result = await f.run(f.persist, { ...f.options, loadFreshState: async context => { reads.push(context); return original(context); } });
+  assert.equal(result.status, 'completed'); assert.equal(f.mutations.length, 1); assert.equal(reads.length, 2);
+  assert.equal(f.durableClaims.length, 3);
+  assert.equal((await f.replica.get(WORKSPACE)).connectionWrites[0].objectivePolicyProposal.digest, f.write.objectivePolicyProposal.digest);
+});
+
+test('new restrictions block old manual approvals and request-id reuse before credentials or provider reads', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase' });
+  installPolicy(f.state); await f.persist();
+  let credentials = 0; f.hooks.credentials = async () => { credentials++; };
+  const result = await f.observe();
+  assert.equal(result.code, 'WRITE_POLICY_REVIEW_REQUIRED'); assertBlocked(result, f.mutations);
+  assert.equal(credentials, 0); assert.equal(f.calls.length, 0);
+  assert.throws(() => proposeConnectionWrite(f.state, 'shopify', { ...f.write.input, requestId: f.write.requestId }, f.state.users[0].id), { code: 'WRITE_POLICY_REVIEW_REQUIRED' });
+  for (const key of ['origin', 'objectiveRef', 'objectivePolicyProposal', 'policyBinding', 'executionPolicy', 'financialEvidence']) {
+    assert.throws(() => proposeConnectionWrite(f.state, 'shopify', { ...f.write.input, requestId: 'forged-policy-request', [key]: {} }, f.state.users[0].id), { code: 'WRITE_POLICY_INPUT_INVALID' });
+  }
+});
+
+test('unknown financial constraints including zero cannot be cleared by exact approval or financialImpact', async t => {
+  for (const limits of [{ maxMonthlyAdBudget: 0, currency: 'GBP' }, { minGrossMarginPercent: 0 }, { minStockCoverDays: 0 }, { profitFirst: true }]) {
+    await t.test(JSON.stringify(limits), async t => {
+      const f = await fixture(t, { policy: { limits: { profitFirst: false, ...limits } } });
+      f.state.approvals[0].financialImpact = 10000;
+      const result = await f.observe();
+      assert.equal(result.code, 'WRITE_POLICY_EVIDENCE_REQUIRED'); assertBlocked(result, f.mutations); assert.equal(f.calls.length, 0);
+    });
+  }
+});
+
+test('proposal, approval and objective alterations cannot borrow an existing policy-bound approval', async t => {
+  for (const [name, change] of Object.entries({
+    proposal(f) { f.write.objectivePolicyProposal.origin = 'objective'; },
+    approval(f) { f.state.approvals[0].payload.objectivePolicyProposalDigest = 'a'.repeat(64); },
+    missing(f) { delete f.write.objectivePolicyProposal; },
+    revision(f) { f.state.businessObjectives[0].revision++; },
+    paused(f) { f.state.businessObjectives[0].status = 'paused'; },
+    disabled(f) { f.state.businessObjectives[0].executionPolicy = { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' }; }
+  })) await t.test(name, async t => {
+    const f = await fixture(t, { policy: true }); change(f);
+    const result = await f.observe(); assertBlocked(result, f.mutations); assert.equal(f.calls.length, 0);
+  });
+});
+
+test('policy activation and edits on another replica during credentials or final phase acknowledgement prevent dispatch', async t => {
+  for (const initialPolicy of [false, true]) for (const boundary of ['credentials', 'phase_ack']) await t.test(`${initialPolicy ? 'edit' : 'activate'} at ${boundary}`, async t => {
+    const f = await fixture(t, { storage: 'mock-supabase', policy: initialPolicy });
+    const change = current => {
+      if (!initialPolicy) installPolicy(current);
+      else {
+        const row = current.businessObjectives[0];
+        upsertBusinessObjective(current, { id: row.id, revision: row.revision, status: 'paused' }, { actorId: current.users[0].id });
+      }
+    };
+    let saves = 0;
+    if (boundary === 'credentials') f.hooks.credentials = async () => { await f.changeReplica(change); };
+    const result = await f.observe(async () => {
+      const ack = await f.persist();
+      if (boundary === 'phase_ack' && ++saves === 2) await f.changeReplica(change);
+      return ack;
+    });
+    assertBlocked(result, f.mutations);
+    const saved = await f.replica.get(WORKSPACE);
+    assert.equal(saved.businessObjectives[0].status, initialPolicy ? 'paused' : 'active');
+  });
+});
+
+test('clock-only expiry before final dispatch blocks while expiry after submission preserves a confirmed receipt', async t => {
+  for (const boundary of ['phase_ack', 'provider_response']) await t.test(boundary, async t => {
+    const at = Date.now(), expiry = at + 60000; let clock = at;
+    t.mock.method(Date, 'now', () => clock);
+    const f = await fixture(t, { storage: 'mock-supabase', policy: { endsAt: new Date(expiry).toISOString() } });
+    if (boundary === 'provider_response') f.hooks.fetch = async call => { if (call.mutation) clock = expiry; };
+    let saves = 0;
+    const result = await f.observe(async () => { const ack = await f.persist(); if (++saves === 2 && boundary === 'phase_ack') clock = expiry; return ack; });
+    const saved = (await f.replica.get(WORKSPACE)).connectionWrites[0];
+    if (boundary === 'phase_ack') {
+      assertBlocked(result, f.mutations); assert.equal(saved.errorCode, 'WRITE_POLICY_NOT_ACTIVE');
+      assert.ok(saved.dispatchClaim.phases.shopify_mutation, 'acknowledged but expired phase stays non-replayable');
+    } else {
+      assert.equal(result.status, 'completed'); assert.equal(saved.status, 'completed');
+      assert.equal(saved.result.externalId, PRODUCT); assert.equal(f.mutations.length, 1);
+    }
+    await f.observe();
+    assert.equal(f.mutations.length, boundary === 'phase_ack' ? 0 : 1);
+  });
+});
+
+test('restricted pending-save sources are deeply pinned even under an existing immutable property descriptor', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase', policy: true });
+  Object.defineProperty(f.state, 'businessObjectives', { value: f.state.businessObjectives, configurable: false, writable: false });
+  let attempts = 0;
+  const result = await f.observe(async () => {
+    const saving = f.persist(); let editError;
+    try { attempts++; f.state.businessObjectives[0].limits.profitFirst = true; } catch (error) { editError = error; }
+    const ack = await saving;
+    if (editError) throw editError;
+    return ack;
+  });
+  assert.ok(result instanceof TypeError); assertBlocked(result, f.mutations); assert.equal(attempts, 1);
+  const saved = await f.replica.get(WORKSPACE);
+  assert.equal(saved.businessObjectives[0].limits.profitFirst, false);
+  assert.deepEqual(saved.connectionWrites[0].dispatchClaim.phases, {});
+});
+
+test('adding initially absent policy state during pending save cannot enter its CAS snapshot or permit dispatch', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase' });
+  assert.equal(Object.hasOwn(f.state, 'businessObjectives'), false);
+  let once = false;
+  const result = await f.observe(async () => {
+    const saving = f.persist();
+    if (!once) { once = true; installPolicy(f.state); }
+    return saving;
+  });
+  assertBlocked(result, f.mutations);
+  assert.equal(result.code, 'WRITE_POLICY_SOURCE_CHANGED');
+  assert.equal(Object.hasOwn(await f.replica.get(WORKSPACE), 'businessObjectives'), false);
+});
+
+test('uncertain governed responses keep the phase claimed and cannot replay on a fresh replica', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase', policy: true });
+  f.hooks.fetch = async call => { if (call.mutation) throw new TypeError('Synthetic interrupted response'); };
+  const result = await f.run(); assert.equal(result.status, 'uncertain'); assert.equal(f.mutations.length, 1);
+  const saved = await f.replica.get(WORKSPACE);
+  const retry = await executeConnectionWrite(saved, f.write.id, saved.users[0].id, f.service,
+    () => f.replica.save(WORKSPACE, saved), { ...f.options, loadFreshState: context => f.replica.getConnectionWriteContext(WORKSPACE, context) }).catch(error => error);
+  assert.equal(retry.code, 'WRITE_ALREADY_ATTEMPTED'); assert.equal(f.mutations.length, 1);
+});
+
+test('catalogue estimates and exact imported cohorts cannot satisfy an enforced financial dispatch restriction', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase', policy: { limits: {
+    minGrossMarginPercent: 35, maxMonthlyAdBudget: 0, currency: 'GBP', minStockCoverDays: 0, profitFirst: true } } });
+  f.state.products[0].variants = [{ id: 'variant-priced', sku: 'PRICED', price: 100, inventory: 80 },
+    { id: 'variant-unpriced', sku: 'MISSING-PRICE', inventory: 80 }];
+  const costs = { landed: 10, packing: 0, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 };
+  f.state.economics = { PRICED: { ...costs }, 'MISSING-PRICE': { ...costs } };
+  const order = (id, currency, amount) => ({ id, externalId: id, provider: 'shopify', currency,
+    createdAt: new Date(Date.now() - 60000).toISOString(), financialStatus: 'PAID', fulfillmentStatus: 'FULFILLED',
+    total: amount, currentTotal: amount, refunds: '0', currentTax: '0', tax: '0', discounts: '0', shippingCharged: '0',
+    lineItems: [{ id: id + '-line', sku: 'PRICED', quantity: 1, net: amount }] });
+  f.state.orders = [order('gbp', 'GBP', '900.000001'), order('missing', 'GBP', null), order('usd', 'USD', '700.000001')];
+  const operations = deriveOperations(f.state), groups = operations.last30d.importedOrderEvidence.groups;
+  assert.equal(operations.averageMargin, 90, 'known catalogue margin remains a covered per-variant estimate');
+  assert.equal(operations.last30d.revenue, null); assert.equal(operations.last30d.operatingProfit, null);
+  const gbp = groups.find(row => row.currency === 'GBP');
+  assert.equal(gbp.recordedAmounts.netTotal.knownSubtotal, '900.000001');
+  assert.equal(gbp.recordedAmounts.netTotal.unknownCount, 1);
+  assert.equal(groups.find(row => row.currency === 'USD').recordedAmounts.netTotal.knownSubtotal, '700.000001');
+  assert.ok(groups.every(row => row.financialQualification.qualifiedOrders === 0));
+  // These plausible application outputs and owner approval remain descriptive;
+  // copying them onto a write must not manufacture an execution proof.
+  f.write.financialEvidence = { verified: true, grossMarginPercent: operations.averageMargin, importedOrderEvidence: operations.last30d.importedOrderEvidence,
+    monthToDateAdSpend: 0, plannedAdSpend: 0, stockCoverDays: 80, contributionProfitDelta: 900 };
+  f.state.approvals[0].financialImpact = 900;
+  await f.persist();
+  const before = JSON.stringify({ products: f.state.products, orders: f.state.orders, economics: f.state.economics });
+  const result = await f.observe();
+  assert.equal(result.code, 'WRITE_POLICY_EVIDENCE_REQUIRED'); assertBlocked(result, f.mutations);
+  assert.equal(f.calls.length, 0); assert.equal(f.write.dispatchClaim, undefined);
+  assert.equal(JSON.stringify({ products: f.state.products, orders: f.state.orders, economics: f.state.economics }), before);
+});
+
+test('a genuinely qualified historical outcome stays separate from legacy graph reviews and cannot authorize profit-first dispatch', async t => {
+  const f = await fixture(t, { storage: 'mock-supabase', policy: { limits: { profitFirst: true, currency: 'GBP' } } });
+  const now = new Date().toISOString(), measuredAt = '2026-10-06T12:00:00.000Z', measurementDigest = fingerprint('combined-measurement');
+  const outcome = createBusinessOutcomeCandidate({
+    source: { type: 'experiment_measurement', experimentId: 'combined-experiment', measurementRevision: 1, measurementDigest },
+    metric: 'incrementalContribution', amount: '123.456789', currency: 'GBP',
+    window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' },
+    coverage: { status: 'complete', scopeId: 'combined-population', observedCount: 2, expectedCount: 2 },
+    method: { kind: 'holdout', definitionVersion: 'incremental-contribution/v1' },
+    provenance: { observationId: 'combined-observation', sourceRefs: [{ type: 'measurement_report', id: 'combined-report', digest: fingerprint('combined-report') }],
+      observedAt: measuredAt, aggregation: 'non_overlapping_scopes_attested' },
+    verification: { kind: 'owner_attestation', actorId: f.state.users[0].id, verifiedAt: '2026-10-06T14:00:00.000Z', measurementDigest }
+  }, { workspaceId: WORKSPACE, now });
+  const head = { schema: 'runvara-outcome-head/v1', workspaceId: WORKSPACE, outcomeId: outcome.outcomeId, revision: outcome.revision,
+    versionId: outcome.versionId, digest: outcome.digest, status: 'published', publicationId: 'combined-publication',
+    committedAt: '2026-10-06T19:00:00.000Z', commitRevision: 'combined-commit' };
+  const publicationBoundary = createOutcomePublicationBoundary({ workspaceId: WORKSPACE, snapshotId: 'combined-snapshot', complete: true,
+    expectedOutcomeCount: 1, resolveCommittedPublication: ({ workspaceId, outcomeId }) => workspaceId === WORKSPACE && outcomeId === outcome.outcomeId ? { head, version: outcome } : null });
+  const outcomeSnapshot = { versions: [outcome], publicationBoundary };
+  f.state.revenueEngine.experiments = [{ id: 'combined-experiment', status: 'completed', impact: { verified: true, incrementalContribution: 999999 } }];
+  const impact = deriveImpact(f.state, { now, outcomeSnapshot }), learning = deriveLearning(f.state, { now, outcomeSnapshot });
+  assert.equal(impact.qualifiedOutcomeCount, 1);
+  assert.equal(impact.qualifiedOutcomeGroups[0].amount, '123.456789');
+  assert.deepEqual(learning.priors, []); assert.equal(learning.qualifiedOutcomeGroups[0].usableForGuidance, false);
+  const graph = deriveBusinessGraph(f.state), nodes = graph.nodes.filter(row => row.type === 'outcome');
+  assert.equal(graph.summary.legacyReviewedOutcomeRecords, 1); assert.equal(graph.summary.verifiedOutcomeRecords, 0);
+  assert.ok(nodes.length > 0 && nodes.every(row => row.attributes.qualification === 'legacy_unqualified' && row.attributes.verified === false && row.attributes.realised === false));
+  f.write.financialEvidence = { qualifiedOutcomeGroups: impact.qualifiedOutcomeGroups, expectedContributionProfit: 123.456789, verified: true };
+  f.state.approvals[0].financialImpact = 123.456789;
+  await f.persist();
+  const result = await f.observe();
+  assert.equal(result.code, 'WRITE_POLICY_EVIDENCE_REQUIRED'); assertBlocked(result, f.mutations);
+  assert.equal(f.calls.length, 0); assert.equal(f.write.dispatchClaim, undefined);
+  assert.equal(deriveImpact(f.state, { now, outcomeSnapshot }).qualifiedOutcomeGroups[0].amount, '123.456789', 'blocking a forecast does not erase qualified descriptive history');
 });

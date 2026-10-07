@@ -17,7 +17,7 @@ try { ebayCommercial = require('../../../ebay-manager/strategy.js'); } catch {}
 
 // Bump when deterministic reporting/detection semantics change, even if the
 // persisted source records are unchanged. Historical reports keep their version.
-export const OPERATIONS_CALCULATION_VERSION = 'imported-order-analytics/v2';
+export const OPERATIONS_CALCULATION_VERSION = 'imported-order-analytics/v3';
 
 export const SOCIAL_COMMERCE_CHANNELS = Object.freeze([
   { id: 'meta', name: 'Facebook & Instagram Shops', kind: 'social-commerce', capabilities: ['catalogue', 'listings', 'orders', 'ads'] },

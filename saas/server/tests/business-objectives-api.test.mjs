@@ -6,6 +6,7 @@ import path from 'node:path';
 import {once} from 'node:events';
 import {createPacksmartServer} from '../server.mjs';
 import {seedWorkspaceState} from '../lib/store.mjs';
+import { OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import {createSessionToken,verifySessionToken} from '../lib/security.mjs';
 
 test('objectives are owner-only, revision protected, audited and tenant isolated', async t => {
@@ -51,4 +52,54 @@ test('objectives are owner-only, revision protected, audited and tenant isolated
   assert.equal(evaluated.status,200);assert.equal(evaluated.body.readyForPreparation,false);assert.equal(evaluated.body.safeguards.externalExecutionAllowed,false);
   assert.equal(writes,before,'evaluation never saves or executes');
   assert.equal((await request('/api/business-objectives/evaluate',{id:'member',method:'POST',body:{}})).status,403);
+});
+
+test('execution restrictions require explicit owner configuration and cannot be relaxed through admin planning or replacement routes', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-policy-api-'));
+  const secret = 'objective-policy-api-synthetic-secret-more-than-thirty-two-characters';
+  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
+  const state = seedWorkspaceState({}, { workspaceId: 'policy-alpha', userId: 'policy-owner', email: 'owner@example.test', passwordHash: 'fixture-only' });
+  state.users.push({ ...state.users[0], id: 'policy-admin', role: 'admin', email: 'admin@example.test' });
+  state.connections = [{ id: 'policy-shopify', provider: 'shopify', metadata: { shopDomain: 'policy-fixture.myshopify.com' } }];
+  await server.packsmart.store.save(state.workspace.id, state);
+  const foreign = seedWorkspaceState({}, { workspaceId: 'policy-beta', userId: 'foreign-owner', email: 'foreign@example.test', passwordHash: 'fixture-only' });
+  await server.packsmart.store.save(foreign.workspace.id, foreign);
+  const tokens = Object.fromEntries([...state.users.map(user => [user.id, state.workspace.id, user]), [foreign.users[0].id, foreign.workspace.id, foreign.users[0]]]
+    .map(([id, workspaceId, user]) => [id, createSessionToken({ workspaceId, userId: id, email: user.email, role: user.role, sessionVersion: 1 }, secret)]));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
+  const request = async (body, { actor = 'policy-owner', csrf = true, method = 'PUT', route = '/api/business-objectives' } = {}) => {
+    const headers = { Cookie: `packsmart_session=${tokens[actor]}`, 'Content-Type': 'application/json' };
+    if (csrf) headers['X-CSRF-Token'] = verifySessionToken(tokens[actor], secret).csrf;
+    const response = await fetch(`http://127.0.0.1:${server.address().port}${route}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: response.status, body: await response.json() };
+  };
+  const now = Date.now(), executionPolicy = { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: {
+    provider: 'shopify', operation: 'product_content', connectionId: 'policy-shopify', account: 'policy-fixture.myshopify.com' } };
+  const definition = { title: 'Owner configured scope', metric: 'orders', baseline: 1, target: 2, direction: 'increase',
+    startsAt: new Date(now - 60000).toISOString(), endsAt: new Date(now + 86400000).toISOString(), limits: { profitFirst: false }, executionPolicy };
+  assert.equal((await request(definition, { csrf: false })).status, 403);
+  assert.equal((await request(definition, { actor: 'policy-admin' })).status, 403);
+  assert.equal((await request({ ...definition, workspaceId: foreign.workspace.id })).status, 403);
+  assert.equal((await request(definition, { actor: 'foreign-owner' })).body.code, 'OBJECTIVE_POLICY_CONNECTION_REQUIRED');
+  const created = await request(definition); assert.equal(created.status, 200);
+  const row = created.body.objective;
+  for (const patch of [{ status: 'paused' }, { status: 'cancelled' }, { status: 'disabled' },
+    { startsAt: new Date(now + 1000).toISOString() }, { endsAt: new Date(now + 1000).toISOString() }, { target: 3 },
+    { limits: { profitFirst: true } }, { executionPolicy: { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' } }]) {
+    const response = await request({ id: row.id, revision: 1, ...patch }, { actor: 'policy-admin' });
+    assert.equal(response.status, 403); assert.equal(response.body.code, 'OWNER_APPROVAL_REQUIRED');
+  }
+  assert.equal((await request({ businessObjectives: [] }, { actor: 'policy-admin' })).status, 400);
+  assert.equal((await request({ id: row.id, revision: 1 }, { actor: 'policy-admin', method: 'DELETE' })).status, 404);
+  assert.equal((await request({ id: row.id, revision: 1, status: 'active' }, { actor: 'foreign-owner' })).status, 404);
+  const saved = await server.packsmart.store.get(state.workspace.id);
+  assert.deepEqual(saved.businessObjectives[0], row);
+  assert.ok(saved.audit.some(event => event.type === 'business_objective_configured' && event.detail.executionPolicyMode === 'enforce' && event.actor === 'policy-owner'));
+  const { executionPolicy: _policy, ...planning } = definition;
+  assert.equal((await request(planning, { actor: 'policy-admin' })).status, 200, 'existing admin planning capability is preserved');
+  const disabled = await request({ id: row.id, revision: 1, executionPolicy: { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'preparation_only' } });
+  assert.equal(disabled.status, 200); assert.equal(disabled.body.objective.revision, 2);
+  assert.equal((await request({ id: row.id, revision: 1, executionPolicy })).status, 409);
 });

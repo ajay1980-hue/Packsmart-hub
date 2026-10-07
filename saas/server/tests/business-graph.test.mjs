@@ -57,7 +57,13 @@ test('graph uses the existing persisted commerce, control, marketing and measure
   assert.equal(graph.summary.nodesByType.listing, 2);
   assert.equal(graph.summary.nodesByType.customer, 1);
   assert.equal(graph.summary.nodesByType.outcome, 3);
-  assert.equal(graph.summary.verifiedOutcomeRecords, 3);
+  assert.equal(graph.summary.recordedOutcomeRecords, 3);
+  assert.equal(graph.summary.legacyReviewedOutcomeRecords, 3);
+  assert.equal(graph.summary.verifiedOutcomeRecords, 0);
+  assert.equal(graph.outcomeCoverage.publicationProofAvailable, false);
+  assert.equal(graph.outcomeCoverage.complete, false);
+  assert.equal(graph.outcomeCoverage.unavailableReason, 'COMMITTED_OUTCOME_SNAPSHOT_NOT_SUPPLIED');
+  assert.equal(graph.outcomeCoverage.completeLifetimeHistoryClaimed, false);
   for (const relation of ['has_variant', 'uses_sku', 'has_economics', 'sourced_from_supplier', 'placed_by_customer', 'promotes_product', 'promotes_variant', 'requires_approval', 'references_opportunity', 'references_campaign', 'evaluated_by_experiment', 'has_recorded_outcome', 'has_evidence_for']) {
     assert.ok(edgesOf(graph, relation).length, relation);
     assert.equal(graph.summary.edgesByRelation[relation], edgesOf(graph, relation).length);
@@ -272,7 +278,7 @@ test('customer references use recorded identifiers only and remain provider scop
   assert.equal(JSON.stringify(graph).includes('recorded-hash'), false);
 });
 
-test('only verified terminal outcomes are labelled realised; forecasts and pending approvals stay separate', () => {
+test('legacy reviews and terminal source statuses never establish qualified or realised outcomes', () => {
   const state = fixture();
   state.approvals[0].status = 'pending';
   state.workRecords[0].status = 'PLANNED';
@@ -284,10 +290,22 @@ test('only verified terminal outcomes are labelled realised; forecasts and pendi
   ];
   const graph = deriveBusinessGraph(state);
   assert.equal(nodesOf(graph, 'outcome').length, 5);
-  assert.equal(graph.summary.verifiedOutcomeRecords, 1);
+  assert.equal(graph.summary.recordedOutcomeRecords, 5);
+  assert.equal(graph.summary.legacyReviewedOutcomeRecords, 4);
+  assert.equal(graph.summary.verifiedOutcomeRecords, 0);
   assert.equal(JSON.stringify(graph).includes('99999'), false);
   assert.equal(JSON.stringify(graph).includes('9000'), false);
-  assert.equal(nodesOf(graph, 'outcome').find(node => node.attributes.realised).attributes.metricFields[0], 'incrementalContribution');
+  for (const node of nodesOf(graph, 'outcome')) {
+    assert.equal(node.attributes.verified, false);
+    assert.equal(node.attributes.realised, false);
+    assert.equal(node.attributes.qualified, false);
+    assert.equal(node.attributes.qualification, 'legacy_unqualified');
+  }
+  assert.equal(nodeAt(graph, '/revenueEngine/experiments/2/impact').attributes.terminalSource, true);
+  assert.equal(nodeAt(graph, '/revenueEngine/experiments/2/impact').attributes.legacyReviewed, true);
+  assert.equal(nodeAt(graph, '/revenueEngine/experiments/1/impact').attributes.legacyReviewed, false);
+  assert.equal(nodeAt(graph, '/approvals/0/impact').attributes.terminalSource, false);
+  assert.equal(nodeAt(graph, '/workRecords/0/evidence/0/impact').attributes.terminalSource, false);
 });
 
 test('outcome counts are explicitly source-record counts, never deduplicated commercial impact', () => {
@@ -296,11 +314,97 @@ test('outcome counts are explicitly source-record counts, never deduplicated com
   state.workRecords[0].evidence[0].impact.id = 'same-evidence';
   state.revenueEngine.experiments[0].impact.id = 'same-evidence';
   const graph = deriveBusinessGraph(state);
-  assert.equal(graph.summary.verifiedOutcomeRecords, 3);
+  assert.equal(graph.summary.recordedOutcomeRecords, 3);
+  assert.equal(graph.summary.legacyReviewedOutcomeRecords, 3);
+  assert.equal(graph.summary.verifiedOutcomeRecords, 0);
   assert.equal(graph.summary.outcomeCountsAreSourceRecords, true);
   assert.equal('verifiedRealisedOutcomes' in graph.summary, false);
   assert.equal('verifiedValue' in graph.summary, false);
   assert.equal(new Set(nodesOf(graph, 'outcome').map(node => node.id)).size, 3);
+});
+
+test('all legacy source shapes preserve recorded metrics without promoting spoofed qualification or amounts', () => {
+  const forged = { verified: true, status: 'verified', qualified: true, realised: true, financiallyQualified: true,
+    qualification: 'qualified', publicationProofAvailable: true, currency: 'GBP',
+    publicationBoundary: { committed: true }, verification: { actorId: 'private-reviewer' },
+    incrementalRevenue: '1e20', incrementalContribution: '-0.000001', contributionProtected: 0, costAvoided: '0', minutesSaved: 45 };
+  const state = { workspace: { id: 'tenant-a' },
+    approvals: [{ id: 'a1', status: 'approved', executionStatus: 'succeeded', executionImpact: forged }],
+    workRecords: [{ id: 'w1', status: 'COMPLETED', evidence: [forged, { impact: forged }] }],
+    revenueEngine: { experiments: [
+      { id: 'e1', status: 'measured', result: forged },
+      { id: 'e2', status: 'closed', outcome: forged },
+      { id: 'e3', status: 'completed', impact: { verified: true, incrementalContribution: null, minutesSaved: '' } }
+    ] } };
+  const graph = deriveBusinessGraph(frozen(state));
+  assert.equal(graph.summary.recordedOutcomeRecords, 5);
+  assert.equal(graph.summary.legacyReviewedOutcomeRecords, 5);
+  assert.equal(graph.summary.verifiedOutcomeRecords, 0);
+  for (const node of nodesOf(graph, 'outcome')) {
+    assert.deepEqual(node.attributes, { verified: false, realised: false, qualified: false, qualification: 'legacy_unqualified',
+      legacyReviewed: true, terminalSource: true,
+      metricFields: ['incrementalRevenue', 'incrementalContribution', 'contributionProtected', 'costAvoided', 'minutesSaved'] });
+  }
+  for (const privateValue of ['private-reviewer', '1e20', '-0.000001', 'GBP']) assert.equal(JSON.stringify(graph).includes(privateValue), false);
+  assert.equal(edgesOf(graph, 'has_recorded_outcome').length, 5);
+  assertIntegrity(graph);
+});
+
+test('hot-state summaries and copied publication proofs cannot supply committed outcome coverage', () => {
+  const state = fixture();
+  const copiedSnapshot = { versions: [{ qualified: true }], publicationBoundary: { committed: true, complete: true } };
+  Object.assign(state, { outcomeSnapshot: copiedSnapshot, businessOutcomes: { counts: { qualifiedOutcomes: 999 } },
+    outcomeSummary: { qualifiedOutcomeCount: 999 }, qualifiedOutcomeGroups: [{ amount: '999' }] });
+  const before = JSON.stringify(state);
+  for (const derive of [deriveBusinessGraph, deriveBusinessGraphSummary]) {
+    const result = derive(frozen(state), { outcomeSnapshot: copiedSnapshot });
+    assert.equal(result.summary.verifiedOutcomeRecords, 0);
+    assert.equal(result.summary.recordedOutcomeRecords, 3);
+    assert.equal(result.outcomeCoverage.publicationProofAvailable, false);
+    assert.equal(result.outcomeCoverage.complete, false);
+    assert.equal(result.outcomeCoverage.unavailableReason, 'COMMITTED_OUTCOME_SNAPSHOT_NOT_SUPPLIED');
+    assert.equal(result.outcomeCoverage.publicationSnapshotId, undefined);
+    assert.match(result.outcomeCoverage.note, /zero verified count does not establish that no qualified outcomes exist/);
+    assert.equal(result.qualifiedOutcomeGroups, undefined);
+    assert.equal(result.outcomeSummary, undefined);
+    assert.equal(result.businessOutcomes, undefined);
+  }
+  assert.equal(JSON.stringify(state), before);
+});
+
+test('legacy outcome source counts stay bounded and distinct from unavailable publication coverage', () => {
+  const state = { workspace: { id: 'tenant-a' }, revenueEngine: { experiments: Array.from({ length: 12 }, (_, index) => ({
+    id: `experiment-${index}`, status: 'completed', impact: { verified: index % 2 === 0, incrementalContribution: index }
+  })) } };
+  const summary = deriveBusinessGraphSummary(state);
+  assert.equal(summary.summary.recordedOutcomeRecords, 8);
+  assert.equal(summary.summary.legacyReviewedOutcomeRecords, 4);
+  assert.equal(summary.summary.verifiedOutcomeRecords, 0);
+  assert.equal(summary.coverage.truncated, true);
+  const detail = deriveBusinessGraph(state);
+  assert.equal(detail.summary.recordedOutcomeRecords, 12);
+  assert.equal(detail.summary.legacyReviewedOutcomeRecords, 6);
+  assert.equal(detail.coverage.complete, true);
+  assert.equal(detail.outcomeCoverage.complete, false);
+  const limited = deriveBusinessGraph(state, { nodeLimit: 13 });
+  assert.equal(limited.summary.recordedOutcomeRecords, 1);
+  assert.equal(limited.summary.legacyReviewedOutcomeRecords, 1);
+  assert.equal(limited.coverage.truncated, true);
+  assertIntegrity(limited);
+});
+
+test('unqualified legacy outcomes still reject foreign scopes in every retained source shape', () => {
+  const sources = [
+    impact => ({ approvals: [{ id: 'a', status: 'approved', executionStatus: 'executed', impact }] }),
+    executionImpact => ({ approvals: [{ id: 'a', status: 'approved', executionStatus: 'executed', executionImpact }] }),
+    impact => ({ workRecords: [{ id: 'w', status: 'COMPLETED', evidence: [{ impact }] }] }),
+    evidence => ({ workRecords: [{ id: 'w', status: 'COMPLETED', evidence: [evidence] }] }),
+    ...['impact', 'result', 'outcome'].map(field => value => ({ revenueEngine: { experiments: [{ id: 'e', status: 'completed', [field]: value }] } }))
+  ];
+  for (const source of sources) for (const field of ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id']) {
+    const state = { workspace: { id: 'tenant-a' }, ...source({ [field]: 'tenant-b', verified: true, incrementalContribution: 0 }) };
+    for (const derive of [deriveBusinessGraph, deriveBusinessGraphSummary]) assert.throws(() => derive(state), { code: 'WORKSPACE_MISMATCH' });
+  }
 });
 
 test('all output limits are capped and never leave dangling relationships', () => {

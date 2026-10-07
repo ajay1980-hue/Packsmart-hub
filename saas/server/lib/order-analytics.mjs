@@ -1,4 +1,4 @@
-import { inspectImportedOrderEvidence } from './imported-order-evidence.mjs';
+import { inspectImportedOrderEvidence, LEGACY_ORDER_FIELD_PROVENANCE } from './imported-order-evidence.mjs';
 
 export const ORDER_ANALYTICS_PROVIDERS = Object.freeze(['shopify', 'ebay', 'meta', 'tiktok_shop', 'pinterest', 'google_youtube', 'whatsapp_business', 'amazon']);
 const DAY = 86400000;
@@ -29,7 +29,7 @@ export function compactOrderEvidence(source) {
     schema: source.schema, period: source.period, providers: source.providers, counts: source.counts,
     completeness: { ...source.completeness, outputComplete: source.completeness.outputComplete && !clipped,
       retainedCohortComplete: source.completeness.retainedCohortComplete && !clipped },
-    provenance: { amounts: 'normalized recorded fields; may include importer defaults or rounding', currency: 'unverified recorded code; no currency inference or FX', costNumbers: 'numeric availability only; historical assignment unverified' },
+    provenance: { ...LEGACY_ORDER_FIELD_PROVENANCE, amounts: 'normalized recorded fields; may include importer defaults or rounding', currency: 'unverified recorded code; no currency inference or FX', costNumbers: 'numeric availability only; historical assignment unverified' },
     sourcePeriods: source.sourcePeriods, financialStatusCohorts: source.financialStatusCohorts,
     groups: groups.map(group => ({ ...group,
       recordedAmounts: Object.fromEntries(Object.entries(group.recordedAmounts).map(([key, metric]) => [key, suppress(metric)])),
@@ -88,8 +88,9 @@ export function compactOrderPeriod(period) {
 }
 
 export function hasRecordedRefund(row) {
-  const refunds = row.recordedAmounts.refunds;
-  return ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(row.financialStatus) || (refunds !== null && !refunds.startsWith('-') && refunds !== '0');
+  // A legacy refund field can be a derived total difference for any provider.
+  // Only recorded status supports this review cue; neither proves a payment.
+  return ['PARTIALLY_REFUNDED', 'REFUNDED'].includes(row.financialStatus);
 }
 
 export function editorOrderRecord(order) {
@@ -124,7 +125,7 @@ export function orderFinancialView(inspection, row = null) {
     const source = inspection.evidence;
     const group = source.groups.find(item => item.provider === row.provider && item.currency === row.currency && item.financialStatus === row.financialStatus && item.cancelled === row.cancelled);
     if (group) importedOrderEvidence = {
-      schema: source.schema, period: source.period, providers: [row.provider], completeness: source.completeness, scope: 'one retained order; completeness describes the bounded source inspection', provenance: { amounts: 'normalized recorded fields', currency: 'unverified recorded code' },
+      schema: source.schema, period: source.period, providers: [row.provider], completeness: source.completeness, scope: 'one retained order; completeness describes the bounded source inspection', provenance: { ...LEGACY_ORDER_FIELD_PROVENANCE, amounts: 'normalized recorded fields', currency: 'unverified recorded code' },
       sourcePeriods: source.sourcePeriods.filter(item => item.provider === row.provider),
       groups: [{ ...group, orders: 1,
         recordedAmounts: Object.fromEntries(Object.entries(row.recordedAmounts).map(([key, value]) => [key, { knownCount: value === null ? 0 : 1, unknownCount: value === null ? 1 : 0, knownSubtotal: row.currency ? value : null, completeCohortTotal: source.completeness.retainedCohortComplete && row.currency ? value : null, complete: Boolean(source.completeness.retainedCohortComplete && row.currency && value !== null) }])),

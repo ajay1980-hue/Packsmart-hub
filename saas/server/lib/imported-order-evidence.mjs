@@ -5,6 +5,11 @@ import { evidenceInWorkspace } from './business-evidence-scope.mjs';
 // ledger. No current importer records a trusted order-period or cost-basis
 // contract. This module deliberately cannot certify either one.
 export const IMPORTED_ORDER_EVIDENCE_VERSION = 'imported-order-evidence/v1';
+export const LEGACY_ORDER_FIELD_PROVENANCE = Object.freeze({
+  refunds: 'Stored refund field; may be derived from total differences; no provider refund, receipt or completed-action proof.',
+  tax: 'Stored tax field; may repeat current tax; original/current tax basis unverified.',
+  refundReview: 'Recorded PARTIALLY_REFUNDED or REFUNDED status only; operational review, not verified payment evidence.'
+});
 export const IMPORTED_ORDER_EVIDENCE_LIMITS = Object.freeze({
   orders: 2000, lines: 8000, linesPerOrder: 100, referencedCosts: 2000,
   groups: 64, skuGroups: 80, references: 100, identifierLength: 256,
@@ -293,6 +298,7 @@ function inspect(state, options = {}) {
     completeness: { collectionAvailable, scanComplete, outputComplete, eligibilityResolved: !unresolvedEligibility, retainedCohortComplete, truncated,
       sourcePeriod: 'unverified', businessTotalsAvailable: false },
     provenance: {
+      ...LEGACY_ORDER_FIELD_PROVENANCE,
       collection: 'state.orders', identity: 'provider + externalId; id only when externalId is absent',
       scope: 'workspace snapshot; all explicit tenant markers must match',
       dates: 'normalized createdAt; importer may have supplied a fallback',

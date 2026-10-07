@@ -8,6 +8,7 @@ import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+import { OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import { createSessionToken, verifySessionToken, decryptCredentials, encryptCredentials } from '../lib/security.mjs';
 import { IntegrationService, mergeSelectedShopify } from '../lib/integrations.mjs';
 import { connectionCentre, connectionDue, saveConnectionSettings, recoveryFor } from '../lib/connection-centre.mjs';
@@ -95,9 +96,43 @@ async function fixture(t, extra = {}, { storage = 'file' } = {}) {
     return {status:response.status,body:value,headers:response.headers};
   }
   const channel=async(provider='shopify',tenant='alpha')=>(await request('/api/connection-centre',{tenant})).body.channels.find(item=>item.id===provider);
-  const connect=async()=>request('/api/connections',{method:'POST',body:{provider:'shopify',credentials:{storeDomain:'alpha.myshopify.com',accessToken:TOKEN}}});
+const connect=async()=>request('/api/connections',{method:'POST',body:{provider:'shopify',credentials:{storeDomain:'alpha.myshopify.com',accessToken:TOKEN}}});
   return {server,env,request,connect,channel,calls,flags,base,tenants,database};
 }
+
+test('HTTP execution rejects legacy bypass, unknown finance, and malformed or foreign stored policies', async t => {
+  const f = await fixture(t, {}, { storage: 'mock-supabase' });
+  await f.connect();
+  assert.equal((await f.request('/api/connections/shopify/test', { method: 'POST', body: {} })).status, 200);
+  const channel = await f.channel();
+  assert.equal((await f.request('/api/connections/shopify/settings', { method: 'POST', body: {
+    revision: channel.settings.revision, permissionMode: 'approval_gated', confirmPermission: 'shopify:approval_gated' } })).status, 200);
+  const input = { operation: 'product_content', productId: 'gid://shopify/Product/1', title: 'Reviewed policy content', description: 'Exact body' };
+  const propose = async requestId => (await f.request('/api/connections/shopify/writes', { method: 'POST', body: { ...input, requestId } })).body.write;
+  const approve = async write => f.request(`/api/approvals/${write.approvalId}/decision`, { method: 'POST', body: { decision: 'approved', revision: 1 } });
+  const execute = async write => f.request(`/api/connection-writes/${write.id}/execute`, { method: 'POST', body: {} });
+  const old = await propose('objective-policy-legacy-0001'); await approve(old);
+  const saved = await f.server.packsmart.store.get('alpha'), connection = saved.connections.find(row => row.provider === 'shopify'), now = Date.now();
+  const definition = { title: 'Do not infer financial authority', metric: 'orders', baseline: 1, target: 2, direction: 'increase',
+    startsAt: new Date(now - 60000).toISOString(), endsAt: new Date(now + 86400000).toISOString(), limits: { profitFirst: false, maxMonthlyAdBudget: 0, currency: 'GBP' },
+    executionPolicy: { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: { provider: 'shopify', operation: 'product_content', connectionId: connection.id, account: 'alpha.myshopify.com' } } };
+  const configured = await f.request('/api/business-objectives', { method: 'PUT', body: definition });
+  assert.equal(configured.status, 200);
+  const before = f.calls.filter(call => call.query.includes('mutation')).length;
+  assert.equal((await execute(old)).body.code, 'WRITE_POLICY_REVIEW_REQUIRED');
+  const current = await propose('objective-policy-current-0001');
+  assert.equal(current.objectivePolicyProposal.policies[0].objectiveId, configured.body.objective.id);
+  assert.equal((await approve(current)).status, 200);
+  assert.equal((await execute(current)).body.code, 'WRITE_POLICY_EVIDENCE_REQUIRED');
+  const valid = structuredClone((await f.server.packsmart.store.get('alpha')).businessObjectives);
+  for (const [source, code, status] of [[null, 'WRITE_POLICY_INVALID', 409],
+    [[{ ...valid[0], workspaceId: 'beta', title: 'never-export-this-foreign-title' }], 'WORKSPACE_MISMATCH', 403]]) {
+    const state = await f.server.packsmart.store.get('alpha'); state.businessObjectives = source; await f.server.packsmart.store.save('alpha', state);
+    const result = await execute(current); assert.equal(result.status, status); assert.equal(result.body.code, code);
+    assert.equal(JSON.stringify(result.body).includes('never-export'), false);
+  }
+  assert.equal(f.calls.filter(call => call.query.includes('mutation')).length, before);
+});
 
 test('Connect → selective sync → confirmed disconnect → reconnect preserves data and tenant isolation',async t=>{
   const f=await fixture(t); assert.equal((await f.connect()).status,200);

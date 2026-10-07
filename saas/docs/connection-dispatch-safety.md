@@ -146,8 +146,36 @@ do not prove cross-process FileStore exclusion or replace PostgreSQL concurrency
 tests. The production route refuses FileStore dispatch. This patch adds no
 schema, roles, credentials or database migration.
 
-The complete local suite passed 766 tests, with syntax and SaaS security guards
-passing. These local results do not replace the remote browser/container and
-existing PostgreSQL gates. This stage is prepared as a separate draft PR from
-current main. Production changes remain held until stage 10 functional health
-is verified through an ordinary permitted read. No migration is needed here.
+The source PR75 was one commit, `fee5351ddbbbaf119780c3426499f9c2b8c36107`,
+above old main `3ebc1c75370b6a8b843da3829bc1b7af59f0a867`. It is now prepared
+incrementally above actual PR74 main
+`b98eb10cf0077fce5bf6696cb234350b8d1f7924`, which includes the approved outcome
+migration alignment and PR82 reporting repair. The only source conflict was the
+compact-authentication predicate: outcome and dispatch routes are both retained.
+The store and fake Supabase merges preserve both predecessor contracts.
+PR76–81 features are excluded.
+
+Fresh full Node22.23.3 verification passed **920 tests**, with zero failures or
+skips. Syntax, SaaS security guards and whitespace checks passed. Separate fresh
+local PostgreSQL17.6 clusters passed all **25 outcome** and **73 reporting**
+cases, preserving the predecessor publication/reporting concurrency and
+privilege guarantees; both clusters stopped. These are predecessor database
+regressions, not a claim of actual PostgreSQL dispatch concurrency coverage.
+
+New interaction regressions exercise the actual dispatcher, provider transport
+and Supabase adapter with synthetic responses. A rejected reporting RPC or a
+lost reply reconciled by its revision read preserves exactly one authorized
+mutation and three full primary saves, with only bounded reporting follow-ups.
+A committed report returning malformed or oversized data after the dispatch
+phase claim cannot provide a confirmed revision: fresh context/CAS blocks the
+mutation and the durable phase prevents replay. Reporting failure never grants
+new dispatch authority. Independent review also exercised 18 failure/phase
+combinations including body-stream loss and concurrent pause without finding a
+blocking defect.
+
+PR74 merged after its six exact-head CI workflows passed. PR75 still needs fresh
+CI on its own eventual head and remains held for PR74 postdeployment health.
+No remote publication, provider call, production mutation or deployment was
+performed for this preparation. Local Chromium remains unavailable; responsive
+browser/container gates are not claimed as passed and no installation or
+workaround was attempted. No migration is needed for PR75.

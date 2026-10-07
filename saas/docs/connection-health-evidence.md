@@ -26,6 +26,42 @@ Historical read/check timestamps in health fields must be valid ISO date-times w
 
 Focused tests cover manual mode, warning boundaries, selected-area omissions, products-only completion, partial/failed completion, invalid and future timestamps, historical authentication, explicit failure precedence, expiry boundaries, tenant isolation, bounded output, and absence of state mutation, provider requests, and timers. The existing connection-doctor test now requires per-area evidence before expecting Healthy. Full server tests, syntax checks, and the existing SaaS guard remain release gates.
 
-Local validation on 2026-10-07 passed all 575 server tests, `npm --prefix saas/server run check`, `node saas/tests/saas-guard.test.cjs`, and `git diff --check`. Independent review also passed the 27 evidence/doctor tests with no remaining blocking findings. Docker is unavailable in this executor, so the container build was not run.
+Incremental local validation on Node22.23.3 passed all 1,031 server tests, syntax, SaaS security guards and whitespace checks, with zero failures/skips. Separate fresh PostgreSQL17.6 clusters passed 25 outcome and 73 reporting cases and both stopped. Independent source and API-test review found no blocking issue. Local browser/container checks were not run; no installation or workaround was attempted. Fresh exact-head CI remains required.
 
 This change adds no schema, network path, polling loop, recovery behavior, credential change, or production operation. Existing records without area evidence intentionally display uncertainty until a successful existing sync records that evidence. A green local suite does not establish live provider access or production health.
+
+
+## Incremental preparation and integration evidence
+
+The source is PR80 `ba53cc06d1172a6b94c6c3141a8edfcc34a23c47`, directly
+above old main `3ebc1c75370b6a8b843da3829bc1b7af59f0a867`. Its four-file patch
+applied cleanly above tested PR79 local
+`99085589d2309e5f0e0b3a8d545f8a1bf7a596c8`, on branch
+`codex/runvara-connection-health-after-static`. The production implementation
+matches the original source exactly. Actual predecessor main ancestry remains
+pending the coordinating task's health/release sequence. PR81 is excluded.
+
+The added authenticated-route regression exercises the real instrumented store
+and `GET /api/connection-centre` with wildcard and real public-asset validators.
+Anonymous requests stay unauthorized, authenticated responses stay no-store
+without ETags, and a foreign workspace query cannot replace the signed-in
+tenant's distinct area evidence. Each successful request makes only its existing
+tenant state read. All five authenticated reads produce the expected tenant read
+counts, zero primary/reporting commits and no hot-state samples; saved state
+remains unchanged and no provider call occurs. Current saved read age remains
+separate from a failed primary-persistence flag, which health reading cannot
+repair.
+
+Existing outcome/dispatch, strict persistence health, activity attribution,
+bounded reporting and static-response contracts remain unchanged. The applied
+migration filenames `20261007100823_business_outcome_publication.sql` and
+`20261007074031_reporting_status_cas.sql` and their SQL bytes are preserved.
+No new migration, permission, credential operation, scheduled task or network
+path is introduced.
+
+No remote mutation or production request was performed in this preparation.
+Remaining steps are actual predecessor main ancestry, predecessor deployment
+and fresh health, PR80 exact-head CI including existing Android/browser/container
+and database gates, then authorized release and fresh PR80 postdeployment
+health. Saved connection freshness is not proof of live provider authorization.
+The original OS remains incomplete; the successor blueprint is untouched.

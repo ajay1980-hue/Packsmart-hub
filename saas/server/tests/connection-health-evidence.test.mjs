@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import { connectionHealth, intelligentConnections } from '../lib/connection-intelligence.mjs';
 import { connectionSettings, finishConnectionSync } from '../lib/connection-centre.mjs';
 import { monitoredSync } from '../lib/scheduler.mjs';
+import { createPacksmartServer } from '../server.mjs';
+import { createStore, seedWorkspaceState } from '../lib/store.mjs';
+import { createSessionToken } from '../lib/security.mjs';
+import { fakeSupabase } from './fake-supabase.mjs';
 
 const now = new Date('2026-10-07T12:00:00.000Z');
 const recent = '2026-10-07T11:45:00.000Z';
@@ -305,4 +310,76 @@ test('health projections are bounded, tenant local, read-only and make no provid
   const empty = fixture();
   delete empty.state.integrationStatus.shopify.areaSuccessAt;
   assert.equal(empty.health().dataFreshness, 'not_measured', 'another tenant receives no evidence from this one');
+});
+
+test('authenticated saved health stays tenant-local and no-store with only the existing state read', async t => {
+  const secret='connection-health-api-test-secret-more-than-thirty-two-characters';
+  const observedAt=new Date(Date.now()-60_000).toISOString(),staleAt=new Date(Date.now()-3*3600_000).toISOString();
+  const states=['health-alpha','health-beta'].map(workspaceId=>{
+    const state=seedWorkspaceState({}, {workspaceId,email:`${workspaceId}@example.test`,passwordHash:'synthetic-only'});
+    state._revision='stored-health-revision';state.users[0].passwordChangeRequired=false;
+    state.connections=[{id:`${workspaceId}-shopify`,provider:'shopify',status:'connected',encryptedCredentials:'PRIVATE-SAVED-CREDENTIAL',lastCheckedAt:observedAt,
+      metadata:{shopDomain:`${workspaceId}.myshopify.com`,grantedScopes:['read_products','read_orders']}}];
+    state.connectionSettings={shopify:{autoSync:true,frequencyMinutes:30,areas:['products','orders']}};
+    state.integrationStatus.shopify={status:'connected',lastSuccessfulSyncAt:observedAt,
+      areaSuccessAt:{products:observedAt,orders:workspaceId==='health-alpha'?staleAt:observedAt}};
+    return state;
+  });
+  const database=fakeSupabase({initialStates:states});
+  const store=createStore({SUPABASE_URL:'https://health-fixture.invalid',SUPABASE_SERVICE_ROLE_KEY:'synthetic-only'}, {fetchImpl:database.fetchImpl});
+  store.integrityCheck=undefined; // Exclude the pre-existing startup integrity task.
+  let providerCalls=0;
+  const integrations={oauthReady:provider=>provider==='shopify',refreshSupported:()=>false,connectionAccessExpiry:()=>null,
+    shopifyConfigured:()=>true,ebayConfigured:()=>false,ebayConnection:()=>null};
+  const server=createPacksmartServer({NODE_ENV:'test',SESSION_SECRET:secret,SHOPIFY_PUBLIC_SYNC_ENABLED:'false'}, {
+    store,integrations,schedulerEnabled:false,agentOpsEnabled:false,fetchImpl:async()=>{providerCalls++;assert.fail('Saved health must not contact a provider');}
+  });
+  t.after(async()=>{await server.packsmart.drain();if(server.listening)await new Promise(resolve=>server.close(resolve));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const base=`http://127.0.0.1:${server.address().port}`;
+  const preserved=structuredClone([...database.states]);
+  const assertPrivate=response=>{assert.equal(response.headers.get('cache-control'),'no-store');assert.equal(response.headers.get('etag'),null);};
+  const asset=await fetch(base+'/app.js');assert.equal(asset.status,200);
+  const publicEtag=asset.headers.get('etag');assert.ok(publicEtag);
+  const anonymous=await fetch(base+'/api/connection-centre',{headers:{'If-None-Match':'*'}});
+  assert.equal(anonymous.status,401);assertPrivate(anonymous);assert.equal(database.calls.length,0);
+  for(const state of states)for(const validator of ['*',publicEtag]){
+    const workspaceId=state.workspace.id,other=workspaceId==='health-alpha'?'health-beta':'health-alpha';
+    const token=createSessionToken({workspaceId,userId:state.users[0].id,email:state.users[0].email,role:'owner',sessionVersion:1},secret);
+    const beforeCalls=database.calls.length;
+    const response=await fetch(base+`/api/connection-centre?workspaceId=${other}`,{headers:{Cookie:`packsmart_session=${token}`,'If-None-Match':validator}});
+    assert.equal(response.status,200);assertPrivate(response);
+    assert.equal(database.calls.length-beforeCalls,1);
+    assert.equal(database.calls.at(-1).url.searchParams.get('workspace_id'),`eq.${workspaceId}`);
+    const payload=await response.json(),channel=payload.channels.find(row=>row.id==='shopify');
+    assert.equal(channel.identity,`${workspaceId}.myshopify.com`);
+    assert.equal(channel.health.dataFreshness,workspaceId==='health-alpha'?'stale':'current');
+    assert.equal(channel.health.status,workspaceId==='health-alpha'?'Attention needed':'Healthy');
+    assert.equal(channel.health.authentication,'not_verified');
+    assert.equal(channel.health.authenticationEvidence.currentAccess,'not_measured');
+    assert.equal(channel.health.lastConnectionTestAt,observedAt);
+    assert.doesNotMatch(JSON.stringify(payload),/PRIVATE-SAVED-CREDENTIAL/);
+    assert.equal(JSON.stringify(payload).includes(`${other}.myshopify.com`),false);
+    const activity=store.activitySnapshot(workspaceId);
+    assert.equal(activity.db.attempted,validator==='*'?1:2);assert.equal(activity.db.operations.state_read,activity.db.attempted);
+    assert.equal(activity.db.operations.state_commit,0);assert.equal(activity.db.operations.reporting_commit,0);
+    assert.equal(activity.hotState.attempted.observations,0);assert.equal(activity.hotState.confirmed.observations,0);
+    if(workspaceId==='health-beta'&&validator===publicEtag){
+      store.primaryPersistenceHealthy=false;
+      const failedPersistence=await fetch(base+'/api/connection-centre',{headers:{Cookie:`packsmart_session=${token}`,'If-None-Match':'*'}});
+      assert.equal(failedPersistence.status,200);assertPrivate(failedPersistence);
+      const health=(await failedPersistence.json()).channels.find(row=>row.id==='shopify').health;
+      assert.equal(health.status,'Degraded');assert.equal(health.persistenceHealth,'degraded');
+      assert.equal(health.dataFreshness,'current','saved read age cannot erase separate persistence failure evidence');
+      assert.equal(store.primaryPersistenceHealthy,false,'reading health never repairs the primary-health flag');
+    }
+  }
+  assert.equal(database.calls.length,5);assert.ok(database.calls.every(call=>call.method==='GET'));
+  for(const [workspaceId,expectedReads]of[['health-alpha',2],['health-beta',3]]){
+    const observed=store.activitySnapshot(workspaceId);
+    assert.equal(observed.db.attempted,expectedReads);assert.equal(observed.db.operations.state_read,expectedReads);
+    assert.equal(observed.db.operations.state_commit,0);assert.equal(observed.db.operations.reporting_commit,0);
+    assert.equal(observed.hotState.attempted.observations,0);assert.equal(observed.hotState.confirmed.observations,0);
+  }
+  assert.deepEqual([...database.states],preserved);assert.equal(providerCalls,0);
 });
