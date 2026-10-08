@@ -211,6 +211,7 @@
   }
 
   function showPasswordSetup() {
+    window.RunvaraConnections?.interruptContent('Password replacement required', true);
     resetObjectiveEditing(true);
     resetBusinessGraph(true);
     resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
@@ -252,6 +253,7 @@
   }
 
   async function loadBootstrap(options) {
+    window.RunvaraConnections?.interruptContent('Workspace refresh started');
     objectiveUI.referenceCache = null;
     resetObjectiveEditing();
     resetBusinessGraph();
@@ -291,6 +293,7 @@
   }
 
   function setView(view) {
+    if (view !== state.view) window.RunvaraConnections?.interruptContent('Navigation changed');
     if (view !== state.view) resetObjectiveEditing();
     if (view !== 'overview') resetBusinessGraph(true);
     if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); }
@@ -2376,13 +2379,14 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { window.RunvaraConnections?.interruptContent('Signing out', true); resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
+    window.RunvaraConnections?.interruptContent('Password change started');
     resetObjectiveEditing(true);
     resetBusinessGraph();
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
-    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
+    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); window.RunvaraConnections?.interruptContent('Password changed', true); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });
@@ -2435,7 +2439,11 @@
   window.RunvaraOutcomes?.init({ request, getContext: () => ({ session: state.session, workspaceId: state.data?.workspace?.id, userId: state.session?.user?.id, role: state.data?.user?.role, view: state.view, experiments: state.data?.revenueEngine?.experiments || [] }) });
   window.RunvaraActivity?.init({ request, getContext: () => ({ session:state.session, workspaceId:state.data?.workspace?.id, role:state.data?.user?.role, view:state.view }) });
   window.RunvaraControl.init({ request, reload: loadBootstrap, notify: showMessage, setView, money, date, escapeHtml });
-  window.RunvaraConnections?.init({ request, reload: loadBootstrap, notify: showMessage, setView, date, escapeHtml });
+  window.RunvaraConnections?.init({ request, reload: loadBootstrap, notify: showMessage, setView, date, escapeHtml,
+    getContentContext: () => ({ session:state.session, csrf:state.csrf, sessionCsrf:state.session?.csrf, generation:state.graphGeneration, bootstrap:state.data, view:state.view,
+      userId:state.session?.user?.id, dataUserId:state.data?.user?.id, workspaceId:state.session?.workspace?.id, dataWorkspaceId:state.data?.workspace?.id,
+      role:state.session?.user?.role, dataRole:state.data?.user?.role, active:state.session?.user?.active, dataActive:state.data?.user?.active,
+      passwordChangeRequired:state.session?.user?.passwordChangeRequired, dataPasswordChangeRequired:state.data?.user?.passwordChangeRequired }) });
 
   (async () => {
     try {

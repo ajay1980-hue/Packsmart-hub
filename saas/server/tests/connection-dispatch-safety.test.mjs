@@ -7,6 +7,7 @@ import test from 'node:test';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { IntegrationService } from '../lib/integrations.mjs';
 import { executeConnectionWrite, proposeConnectionWrite } from '../lib/connection-writes.mjs';
+import { resolveManualContentTarget } from '../lib/manual-content-target.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import { deriveOperations } from '../lib/operations.mjs';
@@ -90,7 +91,7 @@ async function fixture(t, { provider = 'shopify', operation = 'product_content',
       ? { operation, catalogId: CATALOG, productId: META_PRODUCT, quantity: 9, availability: 'in stock', visibility: 'staging', name: 'Approved product', description: 'Approved description',
         retailerId: 'approved-sku', brand: 'Approved brand', category: 'Home & Garden', url: 'https://example.test/approved', imageUrl: 'https://example.test/approved.jpg', priceMinor: 1099, currency: 'GBP' }
       : { operation, pageId: PAGE, message: 'Approved post', imageUrl: 'https://example.test/approved.jpg', url: 'https://example.test/approved', postId: `${PAGE}_909` };
-  const requested = proposeConnectionWrite(seeded, provider, { ...body, requestId: 'dispatch-safety-request-0001' }, seeded.users[0].id);
+  const requested = proposeConnectionWrite(seeded, provider, { ...body, requestId: 'dispatch-safety-request-0001', ...(operation === 'product_content' ? { target: resolveManualContentTarget(seeded).target } : {}) }, seeded.users[0].id);
   const approved = seeded.approvals.find(item => item.id === requested.approvalId);
   Object.assign(approved, { status: 'approved', decidedBy: seeded.users[0].id, decidedAt: new Date().toISOString() });
   await store.save(WORKSPACE, seeded);
@@ -871,7 +872,7 @@ test('the durable admission count survives a second SupabaseStore client and blo
   await f.persist();
   const current = await f.replica.get(WORKSPACE);
   assert.equal(current.connectionDispatchAdmissions.length, 10);
-  const next = proposeConnectionWrite(current, 'shopify', { ...f.write.input, requestId:'durable-admission-second-request' }, current.users[0].id);
+  const next = proposeConnectionWrite(current, 'shopify', { ...f.write.input, requestId:'durable-admission-second-request', target: resolveManualContentTarget(current).target }, current.users[0].id);
   Object.assign(current.approvals.find(row => row.id === next.approvalId), {
     status:'approved', decidedBy:current.users[0].id, decidedAt:new Date().toISOString()
   });
@@ -1271,7 +1272,7 @@ test('new restrictions block old manual approvals and request-id reuse before cr
   const result = await f.observe();
   assert.equal(result.code, 'WRITE_POLICY_REVIEW_REQUIRED'); assertBlocked(result, f.mutations);
   assert.equal(credentials, 0); assert.equal(f.calls.length, 0);
-  assert.throws(() => proposeConnectionWrite(f.state, 'shopify', { ...f.write.input, requestId: f.write.requestId }, f.state.users[0].id), { code: 'WRITE_POLICY_REVIEW_REQUIRED' });
+  assert.throws(() => proposeConnectionWrite(f.state, 'shopify', { ...f.write.input, requestId: f.write.requestId, target: resolveManualContentTarget(f.state).target }, f.state.users[0].id), { code: 'WRITE_POLICY_REVIEW_REQUIRED' });
   for (const key of ['origin', 'objectiveRef', 'objectivePolicyProposal', 'policyBinding', 'executionPolicy', 'financialEvidence']) {
     assert.throws(() => proposeConnectionWrite(f.state, 'shopify', { ...f.write.input, requestId: 'forged-policy-request', [key]: {} }, f.state.users[0].id), { code: 'WRITE_POLICY_INPUT_INVALID' });
   }
@@ -1626,7 +1627,7 @@ test('all applicable policy revisions survive completion context without inventi
   const f = await fixture(t, { policy: true });
   installPolicy(f.state, { title: 'Second independent restriction' });
   // A fresh exact proposal/approval is required for the enlarged restriction set.
-  const w = proposeConnectionWrite(f.state, 'shopify', { requestId:'multiple_policy_request_0001', operation:'product_content', productId:PRODUCT, title:'New approved title', description:'Policy-bound description' }, f.state.users[0].id);
+  const w = proposeConnectionWrite(f.state, 'shopify', { target:resolveManualContentTarget(f.state).target, requestId:'multiple_policy_request_0001', operation:'product_content', productId:PRODUCT, title:'New approved title', description:'Policy-bound description' }, f.state.users[0].id);
   const a=f.state.approvals.find(a=>a.id===w.approvalId); Object.assign(a,{status:'approved',decidedBy:f.state.users[0].id,decidedAt:new Date().toISOString()});
   await f.persist();
   const result=await executeConnectionWrite(f.state,w.id,f.state.users[0].id,f.service,f.persist,f.options);
@@ -1693,7 +1694,7 @@ test('actual recorded content action linked into an owner-reviewed result cannot
   const learning=deriveLearning(f.state,{now:now.toISOString(),outcomeSnapshot});
   assert.deepEqual(learning.priors,[]); assert.equal(learning.qualifiedOutcomeGroups[0].usableForGuidance,false);
   installPolicy(f.state,{limits:{profitFirst:true}});
-  const w=proposeConnectionWrite(f.state,'shopify',{requestId:'linked_profit_first_0001',operation:'product_content',productId:PRODUCT,title:'Another approved title',description:'Another approved description'},f.state.users[0].id);
+  const w=proposeConnectionWrite(f.state,'shopify',{target:resolveManualContentTarget(f.state).target,requestId:'linked_profit_first_0001',operation:'product_content',productId:PRODUCT,title:'Another approved title',description:'Another approved description'},f.state.users[0].id);
   const a=f.state.approvals.find(a=>a.id===w.approvalId); Object.assign(a,{status:'approved',decidedBy:f.state.users[0].id,decidedAt:now.toISOString()});
   w.financialEvidence={qualifiedOutcome:row,sourceAction:source,learning}; await f.persist(); const saves=f.durableClaims.length;
   await assert.rejects(executeConnectionWrite(f.state,w.id,f.state.users[0].id,f.service,f.persist,f.options),{code:'WRITE_POLICY_EVIDENCE_REQUIRED'});

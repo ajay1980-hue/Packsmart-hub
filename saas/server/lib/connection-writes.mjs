@@ -7,8 +7,62 @@ import { createConnectionDispatch, connectionDispatchCount } from './connection-
 import { META_WRITES, prepareMetaWrite, requireMetaScopes, metaWriteScopes } from './meta-commerce.mjs';
 import { captureObjectiveDispatchPolicy, prepareObjectiveDispatchProposal, assertObjectiveDispatchBinding,
   assertObjectivePolicySource, protectObjectivePolicySource, assertObjectiveDispatchAllowed } from './objective-dispatch-policy.mjs';
+import { MANUAL_CONTENT_REQUEST_SCHEMA, manualContentRecord, manualContentRows, manualContentWorkspace,
+  assertManualContentScope, assertManualContentActor, validateManualContentTarget, assertManualContentTarget } from './manual-content-target.mjs';
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const contentTerminal = status => ['completed', 'uncertain', 'failed', 'rejected'].includes(status);
+function contentInput(body) {
+  if (typeof body.productId !== 'string' || body.productId.length > 100 || !/^gid:\/\/shopify\/Product\/\d+$/.test(body.productId)) throw connectionError('Choose a Shopify product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
+  if (typeof body.title !== 'string' || !body.title.trim() || body.title.length > 200 || typeof body.description !== 'string' || body.description.length > 10000) throw connectionError('Enter a product title and a description of up to 10,000 characters.');
+  return { productId: body.productId, operation: 'product_content', title: body.title.trim(), description: body.description };
+}
+function contentRequestRows(state, requestId) {
+  return manualContentRows(state.connectionWrites || []).filter(row => row.requestId === requestId);
+}
+function contentRequest(state, requestId, actor) {
+  const workspaceId = manualContentWorkspace(state);
+  const rows = contentRequestRows(state, requestId);
+  if (rows.length > 1) throw connectionError('This request reference is ambiguous. Review the saved requests before continuing.', 'WRITE_CONFLICT', 409);
+  if (!rows.length) return null;
+  const write = rows[0];
+  assertManualContentScope(write, workspaceId);
+  if (write.provider !== 'shopify' || write.input?.operation !== 'product_content' || write.requestedBy !== actor) throw connectionError('This request reference belongs to a different change or requester.', 'WRITE_CONFLICT', 409);
+  manualContentRecord(write.input);
+  const normalized = contentInput(write.input);
+  if (Reflect.ownKeys(write.input).length !== 4 || Object.keys(normalized).some(key => write.input[key] !== normalized[key])
+    || write.digest !== digest(normalized) || typeof write.id !== 'string' || !/^write_[A-Za-z0-9_-]{1,100}$/.test(write.id)
+    || typeof write.connectionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(write.connectionId)
+    || typeof write.account !== 'string' || write.account.length > 253 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(write.account)
+    || typeof write.approvalId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(write.approvalId)
+    || !['pending_approval', 'ready', 'executing', 'processing', 'completed', 'uncertain', 'failed', 'rejected'].includes(write.status)
+    || state.connectionWrites.filter(row => row.id === write.id).length !== 1) throw connectionError('The saved content request could not be verified.', 'WRITE_CONFLICT', 409);
+  return write;
+}
+function assertPendingContentApproval(state, write) {
+  const rows = manualContentRows(state.approvals || []).filter(row => row.id === write.approvalId);
+  const approval = rows[0];
+  if (approval) assertManualContentScope(approval, state.workspace.id);
+  if (rows.length !== 1 || write.requiresApproval !== true || approval.type !== 'customer_facing_publish'
+    || (approval.revision || 1) !== 1 || approval.payload?.connectionWriteId !== write.id || approval.payload?.digest !== write.digest
+    || !['pending', 'approved'].includes(approval.status)
+    || (write.status !== 'pending_approval' && approval.status !== 'approved')) {
+    throw connectionError('The exact saved approval changed. Review a new request.', 'APPROVAL_REQUIRED', 409);
+  }
+  assertObjectiveDispatchBinding(write, approval, captureObjectiveDispatchPolicy(state, write));
+}
+export function readManualContentRequest(state, requestId, actor) {
+  if (typeof requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(requestId)) throw connectionError('An exact request reference is required.', 'WRITE_REQUEST_ID_REQUIRED');
+  assertManualContentActor(state, actor);
+  const write = contentRequest(state, requestId, actor);
+  // This is history from one retained snapshot, never execution authority or a
+  // promise that an outstanding request cannot still commit on another replica.
+  const request = write ? { id: write.id, requestId, provider: write.provider, input: structuredClone(write.input), digest: write.digest,
+    connectionId: write.connectionId, account: write.account, requestedBy: write.requestedBy, status: write.status, approvalId: write.approvalId } : null;
+  const result = { schema: MANUAL_CONTENT_REQUEST_SCHEMA, workspaceId: state.workspace.id, requestId, requestedBy: actor, found: Boolean(write), request };
+  if (Buffer.byteLength(JSON.stringify(result)) > 65536) throw connectionError('This request exceeds the safe review size.', 'WRITE_REQUEST_TOO_LARGE', 409);
+  return result;
+}
 export async function previewShopifyTagTest(state, productId, integrations) {
   const product = state.products?.find(item => item.id === productId && item.provider === 'shopify');
   if (!product || !/^gid:\/\/shopify\/Product\/\d+$/.test(product.id)) throw connectionError('Choose a product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
@@ -29,19 +83,32 @@ export async function previewShopifyTagTest(state, productId, integrations) {
     notice: 'No write or permission change has occurred. Tags may affect storefront collections or external workflows. The inverse removal needs its own exact approval.' };
 }
 export function proposeConnectionWrite(state, provider, body, actor) {
+  const operationField = provider === 'shopify' ? Object.getOwnPropertyDescriptor(body, 'operation') : null;
+  if (provider === 'shopify' && (!operationField && 'operation' in body || operationField && !Object.hasOwn(operationField, 'value'))) throw connectionError('The requested operation must be ordinary own data.', 'WRITE_CONTENT_INPUT_INVALID');
   if (['origin', 'objectiveRef', 'objectivePolicyProposal', 'policyBinding', 'executionPolicy', 'financialEvidence'].some(key => Object.hasOwn(body, key))) {
     throw connectionError('Execution restrictions and proposal authority are assigned by the server.', 'WRITE_POLICY_INPUT_INVALID', 400);
   }
-  const settings = connectionSettings(state, provider);
-  if (settings.disconnected || settings.permissionMode === 'read_only') throw connectionError('This connection is read-only. The owner must authorise write access first.', 'WRITE_NOT_AUTHORISED', 403);
+  const manualContent = provider === 'shopify' && operationField?.value === 'product_content';
+  if (manualContent) {
+    manualContentRecord(body);
+    if (Reflect.ownKeys(body).some(key => !['operation', 'requestId', 'productId', 'title', 'description', 'target'].includes(key))) throw connectionError('Unsupported content request field. Refresh and review the exact request.', 'WRITE_CONTENT_INPUT_INVALID');
+    validateManualContentTarget(body.target);
+    assertManualContentActor(state, actor);
+  }
+  let settings = manualContent ? null : connectionSettings(state, provider);
+  if (!manualContent && (settings.disconnected || settings.permissionMode === 'read_only')) throw connectionError('This connection is read-only. The owner must authorise write access first.', 'WRITE_NOT_AUTHORISED', 403);
   if (!((provider === 'shopify' && ['product_content', 'internal_note', 'product_tags_add', 'product_tags_remove'].includes(body.operation)) || (provider === 'meta' && META_WRITES.includes(body.operation)))) throw connectionError('Runvara does not support this write action. No change was made.', 'WRITE_UNSUPPORTED', 422);
-  if (!/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId || '')) throw connectionError('A unique request reference is required.', 'WRITE_REQUEST_ID_REQUIRED');
+  if (manualContent && typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId || '')) throw connectionError('A unique request reference is required.', 'WRITE_REQUEST_ID_REQUIRED');
   state.connectionWrites ||= [];
-  const existing = state.connectionWrites.find(item => item.requestId === body.requestId);
-  const product = (state.products || []).find(item => item.id === body.productId && item.provider === 'shopify');
-  if (provider === 'shopify' && (!product || !/^gid:\/\/shopify\/Product\/\d+$/.test(product.id))) throw connectionError('Choose a Shopify product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
-  const input = provider === 'meta' ? prepareMetaWrite(state, body) : { productId: product.id, operation: body.operation };
-  if (provider === 'meta') { /* Exact supported input was validated above. */ } else if (body.operation === 'internal_note') {
+  const existing = manualContent ? contentRequest(state, body.requestId, actor) : state.connectionWrites.find(item => item.requestId === body.requestId);
+  const products = manualContent ? manualContentRows(state.products || []) : state.products || [];
+  const matches = manualContent ? products.filter(item => item.id === body.productId && item.provider === 'shopify')
+    : [products.find(item => item.id === body.productId && item.provider === 'shopify')];
+  const product = matches[0];
+  if (provider === 'shopify' && !(manualContent && existing && contentTerminal(existing.status)) && (!product || manualContent && matches.length !== 1 || !/^gid:\/\/shopify\/Product\/\d+$/.test(product.id))) throw connectionError('Choose one exact Shopify product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
+  if (manualContent && product) assertManualContentScope(product, state.workspace.id);
+  const input = manualContent ? contentInput(body) : provider === 'meta' ? prepareMetaWrite(state, body) : { productId: product.id, operation: body.operation };
+  if (provider === 'meta' || manualContent) { /* Exact supported input was validated above. */ } else if (body.operation === 'internal_note') {
     if (typeof body.note !== 'string' || !body.note.trim() || body.note.length > 500) throw connectionError('Enter an internal note of up to 500 characters.');
     input.note = body.note.trim();
   } else if (body.operation.startsWith('product_tags_')) {
@@ -58,12 +125,18 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   }
   if (existing) {
     if (existing.provider !== provider || existing.digest !== digest(input)) throw connectionError('This request reference was already used for a different change.', 'WRITE_CONFLICT', 409);
+    if (manualContent) {
+      if (existing.connectionId !== body.target.connectionId || existing.account !== body.target.account) throw connectionError('This request reference was already used for a different account.', 'WRITE_CONFLICT', 409);
+      if (!contentTerminal(existing.status)) { assertManualContentTarget(state, body.target); assertPendingContentApproval(state, existing); }
+      return existing;
+    }
     if (!['completed', 'uncertain', 'failed', 'rejected'].includes(existing.status)) {
       assertObjectiveDispatchBinding(existing, state.approvals?.find(row => row.id === existing.approvalId), captureObjectiveDispatchPolicy(state, existing));
     }
     return existing;
   }
-  const connection = state.connections?.find(item => item.provider === provider && item.encryptedCredentials);
+  const connection = manualContent ? assertManualContentTarget(state, body.target) : state.connections?.find(item => item.provider === provider && item.encryptedCredentials);
+  if (manualContent) settings = connectionSettings(state, provider);
   if (provider === 'meta') requireMetaScopes(connection?.metadata?.grantedScopes, metaWriteScopes(input.operation));
   if (provider === 'shopify' && !connection?.metadata?.grantedScopes?.includes('write_products')) throw connectionError('Shopify has not granted product write access. Reconnect with write access and test the connection first.', 'WRITE_SCOPE_REQUIRED', 409);
   const requiresApproval = provider === 'meta' || settings.permissionMode !== 'automatic' || body.operation !== 'internal_note';

@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  let api, channels = [], data = {}, selected = null, returnFocus, pollTimer, refreshPending, refreshController, sessionGeneration = 0, journeyTimer;
+  let api, channels = [], data = {}, selected = null, returnFocus, pollTimer, refreshPending, refreshController, refreshTicket, sessionGeneration = 0, journeyTimer;
   const busy = new Set();
   const $ = selector => document.querySelector(selector);
   const labels = { connected: 'Connected', degraded: 'Limited coverage', action_required: 'Action required', disconnected: 'Disconnected', not_configured: 'Not configured', read_only: 'Read-only', approval_gated: 'Approval-gated write', automatic: 'Automatic write', catalogs: 'Catalogues', posts: 'Facebook posts', products: 'Products', variants: 'Variants', inventory: 'Inventory', prices: 'Prices', orders: 'Orders', customers: 'Customers', promotions: 'Promotions', accounts: 'Facebook Pages & Instagram accounts', channels: 'YouTube channels', boards: 'Boards', pins: 'Pins', shops: 'Shops' };
@@ -12,6 +12,260 @@
   const operatorWorkspace = () => data.launchAdmin === true;
   const statusClass = status => status === 'connected' ? 'good' : ['degraded', 'action_required'].includes(status) ? 'warn' : 'neutral';
   const button = (action, text, channel, style = 'secondary') => `<button type="button" class="${style}" data-connection-action="${action}" data-provider="${channel.id}" ${busy.has(channel.id) || (!manager() && action !== 'open') ? 'disabled' : ''}>${esc(text)}</button>`;
+  const content = { editor: null, attempt: null, previous: null, ticket: null, epoch: 0 };
+  const contentSchema = 'runvara-manual-content-target/v1';
+  const cloneContent = value => JSON.parse(JSON.stringify(value));
+  const freezeContent = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freezeContent); Object.freeze(value); } return value; };
+  const contentId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
+  const sameKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === keys.slice().sort().join(',');
+  function contentContext() { return api.getContentContext?.() || null; }
+  function contentOwner(context = contentContext()) {
+    return Boolean(context?.session && context.userId && context.workspaceId && context.csrf && context.userId === context.session.user?.id &&
+      context.userId === context.dataUserId && context.workspaceId === context.session.workspace?.id && context.workspaceId === context.dataWorkspaceId &&
+      context.role === 'owner' && context.dataRole === 'owner' && context.session.user?.role === 'owner' &&
+      !context.passwordChangeRequired && !context.dataPasswordChangeRequired && !context.session.user?.passwordChangeRequired &&
+      context.active !== false && context.dataActive !== false && context.session.user?.active !== false);
+  }
+  function sameContentIdentity(original, current = contentContext()) {
+    return contentOwner(current) && original?.session === current.session && original.userId === current.userId && original.workspaceId === current.workspaceId &&
+      original.csrf === current.csrf && original.sessionCsrf === current.sessionCsrf;
+  }
+  function currentContentTarget() {
+    const matches = channels.filter(channel => channel?.id === 'shopify');
+    const projection = matches.length === 1 ? matches[0].contentPreparation : null, target = projection?.target;
+    if (projection?.available !== true || !sameKeys(target, ['schema','connectionId','account','settingsRevision']) || target.schema !== contentSchema ||
+      !contentId(target.connectionId) || typeof target.account !== 'string' || target.account.length > 253 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(target.account) ||
+      !Number.isSafeInteger(target.settingsRevision) || target.settingsRevision < 0) return null;
+    return cloneContent(target);
+  }
+  function contentProducts() {
+    const rows = Array.isArray(data.products) ? data.products : [];
+    return rows.filter(row => row?.provider === 'shopify' && typeof row.id === 'string' && row.id.length <= 100 && /^gid:\/\/shopify\/Product\/\d+$/.test(row.id) &&
+      rows.filter(other => other?.id === row.id).length === 1 && [row.workspaceId,row.workspace_id,row.tenantId,row.tenant_id,row.workspace?.id,row.tenant?.id,typeof row.workspace === 'string' ? row.workspace : undefined,typeof row.tenant === 'string' ? row.tenant : undefined].every(value => value === undefined || value === data.workspace?.id))
+      .map(row => ({ id: row.id, title: typeof row.title === 'string' ? row.title.slice(0,400) : 'Saved Shopify product' }));
+  }
+  function contentSourceKey() { return JSON.stringify([currentContentTarget(), contentProducts()]); }
+  function currentContentIdentity() {
+    const identity = content.attempt?.identity || content.editor?.identity;
+    if (identity && !sameContentIdentity(identity)) { interruptContent('Session changed', true); return false; }
+    return contentOwner();
+  }
+  function contentVisible() { return selected === 'shopify' && $('#connection-dialog').open && !document.hidden && contentContext()?.view === 'channels'; }
+  function interruptContent(reason = 'Editing interrupted', clear = false) {
+    content.epoch++;
+    const ticket = content.ticket; content.ticket = null; ticket?.controller.abort();
+    if (clear || ((content.attempt || content.editor) && !sameContentIdentity(content.attempt?.identity || content.editor.identity))) {
+      content.editor = null; content.attempt = null; content.previous = null;
+      $('#connection-content-editor')?.replaceChildren();
+      return;
+    }
+    if (content.attempt && !['saved','refused'].includes(content.attempt.phase)) {
+      if (content.attempt.sent) { content.attempt.phase = 'unknown'; content.attempt.hadUnknown = true; content.attempt.retryReady = false; }
+      else content.attempt = null;
+    }
+    if (content.editor) {
+      content.editor.ackKey = null; content.editor.stale = true;
+      content.editor.message = reason + '. Review the retained draft and explicitly reload saved targets before preparing a change.';
+    }
+    renderContentState();
+  }
+  function observeContentSource() {
+    if (!currentContentIdentity()) return;
+    const editor = content.editor;
+    if (editor && (editor.sourceKey !== contentSourceKey() || editor.generation !== contentContext()?.generation || editor.bootstrap !== contentContext()?.bootstrap)) {
+      if (content.ticket) interruptContent('The saved content target or workspace changed');
+      editor.stale = true; editor.ackKey = null;
+      editor.message = 'The saved target, products or workspace context changed. Reload and review; no account or product will be selected automatically.';
+      if (content.attempt) content.attempt.retryReady = false;
+      renderContentState();
+    }
+  }
+  function newContentEditor() {
+    if (!contentOwner()) return;
+    const context = contentContext();
+    content.editor = { identity: { ...context }, generation: context.generation, bootstrap: context.bootstrap, target: currentContentTarget(), products: contentProducts(),
+      sourceKey: contentSourceKey(), fields: { account:'', product:'', title:'', description:'' }, ackKey:null, stale:false, message:'' };
+  }
+  function contentForm() {
+    if (!currentContentIdentity()) return '<section id="connection-content-editor" class="connection-section"><p>Content preparation requires the current owner session.</p></section>';
+    if (!content.editor) newContentEditor();
+    const editor = content.editor, attempt = content.attempt, target = attempt?.intent?.target || editor.target, fields = editor.fields;
+    const selectedAccount = attempt?.intent ? attempt.intent.target.connectionId : fields.account;
+    const selectedProduct = attempt?.intent ? attempt.intent.input.productId : fields.product;
+    const choices = editor.products.some(row => row.id === selectedProduct) || !selectedProduct ? editor.products : [...editor.products, { id:selectedProduct,title:'Retained exact product reference' }];
+    return `<section id="connection-content-editor" class="connection-section"><h3>Prepare an exact Shopify content change</h3>
+      <p>Choose the saved account and product, then review the exact title and description. Preparation records a request for approval; it never publishes. Other restrictions still apply.</p>
+      <form id="connection-content-form" class="connection-manage-form" aria-busy="false">
+      <label>Exact saved account<select id="content-account" required><option value="">Choose the exact saved Shopify account</option>${target ? `<option value="${esc(target.connectionId)}" ${selectedAccount === target.connectionId ? 'selected' : ''}>${esc(target.account)} · ${esc(target.connectionId)}</option>` : ''}</select></label>
+      <label>Product<select id="content-product" required><option value="">Choose a saved Shopify product</option>${choices.map(row => `<option value="${esc(row.id)}" ${row.id === selectedProduct ? 'selected' : ''}>${esc(row.title)} · ${esc(row.id)}</option>`).join('')}</select></label>
+      <label>Exact new title<input id="content-title" maxlength="200" required value="${esc(attempt?.intent?.input.title ?? fields.title)}"></label>
+      <label>Exact new description<textarea id="content-description" maxlength="10000">${esc(attempt?.intent?.input.description ?? fields.description)}</textarea></label>
+      <p id="content-status" role="status"></p><div id="content-exact" class="connection-exact-text"></div>
+      <label class="check-label"><input id="content-ack" type="checkbox"> I reviewed this exact account, product, title and description. Prepare only this request for separate owner approval.</label>
+      <div class="button-row"><button id="content-prepare" type="submit" class="secondary">Prepare exact content request</button><button id="content-check" type="button" class="secondary hidden">Check exact saved request</button><button id="content-retry" type="button" class="secondary hidden">Retry the same request reference</button><button id="content-reload" type="button" class="secondary">Discard unsent draft and reload targets</button><button id="content-new" type="button" class="secondary hidden">Start a different content draft</button><button id="content-approvals" type="button" class="secondary hidden" data-connection-action="approvals" data-provider="shopify">Open Approval Centre</button></div>
+      <p id="content-error" class="connection-feedback bad" role="alert"></p></form>
+      <p class="muted tiny">Saved target settings can change before preparation. This reference is not proof of current credentials or provider freshness. Exact approval and a separate Apply action remain necessary. Unconfirmed request references stay only in this session; a full page reload cannot prove whether an earlier request was recorded.</p></section>`;
+  }
+  function readContentFields() {
+    return { account:$('#content-account')?.value || '', product:$('#content-product')?.value || '', title:$('#content-title')?.value || '', description:$('#content-description')?.value || '' };
+  }
+  function contentDraftKey() { return JSON.stringify([content.editor?.target, readContentFields(), content.editor?.sourceKey]); }
+  function contentInput(fields) { return { productId:fields.product, operation:'product_content', title:fields.title.trim(), description:fields.description }; }
+  function contentIntentKey(input, target) { return JSON.stringify([input, target.connectionId, target.account]); }
+  function validContentDraft() {
+    const editor = content.editor, fields = readContentFields();
+    return editor?.target && fields.account === editor.target.connectionId && editor.products.some(row => row.id === fields.product) && fields.title.trim() && fields.title.length <= 200 && fields.description.length <= 10000;
+  }
+  function renderContentState() {
+    const form = $('#connection-content-form'), editor = content.editor, attempt = content.attempt;
+    if (!form || !editor) return;
+    const working = Boolean(content.ticket), unresolved = attempt && !['saved','refused'].includes(attempt.phase), saved = attempt?.phase === 'saved';
+    const locked = working || Boolean(unresolved) || saved || editor.stale;
+    for (const id of ['content-account','content-product','content-title','content-description']) $('#' + id).disabled = locked;
+    const ready = unresolved ? attempt.retryReady && !working && !editor.stale : !saved && !editor.stale && validContentDraft();
+    $('#content-ack').disabled = !ready;
+    if (!editor.ackKey) $('#content-ack').checked = false;
+    $('#content-prepare').classList.toggle('hidden', Boolean(unresolved) || saved);
+    $('#content-prepare').disabled = working || !ready || !$('#content-ack').checked || editor.ackKey !== contentDraftKey();
+    $('#content-check').classList.toggle('hidden', !unresolved); $('#content-check').disabled = working;
+    $('#content-retry').classList.toggle('hidden', !unresolved || !attempt.retryReady);
+    $('#content-retry').disabled = !ready || !$('#content-ack').checked || editor.ackKey !== contentDraftKey();
+    $('#content-reload').classList.toggle('hidden', Boolean(unresolved) || saved); $('#content-reload').disabled = working;
+    $('#content-new').classList.toggle('hidden', !saved && attempt?.phase !== 'refused'); $('#content-new').disabled = working;
+    $('#content-approvals').classList.toggle('hidden', !saved);
+    form.setAttribute('aria-busy', String(working));
+    const fields = attempt?.intent ? { product:attempt.intent.input.productId,title:attempt.intent.input.title,description:attempt.intent.input.description } : readContentFields();
+    const target = attempt?.intent?.target || editor.target;
+    $('#content-exact').textContent = 'Account: ' + (target ? target.account + '\nConnection: ' + target.connectionId + '\nSaved settings revision: ' + target.settingsRevision : 'No eligible exact target') +
+      '\nProduct ID: ' + (fields.product || 'Not selected') + '\nExact proposed title: ' + (fields.title.trim() || 'Not entered') + '\nExact proposed description:\n' + fields.description +
+      (attempt ? '\nRequest reference: ' + attempt.requestId : '');
+    $('#content-status').textContent = saved ? 'Exact request found: ' + attempt.record.id + ' · ' + label(attempt.record.status) + '. This is saved request history, not permission to apply or evidence of a new publication.' :
+      attempt?.phase === 'submitting' ? 'Preparing this one exact request. Leaving cannot cancel a server save.' :
+      attempt?.phase === 'reconciling' ? 'Checking this exact saved request reference…' :
+      unresolved ? (attempt.retryReady ? 'No matching request was found in the checked snapshot. An earlier request could still commit. Review the retained exact content before deliberately retrying the same reference.' : 'The preparation outcome is unknown. This exact request may already have been recorded. Check its saved reference before any retry; no new reference will be created.') :
+      editor.stale ? editor.message : editor.target ? 'Choose the exact account and product deliberately. The account reference is for preparation; write authority is checked separately.' :
+      'Exact content preparation is unavailable. Reload saved targets after the connection settings have been reviewed.';
+  }
+  function contentTicket(kind) {
+    const context = contentContext(), ticket = { kind, context:{...context}, epoch:content.epoch, controller:new AbortController() };
+    content.ticket = ticket; return ticket;
+  }
+  function currentContentTicket(ticket) {
+    if (content.ticket !== ticket || ticket.epoch !== content.epoch || !sameContentIdentity(ticket.context)) return false;
+    const context = contentContext();
+    return ticket.context.generation === context.generation && ticket.context.bootstrap === context.bootstrap && contentVisible();
+  }
+  const contentIdentityError = error => error.status === 401 || (error.status === 403 && ['ROLE_DENIED','WRITE_ACTOR_CHANGED','PASSWORD_CHANGE_REQUIRED'].includes(error.code));
+  function contentError(message) { if ($('#content-error')) $('#content-error').textContent = message; }
+  function validContentRecord(record, attempt, strict = false) {
+    const input = attempt.intent.input;
+    return (!strict || sameKeys(record,['id','requestId','provider','input','digest','connectionId','account','requestedBy','status','approvalId'])) &&
+      contentId(record?.id) && record.requestId === attempt.requestId && record.provider === 'shopify' && record.requestedBy === attempt.identity.userId &&
+      record.connectionId === attempt.intent.target.connectionId && record.account === attempt.intent.target.account && record.digest === attempt.intent.digest &&
+      contentId(record.approvalId) && ['pending_approval','ready','executing','processing','completed','uncertain','failed','rejected'].includes(record.status) &&
+      sameKeys(record.input,['productId','operation','title','description']) && Object.keys(input).every(key => record.input[key] === input[key]);
+  }
+  function acceptContentRecord(attempt, record) {
+    attempt.phase = 'saved'; attempt.retryReady = false; attempt.record = freezeContent(cloneContent(record));
+    content.editor.ackKey = null; content.editor.stale = false; contentError('');
+  }
+  function unavailableContentAttempt(attempt, message) {
+    attempt.phase = 'unknown'; attempt.hadUnknown = true; attempt.retryReady = false; content.editor.ackKey = null;
+    contentError(message); renderContentState();
+  }
+  async function prepareContent(retry = false) {
+    if (!currentContentIdentity() || !contentVisible() || content.ticket || !content.editor || content.editor.stale) return;
+    observeContentSource();
+    const editor = content.editor;
+    if (editor.stale || !$('#content-ack').checked || editor.ackKey !== contentDraftKey()) return;
+    let attempt = content.attempt;
+    if (retry) {
+      if (!attempt?.retryReady || !sameContentIdentity(attempt.identity) || JSON.stringify(currentContentTarget()) !== JSON.stringify(attempt.intent.target)) return;
+      const fields = readContentFields();
+      if (fields.account !== attempt.intent.target.connectionId || JSON.stringify(contentInput(fields)) !== JSON.stringify(attempt.intent.input)) {
+        editor.ackKey = null; contentError('The displayed fields no longer match the frozen request. Close and reopen to review that exact request before checking again.'); renderContentState(); return;
+      }
+    } else {
+      if ((attempt && attempt.phase !== 'refused') || !validContentDraft()) return;
+      const fields = readContentFields(), input = contentInput(fields), target = cloneContent(editor.target), key = contentIntentKey(input,target);
+      if (content.previous?.phase === 'saved' && content.previous.key === key) { contentError('This exact content was already prepared. Review the saved request, or deliberately change the content or target for a different draft.'); return; }
+      const prior = attempt?.phase === 'refused' ? attempt : content.previous?.phase === 'refused' ? content.previous : null;
+      attempt = { identity:{...contentContext()}, requestId:prior?.key === key ? prior.requestId : crypto.randomUUID(), key, phase:'submitting', sent:false, hadUnknown:false, retryReady:false,
+        intent: { input, target, digest:null } };
+      content.attempt = attempt;
+      $('#content-title').value = input.title; editor.fields = { ...fields, title:input.title };
+    }
+    const ticket = contentTicket('prepare'); attempt.phase = 'submitting'; attempt.retryReady = false; contentError(''); renderContentState();
+    try {
+      if (!attempt.intent.digest) {
+        const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(attempt.intent.input)));
+        if (!currentContentTicket(ticket)) return;
+        attempt.intent = freezeContent({ ...attempt.intent, digest:Array.from(new Uint8Array(hash), byte => byte.toString(16).padStart(2,'0')).join('') });
+      }
+      if (!currentContentTicket(ticket)) return;
+      const visible = readContentFields();
+      if (visible.account !== attempt.intent.target.connectionId || JSON.stringify(contentInput(visible)) !== JSON.stringify(attempt.intent.input) ||
+        content.editor.sourceKey !== contentSourceKey()) throw Object.assign(new Error('The reviewed fields or saved target changed before preparation. Reload and review again.'), {status:400,code:'CONTENT_REVIEW_CHANGED'});
+      attempt.sent = true;
+      const body = { operation:'product_content', requestId:attempt.requestId, productId:attempt.intent.input.productId, title:attempt.intent.input.title, description:attempt.intent.input.description, target:attempt.intent.target };
+      const result = await api.request('/api/connections/shopify/writes', { method:'POST',body:JSON.stringify(body), signal:ticket.controller.signal, isCurrent:()=>currentContentTicket(ticket) });
+      if (!currentContentTicket(ticket)) return;
+      if (!sameKeys(result,['write']) || !validContentRecord(result.write,attempt) || result.write.requiresApproval !== true) throw Object.assign(new Error('The response did not confirm this exact request.'),{code:'CONTENT_RESULT_UNKNOWN'});
+      acceptContentRecord(attempt,result.write);
+    } catch (error) {
+      if (!currentContentTicket(ticket)) return;
+      if (contentIdentityError(error)) { interruptContent('Owner session unavailable',true); return; }
+      if (attempt.sent && (attempt.hadUnknown || !error.status || error.status >= 500 || error.code === 'STATE_CONFLICT' || error.code === 'CONTENT_RESULT_UNKNOWN')) unavailableContentAttempt(attempt,'The outcome is unknown. Check the exact saved request before retrying. ' + error.message);
+      else { attempt.phase = 'refused'; editor.ackKey = null; editor.stale = true; editor.message = 'Preparation was refused. Reload targets and review a deliberate draft before another request.'; contentError(error.message); }
+    } finally {
+      if (content.ticket === ticket) { content.ticket = null; if (currentContentIdentity()) renderContentState(); }
+    }
+  }
+  async function checkContentAttempt() {
+    const attempt = content.attempt;
+    if (!attempt?.intent?.digest || ['saved','refused'].includes(attempt.phase) || !currentContentIdentity() || !contentVisible() || content.ticket) return;
+    const ticket = contentTicket('check'); attempt.phase = 'reconciling'; attempt.retryReady = false; content.editor.ackKey = null; contentError(''); renderContentState();
+    const config = {signal:ticket.controller.signal,isCurrent:()=>currentContentTicket(ticket)};
+    try {
+      const result = await api.request('/api/connections/shopify/content-requests/' + encodeURIComponent(attempt.requestId),config);
+      if (!currentContentTicket(ticket)) return;
+      if (!sameKeys(result,['schema','workspaceId','requestId','requestedBy','found','request']) || result.schema !== 'runvara-manual-content-request/v1' || result.workspaceId !== attempt.identity.workspaceId ||
+        result.requestedBy !== attempt.identity.userId || result.requestId !== attempt.requestId || typeof result.found !== 'boolean' ||
+        (result.found ? !validContentRecord(result.request,attempt,true) : result.request !== null)) throw new Error('The saved response did not match this exact request and requester.');
+      if (result.found) { acceptContentRecord(attempt,result.request); return; }
+      const latest = await api.request('/api/connection-centre',config);
+      if (!currentContentTicket(ticket)) return;
+      if (!Array.isArray(latest?.channels) || latest.channels.filter(channel=>channel?.id==='shopify').length !== 1) throw new Error('A current exact Shopify target was not returned.');
+      channels = latest.channels; data.connectionCentre = channels;
+      const matching = JSON.stringify(currentContentTarget()) === JSON.stringify(attempt.intent.target) && contentProducts().some(row=>row.id===attempt.intent.input.productId);
+      attempt.phase = 'unknown'; attempt.retryReady = matching;
+      content.editor.stale = !matching; content.editor.sourceKey = contentSourceKey(); content.editor.generation = contentContext().generation; content.editor.bootstrap = contentContext().bootstrap;
+      if (!matching) contentError('The saved target or product changed. The original request stays unconfirmed; a new account or reference cannot be substituted. Check the exact saved request again after reviewing the connection.');
+    } catch(error) {
+      if (!currentContentTicket(ticket)) return;
+      if (contentIdentityError(error)) { interruptContent('Owner session unavailable',true); return; }
+      unavailableContentAttempt(attempt,'Could not reconcile this exact request. It remains unconfirmed. ' + error.message);
+    } finally { if (content.ticket === ticket) { content.ticket = null; if (currentContentIdentity()) renderContentState(); } }
+  }
+  async function reloadContentDraft() {
+    if (!currentContentIdentity() || !contentVisible() || content.ticket || (content.attempt && !['saved','refused'].includes(content.attempt.phase))) return;
+    const ticket = contentTicket('reload'); content.editor.ackKey = null; contentError(''); renderContentState();
+    try {
+      const payload = await api.request('/api/connection-centre',{signal:ticket.controller.signal,isCurrent:()=>currentContentTicket(ticket)});
+      if (!currentContentTicket(ticket)) return;
+      if (!Array.isArray(payload?.channels) || payload.channels.filter(channel=>channel?.id==='shopify').length !== 1) throw new Error('The saved Shopify target is unavailable.');
+      channels = payload.channels; data.connectionCentre = channels;
+      content.previous = content.attempt || content.previous; content.attempt = null; newContentEditor();
+      const panel = $('#connection-content-editor'); panel.outerHTML = contentForm(); renderContentState(); $('#content-account')?.focus();
+    } catch(error) { if (currentContentTicket(ticket)) { if (contentIdentityError(error)) interruptContent('Owner session unavailable',true); else contentError('Could not reload saved targets: ' + error.message); } }
+    finally { if (content.ticket === ticket) { content.ticket = null; if (currentContentIdentity()) renderContentState(); } }
+  }
+  function contentFieldChanged(event) {
+    if (!event.target.closest('#connection-content-form') || !currentContentIdentity() || !contentVisible() || content.ticket || !content.editor) return;
+    if (event.target.id === 'content-ack') content.editor.ackKey = event.target.checked ? contentDraftKey() : null;
+    else { content.editor.fields = readContentFields(); content.editor.ackKey = null; }
+    observeContentSource(); renderContentState();
+  }
   const customerZeroManagerLink = '<a class="secondary button-link" href="https://packsmart-ebay-manager.sleek-chub-7298.chatgpt.site/" target="_blank" rel="noopener noreferrer">Open existing eBay Manager</a>';
   function firstSyncSteps(channel) {
     const first = channel.firstSync;
@@ -90,6 +344,9 @@
   }
   function renderPanel() {
     const channel = channels.find(item => item.id === selected); if (!channel) return;
+    observeContentSource();
+    const preservedContent = selected === 'shopify' && $('#connection-dialog').open && content.editor && currentContentIdentity() ? $('#connection-content-editor') : null;
+    const contentFocus = preservedContent?.contains(document.activeElement) ? document.activeElement : null;
     const writes = (data.connectionWrites || []).filter(item => item.provider === channel.id);
     $('#connection-detail').innerHTML = `<div class="section-head stack-mobile"><div><p class="eyebrow">CONNECTION CENTRE</p><h2 id="connection-dialog-title">${esc(channel.name)}</h2><p class="muted">${esc(channel.identity || 'No account connected')}</p></div><span class="tag ${statusClass(channel.status)}">${esc(label(channel.status))}</span></div>
       <p id="connection-feedback" class="connection-feedback" role="status" aria-live="polite"></p><div id="connection-progress">${progress(channel)}</div>${channel.firstSync?firstSyncSteps(channel):''}
@@ -110,9 +367,12 @@
       <p class="muted">${channel.id === 'shopify' ? `Supported writes: internal product notes and approval-gated product content. ${channel.writeAccessGranted ? 'Shopify product write access is granted.' : 'Shopify product write access is not granted. Request it when reconnecting, then test the connection.'} Automatic mode can bypass approval only for private Runvara product notes.` : channel.id === 'meta' ? 'Catalogue products, stock, product visibility, Facebook posts and Instagram JPEG posts support approval-gated changes. Automatic mode never bypasses approval for Meta. Reconnect to request any missing catalogue or publishing permissions.' : 'This channel currently has no supported write action in Runvara. A write policy never grants channel permissions or enables an unavailable action.'}</p>
       ${channel.id === 'shopify' && owner() ? `<form id="connection-tag-preview" class="connection-manage-form"><h3>Safe write acceptance preview</h3><p>Read the current product tags and prepare one reversible test for owner review. This does not change Shopify or your write permissions.</p><label>Product<select name="productId" required>${(data.products || []).filter(item => item.provider === 'shopify').map(item => `<option value="${esc(item.id)}">${esc(item.title)}</option>`).join('')}</select></label><button class="secondary">Prepare exact tag test</button><div id="tag-preview-result" class="connection-exact-text" role="status"></div></form>` : ''}
       ${channel.id === 'shopify' && channel.settings.permissionMode !== 'read_only' && channel.writeAccessGranted && owner() ? writeForm() : channel.id === 'meta' && channel.settings.permissionMode !== 'read_only' && channel.writeAccessGranted && owner() ? metaWriteForm(channel) : ''}</section>` : ''}
-      ${writes.length ? `<section class="connection-section"><h3>Proposed changes</h3>${writes.slice(0,15).map(write => `<article class="connection-write"><b>${esc(write.input.operation.replaceAll('_',' '))}</b><p>${esc(write.status.replaceAll('_',' '))}</p><details><summary>Review exact change</summary><dl>${Object.entries(write.input).map(([key,value]) => `<dt>${esc(key.replace(/([A-Z])/g,' $1'))}</dt><dd class="connection-exact-text">${esc(value)}</dd>`).join('')}</dl></details><div class="button-row">${write.approvalId ? button('approvals', 'Open Approval Centre', channel) : ''}${owner() && ['ready','processing'].includes(write.status) ? `<button class="secondary" type="button" data-connection-action="execute" data-provider="${channel.id}" data-write="${esc(write.id)}">${write.status === 'processing' ? 'Check publishing progress' : write.requiresApproval ? 'Apply approved change' : 'Apply change'}</button>` : ''}</div>${write.status === 'processing' ? `<p>${write.observationErrorCode ? 'Instagram status could not be verified. The saved container is retained; check its status again after a minute.' : 'Instagram is preparing your image. Check again after a minute; the same approved request will be continued.'}</p>` : ''}${write.status === 'uncertain' ? '<p class="warn">Check the channel before making another request. Runvara will not repeat an uncertain write.</p>' : ''}${write.status === 'failed' ? `<p class="warn">${write.dispatchBlocked ? 'Runvara stopped this request before a new channel submission. Review the current permissions and prepare a new exact change.' : 'The channel declined this request. Test the connection, check the selected asset and fields, then prepare a new change.'}</p>` : ''}${write.result?.externalId ? `<p>Confirmed channel reference: ${esc(write.result.externalId)}</p>` : ''}</article>`).join('')}</section>` : ''}
+      ${channel.id === 'shopify' && owner() ? contentForm() : ''}
+      ${writes.length ? `<section class="connection-section"><h3>Proposed changes</h3>${writes.slice(0,15).map(write => `<article class="connection-write"><b>${esc(write.input.operation.replaceAll('_',' '))}</b><p>${esc(write.status.replaceAll('_',' '))}</p><details><summary>Review exact change</summary><dl>${write.provider === 'shopify' && write.input.operation === 'product_content' ? `<dt>Saved Shopify account</dt><dd class="connection-exact-text">${esc(write.account || 'Unavailable saved target')}</dd><dt>Saved connection reference</dt><dd class="connection-exact-text">${esc(write.connectionId || 'Unavailable saved reference')}</dd>` : ''}${Object.entries(write.input).map(([key,value]) => `<dt>${esc(key.replace(/([A-Z])/g,' $1'))}</dt><dd class="connection-exact-text">${esc(value)}</dd>`).join('')}</dl></details><div class="button-row">${write.approvalId ? button('approvals', 'Open Approval Centre', channel) : ''}${owner() && ['ready','processing'].includes(write.status) ? `<button class="secondary" type="button" data-connection-action="execute" data-provider="${channel.id}" data-write="${esc(write.id)}">${write.status === 'processing' ? 'Check publishing progress' : write.requiresApproval ? 'Apply approved change' : 'Apply change'}</button>` : ''}</div>${write.status === 'processing' ? `<p>${write.observationErrorCode ? 'Instagram status could not be verified. The saved container is retained; check its status again after a minute.' : 'Instagram is preparing your image. Check again after a minute; the same approved request will be continued.'}</p>` : ''}${write.status === 'uncertain' ? '<p class="warn">Check the channel before making another request. Runvara will not repeat an uncertain write.</p>' : ''}${write.status === 'failed' ? `<p class="warn">${write.dispatchBlocked ? 'Runvara stopped this request before a new channel submission. Review the current permissions and prepare a new exact change.' : 'The channel declined this request. Test the connection, check the selected asset and fields, then prepare a new change.'}</p>` : ''}${write.result?.externalId ? `<p>Confirmed channel reference: ${esc(write.result.externalId)}</p>` : ''}</article>`).join('')}</section>` : ''}
       <section class="connection-section"><h3>Sync history</h3><p class="muted tiny">Latest 30 syncs. Completed sync summaries remain in the workspace audit log.</p><div class="connection-history">${channel.history.length ? channel.history.map(run => `<article><div><b>${esc({completed:'Completed',partial:'Partially completed',failed:'Needs attention',running:'In progress'}[run.status])}</b><small>${esc(when(run.startedAt))} · ${run.automatic ? 'Automatic' : 'Requested'}</small></div><p>${esc(run.areas.map(label).join(', '))}</p>${run.status === 'failed' || run.status === 'partial' ? '<p class="warn">Some data could not be refreshed. Your previous data is retained. Use Sync now to retry.</p>' : ''}</article>`).join('') : '<p class="muted">No sync history recorded yet. Your earlier imported data is retained.</p>'}</div></section>
       ${channel.configured ? `<section class="connection-section"><h3>Disconnect</h3><p>Stop Runvara from accessing this channel. Imported data stays in this workspace. ${channel.id === 'ebay' ? 'Your separate eBay Manager stays intact.' : 'This does not delete or close your channel account.'}</p>${button('disconnect', `Disconnect ${channel.name}`, channel, 'secondary danger')}<form id="connection-disconnect" class="connection-confirm hidden"><p>Are you sure? Syncing will stop and Runvara’s write permission will be removed.</p><label class="check-label"><input name="confirm" type="checkbox" required> I confirm I want to disconnect this channel from Runvara.</label><div class="button-row"><button class="primary danger" type="submit">Confirm disconnect</button>${button('cancel-disconnect','Keep connected',channel)}</div></form></section>` : ''}`;
+    if (preservedContent) $('#connection-content-editor')?.replaceWith(preservedContent);
+    renderContentState(); contentFocus?.focus({preventScroll:true});
     metaWriteFields();
   }
   function diagnostics(channel) {
@@ -120,7 +380,7 @@
     return `<section class="connection-section"><h3>Connection health & access</h3><dl class="connection-counts"><div><dt>Authentication</dt><dd>${esc(channel.status === 'action_required' ? 'Needs attention' : label(channel.status))}</dd></div><div><dt>Last failed sync</dt><dd>${esc(when(channel.lastFailedSyncAt))}</dd></div><div><dt>Access expires</dt><dd>${esc(channel.accessExpiresAt ? when(channel.accessExpiresAt) : 'Not reported')}</dd></div><div><dt>Automatic sync</dt><dd>${channel.settings.autoSync && data.autopilot?.enabled ? 'On' : 'Paused'}</dd></div></dl><p>Reads: ${esc(channel.areas.map(label).join(', ') || 'Not available')}.</p><p>Writes: ${esc(channel.writes.length ? label(channel.settings.permissionMode) : 'Not implemented for this channel')}.</p>${Object.keys(channel.readDiagnostics || {}).length ? `<details><summary>Support diagnostics</summary>${Object.entries(channel.readDiagnostics).map(([surface,entry])=>`<p>${esc(surface)} · ${esc(entry.code)} · HTTP ${esc(entry.httpStatus)} · Provider references ${esc((entry.errorIds||[]).join(', '))} · ${esc(when(entry.at))}</p>`).join('')}</details>` : ''}<details><summary>Permissions granted by the channel</summary><p class="connection-exact-text">${esc((channel.grantedScopes || []).join(', ') || 'Not reported by the channel. Test the connection to check access.')}</p></details><details><summary>Connection activity</summary>${(channel.audit || []).length ? channel.audit.map(event => `<p>${esc(events[event.type] || 'Connection updated')} · ${esc(when(event.createdAt))}</p>`).join('') : '<p>No connection activity recorded yet.</p>'}</details></section>`;
   }
   function writeForm() {
-    return `<form id="connection-write-form" class="connection-manage-form"><h3>Prepare a Shopify change</h3><label>Product<select name="productId" required>${(data.products || []).filter(item => item.provider === 'shopify').map(item => `<option value="${esc(item.id)}">${esc(item.title)}</option>`).join('')}</select></label><label>Action<select name="operation"><option value="internal_note">Private Runvara product note</option><option value="product_content">Product title and description (approval required)</option><option value="product_tags_add">Add product tags (approval required)</option><option value="product_tags_remove">Remove product tags (approval required)</option></select></label><label>Tags, separated by commas<input name="tags" maxlength="12799"></label><p>Tags can affect collections and shop automations. Review existing tags before adding or removing them. Reversing a change requires a new approval.</p><label>Internal note<textarea name="note" maxlength="500"></textarea></label><label>New product title<input name="title" maxlength="200"></label><label>New product description<textarea name="description" maxlength="10000"></textarea></label><p class="muted tiny">Only fields for your selected action are used. This prepares an exact, reviewable change before applying it.</p><button class="secondary" type="submit">Prepare change</button></form>`;
+    return `<form id="connection-write-form" class="connection-manage-form"><h3>Prepare a Shopify change</h3><label>Product<select name="productId" required>${(data.products || []).filter(item => item.provider === 'shopify').map(item => `<option value="${esc(item.id)}">${esc(item.title)}</option>`).join('')}</select></label><label>Action<select name="operation"><option value="internal_note">Private Runvara product note</option><option value="product_tags_add">Add product tags (approval required)</option><option value="product_tags_remove">Remove product tags (approval required)</option></select></label><label>Tags, separated by commas<input name="tags" maxlength="12799"></label><p>Tags can affect collections and shop automations. Review existing tags before adding or removing them. Reversing a change requires a new approval.</p><label>Internal note<textarea name="note" maxlength="500"></textarea></label><p class="muted tiny">Only fields for your selected action are used. This prepares an exact, reviewable change before applying it.</p><button class="secondary" type="submit">Prepare change</button></form>`;
   }
   function metaAssets(channel) {
     const meta = channel.meta || {}, assets = meta.assets || { pages:[], catalogs:[] };
@@ -159,25 +419,37 @@
     }
     $('#connection-meta-write-fields').innerHTML = html;
   }
-  async function refresh({ panel = true } = {}) {
-    const generation = sessionGeneration;
-    if (!refreshPending) {
-      refreshController = new AbortController();
-      refreshPending = api.request('/api/connection-centre', { signal: refreshController.signal }).finally(() => { refreshPending = null; refreshController = null; });
-    }
-    const payload = await refreshPending;
-    if (generation !== sessionGeneration) return;
-    channels = payload.channels; data.connectionWrites = payload.writes;
-    data.connectionCentre = channels;
-    if(payload.journey)data.onboarding={...data.onboarding,journey:payload.journey};
-    data.connectionNotifications=payload.notifications||[];data.connectionRecommendations=payload.recommendations||[];
-    if(!$('#connection-journey')?.contains(document.activeElement))journey();notifications();
-    data.autopilot = { ...data.autopilot, enabled: payload.autopilotEnabled }; cards();
-    if (selected && panel) renderPanel();
-    else if (selected) $('#connection-progress').innerHTML = progress(channels.find(item => item.id === selected));
+  function currentRefresh(ticket) {
+    const context = contentContext(), original = ticket.context;
+    return refreshTicket === ticket && ticket.generation === sessionGeneration && (!original || (context?.session === original.session && context?.userId === original.userId &&
+      context?.workspaceId === original.workspaceId && context?.csrf === original.csrf && context?.generation === original.generation && context?.bootstrap === original.bootstrap && context?.view === original.view));
   }
-  function close() { $('#connection-dialog').close(); selected = null; clearInterval(pollTimer); returnFocus?.focus(); }
+  async function refresh({ panel = true } = {}) {
+    if (!refreshPending) {
+      const ticket = { generation:sessionGeneration,context:contentContext(),controller:new AbortController() };
+      refreshTicket = ticket; refreshController = ticket.controller;
+      refreshPending = api.request('/api/connection-centre', { signal:ticket.controller.signal,isCurrent:()=>currentRefresh(ticket) });
+    }
+    const ticket = refreshTicket;
+    try {
+      const payload = await refreshPending;
+      if (!ticket || !currentRefresh(ticket)) return;
+      channels = payload.channels; data.connectionWrites = payload.writes;
+      data.connectionCentre = channels;
+      if(payload.journey)data.onboarding={...data.onboarding,journey:payload.journey};
+      data.connectionNotifications=payload.notifications||[];data.connectionRecommendations=payload.recommendations||[];
+      if(!$('#connection-journey')?.contains(document.activeElement))journey();notifications();
+      data.autopilot = { ...data.autopilot, enabled: payload.autopilotEnabled }; cards();
+      observeContentSource();
+      if (selected && panel) renderPanel();
+      else if (selected) $('#connection-progress').innerHTML = progress(channels.find(item => item.id === selected));
+    } finally {
+      if (refreshTicket === ticket) { refreshPending = null; refreshController = null; refreshTicket = null; }
+    }
+  }
+  function close() { interruptContent('Connection editor closed'); $('#connection-dialog').close(); selected = null; clearInterval(pollTimer); returnFocus?.focus(); }
   function open(provider, setup = false) {
+    if (selected && selected !== provider) interruptContent('Connection changed');
     selected = provider; returnFocus = document.activeElement; renderPanel();
     const dialog = $('#connection-dialog'); if (!dialog.open) dialog.showModal();
     if (setup) $('#connection-setup').classList.remove('hidden');
@@ -185,7 +457,8 @@
     pollTimer = setInterval(() => { if (selected && !document.hidden && !refreshPending && !busy.size) refresh({ panel: false }).catch(() => {}); }, 15000);
   }
   async function perform(provider, action, body = {}) {
-    if (busy.has(provider)) return;
+    if (busy.has(provider) || (provider === 'shopify' && content.ticket)) return;
+    if (provider === 'shopify') interruptContent('Connection activity changed');
     if (!selected) open(provider);
     busy.add(provider); cards();
     const dialog = $('#connection-dialog'); dialog.setAttribute('aria-busy', 'true');
@@ -242,7 +515,8 @@
     if (form.id === 'connection-sync-settings') return perform(channel.id, 'settings', { revision:channel.settings.revision, areas:values.getAll('areas'), autoSync:values.has('autoSync'), frequencyMinutes:Number(values.get('frequencyMinutes')) });
     if (form.id === 'connection-permissions') return perform(channel.id, 'settings', { revision:channel.settings.revision, permissionMode:values.get('permissionMode'), confirmPermission:values.has('confirmPermission') ? `${channel.id}:${values.get('permissionMode')}` : '' });
     if (form.id === 'connection-disconnect') { if(values.has('confirm')) return perform(channel.id, 'disconnect', {confirm:channel.id,revision:channel.settings.revision}); return; }
-    if (form.id === 'connection-write-form') return perform(channel.id,'writes',{...Object.fromEntries(values),requestId:crypto.randomUUID()});
+    if (form.id === 'connection-content-form') return prepareContent();
+    if (form.id === 'connection-write-form') { if (values.get('operation') === 'product_content') return; return perform(channel.id,'writes',{...Object.fromEntries(values),requestId:crypto.randomUUID()}); }
     if (form.id === 'connection-onboarding') {
       const button = form.querySelector('button[type="submit"]'); button.disabled=true; button.textContent='Opening secure sign-in…';
       try {
@@ -260,16 +534,24 @@
   window.RunvaraConnections = {
     init(config) {
       api=config;
+      $('#connection-dialog').addEventListener('input',contentFieldChanged);
+      $('#connection-dialog').addEventListener('change',contentFieldChanged);
+      $('#connection-dialog').addEventListener('click',event=>{ const id=event.target.closest('button')?.id; if(id==='content-check')checkContentAttempt(); else if(id==='content-retry')prepareContent(true); else if(id==='content-reload'||id==='content-new')reloadContentDraft(); });
+      $('#connection-dialog').addEventListener('close',()=>interruptContent('Connection dialog closed'));
+      document.addEventListener('visibilitychange',()=>{if(document.hidden)interruptContent('Tab hidden');});
+      window.addEventListener('pagehide',()=>interruptContent('Page hidden'));
+      window.addEventListener('popstate',()=>interruptContent('Navigation changed'));
       $('#connection-journey')?.addEventListener('submit',event=>{if(event.target.id==='journey-business'){event.preventDefault();saveJourney({businessName:new FormData(event.target).get('businessName')});}else if(event.target.id==='journey-preferences'){event.preventDefault();const values=new FormData(event.target);saveJourney({preferences:{goal:values.get('goal'),automation:values.get('automation'),approval:'always',stockThreshold:Number(values.get('stockThreshold')),customerRecords:values.has('customerRecords'),marketing:values.has('marketing')}});}else if(event.target.id==='journey-platforms'){event.preventDefault();saveJourney({platforms:new FormData(event.target).getAll('platforms')});}});
       $('#connection-journey')?.addEventListener('click',event=>{const target=event.target.closest('button');if(!target)return;if(target.dataset.journeyReview)saveJourney({reviewPermissions:target.dataset.journeyReview});else if(target.dataset.journeySkip)saveJourney({platforms:(data.onboarding?.journey?.platforms||[]).filter(item=>item.provider!==target.dataset.journeySkip).map(item=>item.provider)});else if(target.id==='journey-recommended')saveJourney({useRecommended:true});else if(target.id==='journey-finish')saveJourney({finish:true,reviewControls:true});else if(target.id==='journey-controls')api.setView('automations');else if(target.id==='journey-dashboard')api.setView('overview');else if(target.dataset.connectionAction)handleAction(event);});
       $('#connection-dialog').addEventListener('change',event=>{ if(event.target.matches('#connection-meta-write-form select[name=operation]')) metaWriteFields(); }); $('#connection-grid').addEventListener('click',handleAction); $('#connection-dialog').addEventListener('click',handleAction); $('#connection-dialog').addEventListener('submit',submit);
       $('#connection-close').addEventListener('click',close); $('#connection-dialog').addEventListener('cancel',event=>{event.preventDefault();close();});
       $('#connection-refresh').addEventListener('click',async event=>{event.target.disabled=true;try{await refresh();api.notify('Connection status refreshed.');}catch(error){api.notify(error.message,'error');}finally{event.target.disabled=false;}});
     },
-    render(next) { data=next;channels=next.connectionCentre || [];cards();journey();notifications();operatorStatus();if(selected)renderPanel();
+    render(next) { data=next;channels=next.connectionCentre || [];observeContentSource();cards();journey();notifications();operatorStatus();if(selected)renderPanel();
       clearInterval(journeyTimer);journeyTimer=setInterval(()=>{if(!document.hidden&&!refreshPending&&!busy.size&&channels.some(c=>['queued','running'].includes(c.firstSync?.status)))refresh({panel:false}).catch(()=>{});},3000);
     },
-    endSession() { clearInterval(journeyTimer);sessionGeneration++; refreshController?.abort(); if (selected) close(); busy.clear(); channels = []; data = {}; },
+    interruptContent(reason, clear = false) { interruptContent(reason,clear); if(reason==='Navigation changed'&&selected==='shopify')close(); },
+    endSession() { interruptContent('Session ended',true); clearInterval(journeyTimer);sessionGeneration++; refreshController?.abort(); refreshPending = null; refreshTicket = null; refreshController = null; if (selected) close(); busy.clear(); channels = []; data = {}; },
     open
   };
 })();

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { addAudit } from './events.mjs';
 import { META_WRITES, META_ORDER_RESTRICTION } from './meta-capabilities.mjs';
+import { resolveManualContentTarget } from './manual-content-target.mjs';
 
 // One capability registry for the existing IntegrationService, UI and scheduler.
 // Areas describe implemented reads, not the provider's theoretical API features.
@@ -270,6 +271,7 @@ export function connectionCentre(state, integrations) {
       customerManagedSetup: true,
       refreshSupported: Boolean(configured && integrations.refreshSupported?.(state, id)),
       writes: definition.writes, writeAccessGranted: id === 'shopify' ? granted.includes('write_products') : id === 'meta' && granted.some(scope => ['catalog_management','pages_manage_posts','instagram_content_publish'].includes(scope)),
+      ...(id === 'shopify' ? { contentPreparation: resolveManualContentTarget(state) } : {}),
       ...(id === 'meta' ? { meta: { assets: record?.metadata?.assets || {pages:[],catalogs:[]}, grantedScopes: granted, data: readData, orderRestriction: META_ORDER_RESTRICTION, discovery: record?.metadata?.discovery || null } } : {}),
       supportRequested: Boolean(settings.supportRequestedAt),
       availability: definition.areas.length ? 'available' : 'awaiting_provider_approval',

@@ -6,6 +6,13 @@ capability. Approval Centre decisions remain decisions; marketing publication
 without an implemented executor remains unavailable. Creative and web scanning
 admission retain their existing closed defaults.
 
+New manual Shopify content preparation additionally requires an explicitly
+reviewed exact account assertion and requester-bound request-ID reuse. See
+[manual content preparation](manual-content-preparation.md) for its bounded
+target resolution, unknown-save reconciliation and draft-revision limitation.
+This assertion does not change existing v1 claim/source-action bytes or the
+legacy exact-approved apply contract described below.
+
 ## What is enforced
 
 The proposed input is copied and frozen before asynchronous preparation. Its

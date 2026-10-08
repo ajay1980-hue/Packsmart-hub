@@ -47,7 +47,7 @@ import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
-import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
+import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, readManualContentRequest } from './lib/connection-writes.mjs';
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
@@ -362,6 +362,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
+  const contentRequestReadLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 60000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const outcomeReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const outcomeDraftLimiter = new SlidingWindowLimiter({ limit: 5, windowMs: 60000, blockMs: 60000 });
@@ -1184,7 +1185,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -2207,6 +2208,18 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        const contentRequestRead = pathname.match(/^\/api\/connections\/shopify\/content-requests\/([A-Za-z0-9_-]{16,100})$/);
+        if (req.method === 'GET' && contentRequestRead) {
+          requireOwner(auth);
+          if ([...url.searchParams.keys()].length) throw connectionError('Exact content request reads do not accept query overrides.', 'WRITE_CONTENT_INPUT_INVALID');
+          if (!contentRequestReadLimiter.check(rateKey).allowed) throw connectionError('Content request check limit reached. Wait before checking again.', 'WRITE_REQUEST_RATE_LIMITED', 429);
+          contentRequestReadLimiter.fail(rateKey);
+          const result = await mutate(auth, state => {
+            if (state.workspace?.id !== auth.session.workspaceId) throw connectionError('Workspace identity changed. Sign in and review the request again.', 'WORKSPACE_MISMATCH', 403);
+            return readManualContentRequest(state, contentRequestRead[1], auth.user.id);
+          }, { persist: false });
+          send(res, 200, result); return;
+        }
         if (req.method === 'GET' && pathname === '/api/connection-centre') {
           const channels = intelligentConnections(auth.state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status });
           send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
@@ -2255,7 +2268,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               addAudit(state, { type: 'connection_setup_requested', actor: auth.user.id, detail: { provider } });
               return { ok:true, message:'Access requested. Your data is safe. You can continue with another channel while access is being prepared.' };
             }
-            if (action === 'writes') return { write: proposeConnectionWrite(state, provider, body, auth.user.id) };
+            if (action === 'writes') {
+              if (provider === 'shopify' && body.operation === 'product_content' && state.workspace?.id !== auth.session.workspaceId) throw connectionError('Workspace identity changed. Sign in and review the request again.', 'WORKSPACE_MISMATCH', 403);
+              return { write: proposeConnectionWrite(state, provider, body, auth.user.id) };
+            }
             try {
               if (action === 'sync') {
                 // A products-only retry cannot erase the budget of an uncertain

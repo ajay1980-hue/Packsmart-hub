@@ -86,6 +86,14 @@ async function fixture(t, extra = {}, { storage = 'file' } = {}) {
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));await server.packsmart.drain();await fs.rm(directory,{recursive:true,force:true});});
   const base=`http://127.0.0.1:${server.address().port}`;
   async function request(route,{tenant='alpha',role='owner',method='GET',body,cookie,csrf=true}={}) {
+    // Existing write scenarios supply the new preparation assertion explicitly;
+    // missing/stale assertion behavior is covered by manual-content-target tests.
+    if (route === '/api/connections/shopify/writes' && body?.operation === 'product_content' && !Object.hasOwn(body, 'target')) {
+      const saved = await server.packsmart.store.get(tenant);
+      const connection = saved.connections.find(row => row.provider === 'shopify' && row.encryptedCredentials);
+      body = { ...body, target: { schema: 'runvara-manual-content-target/v1', connectionId: connection?.id,
+        account: connection?.metadata?.shopDomain, settingsRevision: saved.connectionSettings?.shopify?.revision ?? 0 } };
+    }
     const user=tenants[tenant].users.find(user=>user.role===role);
     const token=createSessionToken({userId:user.id,workspaceId:tenant,email:user.email,role,sessionVersion:1},SESSION);
     const headers={Cookie:cookie || `__Host-packsmart_session=${token}`};
