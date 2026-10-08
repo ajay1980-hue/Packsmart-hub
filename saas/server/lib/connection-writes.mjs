@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { types } from 'node:util';
 import { createRecordedActionContext, REVIEWED_ACTION_STATE_MAX_BYTES } from './reviewed-action-evidence.mjs';
 import { connectionError, connectionSettings } from './connection-centre.mjs';
 import { normalizeApprovalRequest } from './operations.mjs';
@@ -12,8 +13,38 @@ import { assertObjectiveContentOwner, validateObjectiveContentSource, loadObject
   objectiveContentApprovalDigest, isObjectiveContentWrite, OBJECTIVE_CONTENT_REQUEST_SCHEMA } from './objective-content-source.mjs';
 import { MANUAL_CONTENT_REQUEST_SCHEMA, manualContentRecord, manualContentRows, manualContentWorkspace,
   assertManualContentScope, assertManualContentActor, validateManualContentTarget, assertManualContentTarget } from './manual-content-target.mjs';
+import { contentWriteIdentityContract, contentWritePreimage, contentInputPreimage, contentApprovalPayloadPreimage,
+  contentConsentPreimage, contentWriteSnapshot, contentApprovalDecisionSnapshot } from './content-write-identity.mjs';
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function contentComparisonContract(state, write, actor) {
+  // Do not introduce reads through getters ahead of authority's scope checks.
+  const data = (record, key) => {
+    if (types.isProxy(record)) throw blocked('WRITE_REQUEST_CHANGED');
+    const field = record && typeof record === 'object' ? Object.getOwnPropertyDescriptor(record, key) : null;
+    if (field ? !Object.hasOwn(field, 'value') : record && typeof record === 'object' && key in record) throw blocked('WRITE_REQUEST_CHANGED');
+    return field?.value;
+  };
+  if (data(write, 'provider') !== 'shopify' || data(data(write, 'input'), 'operation') !== 'product_content') return null;
+  const settings = data(data(state, 'connectionSettings'), 'shopify') || {};
+  const connection = state.connections?.find(row => data(row, 'id') === data(write, 'connectionId') && data(row, 'provider') === 'shopify');
+  const approval = state.approvals?.find(row => data(row, 'id') === data(write, 'approvalId'));
+  const user = state.users?.find(row => data(row, 'id') === (actor ?? data(write, 'requestedBy')));
+  // Retained history can outlive its connection/approval. Without the full
+  // producer layout there is no compatibility claim; keep its existing path.
+  if (!approval) return null;
+  // Reject non-JSON before any legacy choice; ordinary unknown signed JSON
+  // fields alone are eligible for the unchanged historical comparison path.
+  contentWriteSnapshot(write); contentWriteSnapshot(approval); contentWriteSnapshot(settings);
+  if (connection) contentWriteSnapshot(connection);
+  const scopes = data(data(connection, 'metadata'), 'grantedScopes');
+  const sessionVersion = data(user, 'sessionVersion'), decidedAt = data(approval, 'decidedAt');
+  if (typeof data(connection, 'encryptedCredentials') !== 'string' || !Array.isArray(scopes)
+    || scopes.some(value => typeof value !== 'string') || !['approval_gated', 'automatic'].includes(data(settings, 'permissionMode'))
+    || !(decidedAt === null || typeof decidedAt === 'string')
+    || !(sessionVersion === undefined || Number.isSafeInteger(sessionVersion) && sessionVersion >= 1)) return null;
+  return contentWriteIdentityContract(write, approval, data(settings, 'consent'));
+}
 const contentTerminal = status => ['completed', 'uncertain', 'failed', 'rejected'].includes(status);
 function contentInput(body) {
   if (typeof body.productId !== 'string' || body.productId.length > 100 || !/^gid:\/\/shopify\/Product\/\d+$/.test(body.productId)) throw connectionError('Choose a Shopify product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
@@ -183,7 +214,9 @@ export async function readObjectiveContentRequest(state, requestId, session, loa
   if (!write) return objectiveRequestProjection(state, requestId, session, null, null);
   validateObjectiveContentSource(write.objectivePolicyProposal.source);
   const source = write.objectivePolicyProposal.source;
-  const retained = digest(write);
+  const comparisonContract = contentComparisonContract(state, write, session.userId);
+  const snapshotIdentity = comparisonContract ? contentWriteSnapshot : digest;
+  const retained = snapshotIdentity(write);
   // A new account security epoch cannot reconcile an old unknown request as if
   // it were this session's intent. History does not confer apply permission.
   if (source.actorId !== session.userId || source.actorSessionVersion !== session.sessionVersion) throw blocked('WRITE_ACTOR_CHANGED');
@@ -193,7 +226,7 @@ export async function readObjectiveContentRequest(state, requestId, session, loa
     code: /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'OBJECTIVE_CONTENT_SOURCE_UNAVAILABLE',
     message: 'This retained request is history only. Its current source could not be confirmed; do not retry or apply it as a new request.' }; }
   assertObjectiveContentOwner(state, session);
-  if (contentRequest(state, requestId, session.userId, true) !== write || digest(write) !== retained) throw blocked('WRITE_REQUEST_CHANGED');
+  if (contentRequest(state, requestId, session.userId, true) !== write || snapshotIdentity(write) !== retained) throw blocked('WRITE_REQUEST_CHANGED');
   return objectiveRequestProjection(state, requestId, session, write, sourceStatus);
 }
 
@@ -247,15 +280,17 @@ export async function prepareObjectiveContentRequest(state, body, session, { loa
     detail: { provider: 'shopify', writeId: write.id, operation: 'product_content', requiresApproval: true, digest: write.digest } });
   // Re-read the separate history row when preparing the actual commit. A
   // workspace revision cannot attest this job row or replace this read.
+  const comparisonContract = contentComparisonContract(state, write, session.userId);
+  const snapshotIdentity = comparisonContract ? contentWriteSnapshot : digest;
+  const expectedWrite = snapshotIdentity(write), expectedApproval = snapshotIdentity(approval);
   const commitSource = await loadObjectiveContentSource(state, current.source.jobId, current.source.opportunityId, session, loadJob, { write });
-  const expectedWrite = digest(write), expectedApproval = digest(approval);
   const beforeCommit = snapshot => {
-    if (contentRequest(state, body.requestId, session.userId, true) !== write || digest(write) !== expectedWrite || digest(approval) !== expectedApproval) throw blocked('WRITE_REQUEST_CHANGED');
+    if (contentRequest(state, body.requestId, session.userId, true) !== write || snapshotIdentity(write) !== expectedWrite || snapshotIdentity(approval) !== expectedApproval) throw blocked('WRITE_REQUEST_CHANGED');
     captureObjectiveContentSource(state, commitSource.job, current.source.opportunityId, session, { write });
     assertManualContentTarget(state, body.target);
     if (snapshot && snapshot !== state) {
       const rows = snapshot.connectionWrites?.filter(row => row.id === write.id) || [];
-      if (rows.length !== 1 || digest(rows[0]) !== expectedWrite || digest(snapshot.approvals?.find(row => row.id === approval.id)) !== expectedApproval) throw blocked('WRITE_REQUEST_CHANGED');
+      if (rows.length !== 1 || snapshotIdentity(rows[0]) !== expectedWrite || snapshotIdentity(snapshot.approvals?.find(row => row.id === approval.id)) !== expectedApproval) throw blocked('WRITE_REQUEST_CHANGED');
       captureObjectiveContentSource(snapshot, commitSource.job, current.source.opportunityId, session, { write: rows[0] });
     }
   };
@@ -267,8 +302,8 @@ export async function prepareObjectiveContentRequest(state, body, session, { loa
     beforeCommit();
     const rows = saved?.connectionWrites?.filter(row => row.id === write.id) || [];
     if (saved?.workspace?.id !== state.workspace.id || typeof saved?._revision !== 'string' || saved._revision === previousRevision
-      || state._revision !== saved._revision || rows.length !== 1 || digest(rows[0]) !== expectedWrite
-      || digest(saved.approvals?.find(row => row.id === approval.id)) !== expectedApproval) throw blocked('WRITE_CLAIM_ACK_INVALID');
+      || state._revision !== saved._revision || rows.length !== 1 || snapshotIdentity(rows[0]) !== expectedWrite
+      || snapshotIdentity(saved.approvals?.find(row => row.id === approval.id)) !== expectedApproval) throw blocked('WRITE_CLAIM_ACK_INVALID');
     return objectiveRequestProjection(state, body.requestId, session, write, { status: 'current' });
   } catch {
     throw connectionError('The save acknowledgement could not be confirmed. Keep this request reference and check its exact saved status before any new request.', 'OBJECTIVE_CONTENT_SAVE_UNKNOWN', 503);
@@ -298,7 +333,8 @@ function metaMutationRequest(input, phase, containerId) {
   }
   return { provider: 'meta', phase, method: 'POST', path, body: JSON.stringify(body) };
 }
-function writeIdentity(write) {
+function writeIdentity(write, comparisonContract = null) {
+  if (comparisonContract) return contentWritePreimage(write, comparisonContract);
   return { id: write.id, requestId: write.requestId, provider: write.provider, input: write.input, digest: write.digest,
     connectionId: write.connectionId, account: write.account, requestedBy: write.requestedBy,
     requiresApproval: write.requiresApproval, approvalId: write.approvalId || null,
@@ -338,7 +374,7 @@ function admitExecution(state, commit = false) {
   if (recent.length >= 10) throw connectionError('Connection execution frequency limit reached. Try again after the current hour window.', 'WRITE_EXECUTION_RATE_LIMITED', 429);
   if (commit) state.connectionDispatchAdmissions = Object.freeze([...recent, now]);
 }
-function authority(state, write, actor, actorSession) {
+function authority(state, write, actor, actorSession, comparisonContract = null) {
   const actors = state.users?.filter(row => row.id === actor) || [];
   const user = actors[0];
   if (actors.length !== 1 || !user || user.active === false || user.role !== 'owner' || user.passwordChangeRequired
@@ -377,10 +413,10 @@ function authority(state, write, actor, actorSession) {
   }
   return digest({ actor, sessionVersion: user.sessionVersion || 1, connectionId: connection.id, account: write.account,
     credentials: digest(connection.encryptedCredentials), scopes: [...(connection.metadata?.grantedScopes || [])].sort(),
-    permissionMode: settings.permissionMode, consent: settings.consent || null,
+    permissionMode: settings.permissionMode, consent: comparisonContract ? contentConsentPreimage(settings.consent) : settings.consent || null,
     ...(write.provider === 'meta' ? { pages: settings.metaPageIds || [], catalogs: settings.metaCatalogIds || [] } : {}),
     approval: needsApproval ? { id: approval.id, revision: approval.revision || 1, decidedBy: approval.decidedBy,
-      decidedAt: approval.decidedAt, payload: approval.payload } : null });
+      decidedAt: approval.decidedAt, payload: comparisonContract ? contentApprovalPayloadPreimage(approval.payload, comparisonContract) : approval.payload } : null });
 }
 
 export async function executeConnectionWrite(state, writeId, actor, integrations, persistClaim, { loadFreshState, loadObjectiveJob, durableStore = false, actorSession: authenticatedSession } = {}) {
@@ -395,22 +431,35 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     sessionVersion: authenticatedSession?.sessionVersion });
   if (actorSession.workspaceId !== state.workspace?.id || actorSession.userId !== actor
     || !Number.isSafeInteger(actorSession.sessionVersion) || actorSession.sessionVersion < 1) throw blocked('WRITE_ACTOR_CHANGED');
-  const authorityDigest = authority(state, write, actor, actorSession);
+  // Pin before the first await. Unknown signed layouts retain every original
+  // comparison; a supported request can never acquire a fallback after change.
+  const comparisonContract = contentComparisonContract(state, write, actor);
+  const snapshotIdentity = comparisonContract ? contentWriteSnapshot : digest;
+  const inputIdentity = input => digest(comparisonContract ? contentInputPreimage(input) : input);
+  const initialWriteSnapshot = comparisonContract ? snapshotIdentity(write) : null;
+  const initialApproval = comparisonContract ? state.approvals?.find(row => row.id === write.approvalId) : null;
+  const initialApprovalSnapshot = comparisonContract ? snapshotIdentity(initialApproval) : null;
+  const checkPreparedSnapshot = () => {
+    if (comparisonContract && (snapshotIdentity(write) !== initialWriteSnapshot || snapshotIdentity(initialApproval) !== initialApprovalSnapshot
+      || !state.approvals.includes(initialApproval) || state.approvals.filter(row => row.id === initialApproval.id).length !== 1)) throw blocked('WRITE_REQUEST_CHANGED');
+  };
+  const authorityDigest = authority(state, write, actor, actorSession, comparisonContract);
   const objectivePolicy = captureObjectiveDispatchPolicy(state, write);
   const objectiveContent = isObjectiveContentWrite(write);
   const sourceAuthorityTime = Date.now();
-  const admissionIdentity = digest(writeIdentity(write)), admissionStatus = write.status;
+  const admissionIdentity = digest(writeIdentity(write, comparisonContract)), admissionStatus = write.status;
   let contentSource = null, contentBinding = null;
   if (objectiveContent) {
     validateObjectiveContentSource(write.objectivePolicyProposal.source);
     const source = write.objectivePolicyProposal.source;
     if (write.requestedBy !== actor || source.actorId !== actor || source.actorSessionVersion !== actorSession.sessionVersion) throw blocked('WRITE_ACTOR_CHANGED');
     contentSource = await loadObjectiveContentSource(state, source.jobId, source.opportunityId, actorSession, loadObjectiveJob, { write });
-    if (digest(writeIdentity(write)) !== admissionIdentity || write.status !== admissionStatus
+    checkPreparedSnapshot();
+    if (digest(writeIdentity(write, comparisonContract)) !== admissionIdentity || write.status !== admissionStatus
       || state.connectionWrites.filter(row => row.id === writeId).length !== 1 || !state.connectionWrites.includes(write)) throw blocked('WRITE_REQUEST_CHANGED');
     contentBinding = { source: contentSource.source, approvalId: write.approvalId, approvalDigest: write.objectivePolicyProposal.approvalDigest };
     assertObjectivePolicySource(state, objectivePolicy);
-    if (authority(state, write, actor, actorSession) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
+    if (authority(state, write, actor, actorSession, comparisonContract) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
   }
   const checkContentSource = (snapshot = state) => {
     if (contentSource) captureObjectiveContentSource(snapshot, contentSource.job, contentSource.source.opportunityId, actorSession,
@@ -427,7 +476,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   if (!connection || (write.provider === 'meta' ? connection.metadata?.accountId : connection.metadata?.shopDomain) !== write.account) throw connectionError('The store connection changed. Create a new request.', 'WRITE_CONNECTION_CHANGED', 409);
   if (write.provider === 'meta') requireMetaScopes(connection.metadata?.grantedScopes, metaWriteScopes(write.input.operation));
   if (write.provider === 'shopify' && !connection.metadata?.grantedScopes?.includes('write_products')) throw connectionError('Shopify write access is missing.', 'WRITE_SCOPE_REQUIRED', 409);
-  if (write.digest !== digest(write.input)) throw connectionError('The proposed change was modified. Create a new request.', 'WRITE_CONFLICT', 409);
+  if (write.digest !== inputIdentity(write.input)) throw connectionError('The proposed change was modified. Create a new request.', 'WRITE_CONFLICT', 409);
   const approval = state.approvals?.find(item => item.id === write.approvalId);
   if (write.requiresApproval || settings.permissionMode !== 'automatic' || write.input.operation !== 'internal_note') {
     if (!approval || approval.status !== 'approved' || approval.payload?.digest !== write.digest || approval.payload?.connectionWriteId !== write.id || (approval.revision || 1) !== 1) throw connectionError('The owner must approve this exact change before it can run.', 'APPROVAL_REQUIRED', 409);
@@ -440,11 +489,12 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const preparedInput = immutable(structuredClone(write.input));
   const approvedActionDecision = write.provider === 'shopify' && preparedInput.operation === 'product_content'
     ? immutable(structuredClone(approval)) : null;
-  const identity = digest(writeIdentity(write));
+  const identity = digest(writeIdentity(write, comparisonContract));
   const workspaceId = state.workspace?.id;
   const config = write.provider === 'shopify' ? { ...integrations.shopifyConfig(state), connection: undefined } : {};
   const metaCredentials = write.provider === 'meta' ? immutable(structuredClone(await integrations.connectorCredentials(state, 'meta'))) : null;
   if (config.mode === 'oauth') config.accessToken = (await integrations.connectorCredentials(state, 'shopify')).accessToken;
+  checkPreparedSnapshot();
   checkContentSource();
   Object.freeze(config);
   if (write.input.expectedTags) {
@@ -457,13 +507,13 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const configDigest = write.provider === 'shopify' ? digest(configBinding(config)) : null;
   let dispatch = null, submittedClaimDigest = null;
   const contentSubmitted = () => objectiveContent && connectionDispatchCount(dispatch) > 0;
-  const approvalDecisionIdentity = value => digest(Object.fromEntries(Object.entries(value)
+  const approvalDecisionIdentity = comparisonContract ? contentApprovalDecisionSnapshot : value => digest(Object.fromEntries(Object.entries(value)
     .filter(([key]) => !['executedExternally', 'executionStatus', 'workStatus'].includes(key))));
   const retainedSubmittedSnapshot = snapshot => {
     const writes = snapshot.connectionWrites?.filter(row => row.id === writeId) || [];
     const approvals = snapshot.approvals?.filter(row => row.id === approval.id) || [];
     if (snapshot.workspace?.id !== workspaceId || writes.length !== 1 || approvals.length !== 1
-      || digest(writeIdentity(writes[0])) !== identity || digest(writes[0].dispatchClaim) !== submittedClaimDigest
+      || digest(writeIdentity(writes[0], comparisonContract)) !== identity || snapshotIdentity(writes[0].dispatchClaim) !== submittedClaimDigest
       || approvalDecisionIdentity(approvals[0]) !== approvalDecisionIdentity(approvedActionDecision)
       || digest(snapshot.connectionDispatchAdmissions ?? []) !== admissionDigest) throw blocked('WRITE_CLAIM_CHANGED');
   };
@@ -473,7 +523,10 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     if (digest(state.connectionDispatchAdmissions ?? []) !== admissionDigest
       || state.workspace?.id !== workspaceId || !state.connectionWrites?.includes(write)
       || state.connectionWrites.filter(row => row.id === writeId).length !== 1
-      || digest(writeIdentity(write)) !== identity) throw blocked('WRITE_CLAIM_CHANGED');
+      || digest(writeIdentity(write, comparisonContract)) !== identity) throw blocked('WRITE_CLAIM_CHANGED');
+    if (comparisonContract && (!state.approvals.includes(approval)
+      || state.approvals.filter(row => row.id === approval.id).length !== 1
+      || approvalDecisionIdentity(approval) !== approvalDecisionIdentity(approvedActionDecision))) throw blocked('WRITE_CLAIM_CHANGED');
   };
   const localCheck = () => {
     retainedCheck();
@@ -483,8 +536,8 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     if (contentSubmitted()) return;
     if ((write.providerState?.containerId || null) !== containerId) throw blocked('WRITE_REQUEST_CHANGED');
     if (state.workspace?.id !== workspaceId || state.connectionWrites?.filter(row => row.id === writeId).length !== 1
-      || !state.connectionWrites.includes(write) || digest(writeIdentity(write)) !== identity
-      || digest(write.input) !== write.digest || authority(state, write, actor, actorSession) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
+      || !state.connectionWrites.includes(write) || digest(writeIdentity(write, comparisonContract)) !== identity
+      || inputIdentity(write.input) !== write.digest || authority(state, write, actor, actorSession, comparisonContract) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
     if (write.provider === 'shopify') {
       const current = integrations.shopifyConfig(state);
       if (digest(configBinding(current)) !== configDigest) throw blocked('WRITE_CONNECTION_CHANGED');
@@ -492,24 +545,32 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   };
   const saveExact = async () => {
     localCheck();
-    const previous = state._revision, expected = digest(write), expectedApproval = objectiveContent ? digest(approval) : null;
-    const saved = await persistClaim(objectiveContent ? { ownedSnapshot: true, beforeCommit: snapshot => {
+    const guardedContent = objectiveContent || comparisonContract;
+    const previous = state._revision, expected = snapshotIdentity(write), expectedApproval = guardedContent ? snapshotIdentity(approval) : null;
+    // The synchronous store guard runs immediately before serialization. Manual
+    // content needs the same exact comparison, but no new full-workspace copy;
+    // objective content retains its existing owned source snapshot behavior.
+    const saved = await persistClaim(guardedContent ? { ...(objectiveContent ? { ownedSnapshot: true } : {}), beforeCommit: snapshot => {
       localCheck();
       if (snapshot) {
         const rows = snapshot.connectionWrites?.filter(row => row.id === writeId) || [];
         const approvals = snapshot.approvals?.filter(row => row.id === approval.id) || [];
-        if (rows.length !== 1 || digest(rows[0]) !== expected || approvals.length !== 1 || digest(approvals[0]) !== expectedApproval) throw blocked('WRITE_CLAIM_CHANGED');
+        if (rows.length !== 1 || snapshotIdentity(rows[0]) !== expected || approvals.length !== 1 || snapshotIdentity(approvals[0]) !== expectedApproval) throw blocked('WRITE_CLAIM_CHANGED');
+        if (comparisonContract && (state._revision !== previous || typeof snapshot._revision !== 'string'
+          || !snapshot._revision || snapshot.workspace?.id !== workspaceId
+          || digest(snapshot.connectionDispatchAdmissions ?? []) !== admissionDigest)) throw blocked('WRITE_CLAIM_CHANGED');
+        if (comparisonContract && !contentSubmitted() && authority(snapshot, rows[0], actor, actorSession, comparisonContract) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
         if (contentSubmitted()) retainedSubmittedSnapshot(snapshot); else checkContentSource(snapshot);
       }
     } } : undefined);
     localCheck();
     const rows = saved?.connectionWrites?.filter(row => row.id === writeId) || [];
     if (typeof state._revision !== 'string' || state._revision === previous || saved?.workspace?.id !== workspaceId
-      || saved?._revision !== state._revision || rows.length !== 1 || digest(rows[0]) !== expected
-      || digest(write) !== expected || digest(saved.connectionDispatchAdmissions ?? []) !== admissionDigest
-      || !contentSubmitted() && authority(saved, rows[0], actor, actorSession) !== authorityDigest) throw blocked('WRITE_CLAIM_ACK_INVALID');
-    if (objectiveContent && (saved.approvals?.filter(row => row.id === approval.id).length !== 1
-      || digest(saved.approvals.find(row => row.id === approval.id)) !== expectedApproval || digest(approval) !== expectedApproval)) throw blocked('WRITE_CLAIM_ACK_INVALID');
+      || saved?._revision !== state._revision || rows.length !== 1 || snapshotIdentity(rows[0]) !== expected
+      || snapshotIdentity(write) !== expected || digest(saved.connectionDispatchAdmissions ?? []) !== admissionDigest
+      || !contentSubmitted() && authority(saved, rows[0], actor, actorSession, comparisonContract) !== authorityDigest) throw blocked('WRITE_CLAIM_ACK_INVALID');
+    if (guardedContent && (saved.approvals?.filter(row => row.id === approval.id).length !== 1
+      || snapshotIdentity(saved.approvals.find(row => row.id === approval.id)) !== expectedApproval || snapshotIdentity(approval) !== expectedApproval)) throw blocked('WRITE_CLAIM_ACK_INVALID');
     if (!contentSubmitted()) { assertObjectivePolicySource(saved, objectivePolicy); checkContentSource(saved); }
     else retainedSubmittedSnapshot(saved);
   };
@@ -523,7 +584,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     }
     // The exact job is read first. The narrow workspace authority/revision read
     // remains last; job history is a separate, non-atomic observation boundary.
-    const expected = digest(write), revision = state._revision;
+    const expected = snapshotIdentity(write), expectedApproval = comparisonContract ? snapshotIdentity(approval) : null, revision = state._revision;
     const needsApproval = write.requiresApproval || settings.permissionMode !== 'automatic' || write.input.operation !== 'internal_note';
     const approverId = needsApproval ? approval.decidedBy : settings.consent.actor;
     const fresh = await loadFreshState({ revision, provider: write.provider, writeId, connectionId: write.connectionId, actorId: actor,
@@ -534,8 +595,11 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     localCheck();
     const rows = fresh?.connectionWrites?.filter(row => row.id === writeId) || [];
     if (fresh?.workspace?.id !== workspaceId || fresh?._revision !== revision || state._revision !== revision
-      || rows.length !== 1 || digest(rows[0]) !== expected || digest(write) !== expected
-      || digest(writeIdentity(rows[0])) !== identity || authority(fresh, rows[0], actor, actorSession) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
+      || rows.length !== 1 || snapshotIdentity(rows[0]) !== expected || snapshotIdentity(write) !== expected
+      || digest(writeIdentity(rows[0], comparisonContract)) !== identity || authority(fresh, rows[0], actor, actorSession, comparisonContract) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
+    if (comparisonContract && (fresh.approvals?.filter(row => row.id === approval.id).length !== 1
+      || snapshotIdentity(fresh.approvals.find(row => row.id === approval.id)) !== expectedApproval
+      || snapshotIdentity(approval) !== expectedApproval)) throw blocked('WRITE_AUTHORITY_CHANGED');
     // The unchanged full-workspace revision attests the pinned objective source.
     // This narrow projection deliberately does not download it a second time.
     assertObjectiveDispatchBinding(rows[0], fresh.approvals?.find(row => row.id === rows[0].approvalId), objectivePolicy, contentBinding);
@@ -571,7 +635,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     // authorization point. A later pause cannot recall an in-flight request.
     await freshCheck();
     assertObjectiveDispatchAllowed(write, objectivePolicy);
-    if (objectiveContent) submittedClaimDigest = digest(write.dispatchClaim);
+    if (objectiveContent) submittedClaimDigest = snapshotIdentity(write.dispatchClaim);
   });
   const recordResult = (phase, externalId) => {
     if (phase !== 'instagram_container' || !/^\d{1,32}$/.test(externalId)

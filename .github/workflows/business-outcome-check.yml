@@ -40,5 +40,9 @@ jobs:
           cache-dependency-path: saas/server/tests/atomic-usage/package-lock.json
       - name: Install locked test-only PostgreSQL driver
         run: npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts --no-audit --no-fund
+      - name: Verify content identity through real JSONB before applying the fixture schema
+        env:
+          CONTENT_JSONB_DISPOSABLE_FIXTURE: github-actions-postgres17
+        run: node --test --test-concurrency=1 saas/server/tests/content-jsonb-postgres.mjs
       - name: Verify actual concurrent publication and privilege boundaries
         run: node --test --test-concurrency=1 saas/server/tests/business-outcome-postgres.mjs
