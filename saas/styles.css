@@ -654,7 +654,7 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
 .approval-card dl div { display: grid; grid-template-columns: 115px minmax(0, 1fr); gap: .6rem; }
 .approval-card dt { color: var(--muted); font-size: .67rem; font-weight: 800; text-transform: uppercase; }
 .approval-card dd { margin: 0; color: var(--silver); font-size: .75rem; line-height: 1.45; overflow-wrap: anywhere; }
-.approval-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+.approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
 .decision-note { margin: .7rem 0 0; color: var(--muted); font-size: .7rem; }
 
 .rule {

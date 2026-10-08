@@ -83,8 +83,11 @@ function createConsumerViewportSession(panel) {
   }
  };
 }
-async function captureConsumer(page,width,name,panel){
+async function captureConsumer(page,width,name,panel,actions){
  const typography=await panel.evaluateHandle(createRestrictionTypographySession),viewport=await panel.evaluateHandle(createConsumerViewportSession);
+ const actionViewport=await actions.evaluateHandle(createConsumerViewportSession),buttons=await actions.locator('button').all();
+ assert.ok(buttons.length>0,`${name} must retain its action controls`);
+ const buttonViewports=await Promise.all(buttons.map(button=>button.evaluateHandle(createConsumerViewportSession)));
  const images=async suffix=>{
   // Keep focus visible on a real non-text control without changing inline
   // styles or triggering any approval/apply action.
@@ -101,6 +104,20 @@ async function captureConsumer(page,width,name,panel){
    covered=bounds.to;if(covered>=bounds.height-1)break;
    assert.ok(part<60,`${label} exceeded the bounded viewport capture budget`);
   }
+  // Actions sit outside the enlarged source subtree. Capture their real row
+  // separately in each source-text state, without resizing or invoking them.
+  await actionViewport.evaluate(session=>session.reveal(0));
+  const file=`/tmp/runvara-objective-content-${width}-${name}${suffix}-actions-viewport.png`;
+  await page.screenshot({path:file,fullPage:false,caret:'initial'});captures.push({width,file});
+  const controls=[{label:'action row',bounds:await actionViewport.evaluate(session=>session.bounds())}];
+  for(let index=0;index<buttons.length;index++)controls.push({label:await buttons[index].textContent(),bounds:await buttonViewports[index].evaluate(session=>session.bounds())});
+  for(const {label,bounds} of controls){
+   const description=`${width}px ${name}${suffix} ${label}: ${JSON.stringify(bounds)}`;
+   assert.ok(bounds.height>0&&bounds.right>bounds.left,`Action control must be rendered: ${description}`);
+   assert.ok(bounds.left>=bounds.visibleLeft-2&&bounds.right<=bounds.visibleRight+2&&bounds.scroll<=bounds.client+2,`Action control must fit its actual scrollport and viewport: ${description}`);
+   assert.ok(bounds.from<=1&&bounds.to>=bounds.height-1,`Action control must be fully visible below sticky chrome: ${description}`);
+  }
+  console.log(`${width}px ${name}${suffix}: complete action row and ${buttons.length} buttons visible in ${file}`);
  };
  try {
   await typography.evaluate(session=>session.assertBaseline());await images('');
@@ -108,7 +125,7 @@ async function captureConsumer(page,width,name,panel){
   try{await typography.evaluate(session=>session.enlarge());await images('-large-text');}
   finally{await typography.evaluate(session=>session.restore());}
   await typography.evaluate(session=>session.assertBaseline());
- }finally{await typography.dispose();await viewport.dispose();}
+ }finally{await typography.dispose();await viewport.dispose();await actionViewport.dispose();await Promise.all(buttonViewports.map(handle=>handle.dispose()));}
 }
 try{
  server.listen(port,'127.0.0.1');await once(server,'listening');assert.equal(base,`http://${server.address().address}:${server.address().port}`);
@@ -167,18 +184,21 @@ try{
   await page.locator('#connection-grid [data-provider="shopify"][data-connection-action="open"]').first().click();await page.locator('#connection-dialog').waitFor();
   await page.locator('#connection-dialog .connection-write').getByText('Review exact change',{exact:true}).first().waitFor();await page.locator('#connection-dialog .connection-write summary').first().click();
   const exact=page.locator('#connection-dialog .connection-write').first();assert.ok((await exact.textContent()).includes(first.jobId));assert.ok((await exact.textContent()).includes(candidate.id));assert.match(await exact.textContent(),/commercial readiness and objective progress remain unverified/);
-  await captureConsumer(page,width,'connection-exact-write',exact.locator('details'));await page.locator('#connection-close').click();
+  const connectionActions=exact.locator('.button-row');assert.deepEqual(await connectionActions.locator('button').allTextContents(),['Open Approval Centre']);
+  await captureConsumer(page,width,'connection-exact-write',exact.locator('details'),connectionActions);await page.locator('#connection-close').click();
   await navigate('ai-team');await page.locator('#refresh-objective-review').click();await entry.waitFor();await entry.click();await page.waitForFunction(()=>document.querySelector('#objective-content-form').getAttribute('aria-busy')==='false');await fill('Explicit same-reference retry');await ack.check();postMode='lose-before-send';await page.locator('#objective-content-prepare').click();await status.getByText('The preparation outcome is unknown.',{exact:false}).waitFor();
   const second=JSON.parse(writes()[1].body);await page.locator('#objective-content-check').click();await status.getByText('No matching request was found in the checked snapshot',{exact:false}).waitFor();assert.equal(writes().length,2);assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#objective-content-retry').isDisabled(),true);await capture(page,width,'retry');
   await ack.check();await page.locator('#objective-content-retry').click();await status.getByText('Exact goal-associated request found:',{exact:false}).waitFor();assert.equal(writes().length,3);assert.deepEqual(JSON.parse(writes()[2].body),second);
   await page.locator('#objective-content-approvals').click();await page.locator('#approval-list summary').getByText('Review full goal-associated content',{exact:true}).first().waitFor();assert.ok((await page.locator('#approval-list').textContent()).includes(second.jobId));assert.equal(calls.some(call=>call.path.includes('/decision')||call.path.endsWith('/execute')),false);
-  const approvalSource=page.locator('#approval-list .approval-card').filter({hasText:second.jobId}).locator('details').filter({has:page.getByText('Review full goal-associated content',{exact:true})}).first();
-  await approvalSource.locator('summary').click();await captureConsumer(page,width,'approval-source',approvalSource);
+  const approvalCard=page.locator('#approval-list .approval-card').filter({hasText:second.jobId}).first(),approvalActions=approvalCard.locator('.approval-actions');
+  const approvalSource=approvalCard.locator('details').filter({has:page.getByText('Review full goal-associated content',{exact:true})});
+  assert.deepEqual(await approvalActions.locator('button').allTextContents(),['Review exact change','Reject','Approve']);
+  await approvalSource.locator('summary').click();await captureConsumer(page,width,'approval-source',approvalSource,approvalActions);
   await navigate('ai-team');await page.locator('#resume-objective-content').click();await page.locator('#objective-content-cancel').click();await page.locator('#refresh-objective-review').click();await entry.waitFor();await entry.click();await page.waitForFunction(()=>document.querySelector('#objective-content-form').getAttribute('aria-busy')==='false');await fill('Refused because retained source changed');await ack.check();
   stored=await server.packsmart.store.get(seed.workspace.id);stored.products[0].title='New';await server.packsmart.store.save(seed.workspace.id,stored);
   await page.locator('#objective-content-prepare').click();await status.getByText('Preparation was refused.',{exact:false}).waitFor();assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#objective-content-prepare').isDisabled(),true);assert.equal(writes().length,4);await capture(page,width,'stale');
   stored=await server.packsmart.store.get(seed.workspace.id);assert.equal(stored.connectionWrites.length,2);assert.equal(stored.approvals.length,2);assert.ok(stored.approvals.every(row=>row.status==='pending'));assert.equal(providerRequests,0);assert.equal(modelRequests,0);assert.deepEqual(external,[]);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await context.close();
   const bytes=(await Promise.all(captures.filter(row=>row.width===width).map(row=>fs.stat(row.file)))).reduce((sum,row)=>sum+row.size,0);assert.ok(bytes<32*1024*1024,`${width}px screenshot artifact exceeds32MiB`);
  }
- console.log('Objective/report-bound content passed normal-size source/prepare/reconcile flows at320,390,1200, explicit same-ID retry, saved history/approval review and stale-source refusal. Separate normal/exact200% source-subtree captures cover both generic displays; surrounding app typography is unchanged. Approval/apply remain separate; zero provider/model calls.');
+ console.log('Objective/report-bound content passed normal-size source/prepare/reconcile flows at320,390,1200, explicit same-ID retry, saved history/approval review and stale-source refusal. Separate normal/exact200% source-subtree captures cover both generic displays, with additional complete action-row views in each state; surrounding app and action-control typography is unchanged. Approval/apply remain separate; zero provider/model calls.');
 }finally{if(browser)await browser.close();if(server.listening)await new Promise(resolve=>server.close(resolve));await server.packsmart.drain();await fs.rm(directory,{recursive:true,force:true});assert.equal(providerRequests,0);assert.equal(modelRequests,0);}
