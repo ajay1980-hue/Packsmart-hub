@@ -26,12 +26,15 @@ async function capture(page,width,name){
     assert.ok(dimensions.left>=0&&dimensions.right<=width+2&&dimensions.scroll<=dimensions.client+2&&dimensions.panel<=dimensions.panelClient+2,`manual content overflow ${width}/${name}: ${JSON.stringify(dimensions)}`);
   };
   const images=async suffix=>{
+    // Focus a non-text control so screenshots need no caret suppression. The
+    // default hides carets via inline styles and leaves empty style attributes,
+    // which would invalidate the original typography baseline.
     if (await page.locator('#content-account').isEnabled()) await page.locator('#content-account').focus();
     else await page.locator('#connection-close').focus();
     await page.locator('#content-account').evaluate(node=>node.scrollIntoView({block:'start'}));
-    await fit();await dialog.screenshot({path:`/tmp/runvara-manual-content-${name}-${width}${suffix}-fields.png`});
+    await fit();await dialog.screenshot({path:`/tmp/runvara-manual-content-${name}-${width}${suffix}-fields.png`,caret:'initial'});
     await page.locator('#content-exact').evaluate(node=>node.scrollIntoView({block:'start'}));
-    await fit();await dialog.screenshot({path:`/tmp/runvara-manual-content-${name}-${width}${suffix}-review.png`});
+    await fit();await dialog.screenshot({path:`/tmp/runvara-manual-content-${name}-${width}${suffix}-review.png`,caret:'initial'});
   };
   try {
     await typography.evaluate(session=>session.assertBaseline());await images('');
