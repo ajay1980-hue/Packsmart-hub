@@ -15,6 +15,8 @@ export const REVIEWED_OUTCOME_GRAPH_BYTES = Object.freeze({ summary: 16 * 1024, 
 const CHANNELS = new Set(['shopify', 'ebay', 'meta', 'tiktok_shop', 'pinterest', 'google_youtube', 'whatsapp_business', 'amazon']);
 const STATUSES = new Set(['active', 'inactive', 'archived', 'draft', 'open', 'pending', 'approved', 'rejected', 'dismissed', 'resolved', 'requires_approval', 'requires approval', 'planned', 'in progress', 'running', 'completed', 'measured', 'closed', 'failed', 'blocked', 'prepared', 'awaiting_approval', 'scheduled', 'published', 'unpublished', 'paid', 'refunded', 'partially_refunded', 'unpaid', 'fulfilled', 'unfulfilled', 'succeeded', 'executed', 'not_connected']);
 const METRICS = ['incrementalRevenue', 'incrementalContribution', 'contributionProtected', 'costAvoided', 'minutesSaved'];
+const REVIEWED_RELATIONS = new Set(['measurement_recorded_for_experiment', 'publication_recorded_request', 'publication_recorded_approval']);
+const OUTPUT_REASONS = new Set(['edge_limit', 'target_outside_projection', 'output_byte_limit']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const identifier = value => (typeof value === 'string' && value.trim() && value.length <= 2048) || (typeof value === 'number' && Number.isFinite(value)) ? String(value) : null;
 const status = value => typeof value === 'string' && STATUSES.has(value.toLowerCase()) ? value.toLowerCase() : 'unknown';
@@ -401,8 +403,10 @@ function project(state, options, summaryOnly) {
     reference(item.node, 'supplier', item.row.supplierId, atField(item.ref, 'supplierId'), 'sourced_from_supplier', null, true);
     if (!item.usedAsSku) unknown(item.node, 'sku_mapping', 'no_recorded_sku_match', item.ref);
   }
-  const retainedRequests = projectRetainedRequests({ workspaceId, summaryOnly, objectives, writes, approvals,
+  const retainedProjection = projectRetainedRequests({ workspaceId, summaryOnly, objectives, writes, approvals,
     metadata, edge, unknown, digest, atField, now: options.now || new Date().toISOString() });
+  const retainedRequests = retainedProjection.projection;
+  let reviewedOutcomes = null, currentProjection = null;
   const retainedCollections = ['businessObjectives', 'connectionWrites', 'approvals'];
   function updateRetainedCoverage() {
     retainedRequests.counts.projectedObjectives = retainedRequests.objectives.length;
@@ -432,6 +436,21 @@ function project(state, options, summaryOnly) {
       unknownTotal -= count; unknownByReason[reason] -= count; if (!unknownByReason[reason]) delete unknownByReason[reason];
     }
     unknownByNode.delete(nodeId);
+    // Byte trimming can remove an already-linked retained node. Preserve a
+    // precise output-limit reason, never a dangling resolved reference.
+    for (const row of retainedRequests.records) for (const key of ['approval', 'objective']) {
+      if (row[key].targetNodeId !== nodeId) continue;
+      row[key] = { status: 'unresolved', reason: 'output_byte_limit' };
+      const subject = nodeMap.get(row.nodeId);
+      unknown(subject, key === 'approval' ? 'request_recorded_approval' : 'request_recorded_objective', 'output_byte_limit', subject?.sourceRef);
+    }
+    for (const row of reviewedOutcomes?.records || []) for (const [key, relation, field] of [
+      ['requestRelationship', 'publication_recorded_request', 'links.action'], ['approvalRelationship', 'publication_recorded_approval', 'links.approval']]) {
+      if (row[key].targetNodeId !== nodeId) continue;
+      row[key] = { status: 'unresolved', reason: 'output_byte_limit', snapshotContentCompared: false };
+      const subject = nodeMap.get(row.nodeId);
+      unknown(subject, relation, 'output_byte_limit', subject && { ...subject.sourceRef, identityHash: row.versionRef, field });
+    }
   }
   function trimRetainedRecord() {
     const removed = retainedRequests.records.pop() || retainedRequests.objectives.pop();
@@ -447,7 +466,6 @@ function project(state, options, summaryOnly) {
   }
   const retainedGraphComplete = retainedRequests.coverage.complete && [...sources.values()].every(item => !item.truncated && !item.invalid)
     && omittedNodes.size === 0 && droppedEdges === 0 && unknownTotal === unknownMappings.length;
-  let reviewedOutcomes = null, currentProjection = null;
   if (options.inspectCurrentOutcomes === true) {
     const now = options.now || new Date().toISOString();
     let qualified = null;
@@ -473,7 +491,9 @@ function project(state, options, summaryOnly) {
         readCompletedAt: currentProjection ? time(options.outcomeReadCompletedAt) : null }, independent: true },
       counts: { currentHeadsRead: currentProjection?.counts.currentHeadsRead ?? null,
         publishedHeads: currentProjection?.counts.publishedHeads ?? null, withdrawnHeads: currentProjection?.counts.withdrawnHeads ?? null,
-        projectedRecords: 0, resolvedExperimentLinks: 0, unresolvedExperimentLinks: 0, qualifiedMeasurements: complete ? qualified.qualifiedOutcomeCount : null },
+        projectedRecords: 0, resolvedExperimentLinks: 0, unresolvedExperimentLinks: 0,
+        resolvedRequestLinks: 0, unresolvedRequestLinks: 0, resolvedApprovalLinks: 0, unresolvedApprovalLinks: 0,
+        qualifiedMeasurements: complete ? qualified.qualifiedOutcomeCount : null },
       coverage: { publicationHeadsComplete: complete, retainedGraphComplete, projectionComplete: false, completeLifetimeHistoryClaimed: false },
       omitted: { records: 0, relationships: 0, groups: 0, mappings: 0 }, records: [],
       groups: (complete ? qualified.qualifiedOutcomeGroups : []).map(group => ({
@@ -483,7 +503,8 @@ function project(state, options, summaryOnly) {
         amount: group.amount, amountStatus: group.amountStatus })),
       limits: { byteLimit: REVIEWED_OUTCOME_GRAPH_BYTES[summaryOnly ? 'summary' : 'detail'] },
       safeguards: { causalAttribution: false, forecastingAuthorized: false, learningAuthorized: false, executionAuthorized: false,
-        currentDraftCompared: false, atomicSnapshot: false, continuouslyCurrent: false, lifetimeHistoryClaimed: false }
+        currentDraftCompared: false, snapshotContentCompared: false, immutableExecutionProof: false, goalProgressEstablished: false,
+        atomicSnapshot: false, continuouslyCurrent: false, lifetimeHistoryClaimed: false }
     };
     if (currentProjection) {
       const rows = currentProjection.records, meta = metadata('reviewedOutcomes.current');
@@ -504,8 +525,25 @@ function project(state, options, summaryOnly) {
         reference(node, 'experiment', row.source.experimentId,
           { ...ref, identityHash: digest([workspaceId, row.outcomeId, row.versionId, row.digest]), field: 'source.experimentId' },
           'measurement_recorded_for_experiment', null, true, relationship);
+        const publishedRelationship = (found, relation, field) => {
+          const refForVersion = { ...ref, identityHash: digest([workspaceId, row.outcomeId, row.versionId, row.digest]), field };
+          const unresolved = reason => {
+            unknown(node, relation, reason, refForVersion);
+            return { status: 'unresolved', reason, snapshotContentCompared: false };
+          };
+          if (row.actionReferenceReason) return unresolved(row.actionReferenceReason);
+          if (!row.actionReferences) return { status: 'not_recorded', reason: null, snapshotContentCompared: false };
+          if (found.reason) return unresolved(found.reason);
+          if (!found.item.node || !nodeMap.has(found.item.node.id)) return unresolved('target_outside_projection');
+          return edge(node, found.item.node, relation, refForVersion, 'recorded-publication-reference')
+            ? { status: 'resolved', reason: null, snapshotContentCompared: false, targetNodeId: found.item.node.id }
+            : unresolved('edge_limit');
+        };
+        const targets = row.actionReferences ? retainedProjection.resolvePublicationTargets(row.actionReferences) : null;
+        const requestRelationship = publishedRelationship(targets?.request, 'publication_recorded_request', 'links.action');
+        const approvalRelationship = publishedRelationship(targets?.approval, 'publication_recorded_approval', 'links.approval');
         reviewedOutcomes.records.push({ nodeId: node.id, versionRef, status: row.status, measurementComplete: row.measurementComplete,
-          qualifiedGroupIncluded, relationship });
+          qualifiedGroupIncluded, relationship, requestRelationship, approvalRelationship });
       }
     }
   }
@@ -531,13 +569,22 @@ function project(state, options, summaryOnly) {
     result.outcomeCoverage = { publicationProofAvailable: Boolean(currentProjection), complete: reviewedOutcomes.coverage.publicationHeadsComplete,
       unavailableReason: reviewedOutcomes.unavailableReason, completeLifetimeHistoryClaimed: false,
       note: 'Current heads are explicitly inspected separately from retained workspace state. Legacy source records remain unqualified; zero projected records does not establish zero tenant outcomes.' };
+    const currentRelationshipCount = (currentProjection?.records || []).reduce((total, row) => total + 1 + (row.actionReferences || row.actionReferenceReason ? 2 : 0), 0);
     const updateCurrentCoverage = () => {
       const records = reviewedOutcomes.records;
       reviewedOutcomes.counts.projectedRecords = records.length;
       reviewedOutcomes.counts.resolvedExperimentLinks = records.filter(row => row.relationship.status === 'resolved').length;
       reviewedOutcomes.counts.unresolvedExperimentLinks = records.length - reviewedOutcomes.counts.resolvedExperimentLinks;
+      for (const [name, key] of [['Request', 'requestRelationship'], ['Approval', 'approvalRelationship']]) {
+        reviewedOutcomes.counts[`resolved${name}Links`] = records.filter(row => row[key].status === 'resolved').length;
+        reviewedOutcomes.counts[`unresolved${name}Links`] = records.filter(row => row[key].status === 'unresolved').length;
+      }
       reviewedOutcomes.omitted.records = (currentProjection?.records.length || 0) - records.length;
-      reviewedOutcomes.omitted.relationships = reviewedOutcomes.omitted.records + records.filter(row => row.relationship.reason === 'edge_limit').length;
+      // Every omitted current record has its experiment reference plus the
+      // recorded pair (including a rejected partial pair), not three invented
+      // relationships for an explicitly unlinked publication.
+      reviewedOutcomes.omitted.relationships = currentRelationshipCount - records.reduce((total, row) => total + 1 + (row.requestRelationship.status !== 'not_recorded' ? 2 : 0), 0)
+        + records.reduce((total, row) => total + [row.relationship, row.requestRelationship, row.approvalRelationship].filter(link => OUTPUT_REASONS.has(link.reason)).length, 0);
       const currentIds = new Set(records.map(row => row.nodeId));
       const currentUnknowns = records.reduce((total, row) => total + Object.values(unknownByNode.get(row.nodeId) || {}).reduce((a, b) => a + b, 0), 0);
       reviewedOutcomes.omitted.mappings = currentUnknowns - unknownMappings.filter(row => currentIds.has(row.subjectId)).length;
@@ -556,7 +603,7 @@ function project(state, options, summaryOnly) {
     // envelope and added detail rows, including repeated refs and omission counts.
     // This is an extension bound, not a whole legacy graph response byte cap.
     const extensionBytes = () => Buffer.byteLength(JSON.stringify({ ...result,
-      ...(summaryOnly ? {} : { nodes: nodes.filter(node => node.type === 'reviewed_outcome'), edges: edges.filter(row => row.relation === 'measurement_recorded_for_experiment'), unknownMappings: unknownMappings.filter(row => row.relation === 'measurement_recorded_for_experiment') }) }), 'utf8');
+      ...(summaryOnly ? {} : { nodes: nodes.filter(node => node.type === 'reviewed_outcome'), edges: edges.filter(row => REVIEWED_RELATIONS.has(row.relation)), unknownMappings: unknownMappings.filter(row => REVIEWED_RELATIONS.has(row.relation)) }) }), 'utf8');
     updateCurrentCoverage();
     while (extensionBytes() > reviewedOutcomes.limits.byteLimit && trimRetainedRecord()) {
       reviewedOutcomes.coverage.retainedGraphComplete = false;

@@ -2208,10 +2208,10 @@
       const objectiveResolved = record.origin === 'owner_objective_content' && objective.status === 'resolved' && validRelation(objective) && matches.length === 1;
       const approvalResolved = approval.status === 'resolved' && validRelation(approval) && Object.hasOwn(approvalStatuses, approval.recordedStatus);
       const comparisonAvailable = objectiveResolved && validComparison(objective) && matches[0].goal.revision === objective.savedRevision;
-      return '<details class="evidence retained-request"><summary>Request ' + (index + 1) + ' · ' + escapeHtml(requestStatuses[record.recordedStatus]) + '</summary><section class="status-list">' +
+      return '<details class="evidence retained-request" id="graph-retained-request-' + index + '" tabindex="-1"><summary>Request ' + (index + 1) + ' · ' + escapeHtml(requestStatuses[record.recordedStatus]) + '</summary><section class="status-list">' +
         row('Request application status', requestStatuses[record.recordedStatus]) + row('Recorded origin', origins[record.origin]) +
         row('Recorded approval link', approvalResolved ? 'Linked to a retained approval' : approval.status === 'not_recorded' ? 'Approval reference not recorded' : 'Unresolved') +
-        row('Recorded approval status', approvalResolved ? approvalStatuses[approval.recordedStatus] : 'Unavailable') +
+        '<div id="graph-retained-approval-' + index + '" tabindex="-1"><span>Recorded approval status</span><b>' + escapeHtml(approvalResolved ? approvalStatuses[approval.recordedStatus] : 'Unavailable') + '</b></div>' +
         (approvalResolved ? '' : row('Approval link reason', approval.status === 'not_recorded' ? 'No approval reference was recorded' : labelFrom(reasons, approval.reason, 'The recorded approval link could not be established'))) +
         row('Recorded goal link', objectiveResolved ? 'Linked to saved goal ' + (matches[0].goalIndex + 1) : objective.status === 'not_recorded' && record.origin !== 'owner_objective_content' ? 'Originating goal not recorded' : 'Unresolved') +
         (objectiveResolved ? '' : row('Goal link reason', objective.status === 'not_recorded' && record.origin !== 'owner_objective_content' ? 'No originating goal was recorded' : labelFrom(reasons, objective.reason, 'The recorded goal link could not be established'))) +
@@ -2250,12 +2250,16 @@
       ['Reviewed results shown', countLabel(counts.projectedRecords)],
       ['Recorded experiment links found', countLabel(counts.resolvedExperimentLinks)],
       ['Unresolved experiment links', countLabel(counts.unresolvedExperimentLinks)],
+      ['Recorded request links found', countLabel(counts.resolvedRequestLinks)],
+      ['Unresolved recorded request links', countLabel(counts.unresolvedRequestLinks)],
+      ['Recorded approval links found', countLabel(counts.resolvedApprovalLinks)],
+      ['Unresolved recorded approval links', countLabel(counts.unresolvedApprovalLinks)],
       ['Measurements in descriptive groups', currentCount('qualifiedMeasurements')],
       ['Reviewed-result read coverage', available && completeness.publicationHeadsComplete === true ? 'Complete current-result read' : 'Incomplete or unavailable'],
       ['Available relationship records', completeness.retainedGraphComplete === true ? 'Complete within retained records' : 'Incomplete or unavailable'],
       ['Shown results, links and groups', available && completeness.projectionComplete === true ? 'Complete within this display' : 'Incomplete or unavailable'],
       ['Reviewed results omitted', countLabel(reviewed?.omitted?.records)],
-      ['Experiment links omitted', countLabel(reviewed?.omitted?.relationships)],
+      ['Reviewed-result links omitted', countLabel(reviewed?.omitted?.relationships)],
       ['Measurement groups omitted', countLabel(reviewed?.omitted?.groups)],
       ['Unresolved link details omitted', countLabel(reviewed?.omitted?.mappings)],
       ['Visible measurement groups', countLabel(groups.length)]
@@ -2279,15 +2283,67 @@
     const methodLabels = { reconciled_manual: 'Reconciled records', before_after: 'Before and after', holdout: 'Holdout comparison' };
     const amountLabels = { measured_sum: 'Measured sum for this currency and window', standalone_observations: 'Separate observations; no combined amount', incomplete_publication_read: 'Results incomplete; amount unavailable' };
     const labelFrom = (labels, value, fallback) => typeof value === 'string' && Object.hasOwn(labels, value) ? labels[value] : fallback;
+    const referenceReasons = {
+      invalid_reference_pair: 'The published request and approval references are incomplete or inconsistent',
+      unresolved_reference: 'Reference absent from the inspected retained snapshot; deletion is not established',
+      ambiguous_reference: 'More than one retained record matches the primary identity',
+      archived_reference: 'The referenced record is explicitly archived',
+      invalid_record: 'The retained record is malformed or incomplete',
+      target_index_incomplete: 'Target records are incomplete; a unique primary identity cannot be confirmed',
+      source_identity_ambiguous: 'More than one retained request has this identity',
+      source_index_incomplete: 'Request records are incomplete; a unique request cannot be confirmed',
+      unsupported_proposal: 'The retained proposal format is unsupported',
+      invalid_proposal: 'The retained proposal is inconsistent or malformed',
+      approval_binding_mismatch: 'The current reciprocal request and approval binding has changed or does not match',
+      paired_request_unresolved: 'The paired request reference could not be resolved',
+      paired_approval_unresolved: 'The paired approval reference could not be resolved',
+      target_outside_projection: 'The known target was omitted by display limits',
+      edge_limit: 'The recorded link was omitted by display limits',
+      output_byte_limit: 'The recorded link was omitted by the output size limit'
+    };
+    const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+    const history = graph.retainedRequests;
+    const historyAvailable = object(history) && history.schema === 'runvara-retained-requests/v1' && ['available', 'incomplete'].includes(history.status) &&
+      Array.isArray(history.records) && Array.isArray(history.objectives) && object(history.counts) && object(history.coverage) && object(history.omitted);
+    const requests = historyAvailable ? history.records.slice(0, 50) : [];
+    const validRequest = record => object(record) && typeof record.nodeId === 'string' && record.nodeId.length > 0 &&
+      ['pending_approval', 'ready', 'executing', 'processing', 'completed', 'uncertain', 'failed', 'rejected'].includes(record.recordedStatus) &&
+      ['owner_manual', 'owner_objective_content', 'not_recorded', 'invalid'].includes(record.origin) && object(record.approval) && object(record.objective);
+    const validReference = relation => object(relation) && relation.snapshotContentCompared === false &&
+      (relation.status === 'resolved' ? relation.reason === null && typeof relation.targetNodeId === 'string' && relation.targetNodeId.length > 0 :
+        relation.status === 'unresolved' ? Object.hasOwn(referenceReasons, relation.reason) && !Object.hasOwn(relation, 'targetNodeId') :
+          relation.status === 'not_recorded' && relation.reason === null && !Object.hasOwn(relation, 'targetNodeId'));
+    const recordedReferences = record => {
+      const request = record.requestRelationship, approval = record.approvalRelationship;
+      const matches = requests.map((item, index) => ({ item, index })).filter(({ item }) => object(item) && item.nodeId === request?.targetNodeId);
+      const retained = matches[0]?.item;
+      // Associate only already-rendered rows. IDs in href/data attributes are
+      // local display indices, never returned record IDs or execution URLs.
+      const displayedPair = history?.records?.length <= 50 && validReference(request) && validReference(approval) && request.status === 'resolved' && approval.status === 'resolved' &&
+        matches.length === 1 && validRequest(retained) && retained.approval.status === 'resolved' && retained.approval.reason === null &&
+        ['pending', 'approved', 'rejected'].includes(retained.approval.recordedStatus) && retained.approval.targetNodeId === approval.targetNodeId &&
+        requests.filter(item => object(item) && item.approval?.targetNodeId === approval.targetNodeId).length === 1;
+      const referenceRow = (label, relation, kind) => {
+        if (!validReference(relation)) return row(label, 'Unavailable; a valid recorded reference was not returned');
+        if (relation.status === 'not_recorded') return row(label, 'Not recorded in this publication');
+        if (relation.status === 'unresolved') return row(label, 'Unresolved') + row(label + ' reason', referenceReasons[relation.reason]);
+        if (!displayedPair) return row(label, 'Unavailable in this display; a unique reciprocal pair could not be shown');
+        const target = 'graph-retained-' + kind + '-' + matches[0].index;
+        return row(label, 'Resolved primary identity; current reciprocal binding recorded') + '<div><span>Inspect recorded ' + kind + '</span><b><a href="#' + target + '" data-graph-record-link="' + target + '">Show ' +
+          (kind === 'request' ? 'retained request ' : 'retained approval for request ') + (matches[0].index + 1) + '</a></b></div>';
+      };
+      return referenceRow('Published request reference', request, 'request') + referenceRow('Published approval reference', approval, 'approval') +
+        row('Snapshot content compared', validReference(request) && validReference(approval) ? 'False; current mutable content was not compared' : 'Unavailable; no content match is established');
+    };
     const recordHtml = records.map((record, index) => {
       const relation = record.relationship || {};
-      return '<details class="evidence"><summary>Reviewed result ' + (index + 1) + ' · ' +
+      return '<details class="evidence reviewed-result"><summary>Reviewed result ' + (index + 1) + ' · ' +
         (record.status === 'published' ? 'Published' : record.status === 'withdrawn' ? 'Withdrawn' : 'Unknown status') + '</summary><section class="status-list">' +
         row('Immutable version reference', record.versionRef || 'Unavailable') +
         row('Measurement evidence', record.measurementComplete === true ? 'Complete owner-attested measurement' : 'Incomplete or withdrawn measurement') +
         row('Descriptive group inclusion', record.qualifiedGroupIncluded === true ? 'Included in a descriptive measurement group' : 'Excluded or withheld from groups') +
         row('Recorded experiment link', relation.status === 'resolved' ? 'Linked to a retained experiment' : 'Unresolved') +
-        (relation.status === 'resolved' ? '' : row('Unresolved reason', labelFrom(linkReasons, relation.reason, 'The experiment link could not be established'))) + '</section></details>';
+        (relation.status === 'resolved' ? '' : row('Unresolved reason', labelFrom(linkReasons, relation.reason, 'The experiment link could not be established'))) + recordedReferences(record) + '</section></details>';
     }).join('');
     const groupHtml = groups.map((group, index) => '<details class="evidence" open><summary>Scoped measurement group ' + (index + 1) + '</summary><section class="status-list">' +
       row('Metric', group.metric === 'incrementalContribution' ? 'Incremental contribution' : 'Unknown') + row('Currency', group.currency || 'Unknown') +
@@ -2304,6 +2360,7 @@
       outcomeRows.map(([label,value]) => row(label,value)).join('') +
       (!available ? '<p class="missing-inputs">Proof of current reviewed results is unavailable. This does not establish zero outcomes.</p>' + row('Outcome read reason', statusLabel(reviewed?.unavailableReason || 'publication_snapshot_unavailable')) : '') +
       '<p class="muted tiny">Current reviewed results only; corrections select the current version. Withdrawn results contribute no measured totals. A resolved experiment relationship does not imply inclusion in a descriptive measurement group.</p>' +
+      '<p class="muted tiny">Published request and approval references describe recorded primary identities in independent snapshots. They do not prove current mutable content equals the published snapshot. The published source digest is not the current input digest. These links establish no immutable execution receipt, current execution authority, causal or commercial proof, qualified learning, or goal progress.</p>' +
       recordHtml + groupHtml +
       (!groups.length ? '<p class="muted tiny">No measurement groups displayed. An empty list or zero shown reviewed results does not establish zero tenant outcomes.</p>' : '') +
       '<p class="muted tiny">Amounts describe only each exact currency and observation window. No overall amount, ROI, forecast, learning prior, causal attribution or execution authority is established. Full lifetime coverage is not claimed.</p>' +
@@ -2313,6 +2370,40 @@
   }
 
   const graphPanel = $('.business-graph-inspector');
+  const graphRecordLinks = new WeakMap(), graphRecordTargets = new WeakMap();
+  function bindBusinessGraphLinks(graph, ticket) {
+    const root = $('#business-graph-result');
+    root.querySelectorAll('.reviewed-result').forEach((element, index) => {
+      const record = graph.reviewedOutcomes?.records?.[index];
+      element.querySelectorAll('[data-graph-record-link]').forEach(link => {
+        const match = /^graph-retained-(request|approval)-(\d{1,2})$/.exec(link.dataset.graphRecordLink);
+        if (!match) return;
+        const retained = graph.retainedRequests?.records?.[Number(match[2])];
+        const expectedNodeId = record?.[match[1] + 'Relationship']?.targetNodeId;
+        const targetNodeId = match[1] === 'request' ? retained?.nodeId : retained?.approval?.targetNodeId;
+        const target = document.getElementById(link.dataset.graphRecordLink);
+        if (!expectedNodeId || targetNodeId !== expectedNodeId || !root.contains(target)) return;
+        const binding = { target, nodeId: expectedNodeId, generation: ticket.inspectionGeneration };
+        graphRecordTargets.set(target, binding); graphRecordLinks.set(link, binding);
+      });
+    });
+  }
+  window.addEventListener('popstate', () => resetBusinessGraph(true));
+  $('#business-graph-result').addEventListener('click', event => {
+    const link = event.target.closest?.('[data-graph-record-link]');
+    if (!link) return;
+    event.preventDefault();
+    const name = link.dataset.graphRecordLink;
+    const binding = graphRecordLinks.get(link);
+    if (!binding || binding.generation !== state.graphInspectionGeneration || !$('#business-graph-result').contains(link) ||
+      !/^graph-retained-(request|approval)-\d{1,2}$/.test(name) || !graphPanel.open || state.view !== 'overview' || $('#app-shell').classList.contains('hidden')) return;
+    const target = document.getElementById(name);
+    const retained = target && graphRecordTargets.get(target);
+    if (!retained || binding.target !== target || retained.nodeId !== binding.nodeId || retained.generation !== binding.generation || !$('#business-graph-result').contains(target)) return;
+    target.closest('.retained-request').open = true;
+    target.focus({ preventScroll: true });
+    target.scrollIntoView({ block: 'center', behavior: 'instant' });
+  });
   function clearClosedGraphPanel(changes) {
     // The native toggle event can coalesce a close and reopen in one turn.
     // Observe the actual open-attribute transitions so an old ticket cannot revive.
@@ -2342,6 +2433,7 @@
       const graph = await request('/api/business-graph?outcomes=current&detail=true', { signal: ticket.controller.signal, isCurrent: () => graphInspectionCurrent(ticket) });
       if (!graphInspectionCurrent(ticket)) return;
       target.innerHTML = renderBusinessGraph(graph);
+      bindBusinessGraphLinks(graph, ticket);
     } catch(error) {
       if (graphInspectionCurrent(ticket)) target.textContent = 'Could not inspect relationships: ' + error.message + ' Select Inspect reviewed results and links to try again.';
     } finally {

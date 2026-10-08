@@ -167,6 +167,7 @@ export function projectRetainedRequests({ workspaceId, summaryOnly, objectives, 
     return index;
   };
   const objectiveIndex = primary(objectives), approvalIndex = primary(approvals), writeIndex = primary(writes), requestIndex = new Map(), reciprocalIndex = new Map();
+  const approvalBindings = new Map();
   const complete = collection => metadata(collection).totalKnown && !metadata(collection).truncated && !metadata(collection).invalid;
   for (const item of writes) if (id(item.row.requestId)) {
     if (!requestIndex.has(item.row.requestId)) requestIndex.set(item.row.requestId, []);
@@ -208,6 +209,7 @@ export function projectRetainedRequests({ workspaceId, summaryOnly, objectives, 
     if (matches.length > 1) return { reason: 'ambiguous_reference' };
     if (matches.length === 1 && archived(matches[0].row)) return { reason: 'archived_reference' };
     if (matches.length === 1 && (collection === 'approvals' && !APPROVAL_STATUSES.has(matches[0].row.status)
+      || collection === 'connectionWrites' && (!id(matches[0].row.requestId) || retainedWriteStatus(matches[0].row) === 'unknown')
       || collection === 'businessObjectives' && objectiveDetails.get(matches[0])?.invalid)) return { reason: 'invalid_record' };
     if (!complete(collection)) return { reason: 'target_index_incomplete' };
     if (!matches.length) return { reason: 'unresolved_reference' };
@@ -221,15 +223,15 @@ export function projectRetainedRequests({ workspaceId, summaryOnly, objectives, 
       : unresolved(item, relation, 'edge_limit', field);
   }
   for (const item of writes) {
-    if (!item.node) continue;
     const write = item.row, captured = proposal(write, workspaceId), approvalRelation = 'request_recorded_approval', objectiveRelation = 'request_recorded_objective';
     const ambiguous = writeIndex.get(write.id)?.length > 1 || requestIndex.get(write.requestId)?.length > 1;
     const sourceReason = !id(write.id) || !id(write.requestId) || retainedWriteStatus(write) === 'unknown' ? 'invalid_record'
       : ambiguous ? 'source_identity_ambiguous' : !complete('connectionWrites') ? 'source_index_incomplete' : null;
-    const row = { nodeId: item.node.id, requestRef: `request_${digest([workspaceId, 'retained-request', id(write.requestId) || item.ref.pointer])}`,
+    const row = { nodeId: item.node?.id, requestRef: `request_${digest([workspaceId, 'retained-request', id(write.requestId) || item.ref.pointer])}`,
       recordedStatus: retainedWriteStatus(write), origin: captured.origin,
       approval: { status: 'not_recorded', reason: null }, objective: { status: 'not_recorded', reason: null } };
-    item.node.attributes.status = row.recordedStatus;
+    if (item.node) item.node.attributes.status = row.recordedStatus;
+    approvalBindings.set(item, { reason: sourceReason || captured.reason || 'approval_binding_mismatch' });
     if (id(write.approvalId) || write.requiresApproval === true) {
       const found = target(approvalIndex, 'approvals', write.approvalId);
       let reason = sourceReason || captured.reason || (found.item && !APPROVAL_STATUSES.has(found.item.row.status) ? 'invalid_record' : null) || found.reason;
@@ -244,9 +246,11 @@ export function projectRetainedRequests({ workspaceId, summaryOnly, objectives, 
             || approval.revision !== 1 || objectiveContentApprovalDigest(approval) !== captured.envelope.approvalDigest) reason = 'approval_binding_mismatch';
         } catch { reason = 'approval_binding_mismatch'; }
       }
+      approvalBindings.set(item, { reason: reason || null, approval: found.item });
       row.approval = reason ? unresolved(item, approvalRelation, reason, 'approvalId') : connect(item, found, approvalRelation, 'approvalId');
       if (row.approval.status === 'resolved') row.approval.recordedStatus = APPROVAL_STATUSES.has(approval.status) ? approval.status : 'unknown';
     }
+    if (!item.node) continue;
     if (captured.reason) row.objective = unresolved(item, objectiveRelation, sourceReason || captured.reason, 'objectivePolicyProposal');
     else if (captured.source) {
       const source = captured.source, found = target(objectiveIndex, 'businessObjectives', source.objectiveId);
@@ -264,5 +268,20 @@ export function projectRetainedRequests({ workspaceId, summaryOnly, objectives, 
     }
     result.records.push(row);
   }
-  return result;
+  // Private projection context. Both the ordinary retained relationships and
+  // publication bridge share these exact bounded primary indices and the one
+  // per-request binding assessment. No resolver, raw ID or row enters the DTO.
+  function resolvePublicationTargets(references) {
+    const request = target(writeIndex, 'connectionWrites', references.action.id);
+    const approval = target(approvalIndex, 'approvals', references.approval.id);
+    if (request.reason || approval.reason) return {
+      request: request.reason ? request : { reason: 'paired_approval_unresolved' },
+      approval: approval.reason ? approval : { reason: 'paired_request_unresolved' }
+    };
+    const binding = approvalBindings.get(request.item);
+    const reason = request.item.row.approvalId !== references.approval.id ? 'approval_binding_mismatch'
+      : binding?.reason || (binding?.approval !== approval.item ? 'approval_binding_mismatch' : null);
+    return reason ? { request: { reason }, approval: { reason } } : { request, approval };
+  }
+  return { projection: result, resolvePublicationTargets };
 }

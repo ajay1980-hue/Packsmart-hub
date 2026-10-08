@@ -39,7 +39,7 @@ test('current-reference projector requires private proof and exposes only descri
   const result = projectCurrentOutcomeReferences(freeze([row]), { ...options, publicationBoundary: boundary });
   assert.equal(result.coverage.complete, true); assert.equal(result.counts.publishedHeads, 1);
   assert.deepEqual(result.records, [{ outcomeId: row.outcomeId, versionId: row.versionId, digest: row.digest,
-    revision: 1, status: 'published', source: row.source, measurementComplete: true }]);
+    revision: 1, status: 'published', source: row.source, measurementComplete: true, actionReferences: null, actionReferenceReason: null }]);
   for (const forbidden of ['actorId', 'links', 'sourceRefs', 'amount', 'verification']) assert.equal(JSON.stringify(result).includes(forbidden), false);
   for (const fake of [undefined, {}, structuredClone(boundary), JSON.parse(JSON.stringify(boundary)), result]) {
     assert.throws(() => projectCurrentOutcomeReferences([row], { ...options, publicationBoundary: fake }), { code: 'PUBLICATION_PROOF_REQUIRED' });

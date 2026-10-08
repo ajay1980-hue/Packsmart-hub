@@ -360,8 +360,17 @@ export function projectCurrentOutcomeReferences(input, options) {
         complete = false; exclusions.push({ code: 'CURRENT_VERSION_UNPROVED' }); continue;
       }
       const assessment = assessBusinessOutcomeCandidate(version, { workspaceId: workspace, now });
+      // These are compact, validated publication references, not retained-input
+      // digests or evidence that today's mutable records match the snapshot.
+      // Reject a partial pair without discarding the measurement/publication.
+      const { action, approval } = version.links;
+      const invalidPair = (action === null) !== (approval === null)
+        || action !== null && (action.revision !== 1 || approval?.revision !== 1);
+      const compact = value => ({ id: value.id, revision: value.revision, digest: value.digest });
       records.push({ outcomeId: logicalId, versionId: head.versionId, digest: head.digest, revision: head.revision,
-        status: head.status, source: { ...version.source }, measurementComplete: assessment.measurementComplete });
+        status: head.status, source: { ...version.source }, measurementComplete: assessment.measurementComplete,
+        actionReferences: !invalidPair && action && approval ? { action: compact(action), approval: compact(approval) } : null,
+        actionReferenceReason: invalidPair ? 'invalid_reference_pair' : null });
     } catch (error) {
       if (error.code === 'WORKSPACE_MISMATCH') throw error;
       complete = false; exclusions.push({ code: 'PUBLICATION_UNAVAILABLE' });

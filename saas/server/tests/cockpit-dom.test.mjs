@@ -12,6 +12,8 @@ import { detectOpportunities } from '../lib/control.mjs';
 import { createSessionToken, hashPasswordAsync } from '../lib/security.mjs';
 import { deriveBusinessGraph } from '../lib/business-graph.mjs';
 import { objectiveContentFixture } from './objective-content-fixture.mjs';
+import { publishedActionGraphFixture, publishedGraphOptions, publishedGraphInput, graphHash } from './published-action-graph-fixture.mjs';
+import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 
 test('cockpit renders authenticated controls and submits real persisted workflows', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-cockpit-'));
@@ -361,12 +363,13 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       groups: [{ id: 'group_one', metric: 'incrementalContribution', definitionVersion: 'incremental-contribution/v1', method: 'reconciled_manual', currency: 'GBP',
         window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-06T00:00:00.000Z' }, measuredCount: 1, knownZeroCount: 0, negativeCount: 1, positiveCount: 0, amount: '-123456789012345678.123456', amountStatus: 'measured_sum' }],
       limits: { byteLimit: 16384 }, safeguards: { externalWrites: false } } });
-  const harness = async () => {
+  const harness = async (role = 'owner') => {
     const errors = [], virtualConsole = new VirtualConsole(); virtualConsole.on('jsdomError', error => errors.push(error.message));
     const dom = new JSDOM(html, { url: base, runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole });
     const window = dom.window, document = window.document, calls = [], pending = [];
-    let control, login = { user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf }, holdBootstrap, holdLogout, holdPassword;
-    window.Headers = Headers; window.AbortController = AbortController; window.scrollTo = () => {};
+    const visibleBootstrap = structuredClone(bootstrap); visibleBootstrap.user.role = role;
+    let control, login = { user: visibleBootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf }, holdBootstrap, holdLogout, holdPassword;
+    window.Headers = Headers; window.AbortController = AbortController; window.scrollTo = () => {}; window.HTMLElement.prototype.scrollIntoView = () => {};
     window.RunvaraControl = { init(api) { control = api; }, render() {}, evidence() { return ''; }, history() { return ''; } };
     window.fetch = (route, options = {}) => {
       calls.push({ route, options });
@@ -374,7 +377,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       if (route === '/api/bootstrap' && holdBootstrap) return new Promise(resolve => { holdBootstrap.resolve = resolve; });
       if (route === '/api/auth/logout' && holdLogout) return new Promise(resolve => { holdLogout.resolve = resolve; });
       if (route === '/api/auth/change-password' && holdPassword) return new Promise(resolve => { holdPassword.resolve = resolve; });
-      return Promise.resolve(Response.json(route === '/api/bootstrap' ? bootstrap : route === '/api/auth/session' || route === '/api/auth/login' ? login : {}));
+      return Promise.resolve(Response.json(route === '/api/bootstrap' ? visibleBootstrap : route === '/api/auth/session' || route === '/api/auth/login' ? login : {}));
     };
     const until = async condition => {
       for (let attempt = 0; attempt < 100; attempt++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
@@ -396,6 +399,155 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       holdBootstrap() { holdBootstrap = {}; return holdBootstrap; }, holdLogout() { holdLogout = {}; return holdLogout; }, holdPassword() { holdPassword = {}; return holdPassword; },
       login: () => login, close: () => dom.window.close() };
   };
+
+  await t.test('actual manual, objective and unlinked publications expose read-only recorded references to every reader', async () => {
+    const fixtures = [await publishedActionGraphFixture(), await publishedActionGraphFixture({ kind: 'objective' }), await publishedActionGraphFixture({ linked: false })];
+    for (const role of ['owner', 'viewer']) {
+      const h = await harness(role);
+      try {
+        for (const [index, fixture] of fixtures.entries()) {
+          h.begin().resolve(Response.json(fixture.graph)); await h.until(() => !h.button.disabled);
+          const reviewed = h.result.querySelector('.reviewed-result'), links = [...reviewed.querySelectorAll('[data-graph-record-link]')];
+          assert.match(reviewed.textContent, /Snapshot content comparedFalse; current mutable content was not compared/);
+          assert.equal(links.length, index === 2 ? 0 : 2);
+          if (index === 2) assert.match(reviewed.textContent, /Not recorded in this publication/);
+          else {
+            assert.match(reviewed.textContent, /Resolved primary identity; current reciprocal binding recorded/);
+            assert.match(h.result.textContent, index === 0 ? /Recorded originOrigin not recorded/ : /Recorded goal-associated content request/);
+            const before = h.calls.length, href = h.window.location.href, historyLength = h.window.history.length;
+            for (const link of links) {
+              const target = h.document.getElementById(link.dataset.graphRecordLink);
+              target.closest('.retained-request').open = false;
+              link.click(); link.click();
+              assert.equal(target.closest('.retained-request').open, true); assert.equal(h.document.activeElement, target);
+              assert.equal(h.window.location.href, href); assert.equal(h.window.history.length, historyLength);
+            }
+            assert.equal(h.calls.length, before, 'inspection anchors never read, decide, prepare, execute or write');
+          }
+          for (const secret of [fixture.write.id, fixture.write.requestId, fixture.approval.id, fixture.write.account, fixture.write.digest, fixture.sourceAction.digest])
+            assert.equal(h.result.innerHTML.includes(secret), false, 'generic graph redacts the private source/reference ' + secret);
+          assert.match(h.result.textContent, /published source digest is not the current input digest/);
+          assert.match(h.result.textContent, /no immutable execution receipt, current execution authority/);
+          assert.equal(h.result.querySelector('[data-approval], [data-connection-write], [data-apply], input, form'), null);
+        }
+        assert.equal(h.document.getElementById('hg-value').textContent, '—'); assert.deepEqual(h.errors, []);
+      } finally { h.close(); }
+    }
+  });
+
+  await t.test('actual primary identities keep independent timing, mutation, missing, ambiguous, incomplete and limited states distinct', async () => {
+    const f = await publishedActionGraphFixture(), h = await harness();
+    const show = async payload => { h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled); return h.result.querySelector('.reviewed-result'); };
+    try {
+      const changed = structuredClone(f.state);
+      changed.connectionWrites[0].input.title = 'Changed current mutable content';
+      changed.connectionWrites[0].digest = graphHash(changed.connectionWrites[0].input);
+      changed.approvals[0].payload.digest = changed.connectionWrites[0].digest;
+      const staleOptions = { ...f.options, workspaceSnapshot: { revision: 'newer_mutable_snapshot', readCompletedAt: '2026-10-08T11:00:00.000Z' }, outcomeReadCompletedAt: '2026-10-07T10:00:00.000Z' };
+      let reviewed = await show(deriveBusinessGraph(changed, staleOptions));
+      assert.equal(reviewed.querySelectorAll('a').length, 2, 'coherently changed mutable content retains identity links without equality claims');
+      assert.match(reviewed.textContent, /False; current mutable content was not compared/);
+      assert.match(h.result.textContent, /2026-10-08T11:00:00.000Z/); assert.match(h.result.textContent, /2026-10-07T10:00:00.000Z/);
+      assert.match(h.result.textContent, /Read times are not commit times or freshness guarantees/);
+      const cases = [
+        ['missing request', state => { state.connectionWrites = []; }, /Reference absent from the inspected retained snapshot; deletion is not established/],
+        ['external ID alias', state => { state.connectionWrites[0].externalId = state.connectionWrites[0].id; state.connectionWrites[0].id = 'different_primary'; }, /Reference absent from the inspected retained snapshot; deletion is not established/],
+        ['duplicate request', state => { state.connectionWrites.push(structuredClone(state.connectionWrites[0])); }, /More than one retained/],
+        ['duplicate approval', state => { state.approvals.push(structuredClone(state.approvals[0])); }, /More than one retained/],
+        ['changed reciprocal binding', state => { state.approvals[0].payload.digest = 'f'.repeat(64); }, /current reciprocal request and approval binding has changed or does not match/],
+        ['incomplete approvals', state => { state.approvals = null; }, /records are incomplete/],
+        ['archived approval', state => { state.approvals[0].archived = true; }, /explicitly archived/]
+      ];
+      for (const [name, mutate, reason] of cases) {
+        const state = structuredClone(f.state); mutate(state);
+        const payload = deriveBusinessGraph(state, f.options); reviewed = await show(payload);
+        assert.ok(reviewed, name); assert.match(reviewed.textContent, reason, name); assert.equal(reviewed.querySelectorAll('a').length, 0, name);
+      }
+      reviewed = await show(deriveBusinessGraph(f.state, { ...f.options, edgeLimit: 1 }));
+      assert.equal(reviewed.querySelectorAll('a').length, 0); assert.match(h.result.textContent, /omitted by display limits|unique reciprocal pair could not be shown/);
+      const versions = Array.from({ length: 50 }, (_, index) => createBusinessOutcomeCandidate(publishedGraphInput('bounded_experiment_' + index, f.version.links), { workspaceId: f.state.workspace.id, now: f.now }));
+      const boundedState = structuredClone(f.state); boundedState.revenueEngine.experiments = versions.map(version => ({ id: version.source.experimentId }));
+      const bounded = deriveBusinessGraph(boundedState, await publishedGraphOptions(versions, { now: f.now }));
+      assert.ok(bounded.reviewedOutcomes.records.some(record => record.requestRelationship.reason === 'output_byte_limit'), 'real aggregate byte trimming supplies the omission reason');
+      await show(bounded); assert.match(h.result.textContent, /recorded link was omitted by the output size limit/);
+      assert.equal(h.result.querySelectorAll('[data-graph-record-link]').length, 0, 'a trimmed reciprocal request row never receives an anchor');
+      const unavailable = deriveBusinessGraph(f.state, { inspectCurrentOutcomes: true }); await show(unavailable);
+      assert.match(h.result.textContent, /Proof of current reviewed results is unavailable/); assert.equal(h.result.querySelectorAll('[data-graph-record-link]').length, 0);
+      assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
+
+  await t.test('actual reused, corrected and withdrawn publications keep version-bound links and measured inclusion separate', async () => {
+    const f = await publishedActionGraphFixture(), h = await harness();
+    try {
+      const input = structuredClone(f.input); input.amount = '20.50'; input.source.measurementRevision = 2;
+      input.source.measurementDigest = graphHash('corrected'); input.verification.measurementDigest = input.source.measurementDigest;
+      const options = { workspaceId: f.state.workspace.id, now: f.now };
+      const corrected = correctBusinessOutcomeCandidate(f.version, input, options);
+      const reused = createBusinessOutcomeCandidate(publishedGraphInput('reused_action_experiment', f.version.links, '3.00'), options);
+      const withdrawn = withdrawBusinessOutcomeCandidate(reused, { reason: 'incorrect_measurement', verification: reused.verification }, options);
+      const state = structuredClone(f.state); state.revenueEngine.experiments.push({ id: 'reused_action_experiment', status: 'completed' });
+      const payload = deriveBusinessGraph(state, await publishedGraphOptions([corrected, withdrawn], options));
+      h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+      const rows = [...h.result.querySelectorAll('.reviewed-result')]; assert.equal(rows.length, 2);
+      assert.equal(h.result.querySelectorAll('[data-graph-record-link]').length, 4, 'reused identity references keep separate current versions');
+      const excluded = rows.find(row => /Withdrawn/.test(row.querySelector('summary').textContent));
+      assert.match(excluded.textContent, /Excluded or withheld from groups/); assert.equal(excluded.querySelectorAll('a').length, 2);
+      assert.match(h.result.textContent, /Exact scoped amount20.5/); assert.doesNotMatch(h.result.textContent, /Exact scoped amount23.5/);
+      assert.equal(payload.reviewedOutcomes.records.some(record => record.versionRef === f.graph.reviewedOutcomes.records[0].versionRef), false);
+      const before = h.calls.length; for (const link of h.result.querySelectorAll('[data-graph-record-link]')) link.click();
+      assert.equal(h.calls.length, before); assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
+
+  await t.test('actual links fail closed for malformed metadata, unsafe fields and duplicate displayed targets', async () => {
+    const f = await publishedActionGraphFixture(), h = await harness();
+    try {
+      const variants = [
+        payload => { delete payload.reviewedOutcomes.records[0].requestRelationship; },
+        payload => { payload.reviewedOutcomes.records[0].requestRelationship.snapshotContentCompared = true; },
+        payload => { payload.retainedRequests.records.push(structuredClone(payload.retainedRequests.records[0])); },
+        payload => { payload.retainedRequests.records[0].approval.targetNodeId = 'wrong_displayed_binding'; },
+        payload => { payload.reviewedOutcomes.records[0].requestRelationship = { status: 'unresolved', reason: '<img src=x onerror=alert(1)>', snapshotContentCompared: false }; },
+        payload => { payload.reviewedOutcomes.records[0].approvalRelationship.targetNodeId = 'PRIVATE_ACCOUNT_SECURITY_EPOCH'; }
+      ];
+      for (const mutate of variants) {
+        const payload = structuredClone(f.graph); mutate(payload);
+        payload.reviewedOutcomes.records[0].sourceAction = { input: 'PRIVATE_ACCOUNT_SECURITY_EPOCH' };
+        h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+        assert.equal(h.result.querySelectorAll('[data-graph-record-link], img, [onerror]').length, 0);
+        assert.doesNotMatch(h.result.innerHTML, /PRIVATE_ACCOUNT_SECURITY_EPOCH|<img|onerror/);
+        assert.match(h.result.querySelector('.reviewed-result').textContent, /Unavailable/);
+      }
+      assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
+
+  await t.test('actual links reject stale elements after replacement/reorder and back or cancelled inspection', async () => {
+    const f = await publishedActionGraphFixture(), h = await harness();
+    try {
+      h.begin().resolve(Response.json(f.graph)); await h.until(() => !h.button.disabled);
+      const oldLink = h.result.querySelector('[data-graph-record-link]'), oldTarget = h.document.getElementById(oldLink.dataset.graphRecordLink);
+      const state = structuredClone(f.state), other = structuredClone(state.connectionWrites[0]), approval = structuredClone(state.approvals[0]);
+      other.id = 'another_current_write'; other.requestId = 'another_current_request'; other.approvalId = 'another_current_approval';
+      approval.id = other.approvalId; approval.payload.connectionWriteId = other.id;
+      state.connectionWrites.unshift(other); state.approvals.unshift(approval);
+      const reordered = deriveBusinessGraph(state, f.options);
+      h.begin().resolve(Response.json(reordered)); await h.until(() => !h.button.disabled);
+      const before = h.calls.length; h.button.focus();
+      oldLink.click(); assert.equal(h.document.activeElement, h.button, 'detached anchor cannot affect the new snapshot');
+      h.result.append(oldLink); oldLink.click(); assert.equal(h.document.activeElement, h.button, 'reattached old anchor cannot target a different row at its former index'); oldLink.remove();
+      assert.equal(oldTarget.isConnected, false);
+      const current = h.result.querySelector('[data-graph-record-link]'); current.click();
+      assert.equal(h.document.activeElement.id, 'graph-retained-request-1'); assert.equal(h.calls.length, before);
+      const pending = h.begin(); h.window.dispatchEvent(new h.window.PopStateEvent('popstate'));
+      assert.equal(pending.signal.aborted, true); assert.equal(h.result.textContent, ''); assert.equal(h.panel.open, false);
+      pending.resolve(Response.json(f.graph)); await h.settle(); assert.equal(h.result.textContent, '');
+      const cancelled = h.begin(); h.panel.open = false; await h.settle();
+      assert.equal(cancelled.signal.aborted, true); cancelled.resolve(Response.json(f.graph)); await h.settle();
+      assert.equal(h.result.textContent, ''); assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
 
   await t.test('open, focus, repeated click, close and reopen only fetch on explicit inspection', async () => {
     const h = await harness();
@@ -432,6 +584,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
     } finally { h.close(); }
   });
 
+  const linkedLifecycle = await publishedActionGraphFixture();
   for (const outcome of ['success', 'error', '401', 'network failure']) await t.test('close and navigation discard abandoned ' + outcome + ' and its finally callback', async () => {
     const h = await harness();
     try {
@@ -439,14 +592,14 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       const current = h.begin();
       assert.equal(old.signal.aborted, true); assert.equal(h.pending.length, 2);
       if (outcome === 'network failure') old.reject(new TypeError('Abandoned network failure'));
-      else old.resolve(outcome === 'success' ? Response.json(graph()) : Response.json({ code: outcome === '401' ? 'AUTH_REQUIRED' : 'FAILED', error: 'Abandoned failure' }, { status: outcome === '401' ? 401 : 503 }));
+      else old.resolve(outcome === 'success' ? Response.json(linkedLifecycle.graph) : Response.json({ code: outcome === '401' ? 'AUTH_REQUIRED' : 'FAILED', error: 'Abandoned failure' }, { status: outcome === '401' ? 401 : 503 }));
       await h.settle(); assert.equal(h.button.disabled, true); assert.match(h.result.textContent, /^Reading current/);
       assert.equal(h.document.getElementById('app-shell').classList.contains('hidden'), false);
-      const latest = graph(); latest.reviewedOutcomes.snapshots.workspace.revisionRef = 'new_workspace_snapshot';
+      const latest = structuredClone(linkedLifecycle.graph); latest.reviewedOutcomes.snapshots.workspace.revisionRef = 'new_workspace_snapshot';
       current.resolve(Response.json(latest)); await h.until(() => !h.button.disabled); assert.match(h.result.textContent, /new_workspace_snapshot/);
       const navigated = h.begin(); h.control.setView('ai-team'); assert.equal(navigated.signal.aborted, true); assert.equal(h.result.textContent, '');
       h.control.setView('overview'); h.panel.open = true;
-      navigated.resolve(Response.json(graph())); await h.settle();
+      navigated.resolve(Response.json(linkedLifecycle.graph)); await h.settle();
       assert.equal(h.result.textContent, ''); assert.equal(h.pending.length, 3, 'returning to Command never revives or fetches a snapshot');
       assert.deepEqual(h.errors, []);
     } finally { h.close(); }
@@ -457,11 +610,11 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
     try {
       const old = h.begin(), blocked = h.holdBootstrap(), loading = h.control.reload({ migrate: false });
       assert.equal(old.signal.aborted, true); assert.equal(h.result.textContent, '');
-      old.resolve(Response.json(graph())); await h.settle(); assert.equal(h.result.textContent, '');
+      old.resolve(Response.json(linkedLifecycle.graph)); await h.settle(); assert.equal(h.result.textContent, '');
       const duringReload = h.begin();
       blocked.resolve(Response.json(bootstrap)); await loading;
       assert.equal(duringReload.signal.aborted, true); assert.equal(h.button.disabled, false);
-      duringReload.resolve(Response.json(graph())); await h.settle();
+      duringReload.resolve(Response.json(linkedLifecycle.graph)); await h.settle();
       assert.equal(h.pending.length, 2); assert.equal(h.result.textContent, '');
     } finally { h.close(); }
   });
@@ -505,7 +658,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       assert.equal(old.signal.aborted, true); assert.equal(h.result.textContent, '');
       const newer = h.begin(); password.resolve(Response.json({ csrf: 'changed-password-session' }));
       await h.until(() => newer.signal.aborted); assert.equal(h.button.disabled, false);
-      old.resolve(Response.json(graph())); newer.resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 }));
+      old.resolve(Response.json(linkedLifecycle.graph)); newer.resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 }));
       await h.settle(); assert.equal(h.result.textContent, '');
       assert.equal(h.document.getElementById('app-shell').classList.contains('hidden'), false);
     } finally { h.close(); }
@@ -517,7 +670,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       const old = h.begin(); h.control.setView('ai-team'); h.control.setView('overview');
       const current = h.begin(); current.resolve(Response.json({ error: 'Latest inspection failed' }, { status: 503 }));
       await h.until(() => !h.button.disabled);
-      old.resolve(Response.json(graph())); await h.settle();
+      old.resolve(Response.json(linkedLifecycle.graph)); await h.settle();
       assert.match(h.result.textContent, /Latest inspection failed/); assert.match(h.result.textContent, /try again/);
       assert.equal(h.button.disabled, false);
     } finally { h.close(); }
@@ -642,7 +795,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       assert.equal(h.result.querySelector('[onerror]'), null); assert.equal(h.result.querySelector('img'), null);
       assert.match(h.result.textContent, /Complete current-result read/); assert.match(h.result.textContent, /Available relationship recordsIncomplete or unavailable/);
       assert.match(h.result.textContent, /Shown results, links and groupsIncomplete or unavailable/);
-      assert.match(h.result.textContent, /Reviewed results omitted2/); assert.match(h.result.textContent, /Experiment links omitted3/); assert.match(h.result.textContent, /Measurement groups omitted4/); assert.match(h.result.textContent, /Unresolved link details omitted5/);
+      assert.match(h.result.textContent, /Reviewed results omitted2/); assert.match(h.result.textContent, /Reviewed-result links omitted3/); assert.match(h.result.textContent, /Measurement groups omitted4/); assert.match(h.result.textContent, /Unresolved link details omitted5/);
       assert.match(h.result.textContent, /-123456789012345678.123456/);
       reviewed.coverage.publicationHeadsComplete = false;
       h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);

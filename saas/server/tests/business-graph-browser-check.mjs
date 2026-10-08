@@ -12,7 +12,10 @@ import { createSessionToken } from '../lib/security.mjs';
 import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
 import { createBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
-import { CONTENT_WORKSPACE, objectiveContentFixture } from './objective-content-fixture.mjs';
+import { CONTENT_WORKSPACE } from './objective-content-fixture.mjs';
+import { publishedActionGraphFixture } from './published-action-graph-fixture.mjs';
+import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
+import { createOutcomeViewportSession } from './business-outcomes-browser-capture.mjs';
 
 async function graphTypography(page) {
   return page.locator('#business-graph-result section.status-list').evaluateAll(sections => sections.flatMap(section =>
@@ -49,25 +52,40 @@ function assertReadableRows(rows, width, { doubled = false } = {}) {
   }
 }
 
-// Viewport captures show the real sticky header and every saved-history row in
-// overlapping slices. Whole-element captures remain separate evidence: they
-// can include fixed UI bands when Chromium stitches an element taller than the viewport.
-async function captureHistoryViewports(page, width, suffix = '') {
-  const geometry = await page.locator('.retained-request-history').evaluate(element => {
-    const rect = element.getBoundingClientRect(), header = document.querySelector('.topbar').getBoundingClientRect();
-    return { top: rect.top + scrollY, bottom: rect.bottom + scrollY, offset: Math.min(header.height + 16, innerHeight / 3), height: innerHeight };
-  });
-  const stride = geometry.height - geometry.offset - 80;
-  let part = 0;
-  for (let position = geometry.top; position < geometry.bottom; position += stride) {
-    await page.evaluate(top => scrollTo({ top, behavior: 'instant' }), Math.max(0, position - geometry.offset));
-    await page.screenshot({ path: `/tmp/runvara-business-graph-${width}-saved-history${suffix}-${++part}.png` });
-  }
+// Capture real scrolling viewports, including fixed chrome, for the entire
+// inspected source and its navigation controls. No stitched element captures.
+async function captureGraphViewports(page, width, suffix = '') {
+  const panel = page.locator('.business-graph-inspector');
+  const viewport = await panel.evaluateHandle(createOutcomeViewportSession);
+  const horizontal = bounds => assert.ok(bounds.left >= bounds.visibleLeft - 2 && bounds.right <= bounds.visibleRight + 2 && bounds.scroll <= bounds.client + 2,
+    `graph ${width}px${suffix} horizontal clipping: ${JSON.stringify(bounds)}`);
+  try {
+    let covered = 0, part = 0;
+    while (true) {
+      await viewport.evaluate((session, offset) => session.reveal(offset), Math.max(0, covered - 80));
+      const bounds = await viewport.evaluate(session => session.bounds()); horizontal(bounds);
+      assert.ok(bounds.from <= covered + 2 && bounds.to > covered + 1, `graph capture leaves a gap: ${JSON.stringify({ covered, ...bounds })}`);
+      await page.screenshot({ path: `/tmp/runvara-business-graph-${width}-source${suffix}-${++part}.png`, fullPage: false });
+      covered = bounds.to;
+      if (covered >= bounds.height - 1) break;
+      assert.ok(part < 60, 'graph source stays within 60 viewport captures');
+    }
+    const controls = [page.locator('#load-business-graph'), panel.locator('[data-graph-record-link]').first(), panel.locator('[data-graph-record-link]').nth(1)];
+    for (let index = 0; index < controls.length; index++) {
+      const control = await controls[index].evaluateHandle(createOutcomeViewportSession);
+      try {
+        await control.evaluate(session => session.reveal(0));
+        const bounds = await control.evaluate(session => session.bounds()); horizontal(bounds);
+        assert.ok(bounds.height > 0 && bounds.from <= 1 && bounds.to >= bounds.height - 1, `graph control must be entirely visible: ${JSON.stringify(bounds)}`);
+        await page.screenshot({ path: `/tmp/runvara-business-graph-${width}-control${suffix}-${index + 1}.png`, fullPage: false });
+      } finally { await control.dispose(); }
+    }
+  } finally { await viewport.dispose(); }
 }
 
 const NOW = '2026-10-07T12:00:00.000Z', WORKSPACE = CONTENT_WORKSPACE;
 const digest = value => createHash('sha256').update(value).digest('hex');
-function publication(index, { experimentId, amount, currency = 'GBP', withdrawn = false }) {
+function publication(index, { experimentId, amount, currency = 'GBP', withdrawn = false, links = {} }) {
   const measurementDigest = digest('browser_measurement_' + index);
   let version = createBusinessOutcomeCandidate({
     source: { type: 'experiment_measurement', experimentId, measurementRevision: 1, measurementDigest },
@@ -77,7 +95,7 @@ function publication(index, { experimentId, amount, currency = 'GBP', withdrawn 
     method: { kind: 'reconciled_manual', definitionVersion: 'incremental-contribution/v1' },
     provenance: { observationId: 'browser_observation_' + index, sourceRefs: [{ type: 'measurement_report', id: 'browser_report_' + index, digest: digest('browser_report_' + index) }],
       observedAt: '2026-10-06T12:00:00.000Z', aggregation: 'non_overlapping_scopes_attested' },
-    verification: { kind: 'owner_attestation', actorId: 'browser_fixture_owner', verifiedAt: '2026-10-06T14:00:00.000Z', measurementDigest }
+    verification: { kind: 'owner_attestation', actorId: 'browser_fixture_owner', verifiedAt: '2026-10-06T14:00:00.000Z', measurementDigest }, links
   }, { workspaceId: WORKSPACE, now: NOW });
   if (withdrawn) version = withdrawBusinessOutcomeCandidate(version, { reason: 'incorrect_measurement', verification: {
     ...version.verification, verifiedAt: '2026-10-06T18:00:00.000Z' } }, { workspaceId: WORKSPACE, now: NOW });
@@ -94,11 +112,13 @@ const server = createPacksmartServer({ NODE_ENV: 'test', APP_PUBLIC_URL: 'http:/
   { schedulerEnabled: false, agentOpsEnabled: false, fetchImpl: () => { providerRequests++; throw new Error('Provider transport forbidden in synthetic graph fixture'); } });
 let browser, currentReads = 0, readBarrier = null;
 try {
-  const prepared = await objectiveContentFixture(), state = prepared.state;
+  const prepared = await publishedActionGraphFixture({ kind: 'objective', workspaceId: WORKSPACE }), state = prepared.state;
+  const manual = await publishedActionGraphFixture({ workspaceId: WORKSPACE });
+  state.connectionWrites.push(manual.write); state.approvals.push(manual.approval); state.connections.push(...manual.state.connections);
   state.products.push({ id: 'p1', provider: 'shopify', title: 'Packaging evidence fixture', status: 'active', variants: [{ id: 'v1', sku: 'PS-1', price: 10, inventory: 3, available: true }] });
   upsertBusinessObjective(state, { id: state.businessObjectives[0].id, revision: state.businessObjectives[0].revision, title: 'Changed saved goal definition' }, { actorId: state.users[0].id });
-  // A recorded completion is history only. The fixture never executes it.
-  state.connectionWrites[0].status = 'completed';
+  // The fixture's completion used synthetic transport. Inspection itself never
+  // executes a write or reads any current provider source.
   const legacy = { ...structuredClone(state.connectionWrites[0]), id: 'browser_legacy_write', requestId: 'browser_legacy_request', approvalId: 'browser_missing_approval', status: 'uncertain' };
   delete legacy.objectivePolicyProposal; delete legacy.source;
   state.connectionWrites.push(legacy);
@@ -108,9 +128,9 @@ try {
     { id: 'browser_long_experiment_one', status: 'completed' },
     { id: 'browser_long_experiment_two', status: 'completed' }
   ];
-  const rows = [publication(1, { experimentId: 'browser_experiment_one', amount: '-12.340001' }),
+  const rows = [publication(1, { experimentId: 'browser_experiment_one', amount: '-12.340001', links: prepared.version.links }),
     publication(2, { experimentId: 'browser_archived_experiment', amount: '0', currency: 'USD' }),
-    publication(3, { experimentId: 'browser_experiment_two', amount: '99', withdrawn: true }),
+    publication(3, { experimentId: 'browser_experiment_two', amount: '99', withdrawn: true, links: manual.version.links }),
     publication(4, { experimentId: 'browser_long_experiment_one', amount: '999999999999999999.123456', currency: 'EUR' }),
     publication(5, { experimentId: 'browser_long_experiment_two', amount: '1', currency: 'EUR' })];
   const persistence = createBusinessOutcomePersistence({ now: () => new Date(NOW), request: async (route, options) => {
@@ -184,7 +204,22 @@ try {
     assert.match(await history.textContent(), /Request application statusRecorded uncertain/);
     assert.match(await history.textContent(), /Reference absent from the inspected retained snapshot/);
     assert.match(await history.textContent(), /Current source and execution eligibility were not checked/);
+    assert.match(await history.textContent(), /Recorded originOrigin not recorded/);
     assert.doesNotMatch(await history.textContent(), /browser_legacy_write|browser_legacy_request|browser_missing_approval|Owner authored|myshopify\.com|content-owner/);
+    await result.locator('.reviewed-result').evaluateAll(elements => elements.forEach(element => { element.open = true; }));
+    assert.equal(await result.locator('[data-graph-record-link]').count(), 4, 'manual and v2 publications link existing retained rows');
+    assert.match(await result.textContent(), /Not recorded in this publication/);
+    assert.match(await result.textContent(), /Snapshot content comparedFalse; current mutable content was not compared/);
+    assert.match(await result.textContent(), /published source digest is not the current input digest/);
+    const linksBefore = apiCalls.length, urlBefore = page.url(), historyBefore = await page.evaluate(() => history.length);
+    for (const link of await result.locator('[data-graph-record-link]').all()) {
+      const targetId = await link.getAttribute('data-graph-record-link');
+      await link.click(); await link.click();
+      assert.equal(await page.evaluate(() => document.activeElement.id), targetId);
+      assert.equal(await page.locator('#' + targetId).evaluate(element => element.closest('.retained-request').open), true);
+    }
+    assert.equal(apiCalls.length, linksBefore, 'inspection links do not fetch, approve or apply');
+    assert.equal(page.url(), urlBefore); assert.equal(await page.evaluate(() => history.length), historyBefore, 'inspection links do not add browser history');
     const dimensions = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, width: innerWidth }));
     assert.ok(dimensions.scroll <= dimensions.width + 2, `graph viewport overflow at ${width}px: ${JSON.stringify(dimensions)}`);
     assert.deepEqual(errors, []);
@@ -202,17 +237,15 @@ try {
     assert.ok(longAmount, 'a grouped exact amount longer than one candidate amount is preserved');
     assert.ok(normal.some(row => row.label.text === 'Request application status' && row.value.text === 'Recorded completed'), 'actual retained request typography is inspected');
     assert.ok(normal.some(row => row.label.text === 'Saved definition comparison' && row.value.text.startsWith('Saved revision changed')), 'actual saved revision comparison typography is inspected');
-    await details.screenshot({ path: `/tmp/runvara-business-graph-${width}-full.png` });
-    await captureHistoryViewports(page, width);
+    await captureGraphViewports(page, width);
 
-    // Double the rendered labels and values, matching a larger-text preference
-    // without changing unrelated app typography. Natural wrapping is expected.
-    await result.locator('section.status-list > div > span, section.status-list > div > b').evaluateAll(elements => {
-      for (const element of elements) {
-        element.dataset.normalFontSize = element.style.fontSize;
-        element.style.fontSize = `${parseFloat(getComputedStyle(element).fontSize) * 2}px`;
-      }
-    });
+    // Capture the selected inspector subtree at exactly 200%, with every
+    // descendant's baseline read before any style changes. This also covers
+    // anchors, controls and source-boundary text without nested multiplication.
+    const typography = await details.evaluateHandle(createRestrictionTypographySession);
+    await typography.evaluate(session => session.begin());
+    try {
+    await typography.evaluate(session => session.enlarge());
     const doubled = await graphTypography(page);
     assertReadableRows(doubled, width, { doubled: true });
     assert.deepEqual(doubled.map(row => [row.label.text, row.value.text]), normal.map(row => [row.label.text, row.value.text]), 'enlarged text preserves every exact value and label');
@@ -226,11 +259,8 @@ try {
     });
     assert.ok(enlargedDimensions.scroll <= enlargedDimensions.width + 2 && enlargedDimensions.panelScroll <= enlargedDimensions.panelWidth + 1,
       `doubled graph text overflows at ${width}px: ${JSON.stringify(enlargedDimensions)}`);
-    await details.screenshot({ path: `/tmp/runvara-business-graph-${width}-full-large-text.png` });
-    await captureHistoryViewports(page, width, '-large-text');
-    await result.locator('section.status-list > div > span, section.status-list > div > b').evaluateAll(elements => {
-      for (const element of elements) { element.style.fontSize = element.dataset.normalFontSize; delete element.dataset.normalFontSize; }
-    });
+    await captureGraphViewports(page, width, '-large-text');
+    } finally { await typography.evaluate(session => session.restore()); await typography.dispose(); }
 
     const closedRead = {}; readBarrier = closedRead;
     await button.click(); await until(() => Boolean(closedRead.release));
@@ -248,7 +278,15 @@ try {
     await page.waitForTimeout(50);
     assert.equal(await result.textContent(), ''); assert.equal(calls.length, 3, 'returning to Command never fetches or revives abandoned results');
     assert.equal(currentReads, readsBefore + 3); assert.equal(await button.isEnabled(), true);
-    assert.equal(apiCalls.filter(call => call.path === '/api/business-graph').length, 3);
+    await page.evaluate(() => window.history.pushState({ fixture: true }, '', '?graph-browser-back-check'));
+    const backRead = {}; readBarrier = backRead;
+    await button.click(); await until(() => Boolean(backRead.release));
+    await page.goBack(); backRead.release();
+    await page.waitForTimeout(50);
+    assert.equal(await result.textContent(), ''); assert.equal(await details.evaluate(element => element.open), false);
+    assert.equal(calls.length, 4, 'browser Back abandons the snapshot without another read');
+    assert.equal(currentReads, readsBefore + 4);
+    assert.equal(apiCalls.filter(call => call.path === '/api/business-graph').length, 4);
     assert.deepEqual(unexpected, []); assert.equal(providerRequests, 0);
     assert.deepEqual(errors, []);
     await navigate('ai-team');
@@ -280,8 +318,7 @@ try {
     assert.deepEqual(unexpected, []); assert.equal(providerRequests, 0);
     await context.close();
   }
-  assert.equal(currentReads, 9, 'nine explicit graph inspections, no automatic current-head reads');
-  assert.deepEqual(prepared.counts, { job: 0, credentials: 0, saves: 0, fresh: 0, mutations: 0 });
+  assert.equal(currentReads, 12, 'twelve explicit graph inspections, no automatic current-head reads');
   assert.equal(providerRequests, 0, 'the server never used provider transport');
   const screenshots = await fs.readdir(os.tmpdir());
   for (const width of [320, 390, 1200]) {
@@ -289,7 +326,7 @@ try {
     const sizes = await Promise.all(files.map(name => fs.stat(path.join(os.tmpdir(), name))));
     assert.ok(sizes.reduce((bytes, stat) => bytes + stat.size, 0) < 31 * 1024 * 1024, `graph ${width}px artifact group leaves room below the 32 MiB ZIP limit`);
   }
-  console.log('Saved goal/request history, reviewed outcomes and objectives verified at 320, 390 and 1200 pixels. Normal interactions and separate doubled label/value captures passed.');
+  console.log('Published manual/v2 references, saved request/approval inspection and objectives verified at 320, 390 and 1200 pixels. Normal interactions and separate exact 200% subtree scrolling source/control captures passed.');
 } finally {
   if (browser) await browser.close();
   await new Promise(resolve => server.close(resolve));
