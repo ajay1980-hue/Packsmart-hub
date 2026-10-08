@@ -117,7 +117,7 @@ try {
       'startup does not fetch objective or account references separately');
     if (await page.locator('#mobile-menu').isVisible()) await page.locator('#mobile-menu').click();
     await page.locator('#main-nav [data-view="ai-team"]').click();
-    const details = page.locator('.business-objectives-panel'); await details.locator('summary').click();
+    const details = page.locator('.business-objectives-panel'); await details.locator(':scope > summary').click();
     await page.locator('#load-business-objectives').click();
     const prepare = page.locator('[data-prepare-objective-review]'); await prepare.waitFor();
     assert.equal(calls.length, 0, 'loading definitions does not prepare a diagnostic');
@@ -140,7 +140,7 @@ try {
       return { width: innerWidth, page: document.documentElement.scrollWidth, panel: panel.scrollWidth, available: panel.clientWidth };
     });
     assert.ok(dimensions.page <= width + 2 && dimensions.panel <= dimensions.available + 2, `review overflow at ${width}px: ${JSON.stringify(dimensions)}`);
-    const before = calls.length; await details.locator('summary').click(); await details.locator('summary').click();
+    const before = calls.length; await details.locator(':scope > summary').click(); await details.locator(':scope > summary').click();
     assert.equal(calls.length, before, 'reopening the completed report does not request it again');
     await result.locator('[data-investigate-review-opportunity="' + originalOpportunityId + '"]').click();
     await page.locator('#view-opportunities.active').waitFor();
@@ -151,7 +151,7 @@ try {
     const beforeReturn = apiCalls.length;
     await page.locator('#main-nav [data-view="ai-team"]').click();
     assert.equal(apiCalls.length, beforeReturn, 'returning to the objective panel does not fetch or mutate a restriction');
-    if (!await details.evaluate(element => element.open)) await details.locator('summary').click();
+    if (!await details.evaluate(element => element.open)) await details.locator(':scope > summary').click();
     const manage = page.locator(`[data-manage-objective-restriction="${objective.id}"]`);
     const panel = page.locator('#business-objective-restriction');
     const typography = await panel.evaluateHandle(createRestrictionTypographySession);

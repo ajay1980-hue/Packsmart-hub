@@ -205,7 +205,7 @@ try {
     assert.deepEqual(errors, []);
     await navigate('ai-team');
     const objectives = page.locator('.business-objectives-panel');
-    await objectives.locator('summary').click();
+    await objectives.locator(':scope > summary').click();
     const form = page.locator('#business-objective-form');
     await form.locator('[name="title"]').fill(`Packaging goal ${width}`);
     await form.locator('[name="baseline"]').fill('100');
