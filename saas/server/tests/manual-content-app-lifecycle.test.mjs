@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { publicConnectionWrite } from '../lib/action-display.mjs';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, encryptCredentials } from '../lib/security.mjs';
@@ -43,7 +44,7 @@ async function harness(t) {
     const input={productId:body.productId,operation:'product_content',title:body.title.trim(),description:body.description};
     const row={id:'write_'+body.requestId,requestId:body.requestId,provider:'shopify',input,digest:crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex'),connectionId:body.target.connectionId,account:body.target.account,requestedBy:bootstrap.user.id,status:'pending_approval',approvalId:'approval_'+body.requestId,requiresApproval:true};h.records.set(body.requestId,row);return row;
   };
-  h.post=async(_path,options)=>Response.json({write:h.record(JSON.parse(options.body))});
+  h.post=async(_path,options)=>Response.json({write:publicConnectionWrite(h.record(JSON.parse(options.body)))});
   h.read=async route=>{const requestId=route.slice(GET.length),row=h.records.get(requestId);return Response.json({schema:'runvara-manual-content-request/v1',workspaceId:bootstrap.workspace.id,requestId,requestedBy:bootstrap.user.id,found:Boolean(row),request:row?Object.fromEntries(['id','requestId','provider','input','digest','connectionId','account','requestedBy','status','approvalId'].map(key=>[key,row[key]])):null});};
   h.password=async()=>Response.json({error:'Synthetic wrong current password',code:'PASSWORD_INVALID'},{status:400});
   w.fetch=async(route,options={})=>{calls.push({route,...options});if(route===POST)return h.post(route,options);if(route.startsWith(GET))return h.read(route,options);if(route==='/api/auth/change-password')return h.password(route,options);if(route==='/api/bootstrap')return Response.json(bootstrap);if(route==='/api/auth/session'||route==='/api/auth/login')return Response.json(session());if(route==='/api/auth/logout')return Response.json({ok:true});if(route==='/api/auth/signup-options')return Response.json({enabled:false});if(route==='/api/connection-centre')return Response.json({channels:bootstrap.connectionCentre,writes:[],autopilotEnabled:false});throw new Error('Unexpected synthetic route '+route);};

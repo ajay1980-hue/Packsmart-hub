@@ -129,7 +129,9 @@ test('HTTP execution rejects legacy bypass, unknown finance, and malformed or fo
   const before = f.calls.filter(call => call.query.includes('mutation')).length;
   assert.equal((await execute(old)).body.code, 'WRITE_POLICY_REVIEW_REQUIRED');
   const current = await propose('objective-policy-current-0001');
-  assert.equal(current.objectivePolicyProposal.policies[0].objectiveId, configured.body.objective.id);
+  assert.equal(current.objectivePolicyProposal, undefined, 'generic preparation returns display fields, not policy authority');
+  const retained = (await f.server.packsmart.store.get('alpha')).connectionWrites.find(row => row.id === current.id);
+  assert.equal(retained.objectivePolicyProposal.policies[0].objectiveId, configured.body.objective.id);
   assert.equal((await approve(current)).status, 200);
   assert.equal((await execute(current)).body.code, 'WRITE_POLICY_EVIDENCE_REQUIRED');
   const valid = structuredClone((await f.server.packsmart.store.get('alpha')).businessObjectives);

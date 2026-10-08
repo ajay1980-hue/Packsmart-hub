@@ -20,6 +20,7 @@ import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measureme
 import { createExperiment } from '../lib/revenue-engine.mjs';
 import { resolveRecordedActionEvidence, validateReviewedSourceAction, REVIEWED_ACTION_STATE_MAX_BYTES } from '../lib/reviewed-action-evidence.mjs';
 import { inspectShopifyOrderSource } from '../lib/shopify-order-source.mjs';
+import { publicConnectionWrite, publicApproval } from '../lib/action-display.mjs';
 
 const WORKSPACE = 'dispatch-safety-fixture';
 const PRODUCT = 'gid://shopify/Product/71';
@@ -1619,6 +1620,14 @@ test('actual content transport records compact prospective context in the same e
     assert.equal(source.context.policies.length, policy ? 1 : 0); assert.equal(source.context.acknowledged, undefined);
     assert.equal(result.recordedActionContext.input, undefined); assert.equal(result.recordedActionContext.description, undefined);
     assert.deepEqual(f.durableClaims[2].connectionWrites.find(w => w.id === result.id).recordedActionContext, result.recordedActionContext);
+    const storedBytes = JSON.stringify(stored), rawBytes = JSON.stringify(result), sourceBytes = JSON.stringify(source);
+    const display = publicConnectionWrite(result), approval = publicApproval(stored.approvals.find(row => row.id === result.approvalId));
+    assert.equal(display.status, 'completed'); assert.deepEqual(display.input, result.input); assert.equal(display.digest, result.digest);
+    assert.deepEqual(display.result, result.result); assert.equal(display.recordedActionContext, undefined); assert.equal(display.dispatchClaim, undefined);
+    assert.equal(display.objectivePolicyProposal, undefined); assert.equal(display.sourceDisplay, undefined);
+    assert.equal(approval.payload.digest, undefined); assert.equal(approval.payload.connectionWriteId, result.id);
+    assert.equal(JSON.stringify(result), rawBytes); assert.equal(JSON.stringify(stored), storedBytes);
+    assert.equal(JSON.stringify(resolveRecordedActionEvidence(stored, result.id)), sourceBytes);
     await f.run(); assert.equal(f.mutations.length, 1); assert.equal(f.durableClaims.length, 3);
   }
 });
@@ -1651,6 +1660,10 @@ test('optional source and state size failures keep known provider success and ne
     assert.equal(result.recordedActionContext,undefined); assert.equal(f.mutations.length,1); assert.equal(f.durableClaims.length,3);
     const saved=await f.replica.get(WORKSPACE); assert.equal(saved.connectionWrites[0].status,'completed');
     assert.throws(()=>resolveRecordedActionEvidence(saved,result.id));
+    const rawBytes=JSON.stringify(result), savedBytes=JSON.stringify(saved), display=publicConnectionWrite(result);
+    assert.equal(display.status,'completed'); assert.deepEqual(display.input,result.input); assert.equal(display.result.externalId,PRODUCT);
+    assert.equal(display.recordedActionContext,undefined); assert.equal(display.recordedActionUnavailable,undefined); assert.equal(display.dispatchClaim,undefined);
+    assert.equal(JSON.stringify(result),rawBytes); assert.equal(JSON.stringify(saved),savedBytes);
     await f.run(); assert.equal(f.mutations.length,1); assert.equal(f.durableClaims.length,3);
   }
 });

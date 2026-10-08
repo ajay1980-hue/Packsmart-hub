@@ -1,5 +1,7 @@
 # Owner-requested objective content
 
+Generic review responses use the separate [write and approval display boundary](generic-action-display.md). Full validation source remains on the exact dedicated routes described below; diagnostic display references and existing public narratives remain available to current tenant readers.
+
 This prepared contract lets the original reviewing owner associate one exact Shopify title/description request with one active, explicitly enforced saved objective and one selected candidate in a succeeded diagnostic review. The owner chooses the destination, retained product reference and replacement text. Preparation creates one existing `customer_facing_publish` approval and one connection write together. Approval and apply remain separate actions.
 
 This is an owner-requested content change associated with a goal. It does not generate an autonomous business proposal, establish commercial readiness, measure goal progress or authorize financial activity. Tags, images, product status, price, refunds, advertising, replenishment, other providers, paid models and automatic execution are outside this contract. Default profit-first and every non-null financial/stock limit, including zero, still stop execution before credential preparation.

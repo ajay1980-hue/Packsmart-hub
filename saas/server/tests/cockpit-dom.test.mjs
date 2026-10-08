@@ -50,7 +50,9 @@ test('cockpit renders authenticated controls and submits real persisted workflow
     for (let attempt = 0; attempt < 150; attempt++) { if (await condition()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
     assert.fail(`UI did not reach expected state. Errors: ${errors.join('; ')}; message: ${document.querySelector('#global-error').textContent}`);
   };
-  for (const file of ['presentation.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
+  // Match index.html's dependency order: approval cards share the real
+  // Connection Centre display parser, including its unavailable-source guards.
+  for (const file of ['presentation.js', 'connections-ui.js', 'control-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   assert.equal(document.querySelector('#kpi-margin').textContent, '40.0%');
   assert.match(document.querySelector('#kpi-margin-coverage').textContent, /1 of 3 catalogue variants · unweighted/);
@@ -275,6 +277,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
       const data = { ...bootstrap, integrations: scenario.values.map((revenue, index) => ({ id: 'channel-' + index, name: index ? 'Channel ' + index : '<img src=x onerror=alert(1)>', kind: 'commerce', status: 'connected', metrics30d: { revenue } })) };
       w.fetch = async route => new Response(JSON.stringify(route === '/api/auth/session' ? { user: bootstrap.user, workspace: bootstrap.workspace, csrf: bootstrap.csrf } : data), { status: 200 });
       w.eval(await fs.readFile(new URL('../../presentation.js', import.meta.url), 'utf8'));
+      w.eval(await fs.readFile(new URL('../../connections-ui.js', import.meta.url), 'utf8'));
       w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
       for (let i = 0; i < 100 && w.document.getElementById('app-shell').classList.contains('hidden'); i++) await new Promise(resolve => setTimeout(resolve, 5));
       assert.equal(w.document.getElementById('app-shell').classList.contains('hidden'), false, w.document.getElementById('startup-error').textContent + '; ' + chartErrors.join('; '));
@@ -345,7 +348,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
   const bootstrapResponse = await fetch(base + '/api/bootstrap', { headers: { Cookie: `packsmart_session=${token}` } });
   assert.equal(bootstrapResponse.status, 200);
   const bootstrap = await bootstrapResponse.json();
-  const [html, presentation, app] = await Promise.all(['../../index.html', '../../presentation.js', '../../app.js'].map(file => fs.readFile(new URL(file, import.meta.url), 'utf8')));
+  const [html, presentation, connections, app] = await Promise.all(['../../index.html', '../../presentation.js', '../../connections-ui.js', '../../app.js'].map(file => fs.readFile(new URL(file, import.meta.url), 'utf8')));
   const graph = () => ({ summary: { nodes: 4, edges: 2, unknownMappings: 1, nodesByType: { reviewed_outcome: 3 }, unknownByReason: { target_not_found: 1 } }, coverage: { complete: true }, retainedRequests: structuredClone(retained),
     reviewedOutcomes: { status: 'available', unavailableReason: null,
       snapshots: { workspace: { revisionRef: 'workspace_revision_one', readCompletedAt: '2026-10-07T12:00:00.000Z' }, outcomes: { id: 'outcome_snapshot_two', readCompletedAt: '2026-10-07T12:00:01.000Z' }, independent: true },
@@ -377,7 +380,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       for (let attempt = 0; attempt < 100; attempt++) { if (condition()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
       assert.fail('Graph DOM state did not settle: ' + errors.join('; '));
     };
-    window.eval(presentation); window.eval(app);
+    window.eval(presentation); window.eval(connections); window.eval(app);
     await until(() => !document.getElementById('app-shell').classList.contains('hidden'));
     const panel = document.querySelector('.business-graph-inspector'), button = document.getElementById('load-business-graph'), result = document.getElementById('business-graph-result');
     const settle = () => new Promise(resolve => setTimeout(resolve, 10));

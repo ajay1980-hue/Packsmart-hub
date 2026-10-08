@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { publicConnectionWrite } from '../lib/action-display.mjs';
 
 const POST='/api/connections/shopify/writes', GET='/api/connections/shopify/content-requests/';
 const target=()=>({schema:'runvara-manual-content-target/v1',connectionId:'connection_exact_b',account:'exact-b.myshopify.com',settingsRevision:7});
@@ -25,7 +26,7 @@ async function harness(t,{role='owner'}={}){
   const h={w,d,calls,notifications,timers,data:state,session,csrf:'csrf-content',generation:1,view:'channels',hidden:false,records:new Map()};
   Object.defineProperty(d,'hidden',{configurable:true,get:()=>h.hidden});
   const context=()=>({session:h.session,csrf:h.csrf,sessionCsrf:h.session?.csrf,userId:h.session?.user.id,dataUserId:h.data.user.id,workspaceId:h.session?.workspace.id,dataWorkspaceId:h.data.workspace.id,role:h.session?.user.role,dataRole:h.data.user.role,active:h.session?.user.active,dataActive:h.data.user.active,passwordChangeRequired:h.session?.user.passwordChangeRequired,dataPasswordChangeRequired:h.data.user.passwordChangeRequired,generation:h.generation,bootstrap:h.data,view:h.view});
-  h.response=body=>{const input={productId:body.productId,operation:'product_content',title:body.title.trim(),description:body.description};const write={id:'write_'+body.requestId,requestId:body.requestId,provider:'shopify',input,digest:crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex'),connectionId:body.target.connectionId,account:body.target.account,requestedBy:h.session.user.id,status:'pending_approval',approvalId:'approval_'+body.requestId,requiresApproval:true};h.records.set(body.requestId,write);return {write};};
+  h.response=body=>{const input={productId:body.productId,operation:'product_content',title:body.title.trim(),description:body.description};const write={id:'write_'+body.requestId,requestId:body.requestId,provider:'shopify',input,digest:crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex'),connectionId:body.target.connectionId,account:body.target.account,requestedBy:h.session.user.id,status:'pending_approval',approvalId:'approval_'+body.requestId,requiresApproval:true};h.records.set(body.requestId,write);return {write:publicConnectionWrite(write)};};
   h.post=async(_path,options)=>h.response(JSON.parse(options.body));
   h.read=async path=>{const requestId=path.slice(GET.length),row=h.records.get(requestId);const request=row?Object.fromEntries(['id','requestId','provider','input','digest','connectionId','account','requestedBy','status','approvalId'].map(key=>[key,row[key]])):null;return {schema:'runvara-manual-content-request/v1',workspaceId:h.data.workspace.id,requestId,requestedBy:h.session.user.id,found:Boolean(row),request};};
   h.centre=async()=>({channels:copy(h.data.connectionCentre),writes:[],autopilotEnabled:false});
@@ -109,7 +110,7 @@ test('definitive refusal permits explicit reload and fresh review; a resolved sa
 });
 
 test('executing is exact saved history and never a new apply permission',async t=>{
- const h=await harness(t);h.open();h.fill();h.post=async(_path,options)=>{const result=h.response(JSON.parse(options.body));result.write.status='executing';throw new Error('Lost');};h.submit();await until(()=>h.writes().length===1);await h.idle();h.el('content-check').click();await h.idle();assert.match(h.el('content-status').textContent,/Exact request found.*executing.*not permission to apply/);assert.equal(h.writes().length,1);assert.equal(h.el('connection-content-editor').querySelector('[data-connection-action=execute]'),null);
+ const h=await harness(t);h.open();h.fill();h.post=async(_path,options)=>{const result=h.response(JSON.parse(options.body));h.records.get(result.write.requestId).status='executing';assert.equal(result.write.status,'pending_approval','display projection is detached from stored state');throw new Error('Lost');};h.submit();await until(()=>h.writes().length===1);await h.idle();h.el('content-check').click();await h.idle();assert.match(h.el('content-status').textContent,/Exact request found.*executing.*not permission to apply/);assert.equal(h.writes().length,1);assert.equal(h.el('connection-content-editor').querySelector('[data-connection-action=execute]'),null);
 });
 
 test('a dismissed old response cannot unlock a newer exact reconciliation or trigger new work',async t=>{

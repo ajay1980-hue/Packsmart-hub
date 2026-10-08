@@ -20,6 +20,19 @@ const server=createPacksmartServer({NODE_ENV:'test',APP_PUBLIC_URL:base,SESSION_
  {schedulerEnabled:false,agentOpsEnabled:false,fetchImpl:()=>{providerRequests++;throw new Error('Provider transport forbidden in synthetic objective-content browser fixture');}});
 server.packsmart.aiProvider.enhanceCommander=async()=>{modelRequests++;throw new Error('Model transport forbidden in synthetic objective-content browser fixture');};
 const captures=[];
+function assertPublicReview(payload) {
+ const writes=payload.connectionWrites||payload.writes||[];
+ for(const write of writes){
+  for(const key of ['objectivePolicyProposal','source','dispatchClaim','providerState','recordedActionContext','stableApproval'])assert.equal(Object.hasOwn(write,key),false,'Generic write must omit '+key);
+  if(write.input?.operation==='product_content'){
+   assert.deepEqual(Object.keys(write.sourceDisplay).sort(),['schema','origin','status','objectiveId','objectiveRevision','jobId','reportId','opportunityId','productId'].sort());
+   assert.equal(write.sourceDisplay.schema,'runvara-objective-content-display/v1');assert.equal(write.sourceDisplay.origin,'owner_objective_content');assert.equal(write.sourceDisplay.status,'available');
+  }
+ }
+ for(const approval of payload.approvals||[]){
+  for(const key of ['source','objectivePolicyProposalDigest','digest','stableApproval'])assert.equal(Object.hasOwn(approval.payload||{},key),false,'Generic approval payload must omit '+key);
+ }
+}
 async function capture(page,width,name){
  const panel=page.locator('#objective-content-editor'),typography=await panel.evaluateHandle(createRestrictionTypographySession);
  const image=async suffix=>{
@@ -51,7 +64,8 @@ try{
    const request=route.request(),url=new URL(request.url());if(url.origin!==base){external.push(url.href);return route.abort();}
    if(!url.pathname.startsWith('/api/'))return route.continue();
    calls.push({path:url.pathname,query:url.search,method:request.method(),body:request.postData()});
-   if(request.method()==='GET'&&(['/api/auth/session','/api/bootstrap','/api/business-objectives','/api/objective-content/context','/api/connection-centre'].includes(url.pathname)||url.pathname.startsWith('/api/objective-content/requests/')||url.pathname.startsWith('/api/business-objectives/reviews/')))return route.continue();
+   if(request.method()==='GET'&&['/api/bootstrap','/api/connection-centre'].includes(url.pathname)){const response=await route.fetch();assert.equal(response.status(),200);assertPublicReview(await response.json());return route.fulfill({response});}
+   if(request.method()==='GET'&&(['/api/auth/session','/api/business-objectives','/api/objective-content/context'].includes(url.pathname)||url.pathname.startsWith('/api/objective-content/requests/')||url.pathname.startsWith('/api/business-objectives/reviews/')))return route.continue();
    if(request.method()==='POST'&&url.pathname==='/api/business-objectives/reviews'){
     assert.deepEqual(request.postDataJSON(),{objectiveId:objective.id,objectiveRevision:objective.revision});const response=await route.fetch();assert.equal(response.status(),202);await server.packsmart.agentOps.tick();return route.fulfill({response});
    }

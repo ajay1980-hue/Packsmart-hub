@@ -266,15 +266,51 @@
     else { content.editor.fields = readContentFields(); content.editor.ackKey = null; }
     observeContentSource(); renderContentState();
   }
+  function objectiveContentDisplay(write) {
+    // This is a display-only DTO. It never validates a signed proposal or supplies
+    // authority for preparation, approval, reconciliation or provider execution.
+    if (!write || !Object.hasOwn(write, 'sourceDisplay')) return null;
+    const source = write.sourceDisplay;
+    const unavailable = { origin: source?.origin === 'owner_objective_content' ? 'owner_objective_content' : 'unknown', status: 'unavailable' };
+    if (!sameKeys(source, ['schema','origin','status','objectiveId','objectiveRevision','jobId','reportId','opportunityId','productId']) ||
+      source.schema !== 'runvara-objective-content-display/v1' || source.origin !== 'owner_objective_content' || source.status !== 'available' ||
+      write.provider !== 'shopify' || write.input?.operation !== 'product_content' || source.productId !== write.input.productId ||
+      !['objectiveId','jobId','reportId','opportunityId'].every(key => contentId(source[key])) ||
+      !Number.isSafeInteger(source.objectiveRevision) || source.objectiveRevision < 1 || typeof source.productId !== 'string' || source.productId.length > 100 ||
+      !/^gid:\/\/shopify\/Product\/\d+$/.test(source.productId)) return unavailable;
+    return source;
+  }
   function objectiveContentWriteDetails(write) {
-    const envelope = write.objectivePolicyProposal;
-    if (envelope?.schema !== 'runvara-objective-dispatch-proposal/v2' || envelope.origin !== 'owner_objective_content') return '';
-    const source = envelope.source;
-    if (source?.schema !== 'runvara-objective-content-source/v1') return '<dt>Goal-associated source</dt><dd>Saved source unavailable. This request must not be treated as a manual content request.</dd>';
-    return '<dt>Request purpose</dt><dd>Owner-written content associated with a saved goal; commercial readiness and objective progress remain unverified.</dd>' +
-      [['Saved objective', source.objectiveId],['Objective revision',source.objectiveRevision],['Diagnostic report',source.reportId],['Review job',source.jobId],['Selected opportunity',source.opportunityId],['Retained product reference',source.productId]].map(([key,value]) => '<dt>' + key + '</dt><dd class="connection-exact-text">' + esc(value) + '</dd>').join('') +
+    const source = objectiveContentDisplay(write);
+    if (!source) return '';
+    const identity = source.status === 'available' ? '<dt>Request purpose</dt><dd>Owner-written content associated with a saved goal; commercial readiness and objective progress remain unverified.</dd>' +
+      [['Saved objective', source.objectiveId],['Objective revision',source.objectiveRevision],['Diagnostic report',source.reportId],['Review job',source.jobId],['Selected opportunity',source.opportunityId],['Retained product reference',source.productId]].map(([key,value]) => '<dt>' + key + '</dt><dd class="connection-exact-text">' + esc(value) + '</dd>').join('') :
+      '<dt>' + (source.origin === 'owner_objective_content' ? 'Goal-associated source' : 'Unsupported request origin') + '</dt><dd>Saved source unavailable. This request must not be treated as a manual content request.</dd>';
+    return identity +
       (write.input?.description === '' ? '<dt>Description consequence</dt><dd>The empty proposed description clears the Shopify description.</dd>' : '') +
       '<dt>Source limits</dt><dd>Server-recorded diagnostic history, not independently immutable proof. Retained product import account is unverified. Saved financial and stock restrictions remain blocking without qualified evidence. Exact approval and separate Apply are still required. Current manual-action outcome linking does not support this origin.</dd>';
+  }
+  function reviewableWriteInput(write) {
+    const input = write?.input;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return false;
+    const strings = keys => keys.every(key => typeof input[key] === 'string');
+    if (write.provider === 'shopify' && strings(['productId'])) {
+      if (input.operation === 'product_content') return strings(['title','description']);
+      if (input.operation === 'internal_note') return strings(['note']);
+      if (['product_tags_add','product_tags_remove'].includes(input.operation)) return Array.isArray(input.tags) && input.tags.every(value => typeof value === 'string') &&
+        (!Object.hasOwn(input,'expectedTags') || Array.isArray(input.expectedTags) && input.expectedTags.every(value => typeof value === 'string'));
+    }
+    if (write.provider !== 'meta') return false;
+    switch (input.operation) {
+      case 'catalog_product_create': return strings(['catalogId','name','description','retailerId','brand','category','url','imageUrl','currency','availability','condition','visibility']) && Number.isSafeInteger(input.priceMinor);
+      case 'catalog_product_update': return strings(['catalogId','productId','name','description']);
+      case 'catalog_visibility': return strings(['catalogId','productId','visibility']);
+      case 'catalog_inventory': return strings(['catalogId','productId','availability']) && Number.isSafeInteger(input.quantity);
+      case 'instagram_publish': return strings(['pageId','instagramId','caption','imageUrl']);
+      case 'facebook_publish': return strings(['pageId','message']) && (!Object.hasOwn(input,'link') || typeof input.link === 'string');
+      case 'facebook_update': return strings(['pageId','postId','message']);
+      default: return false;
+    }
   }
   const customerZeroManagerLink = '<a class="secondary button-link" href="https://packsmart-ebay-manager.sleek-chub-7298.chatgpt.site/" target="_blank" rel="noopener noreferrer">Open existing eBay Manager</a>';
   function firstSyncSteps(channel) {
@@ -378,7 +414,7 @@
       ${channel.id === 'shopify' && owner() ? `<form id="connection-tag-preview" class="connection-manage-form"><h3>Safe write acceptance preview</h3><p>Read the current product tags and prepare one reversible test for owner review. This does not change Shopify or your write permissions.</p><label>Product<select name="productId" required>${(data.products || []).filter(item => item.provider === 'shopify').map(item => `<option value="${esc(item.id)}">${esc(item.title)}</option>`).join('')}</select></label><button class="secondary">Prepare exact tag test</button><div id="tag-preview-result" class="connection-exact-text" role="status"></div></form>` : ''}
       ${channel.id === 'shopify' && channel.settings.permissionMode !== 'read_only' && channel.writeAccessGranted && owner() ? writeForm() : channel.id === 'meta' && channel.settings.permissionMode !== 'read_only' && channel.writeAccessGranted && owner() ? metaWriteForm(channel) : ''}</section>` : ''}
       ${channel.id === 'shopify' && owner() ? contentForm() : ''}
-      ${writes.length ? `<section class="connection-section"><h3>Proposed changes</h3>${writes.slice(0,15).map(write => `<article class="connection-write"><b>${esc(write.input.operation.replaceAll('_',' '))}</b><p>${esc(write.status.replaceAll('_',' '))}</p><details><summary>Review exact change</summary><dl>${objectiveContentWriteDetails(write)}${write.provider === 'shopify' && write.input.operation === 'product_content' ? `<dt>Saved Shopify account</dt><dd class="connection-exact-text">${esc(write.account || 'Unavailable saved target')}</dd><dt>Saved connection reference</dt><dd class="connection-exact-text">${esc(write.connectionId || 'Unavailable saved reference')}</dd>` : ''}${Object.entries(write.input).map(([key,value]) => `<dt>${esc(key.replace(/([A-Z])/g,' $1'))}</dt><dd class="connection-exact-text">${esc(value)}</dd>`).join('')}</dl></details><div class="button-row">${write.approvalId ? button('approvals', 'Open Approval Centre', channel) : ''}${owner() && ['ready','processing'].includes(write.status) ? `<button class="secondary" type="button" data-connection-action="execute" data-provider="${channel.id}" data-write="${esc(write.id)}">${write.status === 'processing' ? 'Check publishing progress' : write.requiresApproval ? 'Apply approved change' : 'Apply change'}</button>` : ''}</div>${write.status === 'processing' ? `<p>${write.observationErrorCode ? 'Instagram status could not be verified. The saved container is retained; check its status again after a minute.' : 'Instagram is preparing your image. Check again after a minute; the same approved request will be continued.'}</p>` : ''}${write.status === 'uncertain' ? '<p class="warn">Check the channel before making another request. Runvara will not repeat an uncertain write.</p>' : ''}${write.status === 'failed' ? `<p class="warn">${write.dispatchBlocked ? 'Runvara stopped this request before a new channel submission. Review the current permissions and prepare a new exact change.' : 'The channel declined this request. Test the connection, check the selected asset and fields, then prepare a new change.'}</p>` : ''}${write.result?.externalId ? `<p>Confirmed channel reference: ${esc(write.result.externalId)}</p>` : ''}</article>`).join('')}</section>` : ''}
+      ${writes.length ? `<section class="connection-section"><h3>Proposed changes</h3>${writes.slice(0,15).map(write => `<article class="connection-write"><b>${esc(typeof write.input?.operation === 'string' ? write.input.operation.replaceAll('_',' ') : 'Unsupported change')}</b><p>${esc(typeof write.status === 'string' ? write.status.replaceAll('_',' ') : 'Status unavailable')}</p><details><summary>Review exact change</summary><dl>${objectiveContentWriteDetails(write)}${!reviewableWriteInput(write) ? '<dt>Change review unavailable</dt><dd>The saved change is unsupported or incomplete. Exact fields must be available before applying.</dd>' : ''}${write.provider === 'shopify' && write.input?.operation === 'product_content' ? `<dt>Saved Shopify account</dt><dd class="connection-exact-text">${esc(write.account || 'Unavailable saved target')}</dd><dt>Saved connection reference</dt><dd class="connection-exact-text">${esc(write.connectionId || 'Unavailable saved reference')}</dd>` : ''}${Object.entries(write.input || {}).map(([key,value]) => `<dt>${esc(key.replace(/([A-Z])/g,' $1'))}</dt><dd class="connection-exact-text">${esc(value)}</dd>`).join('')}</dl></details><div class="button-row">${write.approvalId ? button('approvals', 'Open Approval Centre', channel) : ''}${owner() && contentId(write.id) && reviewableWriteInput(write) && ['ready','processing'].includes(write.status) ? `<button class="secondary" type="button" data-connection-action="execute" data-provider="${channel.id}" data-write="${esc(write.id)}">${write.status === 'processing' ? 'Check publishing progress' : write.requiresApproval ? 'Apply approved change' : 'Apply change'}</button>` : ''}</div>${write.status === 'processing' ? `<p>${write.observationErrorCode ? 'Instagram status could not be verified. The saved container is retained; check its status again after a minute.' : 'Instagram is preparing your image. Check again after a minute; the same approved request will be continued.'}</p>` : ''}${write.status === 'uncertain' ? '<p class="warn">Check the channel before making another request. Runvara will not repeat an uncertain write.</p>' : ''}${write.status === 'failed' ? `<p class="warn">${write.dispatchBlocked ? 'Runvara stopped this request before a new channel submission. Review the current permissions and prepare a new exact change.' : 'The channel declined this request. Test the connection, check the selected asset and fields, then prepare a new change.'}</p>` : ''}${write.result?.externalId ? `<p>Confirmed channel reference: ${esc(write.result.externalId)}</p>` : ''}</article>`).join('')}</section>` : ''}
       <section class="connection-section"><h3>Sync history</h3><p class="muted tiny">Latest 30 syncs. Completed sync summaries remain in the workspace audit log.</p><div class="connection-history">${channel.history.length ? channel.history.map(run => `<article><div><b>${esc({completed:'Completed',partial:'Partially completed',failed:'Needs attention',running:'In progress'}[run.status])}</b><small>${esc(when(run.startedAt))} · ${run.automatic ? 'Automatic' : 'Requested'}</small></div><p>${esc(run.areas.map(label).join(', '))}</p>${run.status === 'failed' || run.status === 'partial' ? '<p class="warn">Some data could not be refreshed. Your previous data is retained. Use Sync now to retry.</p>' : ''}</article>`).join('') : '<p class="muted">No sync history recorded yet. Your earlier imported data is retained.</p>'}</div></section>
       ${channel.configured ? `<section class="connection-section"><h3>Disconnect</h3><p>Stop Runvara from accessing this channel. Imported data stays in this workspace. ${channel.id === 'ebay' ? 'Your separate eBay Manager stays intact.' : 'This does not delete or close your channel account.'}</p>${button('disconnect', `Disconnect ${channel.name}`, channel, 'secondary danger')}<form id="connection-disconnect" class="connection-confirm hidden"><p>Are you sure? Syncing will stop and Runvara’s write permission will be removed.</p><label class="check-label"><input name="confirm" type="checkbox" required> I confirm I want to disconnect this channel from Runvara.</label><div class="button-row"><button class="primary danger" type="submit">Confirm disconnect</button>${button('cancel-disconnect','Keep connected',channel)}</div></form></section>` : ''}`;
     if (preservedContent) $('#connection-content-editor')?.replaceWith(preservedContent);
@@ -422,7 +458,7 @@
       }
     } else {
       html += select('pageId','Facebook Page',assets.pages.filter(item=>channel.settings.metaPageIds?.includes(item.id) && (operation !== 'instagram_publish' || item.instagram)));
-      if (operation === 'facebook_update') html += select('postId','Post published by Runvara',(data.connectionWrites || []).filter(item=>item.provider === 'meta' && item.status === 'completed' && item.input.operation === 'facebook_publish').map(item=>({id:item.result.externalId,name:item.input.message})));
+      if (operation === 'facebook_update') html += select('postId','Post published by Runvara',(data.connectionWrites || []).filter(item=>item.provider === 'meta' && item.status === 'completed' && item.input?.operation === 'facebook_publish' && reviewableWriteInput(item) && typeof item.result?.externalId === 'string').map(item=>({id:item.result.externalId,name:item.input.message})));
       html += `<label>${operation === 'instagram_publish' ? 'Caption' : 'Post text'}<textarea name="message" required maxlength="${operation === 'instagram_publish' ? 2200 : 5000}"></textarea></label>`;
       if (operation === 'instagram_publish') html += field('imageUrl','Public HTTPS JPEG image address','type="url"') + '<p>Use a linked Instagram professional account and a publicly accessible JPEG. Meta may require Page publishing authorisation. Instagram allows up to 100 API-published posts per rolling 24 hours.</p>';
       if (operation === 'facebook_publish') html += '<label>Optional public HTTPS link<input name="url" type="url"></label>';
@@ -504,6 +540,8 @@
     if (action === 'disconnect' || action === 'cancel-disconnect') { $('#connection-disconnect').classList.toggle('hidden', action !== 'disconnect'); if(action === 'disconnect') $('#connection-disconnect input').focus(); return; }
     if (action === 'sync-selected') { const areas = [...new FormData($('#connection-sync-settings')).getAll('areas')]; return perform(provider, 'sync', { areas }); }
     if (action === 'execute') {
+      const write = (data.connectionWrites || []).find(item => item.id === target.dataset.write && item.provider === provider);
+      if (!owner() || !contentId(write?.id) || !reviewableWriteInput(write) || !['ready','processing'].includes(write.status)) return;
       target.disabled = true;
       try { const result = await api.request(`/api/connection-writes/${target.dataset.write}/execute`, {method:'POST',body:'{}'}); await api.reload({migrate:false}); await refresh(); const processing = result.write?.status === 'processing'; api.notify(result.executedExternally ? `${channel.name} confirmed the change.` : processing ? result.write?.observationErrorCode ? 'Instagram status could not be verified. Its saved container is retained; check again after a minute.' : 'Instagram is preparing the image. Check publishing progress after a minute.' : `Check the result in ${channel.name}. This request will not be repeated.`, result.executedExternally || processing ? undefined : 'error'); }
       catch(error) { target.disabled=false; $('#connection-feedback').textContent=error.message; api.notify(error.message,'error'); }
@@ -562,6 +600,7 @@
     },
     interruptContent(reason, clear = false) { interruptContent(reason,clear); if(reason==='Navigation changed'&&selected==='shopify')close(); },
     endSession() { interruptContent('Session ended',true); clearInterval(journeyTimer);sessionGeneration++; refreshController?.abort(); refreshPending = null; refreshTicket = null; refreshController = null; if (selected) close(); busy.clear(); channels = []; data = {}; },
-    open
+    open,
+    objectiveContentDisplay
   };
 })();

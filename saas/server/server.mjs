@@ -50,6 +50,7 @@ import { CONNECTORS, connector, connectionCentre, connectionSettings, connection
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, readManualContentRequest,
   prepareObjectiveContentRequest, readObjectiveContentRequest } from './lib/connection-writes.mjs';
 import { objectiveContentContext } from './lib/objective-content-source.mjs';
+import { publicConnectionWrite, publicApproval } from './lib/action-display.mjs';
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
@@ -598,13 +599,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       automationDefinitions: AUTOMATION_DEFINITIONS,
       marketing: marketingSnapshot(state, env),
       webIntelligence: webIntelligenceSnapshot(state, env),
-      approvals: state.approvals || [],
+      approvals: (state.approvals || []).map(publicApproval),
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
       connectionCentre: intelligentConnections(state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status }),
       connectionNotifications: doctorNotifications(state),
       connectionRecommendations: recommendations(state, connectionCentre(state, integrations)),
-      connectionWrites: (state.connectionWrites || []).slice(0, 50),
+      connectionWrites: (state.connectionWrites || []).slice(0, 50).map(publicConnectionWrite),
       integrations: integrationMatrix(state, env, operations),
       ebayOAuth: integrations.ebayOAuthStatus(state),
       ebay: state.ebay || null,
@@ -1829,7 +1830,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             addAudit(state, { type: 'marketing_publish_approval_requested', actor: auth.user.id, detail: { campaignId: campaign.id, approvalId: next.id } });
             return next;
           });
-          send(res, 202, { approvalRequired: true, approval, executedExternally: false });
+          send(res, 202, { approvalRequired: true, approval: publicApproval(approval), executedExternally: false });
           return;
         }
 
@@ -1854,7 +1855,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             state.approvals = [approval, ...(state.approvals || [])];
             addAudit(state, { type: 'approval_requested', actor: auth.user.id, detail: { approvalId: approval.id, actionType: approval.type, financialImpact: approval.financialImpact } });
           });
-          send(res, 202, { approvalRequired: true, approval, executedExternally: false });
+          send(res, 202, { approvalRequired: true, approval: publicApproval(approval), executedExternally: false });
           return;
         }
 
@@ -1884,12 +1885,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             addAudit(state, { type: 'approval_decided', actor: auth.user.id, detail: { approvalId: approval.id, decision, executedExternally: false } });
             return approval;
           });
-          send(res, 200, { approval: result, executedExternally: false });
+          send(res, 200, { approval: publicApproval(result), executedExternally: false });
           return;
         }
 
         if (req.method === 'GET' && pathname === '/api/approvals') {
-          send(res, 200, { approvals: auth.state.approvals || [] });
+          send(res, 200, { approvals: (auth.state.approvals || []).map(publicApproval) });
           return;
         }
 
@@ -2053,7 +2054,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const opportunityMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/approval$/);
         if (req.method === 'POST' && opportunityMatch) {
           const approval = await mutate(auth, async state => requestOpportunityApproval(state, opportunityMatch[1], auth.user.id));
-          send(res, 202, { approval, executedExternally: false }); return;
+          send(res, 202, { approval: publicApproval(approval), executedExternally: false }); return;
         }
         const opportunityExperimentMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/experiment$/);
         if (req.method === 'POST' && opportunityExperimentMatch) {
@@ -2075,7 +2076,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireApprover(auth);
           const body = await jsonBody(req, 32768);
           const approval = await mutate(auth, async state => modifyApproval(state, modifyMatch[1], body, auth.user.id));
-          send(res, 200, { approval, executedExternally: false }); return;
+          send(res, 200, { approval: publicApproval(approval), executedExternally: false }); return;
         }
 
         const agentSettingMatch = pathname.match(/^\/api\/agents\/([^/]+)\/settings$/);
@@ -2243,7 +2244,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
         if (req.method === 'GET' && pathname === '/api/connection-centre') {
           const channels = intelligentConnections(auth.state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status });
-          send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
+          send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50).map(publicConnectionWrite), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
         }
         if (req.method === 'GET' && pathname === '/api/operator/providers') {
           requireLaunchAdmin(auth, env);
@@ -2326,7 +2327,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             }
           });
           if (result.failure) send(res, result.failure.status, result.failure);
-          else send(res, 200, result);
+          else send(res, 200, action === 'writes' ? { write: publicConnectionWrite(result.write) } : result);
           return;
         }
         const executeWrite = pathname.match(/^\/api\/connection-writes\/([a-z0-9_-]+)\/execute$/i);
@@ -2337,7 +2338,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           connectionWriteLimiter.fail(auth.session.workspaceId);
           const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, options => store.save(auth.session.workspaceId, state, options), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), loadObjectiveJob: jobId => store.getAgentJob(auth.session.workspaceId, jobId, { includeReport: true }), durableStore: store.provider === 'supabase',
             actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
-          send(res, 200, { write, executedExternally: write.status === 'completed' }); return;
+          send(res, 200, { write: publicConnectionWrite(write), executedExternally: write.status === 'completed' }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/integrations') {
