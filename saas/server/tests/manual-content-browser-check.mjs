@@ -99,8 +99,14 @@ try{
   await page.locator('#connection-close').click();await open();assert.equal(await page.locator('#content-title').inputValue(),second.title);await page.locator('#content-check').click();await page.locator('#content-status').getByText('No matching request was found',{exact:false}).waitFor();await ack.check();await page.locator('#content-retry').click();await page.locator('#content-status').getByText('Exact request found:',{exact:false}).waitFor();
   assert.equal(writes().length,3);assert.deepEqual(JSON.parse(writes()[2].body),second);stored=await server.packsmart.store.get(seed.workspace.id);assert.equal(stored.connectionWrites.length,2);assert.equal(stored.approvals.length,2);
   await page.locator('#content-new').click();await page.waitForFunction(()=>document.querySelector('#connection-content-form').getAttribute('aria-busy')==='false');await fill('Draft with stale settings');await ack.check();
+  const readDraft=()=>form.evaluate(node=>({fields:Array.from(node.querySelectorAll('select,textarea,input:not([type="checkbox"])'),field=>[field.id,field.value]),review:node.querySelector('#content-exact').textContent}));
+  const draftBeforeRefresh=await readDraft();
   stored=await server.packsmart.store.get(seed.workspace.id);stored.connectionSettings.shopify.revision++;await server.packsmart.store.save(seed.workspace.id,stored);
-  await page.locator('#connection-refresh').click();await page.locator('#content-status').getByText('changed',{exact:false}).waitFor();assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#content-prepare').isDisabled(),true);
+  // The open modal makes the page's refresh button inert. Observe its existing
+  // 15-second background poll, allowing two intervals plus scheduling slack.
+  await page.locator('#content-status').getByText('changed',{exact:false}).waitFor({timeout:35000});
+  assert.equal(await page.locator('#connection-dialog').evaluate(node=>node.open),true);assert.deepEqual(await readDraft(),draftBeforeRefresh);
+  assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#content-prepare').isDisabled(),true);assert.equal(writes().length,3);
   await page.locator('#global-success').waitFor({state:'hidden'});await capture(page,width,'stale');
   await page.locator('#content-reload').click();await page.waitForFunction(()=>document.querySelector('#connection-content-form').getAttribute('aria-busy')==='false');assert.equal(await account.inputValue(),'');assert.equal(await product.inputValue(),'');assert.equal(writes().length,3);
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(unexpected,[]);assert.equal(providerRequests,0,'preparation and reconciliation make no server-side provider requests');await context.close();
