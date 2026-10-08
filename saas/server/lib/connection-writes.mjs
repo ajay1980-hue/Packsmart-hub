@@ -15,6 +15,8 @@ import { MANUAL_CONTENT_REQUEST_SCHEMA, manualContentRecord, manualContentRows, 
   assertManualContentScope, assertManualContentActor, validateManualContentTarget, assertManualContentTarget } from './manual-content-target.mjs';
 import { contentWriteIdentityContract, contentWritePreimage, contentInputPreimage, contentApprovalPayloadPreimage,
   contentConsentPreimage, contentWriteSnapshot, contentApprovalDecisionSnapshot } from './content-write-identity.mjs';
+import { contentExecutionReceiptRequired, prepareContentExecutionAdmission, completeContentExecutionReceipt,
+  assertContentReceiptAcknowledgement } from './content-execution-receipt.mjs';
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 function contentComparisonContract(state, write, actor) {
@@ -419,7 +421,34 @@ function authority(state, write, actor, actorSession, comparisonContract = null)
       decidedAt: approval.decidedAt, payload: comparisonContract ? contentApprovalPayloadPreimage(approval.payload, comparisonContract) : approval.payload } : null });
 }
 
-export async function executeConnectionWrite(state, writeId, actor, integrations, persistClaim, { loadFreshState, loadObjectiveJob, durableStore = false, actorSession: authenticatedSession } = {}) {
+function recordCompletedConnectionWrite(state, write, approval) {
+  if (approval) {
+    approval.executedExternally = true; approval.executionStatus = 'completed'; approval.workStatus = 'COMPLETED';
+    recordWork(state, { id: approval.id, title: approval.action, source: 'approval-centre', status: 'COMPLETED', executedExternally: true, evidence: [{ type: `${write.provider}_write`, id: write.result?.externalId || write.input.productId, detail: write.input.operation }] });
+  }
+  recordWork(state, { id: write.id, title: `${write.provider === 'meta' ? 'Meta' : 'Shopify'} change confirmed`, source: 'connection-centre', status: 'COMPLETED', executedExternally: true, evidence: [{ type: `${write.provider}_write`, id: write.result?.externalId || write.input.productId, detail: write.input.operation }] });
+}
+
+function preflightContentCompletionState(state, writeId, actor, phase) {
+  // Protected mode only. Include real completion bookkeeping: an unusually
+  // large approved action title or retained work history must not knowingly
+  // produce an unpersistable final state after the external write. The optional
+  // context can be omitted; reserve headroom for store/reporting metadata.
+  const projected = structuredClone(state), write = projected.connectionWrites.find(row => row.id === writeId);
+  const approval = projected.approvals.find(row => row.id === write.approvalId);
+  if (write.errorCode != null || write.dispatchBlocked === true) throw blocked('CONTENT_RECEIPT_SOURCE_UNAVAILABLE');
+  write.dispatchClaim.phases.shopify_mutation = structuredClone(phase);
+  write.status = 'completed'; write.observationErrorCode = null; write.completedAt = phase.at;
+  write.result = { externalId: write.input.productId };
+  delete write.recordedActionContext; delete write.recordedActionUnavailable;
+  recordCompletedConnectionWrite(projected, write, approval);
+  addAudit(projected, { type: 'connection_write_finished', actor, detail: { provider: write.provider, writeId: write.id, status: 'completed', errorCode: null } });
+  if (Buffer.byteLength(JSON.stringify(projected)) >= REVIEWED_ACTION_STATE_MAX_BYTES - 16384) {
+    throw blocked('CONTENT_RECEIPT_STATE_CAPACITY_EXHAUSTED', 'Workspace history is too close to its safe size limit to retain this content execution.');
+  }
+}
+
+export async function executeConnectionWrite(state, writeId, actor, integrations, persistClaim, { loadFreshState, loadObjectiveJob, durableStore = false, actorSession: authenticatedSession, protectedContentReceipts = null } = {}) {
   const write = state.connectionWrites?.find(item => item.id === writeId);
   if (!write) throw connectionError('Write request not found in this workspace.', 'WRITE_NOT_FOUND', 404);
   if (write.status === 'completed') return write;
@@ -434,6 +463,9 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   // Pin before the first await. Unknown signed layouts retain every original
   // comparison; a supported request can never acquire a fallback after change.
   const comparisonContract = contentComparisonContract(state, write, actor);
+  const receiptRequired = write.provider === 'shopify' && write.input?.operation === 'product_content'
+    && contentExecutionReceiptRequired(protectedContentReceipts);
+  if (receiptRequired && !comparisonContract) throw blocked('CONTENT_RECEIPT_SOURCE_UNAVAILABLE');
   const snapshotIdentity = comparisonContract ? contentWriteSnapshot : digest;
   const inputIdentity = input => digest(comparisonContract ? contentInputPreimage(input) : input);
   const initialWriteSnapshot = comparisonContract ? snapshotIdentity(write) : null;
@@ -507,7 +539,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   if (write.provider === 'shopify' && config.domain !== write.account) throw blocked('WRITE_CONNECTION_CHANGED');
   const configDigest = write.provider === 'shopify' ? digest(configBinding(config)) : null;
   let dispatch = null, submittedClaimDigest = null;
-  const contentSubmitted = () => objectiveContent && connectionDispatchCount(dispatch) > 0;
+  const contentSubmitted = () => (objectiveContent || receiptRequired) && connectionDispatchCount(dispatch) > 0;
   const approvalDecisionIdentity = comparisonContract ? contentApprovalDecisionSnapshot : value => digest(Object.fromEntries(Object.entries(value)
     .filter(([key]) => !['executedExternally', 'executionStatus', 'workStatus'].includes(key))));
   const retainedSubmittedSnapshot = snapshot => {
@@ -544,14 +576,14 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
       if (digest(configBinding(current)) !== configDigest) throw blocked('WRITE_CONNECTION_CHANGED');
     }
   };
-  const saveExact = async () => {
+  const saveExact = async (protectedContentCommit = null) => {
     localCheck();
     const guardedContent = objectiveContent || comparisonContract;
     const previous = state._revision, expected = snapshotIdentity(write), expectedApproval = guardedContent ? snapshotIdentity(approval) : null;
     // The synchronous store guard runs immediately before serialization. Manual
     // content needs the same exact comparison, but no new full-workspace copy;
     // objective content retains its existing owned source snapshot behavior.
-    const saved = await persistClaim(guardedContent ? { ...(objectiveContent ? { ownedSnapshot: true } : {}), beforeCommit: snapshot => {
+    const saveOptions = guardedContent ? { ...(objectiveContent ? { ownedSnapshot: true } : {}), beforeCommit: snapshot => {
       localCheck();
       if (snapshot) {
         const rows = snapshot.connectionWrites?.filter(row => row.id === writeId) || [];
@@ -563,7 +595,10 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
         if (comparisonContract && !contentSubmitted() && authority(snapshot, rows[0], actor, actorSession, comparisonContract) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
         if (contentSubmitted()) retainedSubmittedSnapshot(snapshot); else checkContentSource(snapshot);
       }
-    } } : undefined);
+    } } : undefined;
+    if (protectedContentCommit) Object.assign(saveOptions, { ownedSnapshot: true, protectedContentCommit });
+    const saved = await persistClaim(saveOptions);
+    if (protectedContentCommit) assertContentReceiptAcknowledgement(saved, protectedContentCommit);
     localCheck();
     const rows = saved?.connectionWrites?.filter(row => row.id === writeId) || [];
     if (typeof state._revision !== 'string' || state._revision === previous || saved?.workspace?.id !== workspaceId
@@ -619,7 +654,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   await saveExact();
   const phases = write.input.operation === 'instagram_publish' ? ['instagram_container', 'instagram_publish']
     : [write.provider === 'shopify' ? 'shopify_mutation' : 'meta_mutation'];
-  let expectedShopifyRequest;
+  let expectedShopifyRequest, contentReservation = null, contentReservationAcknowledged = false, confirmedContentObservation = null;
   dispatch = createConnectionDispatch(async request => {
     if (request.provider !== write.provider || !phases.includes(request.phase)
       || write.dispatchClaim.phases[request.phase]) throw blocked('WRITE_ALREADY_ATTEMPTED');
@@ -630,13 +665,26 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     assertObjectiveDispatchAllowed(write, objectivePolicy);
     if (write.dispatchClaim.phases[request.phase]) throw blocked('WRITE_ALREADY_ATTEMPTED');
     if (request.phase === 'instagram_publish') write.providerState.publishStartedAt = new Date().toISOString();
-    write.dispatchClaim.phases[request.phase] = { requestDigest: digest(request), status: 'dispatching', at: new Date().toISOString() };
-    await saveExact();
+    const phase = { requestDigest: digest(request), status: 'dispatching', at: new Date().toISOString() };
+    if (receiptRequired) {
+      preflightContentCompletionState(state, writeId, actor, phase);
+      // Preflight owns the entire prospective source and receipt before either
+      // the reservation transaction or provider request can be sent. The
+      // completion timestamp has fixed width; no later provider text enters it.
+      contentReservation = prepareContentExecutionAdmission({ state, write, preparedInput, actor, actorSession,
+        approval: approvedActionDecision, approvedProposal: approvedActionProposal, objectivePolicy,
+        dispatchRequestDigest: phase.requestDigest, claimId: executionClaimId, claimIdentity: identity,
+        authorityDigest, apiVersion: config.apiVersion || '2026-07', phaseAt: phase.at, comparisonContract });
+    }
+    write.dispatchClaim.phases[request.phase] = phase;
+    await saveExact(contentReservation);
+    if (receiptRequired) contentReservationAcknowledged = true;
     // Final acknowledged, revision-guarded phase claim is the dispatch
     // authorization point. A later pause cannot recall an in-flight request.
     await freshCheck();
     assertObjectiveDispatchAllowed(write, objectivePolicy);
-    if (objectiveContent) submittedClaimDigest = snapshotIdentity(write.dispatchClaim);
+    if (receiptRequired) preflightContentCompletionState(state, writeId, actor, phase);
+    if (objectiveContent || receiptRequired) submittedClaimDigest = snapshotIdentity(write.dispatchClaim);
   });
   const recordResult = (phase, externalId) => {
     if (phase !== 'instagram_container' || !/^\d{1,32}$/.test(externalId)
@@ -677,12 +725,15 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     if (connectionDispatchCount(dispatch) === 0) throw blocked('WRITE_DISPATCH_UNVERIFIED');
     if (result.userErrors?.length) { write.status = 'failed'; throw connectionError('Shopify declined this change. Check the product in Shopify before submitting a new request.', 'WRITE_REJECTED', 422); }
     write.status = 'completed'; write.observationErrorCode = null; write.completedAt = new Date().toISOString();
-    if (approval) {
-      approval.executedExternally = true; approval.executionStatus = 'completed'; approval.workStatus = 'COMPLETED';
-      recordWork(state, { id: approval.id, title: approval.action, source: 'approval-centre', status: 'COMPLETED', executedExternally: true, evidence: [{ type: `${write.provider}_write`, id: write.result?.externalId || write.input.productId, detail: write.input.operation }] });
-    }
-    recordWork(state, { id: write.id, title: `${write.provider === 'meta' ? 'Meta' : 'Shopify'} change confirmed`, source: 'connection-centre', status: 'COMPLETED', executedExternally: true, evidence: [{ type: `${write.provider}_write`, id: write.result?.externalId || write.input.productId, detail: write.input.operation }] });
+    if (receiptRequired) confirmedContentObservation = Object.freeze({ completedAt: write.completedAt, resultId: write.result.externalId });
+    recordCompletedConnectionWrite(state, write, approval);
   } catch (error) {
+    // A rejected or unconfirmed protected reservation must leave through its
+    // own persistence boundary. A generic terminal save would either try to
+    // install an unadmitted phase, or overwrite a possibly committed claim.
+    // Preserve the exact refusal/uncertainty and never infer rollback from a
+    // generic `definitive` flag or a missing private acknowledgement.
+    if (receiptRequired && contentReservation && !contentReservationAcknowledged) throw error;
     // Never let the outer whole-state save overwrite acknowledged admission
     // history or immutable request identity with a changed shared snapshot.
     retainedCheck();
@@ -691,6 +742,12 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     write.errorCode = /^[A-Z0-9_]+$/.test(error.code || '') ? error.code : 'WRITE_RESULT_UNKNOWN';
   }
   addAudit(state, { type: 'connection_write_finished', actor, detail: { provider: write.provider, writeId: write.id, status: write.status, errorCode: write.errorCode || null } });
+  // Construct mandatory completion from the admitted immutable source, outside
+  // the provider catch. Unexpected evidence failure cannot relabel an observed
+  // success as an uncertain provider outcome. Optional workspace context below
+  // is independent, including its existing near-state-ceiling omission rule.
+  const protectedCompletion = receiptRequired && confirmedContentObservation
+    ? completeContentExecutionReceipt(contentReservation, confirmedContentObservation) : null;
   // Optional evidence preparation is deliberately outside the provider-result
   // catch. A size/shape failure cannot erase a known Shopify response, change it
   // to uncertain, add another save, or replay the provider mutation. The exact
@@ -712,6 +769,6 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     }
     if (write.recordedActionUnavailable && Buffer.byteLength(JSON.stringify(state)) >= REVIEWED_ACTION_STATE_MAX_BYTES - 16384) delete write.recordedActionUnavailable;
   }
-  await saveExact();
+  await saveExact(protectedCompletion);
   return structuredClone(write);
 }

@@ -14,6 +14,9 @@ import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
 import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
+import { CONTENT_EXECUTION_RECEIPT_CONTRACT, validateContentExecutionCommit,
+  recordContentReceiptAcknowledgement } from './content-execution-receipt.mjs';
+import { prepareContentReceiptTransaction, commitContentReceiptTransaction } from './content-execution-receipt-store.mjs';
 import { orderFinancialMirrorRow, orderReportingCurrency } from './shopify-order-source.mjs';
 import { LEGACY_AI_USAGE_COLUMNS, LEGACY_AI_USAGE_MAX_ROWS, LEGACY_AI_USAGE_MAX_BYTES,
   legacyAiUsageWindow, legacyAiUsageUnknown, legacyAiUsagePage } from './legacy-ai-usage.mjs';
@@ -383,6 +386,7 @@ export function upgradeState(state, env = process.env) {
 
 class FileStore {
   constructor(env, activityOptions = {}) {
+    Object.defineProperty(this, 'contentExecutionReceiptCapability', { value: env.CONTENT_EXECUTION_RECEIPT_CONTRACT ?? null });
     this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: false });
     const defaultPath = fileURLToPath(new URL('../data/state.json', import.meta.url));
     this.filePath = env.SAAS_STATE_FILE || defaultPath;
@@ -417,7 +421,8 @@ class FileStore {
     return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit } = {}) {
+    if (protectedContentCommit !== undefined) throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
     assertWorkspace(workspaceId, state);
     const assertCurrent = saveGuard(beforeCommit);
     assertCurrent(state);
@@ -602,6 +607,7 @@ class FileStore {
 
 class SupabaseStore {
   constructor(env, fetchImpl, activityOptions = {}) {
+    Object.defineProperty(this, 'contentExecutionReceiptCapability', { value: env.CONTENT_EXECUTION_RECEIPT_CONTRACT ?? null });
     this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: true });
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
@@ -1247,7 +1253,7 @@ class SupabaseStore {
     }, { primary: false });
   }
 
-  async commit(workspaceId, state, expectedRevision, existing, { primary = true } = {}) {
+  async commit(workspaceId, state, expectedRevision, existing, { primary = true, protectedContentCommit } = {}) {
     try {
       const stateBytes = Buffer.byteLength(JSON.stringify(state));
       this.telemetry.stateBytes = stateBytes;
@@ -1261,8 +1267,26 @@ class SupabaseStore {
       if (stateBytes >= SUPABASE_STATE_WARN_BYTES) {
         console.warn(JSON.stringify({ event: 'supabase_state_size_warning', workspaceId, stateBytes, warnBytes: SUPABASE_STATE_WARN_BYTES, hardBytes: SUPABASE_STATE_HARD_BYTES }));
       }
+      let protectedResult = null;
       const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
-      if (existing) {
+      if (protectedContentCommit) {
+        if (this.contentExecutionReceiptCapability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) {
+          throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
+        }
+        const transaction = prepareContentReceiptTransaction(workspaceId, state, expectedRevision, protectedContentCommit);
+        try {
+          protectedResult = await commitContentReceiptTransaction(transaction, (operation, pathname, options, retryKind) =>
+            this.scopedRequest(workspaceId, operation, pathname, options, retryKind));
+        } finally {
+          // An uncertain response may have committed; cached predecessors are
+          // never authoritative evidence. Reinstall only after normal success.
+          if (!protectedResult || protectedResult.recovered) {
+            this.invalidateSchedulerCache(workspaceId);
+            this.mirrorRevisions.delete(workspaceId);
+            for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
+          }
+        }
+      } else if (existing) {
         const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
         const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
         const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
@@ -1281,6 +1305,7 @@ class SupabaseStore {
         this.telemetry.lastPrimaryWriteAt = new Date().toISOString();
         this.primaryPersistenceHealthy = true;
       }
+      if (protectedResult) return protectedResult;
     } catch (error) {
       // Revision conflicts are expected concurrency outcomes. A reporting-status
       // follow-up cannot revoke or replace the already-confirmed primary commit.
@@ -1394,8 +1419,20 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit } = {}) {
     assertWorkspace(workspaceId, state);
+    if (protectedContentCommit !== undefined) {
+      if (this.contentExecutionReceiptCapability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) {
+        throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
+      }
+      // Detach both the descriptor and workspace before the first archive await.
+      protectedContentCommit = validateContentExecutionCommit(protectedContentCommit);
+      if (protectedContentCommit.admission.workspaceId !== workspaceId) throw Object.assign(new Error('WORKSPACE_MISMATCH'), { code: 'WORKSPACE_MISMATCH', status: 403 });
+      if (typeof state._revision !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(state._revision)) {
+        throw Object.assign(new Error('CONTENT_RECEIPT_INVALID'), { code: 'CONTENT_RECEIPT_INVALID', status: 409 });
+      }
+      ownedSnapshot = true;
+    }
     const assertCurrent = saveGuard(beforeCommit);
     assertCurrent(state);
     // Opt-in source-bound requests own every value serialized after an archive
@@ -1410,7 +1447,7 @@ class SupabaseStore {
     const expectedRevision = state._revision;
     // Plan against the predecessor and original run references, not the new
     // revision or a deep clone. Scheduler claim handles survive save/finish.
-    const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(state) : null;
+    const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(protectedContentCommit ? source : state) : null;
     const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: true };
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
@@ -1444,7 +1481,19 @@ class SupabaseStore {
     const retainedAutomationRuns = automationPlan ? applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns : null;
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     assertCurrent(upgraded);
-    await this.commit(workspaceId, upgraded, expectedRevision, existing);
+    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit });
+    if (protectedResult?.recovered) {
+      // The exact original primary transaction is proven, even if another
+      // replica has since advanced the workspace. Never mirror or save this
+      // old snapshot over that newer state, or install it in scheduler caches.
+      // Advance the caller only to its own acknowledged primary revision. This
+      // is the dispatch continuation's original fence, never the newer revision
+      // observed elsewhere; its final fresh check still detects concurrent work.
+      state._revision = upgraded._revision;
+      const persisted = markPersisted(upgraded);
+      recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
+      return persisted;
+    }
     state._revision = upgraded._revision;
     for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) {
       // Retention plans deliberately keep original run handles for scheduler
@@ -1485,6 +1534,7 @@ class SupabaseStore {
     }
     if (reportingCommitted) this.rememberSchedulerState(workspaceId, persisted);
     else this.invalidateSchedulerCache(workspaceId);
+    if (protectedResult) recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
     return persisted;
   }
 

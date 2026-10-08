@@ -46,3 +46,5 @@ jobs:
         run: node --test --test-concurrency=1 saas/server/tests/content-jsonb-postgres.mjs
       - name: Verify actual concurrent publication and privilege boundaries
         run: node --test --test-concurrency=1 saas/server/tests/business-outcome-postgres.mjs
+      - name: Verify protected content receipts, capacity and rollback boundaries
+        run: node --test --test-concurrency=1 saas/server/tests/content-execution-receipt-postgres.mjs

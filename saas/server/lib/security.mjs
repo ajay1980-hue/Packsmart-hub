@@ -272,9 +272,26 @@ function sanitizePublicMetadata(metadata) {
   return Object.fromEntries(allowed.filter(key => metadata[key] !== undefined).map(key => [key, metadata[key]]));
 }
 
+// These codes can escape either admission or final persistence. The public
+// text must not infer whether Shopify was called from an error code alone.
+const contentReceiptErrors = Object.freeze({
+  CONTENT_RECEIPT_CAPACITY_EXHAUSTED: 'Protected content history is full.',
+  CONTENT_RECEIPT_STATE_CAPACITY_EXHAUSTED: 'Workspace history has no room to safely retain this content change.',
+  CONTENT_RECEIPT_TOO_LARGE: 'This content change is too large to retain safely.',
+  CONTENT_RECEIPT_SOURCE_UNAVAILABLE: 'The saved source for this content change is unavailable.',
+  CONTENT_RECEIPT_UNAVAILABLE: 'Protected content history is unavailable.',
+  CONTENT_RECEIPT_INVALID: 'Runvara could not validate the saved record for this content change.',
+  CONTENT_RECEIPT_ACTOR_REQUIRED: 'Runvara could not verify the authorised owner for this saved content change.',
+  CONTENT_RECEIPT_IDENTITY_CONFLICT: 'The saved content request no longer matches its protected record.',
+  CONTENT_RECEIPT_GUARD_REQUIRED: 'Required protection for this content change could not be verified.',
+  CONTENT_RECEIPT_ACK_INVALID: 'Runvara could not confirm the saved record for this content change.',
+  CONTENT_RECEIPT_COMMIT_UNCONFIRMED: 'Shopify may have applied the change, but Runvara could not confirm its saved completion.'
+});
+
 export function sanitizeError(error) {
   const status = Number(error?.status) || 500;
-  const publicMessage = status >= 500 ? 'Internal server error' : String(error?.message || 'Request failed').slice(0, 240);
+  const receiptMessage = typeof error?.code === 'string' && Object.hasOwn(contentReceiptErrors, error.code) ? contentReceiptErrors[error.code] : null;
+  const publicMessage = receiptMessage ? receiptMessage + ' Review the existing request before taking further action.' : status >= 500 ? 'Internal server error' : String(error?.message || 'Request failed').slice(0, 240);
   return { status, publicMessage, code: String(error?.code || (status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR')).slice(0, 80) };
 }
 

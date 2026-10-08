@@ -2341,6 +2341,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
           connectionWriteLimiter.fail(auth.session.workspaceId);
           const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, options => store.save(auth.session.workspaceId, state, options), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), loadObjectiveJob: jobId => store.getAgentJob(auth.session.workspaceId, jobId, { includeReport: true }), durableStore: store.provider === 'supabase',
+            protectedContentReceipts: store.contentExecutionReceiptCapability,
             actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write: publicConnectionWrite(write), executedExternally: write.status === 'completed' }); return;
         }

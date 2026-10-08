@@ -313,6 +313,20 @@ begin
     revoke all on public.runvara_business_outcome_heads from public,anon,authenticated,service_role;
     grant select on public.runvara_business_outcome_heads to service_role;
   end if;
+  -- Protected content evidence is available only through exact private RPCs.
+  -- Keep the dormant/enforced latch and quota metadata out of generic DML too.
+  if to_regclass('public.runvara_content_receipt_control') is not null then
+    revoke all on public.runvara_content_receipt_control from public,anon,authenticated,service_role;
+  end if;
+  if to_regclass('public.runvara_content_receipt_quotas') is not null then
+    revoke all on public.runvara_content_receipt_quotas from public,anon,authenticated,service_role;
+  end if;
+  if to_regclass('public.runvara_content_admissions') is not null then
+    revoke all on public.runvara_content_admissions from public,anon,authenticated,service_role;
+  end if;
+  if to_regclass('public.runvara_content_receipts') is not null then
+    revoke all on public.runvara_content_receipts from public,anon,authenticated,service_role;
+  end if;
 end
 $$;
 

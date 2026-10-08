@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
+import { publicConnectionWrite } from '../lib/action-display.mjs';
 import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
 
 const directory=await fs.mkdtemp(path.join(os.tmpdir(),'runvara-manual-content-browser-'));
@@ -44,6 +45,22 @@ async function capture(page,width,name){
     await typography.evaluate(session=>session.assertBaseline());
   } finally {await typography.dispose();}
 }
+async function captureReceiptFeedback(page,width,name,message,failed){
+  const notification=page.locator(failed?'#global-error':'#global-success');
+  await notification.getByText(message,{exact:true}).waitFor();
+  assert.equal(await notification.textContent(),message);
+  const fit=async locator=>{
+    await locator.scrollIntoViewIfNeeded();
+    const bounds=await locator.evaluate(node=>{const box=node.getBoundingClientRect();return {left:box.left,right:box.right,top:box.top,bottom:box.bottom,width:innerWidth,height:innerHeight,scroll:node.scrollWidth,client:node.clientWidth};});
+    assert.ok(bounds.left>=0&&bounds.right<=width+2&&bounds.top>=0&&bounds.bottom<=bounds.height+2&&bounds.scroll<=bounds.client+2,`receipt feedback overflow ${width}/${name}: ${JSON.stringify(bounds)}`);
+  };
+  if(failed){
+    const feedback=page.locator('#connection-feedback');assert.equal(await feedback.textContent(),message);
+    await fit(feedback);await feedback.screenshot({path:`/tmp/runvara-manual-content-receipt-${name}-${width}-feedback.png`,caret:'initial'});
+  }else assert.equal(await page.locator('#connection-feedback').textContent(),'');
+  await page.locator('#connection-close').click();
+  await fit(notification);await notification.screenshot({path:`/tmp/runvara-manual-content-receipt-${name}-${width}-notification.png`,caret:'initial'});
+}
 try{
  const seed=seedWorkspaceState({}, {workspaceId:'manual-content-browser',userId:'manual-content-owner',name:'Synthetic exact content tenant',email:'manual-content@example.test',passwordHash:'fixture-only'});
  seed.products=[{id:productId,provider:'shopify',title:'Synthetic retained product',status:'active',variants:[]}];
@@ -58,7 +75,7 @@ try{
  for(const width of [320,390,1200]){
   const reset=structuredClone(seed);reset._revision=(await server.packsmart.store.get(seed.workspace.id))._revision;await server.packsmart.store.save(seed.workspace.id,reset);
   const context=await browser.newContext({viewport:{width,height:900}});await context.addCookies([{name:'packsmart_session',value:token,url:base,httpOnly:true,sameSite:'Strict'}]);
-  const page=await context.newPage(),calls=[],errors=[],external=[],unexpected=[];let postMode='commit-and-lose';
+  const page=await context.newPage(),calls=[],errors=[],external=[],unexpected=[];let postMode='commit-and-lose',executeFixture=null;
   page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/*',async route=>{
    const request=route.request(),url=new URL(request.url());if(url.origin!==base){external.push(url.href);return route.abort();}
@@ -66,6 +83,16 @@ try{
    calls.push({path:url.pathname,method:request.method(),body:request.postData()});
    if(request.method()==='GET'&&['/api/auth/session','/api/bootstrap','/api/connection-centre'].includes(url.pathname))return route.continue();
    if(request.method()==='GET'&&url.pathname.startsWith('/api/connections/shopify/content-requests/'))return route.continue();
+   if(executeFixture&&request.method()==='POST'&&url.pathname===executeFixture.path){
+    assert.equal(await request.headerValue('origin'),base);assert.equal(request.postData(),'{}');
+    const fixture=executeFixture;executeFixture=null;
+    // Synthetic response only: this route never reaches the execution API.
+    const state=await server.packsmart.store.get(seed.workspace.id),write=state.connectionWrites.find(row=>row.id===fixture.writeId);
+    Object.assign(write,fixture.saved);await server.packsmart.store.save(seed.workspace.id,state);
+    return route.fulfill({status:fixture.status,contentType:'application/json',body:JSON.stringify(fixture.error?
+      {code:'CONTENT_RECEIPT_COMMIT_UNCONFIRMED',error:'PRIVATE_RECEIPT_CANARY <img src=x onerror="window.receiptLeak=true">'}:
+      {write:publicConnectionWrite(write),executedExternally:write.status==='completed'})});
+   }
    if(request.method()==='POST'&&url.pathname==='/api/connections/shopify/writes'){
     assert.equal(await request.headerValue('origin'),base);
     if(postMode==='commit-and-lose'){postMode='normal';const response=await route.fetch();assert.equal(response.status(),200);return route.abort();}
@@ -109,7 +136,29 @@ try{
   assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#content-prepare').isDisabled(),true);assert.equal(writes().length,3);
   await page.locator('#global-success').waitFor({state:'hidden'});await capture(page,width,'stale');
   await page.locator('#content-reload').click();await page.waitForFunction(()=>document.querySelector('#connection-content-form').getAttribute('aria-busy')==='false');assert.equal(await account.inputValue(),'');assert.equal(await product.inputValue(),'');assert.equal(writes().length,3);
+  await page.locator('#connection-close').click();
+  const receiptCases=[
+    {name:'capacity',status:200,saved:{status:'failed',dispatchBlocked:true,errorCode:'CONTENT_RECEIPT_CAPACITY_EXHAUSTED'},message:'Runvara stopped this request before sending a change to Shopify. Protected content history is full. Review the existing request before taking further action.'},
+    {name:'unconfirmed',status:503,error:true,saved:{status:'executing'},message:'Shopify may have applied the change, but Runvara could not confirm its saved completion. Review the existing request before taking further action.'},
+    {name:'confirmed',status:200,saved:{status:'completed',result:{externalId:productId}},message:'Shopify confirmed the change.'}
+  ];
+  for(const fixture of receiptCases){
+    // Prepare only this disposable fixture's already reviewed record. Approval
+    // and execution APIs stay forbidden except the intercepted response above.
+    stored=await server.packsmart.store.get(seed.workspace.id);const write=stored.connectionWrites[0];
+    write.status='ready';delete write.errorCode;delete write.dispatchBlocked;delete write.result;
+    stored.approvals.find(row=>row.id===write.approvalId).status='approved';await server.packsmart.store.save(seed.workspace.id,stored);
+    await page.locator('#connection-refresh').click();await page.waitForFunction(()=>!document.querySelector('#connection-refresh').disabled);await open();
+    const executePath='/api/connection-writes/'+write.id+'/execute',before=calls.filter(call=>call.path===executePath).length;
+    executeFixture={...fixture,path:executePath,writeId:write.id};
+    await page.locator(`[data-connection-action="execute"][data-write="${write.id}"]`).click();
+    await captureReceiptFeedback(page,width,fixture.name,fixture.message,fixture.name!=='confirmed');
+    assert.equal(calls.filter(call=>call.path===executePath).length,before+1);assert.equal(executeFixture,null);
+    assert.equal(await page.evaluate(()=>window.receiptLeak),undefined);assert.equal((await page.locator('body').textContent()).includes('PRIVATE_RECEIPT_CANARY'),false);
+    assert.equal(writes().length,3,'receipt feedback never prepares a replacement request');
+    assert.equal(providerRequests,0,'synthetic execute feedback never reaches provider transport');
+  }
   assert.deepEqual(errors,[]);assert.deepEqual(external,[]);assert.deepEqual(unexpected,[]);assert.equal(providerRequests,0,'preparation and reconciliation make no server-side provider requests');await context.close();
  }
- console.log('Manual Shopify exact-target content preparation/recovery checks passed at320,390,1200 with normal and200% text, real local saves, separate approval and no provider requests.');
+ console.log('Manual Shopify exact-target content preparation/recovery checks passed at320,390,1200 with normal and200% text, real local saves, separate approval and no provider requests. Fixed receipt refusal, unconfirmed completion and success feedback also fit at all three widths using intercepted synthetic execution responses.');
 }finally{if(browser)await browser.close();if(server.listening)await new Promise(resolve=>server.close(resolve));await fs.rm(directory,{recursive:true,force:true});assert.equal(providerRequests,0,'no provider transport may be attempted, including on a failed fixture path');}
