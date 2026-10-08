@@ -71,7 +71,8 @@ import { deriveImpact } from './lib/impact-engine.mjs';
 import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
 import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
-import { REVIEWED_ACTION_CONTRACT, resolveRecordedActionEvidence, validateActionSelection } from './lib/reviewed-action-evidence.mjs';
+import { supportsReviewedActions, supportsReviewedActionSource, resolveRecordedActionEvidence, validateActionSelection } from './lib/reviewed-action-evidence.mjs';
+import { publicBusinessOutcomeEvidence } from './lib/business-outcome-store.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from './lib/experiment-measurements.mjs';
 import { evidenceInWorkspace } from './lib/business-evidence-scope.mjs';
 
@@ -1230,10 +1231,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             requireOwner(auth); consume(outcomeDraftLimiter);
             const id = decodeId(source[1]), body = await jsonBody(req, 16384);
             const selection = validateActionSelection(body.actionSelection);
-            let reusedAction = null;
+            let reusedAction = null, actionLinkContract = null;
             if (selection) {
               const compatible = await store.getBusinessOutcomeReview(workspaceId, id);
-              if (compatible.actionLinkContract !== REVIEWED_ACTION_CONTRACT) throw Object.assign(new Error('Reviewed action linking requires the compatible storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
+              if (!supportsReviewedActions(compatible.actionLinkContract)) throw Object.assign(new Error('Reviewed action linking requires the compatible storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
+              actionLinkContract = compatible.actionLinkContract;
               if (selection.reuseVersionId) {
                 const evidence = await store.getBusinessOutcomeEvidence(workspaceId, selection.reuseVersionId);
                 if (evidence.publication.version.source.experimentId !== id || !evidence.sourceAction) throw Object.assign(new Error('Selected immutable action is not available for this experiment'), { status: 409, code: 'OUTCOME_ACTION_INVALID' });
@@ -1249,9 +1251,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 || actors.length !== 1 || !owned(actors[0]) || actors[0].passwordChangeRequired) {
                 throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
               }
+              const actionEvidence = selection ? reusedAction ?? resolveRecordedActionEvidence(state, selection.actionId) : null;
+              if (selection && !supportsReviewedActionSource(actionLinkContract, actionEvidence)) throw Object.assign(new Error('Objective action linking requires the forward storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
               const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
                 actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null,
-                ...(selection ? { actionEvidence: reusedAction ?? resolveRecordedActionEvidence(state, selection.actionId), reuseVersionId: selection.reuseVersionId ?? null } : {}) });
+                ...(selection ? { actionEvidence, reuseVersionId: selection.reuseVersionId ?? null } : {}) });
               matches[0].outcomeMeasurement = measurement;
               const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
               addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,
@@ -1276,7 +1280,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const version = pathname.match(/^\/api\/business-outcomes\/versions\/(outcome_version_[a-f0-9]{64})$/);
           if (req.method === 'GET' && version) {
             consume(outcomeReadLimiter);
-            send(res, 200, await store.getBusinessOutcomeEvidence(workspaceId, version[1])); return;
+            send(res, 200, publicBusinessOutcomeEvidence(await store.getBusinessOutcomeEvidence(workspaceId, version[1]), { workspaceId })); return;
           }
           throw Object.assign(new Error('Outcome route not found'), { status: 404, code: 'NOT_FOUND' });
         }

@@ -287,7 +287,8 @@ test('fresh synthetic HTTP dispatch records known success before projection and 
   assert.deepEqual(retained.approvals[0].payload, approvalPayload);
   assert.deepEqual(retained.connectionWrites[0].futurePrivate, write.futurePrivate);
   assert.ok(retained.connectionWrites[0].dispatchClaim.phases.shopify_mutation);
-  assert.equal(retained.connectionWrites[0].recordedActionUnavailable, 'objective_origin_unsupported');
+  assert.equal(retained.connectionWrites[0].recordedActionContext.schema, 'runvara-recorded-action-context/v2');
+  assert.equal(retained.connectionWrites[0].recordedActionUnavailable, undefined);
   const again = await execute(); success(again); assertPrivateAbsent(again.body, secret);
   assert.equal(again.body.write.status, 'completed'); assert.equal(calls, 1); assert.equal(saves, 3);
 });

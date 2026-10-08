@@ -13,7 +13,9 @@ test('objective content synthetic dispatch binds source, reads history at admiss
   assert.equal(result.status, 'completed', result.errorCode);
   assert.equal(f.counts.mutations, 1); assert.equal(f.counts.credentials, 1); assert.equal(f.counts.job, 3); assert.equal(f.counts.fresh, 2);
   assert.equal(result.objectivePolicyProposal.origin, 'owner_objective_content');
-  assert.equal(result.recordedActionContext, undefined); assert.equal(result.recordedActionUnavailable, 'objective_origin_unsupported');
+  assert.equal(result.recordedActionContext.schema, 'runvara-recorded-action-context/v2'); assert.equal(result.recordedActionUnavailable, undefined);
+  assert.equal(result.recordedActionContext.origin, 'owner_objective_content');
+  assert.equal(f.counts.saves, 3, 'context uses the existing single final save');
   const again = await f.run(); assert.equal(again.status, 'completed'); assert.equal(f.counts.mutations, 1);
 });
 
@@ -98,7 +100,7 @@ test('a prepared v1-only envelope guard rejects actual v2 and unknown versions i
 });
 test('known results survive post-submission source disappearance, eligibility loss, and clock expiry', async t => {
   for (const changed of ['product', 'job', 'owner', 'expiry']) await t.test(changed, async () => {
-    const f = await objectiveContentFixture(), originalNow = Date.now;
+    const f = await objectiveContentFixture(), originalNow = Date.now, pinnedProposal = structuredClone(f.write.objectivePolicyProposal);
     f.hooks.fetch = async () => {
       if (changed === 'product') f.state.products = [];
       if (changed === 'job') f.database.tables.set('runvara_agent_jobs', []);
@@ -108,6 +110,8 @@ test('known results survive post-submission source disappearance, eligibility lo
     };
     try {
       const result = await f.run(); assert.equal(result.status, 'completed'); assert.equal(f.counts.mutations, 1);
+      assert.deepEqual(result.recordedActionContext.proposal, pinnedProposal, 'context preserves the originally approved source after submission');
+      assert.equal(result.recordedActionContext.schema, 'runvara-recorded-action-context/v2'); assert.equal(f.counts.saves, 3);
       assert.equal(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].status, 'completed');
       assert.equal((await f.run()).status, 'completed'); assert.equal(f.counts.mutations, 1);
       if (['product', 'job'].includes(changed)) {
@@ -138,6 +142,10 @@ test('known rejection, unknown provider response and lost final save never repla
     if (mode === 'rejected') assert.equal(result.status, 'failed');
     if (mode === 'unknown') assert.equal(result.status, 'uncertain');
     if (mode === 'lost-final') assert.ok(result instanceof Error);
+    if (mode === 'lost-final') {
+      assert.equal(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].status, 'completed');
+      assert.equal(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].recordedActionContext.schema, 'runvara-recorded-action-context/v2');
+    } else assert.equal(f.write.recordedActionContext, undefined, 'failed or uncertain dispatch is never optional action evidence');
     assert.equal(f.counts.mutations, 1);
     await f.run().catch(error => error); assert.equal(f.counts.mutations, 1);
   });
@@ -154,15 +162,44 @@ test('final CAS conflict preserves the competing workspace and an unreplayable s
   assert.equal(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].status, 'executing');
   assert.ok(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].dispatchClaim.phases.shopify_mutation);
   assert.equal(f.write.status, 'completed', 'known local response is retained even if CAS acknowledgement fails');
+  assert.equal(f.write.recordedActionContext.schema, 'runvara-recorded-action-context/v2');
+  assert.equal(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].recordedActionContext, undefined, 'unacknowledged local evidence is not persisted by a competing CAS');
   assert.equal(f.counts.mutations, 1);
+  await f.run(); assert.equal(f.counts.mutations, 1);
+});
+
+test('oversized or unsupported optional objective context preserves exact known success and one final save', async t => {
+  for (const kind of ['oversized-unicode', 'oversized-escaped', 'unsupported-unicode', 'unsupported-null']) await t.test(kind, async () => {
+    const f = await objectiveContentFixture({ contentInput: { description: kind === 'oversized-unicode' ? '雪'.repeat(6000)
+      : kind === 'oversized-escaped' ? '\u0001'.repeat(3500) : kind === 'unsupported-unicode' ? '\ud800' : '\0' } });
+    const result = await f.run(); assert.equal(result.status, 'completed');
+    assert.deepEqual(result.result, { externalId: CONTENT_PRODUCT }); assert.equal(result.recordedActionContext, undefined);
+    assert.equal(result.recordedActionUnavailable, kind.startsWith('unsupported') ? 'context_unavailable' : 'source_size_limit');
+    assert.equal(f.counts.mutations, 1); assert.equal(f.counts.saves, 3); assert.equal(f.counts.job, 3);
+    assert.equal(f.database.states.get(CONTENT_WORKSPACE).connectionWrites[0].status, 'completed');
+    await f.run(); assert.equal(f.counts.mutations, 1); assert.equal(f.counts.saves, 3);
+  });
+});
+
+test('optional objective context respects the unchanged whole-state ceiling without erasing known success', async () => {
+  const f = await objectiveContentFixture();
+  f.state.unrelatedRetainedText = 'x'.repeat(2065000);
+  await f.store.save(CONTENT_WORKSPACE, f.state);
+  const result = await f.run();
+  assert.equal(result.status, 'completed', result.errorCode); assert.equal(result.recordedActionContext, undefined);
+  assert.equal(result.recordedActionUnavailable, 'state_size_limit'); assert.equal(f.counts.saves, 3); assert.equal(f.counts.mutations, 1);
+  assert.ok(Buffer.byteLength(JSON.stringify(f.database.states.get(CONTENT_WORKSPACE))) <= 2097152);
+  await f.run(); assert.equal(f.counts.mutations, 1); assert.equal(f.counts.saves, 3);
 });
 test('final private snapshots and acknowledgements cannot substitute approval, claim or admission identity', async t => {
-  for (const boundary of ['private', 'ack']) for (const field of ['approval', 'claim', 'admissions']) await t.test(`${boundary}:${field}`, async () => {
+  for (const boundary of ['private', 'ack']) for (const field of ['approval', 'claim', 'admissions', 'context', 'stableApproval']) await t.test(`${boundary}:${field}`, async () => {
     const f = await objectiveContentFixture(), save = f.store.save.bind(f.store);
     const mutate = snapshot => {
       if (field === 'approval') snapshot.approvals[0].decidedBy = 'forged-owner';
       if (field === 'claim') snapshot.connectionWrites[0].dispatchClaim.id = 'forged-claim';
       if (field === 'admissions') snapshot.connectionDispatchAdmissions = [];
+      if (field === 'context') snapshot.connectionWrites[0].recordedActionContext.originatingObjective.digest = 'a'.repeat(64);
+      if (field === 'stableApproval') snapshot.connectionWrites[0].recordedActionContext.stableApproval.reason = 'forged reason';
     };
     f.store.save = async (workspaceId, state, options) => {
       if (f.counts.saves !== 3) return save(workspaceId, state, options);
@@ -171,6 +208,7 @@ test('final private snapshots and acknowledgements cannot substitute approval, c
     };
     await assert.rejects(f.run); assert.equal(f.counts.mutations, 1);
     assert.equal(f.write.status, 'completed');
+    await f.run(); assert.equal(f.counts.mutations, 1, 'an unconfirmed final snapshot never authorizes another provider mutation');
   });
 });
 test('two replicas cannot both claim and submit one objective-bound write', async () => {

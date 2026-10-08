@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BUSINESS_OUTCOME_CURRENCIES, BUSINESS_OUTCOME_CURRENCY_CONTRACT_VERSION, createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate, validateBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
@@ -875,4 +875,383 @@ test('oversized or unsupported optional action collections do not break unlinked
     assert.deepEqual((await review(f)).actionChoices, []);
     await assert.rejects(publish(request(f)), code('P0O10')); await unchanged(f);
   }
+});
+
+// Preserve every pre-forward test above. Only this final suite installs the
+// prepared objective-content union in the same disposable PostgreSQL service.
+import { objectivePublicationFixture, objectivePublicationMeasurementInput } from './objective-publication-fixture.mjs';
+import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
+import { reviewedActionClaimIdentity, validateReviewedSourceAction, resolveRecordedActionEvidence } from '../lib/reviewed-action-evidence.mjs';
+let objectiveSecurityBefore, objectiveTriggerBefore;
+async function outcomeTriggers() {
+  return (await admin.query(`SELECT c.relname,t.tgname,t.tgfoid::regprocedure::text function,t.tgenabled,pg_get_triggerdef(t.oid) definition
+    FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid WHERE NOT t.tgisinternal
+    AND c.oid IN ('public.runvara_business_outcome_versions'::regclass,'public.runvara_business_outcome_heads'::regclass) ORDER BY c.relname,t.tgname`)).rows;
+}
+async function objectiveSecurity() {
+  const sourceActionColumn=(await admin.query(`SELECT a.attname,a.attacl::text,r.rolname,
+    has_column_privilege(r.oid,a.attrelid,a.attnum,'SELECT') can_select,
+    has_column_privilege(r.oid,a.attrelid,a.attnum,'INSERT') can_insert,
+    has_column_privilege(r.oid,a.attrelid,a.attnum,'UPDATE') can_update,
+    has_column_privilege(r.oid,a.attrelid,a.attnum,'REFERENCES') can_reference
+    FROM pg_attribute a CROSS JOIN pg_roles r WHERE a.attrelid='public.runvara_business_outcome_versions'::regclass
+      AND a.attname='source_action' AND r.rolname IN ('anon','authenticated','service_role') ORDER BY r.rolname`)).rows;
+  const roles=(await admin.query('SELECT rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolbypassrls,rolconnlimit,rolconfig FROM pg_roles ORDER BY rolname')).rows;
+  const memberships=(await admin.query('SELECT roleid::regrole::text role,member::regrole::text member,grantor::regrole::text grantor,admin_option,inherit_option,set_option FROM pg_auth_members ORDER BY role,member,grantor')).rows;
+  return {...await outcomeSecurity(),sourceActionColumn,roles,memberships};
+}
+async function objectiveFixture(options = {}) {
+  const actual = await objectivePublicationFixture({ workspaceId: 'objective-outcome-' + randomUUID(), ...options });
+  const f = { ...actual, sourceAction: actual.source, experimentId: 'objective-experiment' };
+  f.state._revision = randomUUID();
+  f.source = prepareExperimentOutcomeMeasurement(objectivePublicationMeasurementInput({ actionSelection: { actionId: f.write.id } }), {
+    workspaceId: f.workspaceId, experimentId: f.experimentId, actorId: 'content-owner', now: new Date(), previousMeasurement: null,
+    actionEvidence: f.sourceAction, reuseVersionId: null
+  });
+  f.state.revenueEngine.experiments = [{ id: f.experimentId, title: 'Synthetic reviewed objective association', status: 'measured', outcomeMeasurement: f.source }];
+  await admin.query('INSERT INTO public.workspaces(id,name,slug) VALUES($1,$1,$1)', [f.workspaceId]);
+  await admin.query('INSERT INTO public.saas_workspace_state(workspace_id,state) VALUES($1,$2)', [f.workspaceId, f.state]);
+  return f;
+}
+const objectiveRequest = (f, overrides = {}) => request(f, { actorId: 'content-owner', ...overrides });
+async function objectiveCorrection(f, prior, { evidence = f.sourceAction, reuseVersionId = null, remove = false } = {}) {
+  const s = await state(f), previousMeasurement = s.revenueEngine.experiments[0].outcomeMeasurement;
+  const selection = remove ? null : reuseVersionId ? { reuseVersionId } : { actionId: evidence.context.writeId };
+  const measurement = prepareExperimentOutcomeMeasurement(objectivePublicationMeasurementInput({ expectedRevision: previousMeasurement.revision, actionSelection: selection, amount: '11.5' }), {
+    workspaceId: f.workspaceId, experimentId: f.experimentId, actorId: 'content-owner', now: new Date(), previousMeasurement,
+    actionEvidence: remove ? null : evidence, reuseVersionId: remove ? null : reuseVersionId
+  });
+  s.revenueEngine.experiments[0].outcomeMeasurement = measurement; s._revision = randomUUID(); await setState(f, s);
+  return objectiveRequest(f, { action: 'correct', workspaceRevision: s._revision, measurementRevision: measurement.revision, measurementDigest: measurement.digest,
+    headVersionId: prior.publication.head.versionId, headDigest: prior.publication.head.digest });
+}
+function resignObjectiveSource(source, { stable = true, claim = true, input = false } = {}) {
+  const s = structuredClone(source), c = s.context, p = c.proposal;
+  if (input) { c.inputDigest = actionFingerprint({ productId:s.input.productId,operation:s.input.operation,title:s.input.title,description:s.input.description }); p.inputDigest = c.inputDigest; c.approval.payload.digest = c.inputDigest; c.stableApproval.payload.digest = c.inputDigest;
+    c.dispatchRequestDigest = actionFingerprint(actionRequest(s.input, c.account, c.apiVersion)); }
+  if (stable) p.approvalDigest = hash(c.stableApproval);
+  delete p.digest; p.digest = hash(p); c.approval.payload.objectivePolicyProposalDigest = p.digest;
+  delete c.approval.digest; c.approval.digest = hash(c.approval);
+  if (claim) c.claimIdentity = reviewedActionClaimIdentity(s.input, c);
+  delete s.digest; s.digest = hash(s); return s;
+}
+const actionFingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+async function assertObjectiveSecurity() {
+  const actual = await objectiveSecurity(), prior = new Set(objectiveSecurityBefore.functions.map(f => f.signature));
+  assert.deepEqual({ ...actual, functions: actual.functions.filter(f => prior.has(f.signature)) }, objectiveSecurityBefore,
+    'Forward union preserves every existing RPC/helper signature, owner, ACL, security mode, search_path, RLS and column privilege');
+  assert.deepEqual(await outcomeTriggers(), objectiveTriggerBefore, 'All immutable triggers remain byte-identical');
+  const helpers = actual.functions.filter(f => !prior.has(f.signature));
+  assert.deepEqual(helpers.map(f => f.signature), ['runvara_outcome_validate_objective_action(jsonb,text)']);
+  for (const helper of helpers) {
+    assert.equal(helper.prosecdef, false); assert.equal(helper.owner, 'postgres'); assert.ok(helper.proconfig.includes('search_path=""'));
+    for (const role of ['anon','authenticated','service_role']) assert.equal((await admin.query("SELECT has_function_privilege($1,$2,'EXECUTE') allowed", [role, helper.signature])).rows[0].allowed, false);
+    assert.equal((await admin.query("SELECT EXISTS(SELECT 1 FROM aclexplode(coalesce(proacl,acldefault('f',proowner))) WHERE grantee=0 AND privilege_type='EXECUTE') allowed FROM pg_proc WHERE oid=$1::regprocedure", [helper.signature])).rows[0].allowed, false);
+  }
+  assert.deepEqual(await ledgerAcl(), originalLedgerAcl);
+  return actual;
+}
+
+test('reader-first storage refuses objective v2 before the forward migration, then preserves all prior security contracts', async () => {
+  const f = await objectiveFixture();
+  assert.equal((await review(f)).actionLinkContract, 'runvara-reviewed-action/v1');
+  assert.deepEqual((await review(f)).actionChoices, []);
+  await assert.rejects(publish(objectiveRequest(f)), code('P0O01')); await unchanged(f);
+  objectiveSecurityBefore = await objectiveSecurity(); objectiveTriggerBefore = await outcomeTriggers();
+  const dir = new URL('../supabase/migrations/', import.meta.url), files = (await readdir(dir)).filter(x => /^\d{14}_objective_action_outcome_snapshot\.sql$/.test(x));
+  assert.equal(files.length, 1); assert.ok(files[0] > '20261007175355_reviewed_action_outcome_snapshot.sql');
+  await admin.query(await readFile(new URL(files[0], dir), 'utf8'));
+  const after = await assertObjectiveSecurity();
+  console.log('OBJECTIVE_OUTCOME_SECURITY_BEFORE=' + JSON.stringify({ ...objectiveSecurityBefore, triggers: objectiveTriggerBefore }));
+  console.log('OBJECTIVE_OUTCOME_SECURITY_AFTER=' + JSON.stringify({ ...after, triggers: await outcomeTriggers() }));
+  assert.equal((await review(f)).actionLinkContract, 'runvara-reviewed-action/v2');
+  const result = await publish(objectiveRequest(f)); assert.deepEqual(await storedAction(f, result.publication.head.versionId), f.sourceAction);
+});
+
+test('actual objective producer source, stable approval and original durable JSONB fingerprints agree independently in SQL', async () => {
+  const f = await objectiveFixture({ contentInput: { title: 'Café 雪 😀', description: 'Exact & < >\n"quoted" \\ backslash\r\t\b\f\u2028\u2029' } });
+  const c = f.sourceAction.context;
+  const result = (await admin.query(`SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source,
+    public.runvara_outcome_resolve_action($3::jsonb,$2,$4) resolved,public.runvara_outcome_action_identity_digest($1::jsonb) claim,
+    public.runvara_outcome_action_request_digest($5::jsonb,$6,$7) request,public.runvara_outcome_hash($8::jsonb) stable,
+    public.runvara_outcome_validate_measurement($9::jsonb,$2,$10,clock_timestamp()) measurement`,
+    [f.sourceAction,f.workspaceId,f.state,f.write.id,f.write.input,f.write.account,c.apiVersion,c.stableApproval,f.source,f.experimentId])).rows[0];
+  assert.deepEqual(result.source,f.sourceAction); assert.deepEqual(result.resolved,f.sourceAction);
+  assert.equal(result.claim,c.claimIdentity); assert.equal(result.claim,f.write.dispatchClaim.identity);
+  assert.equal(result.request,c.dispatchRequestDigest); assert.equal(result.stable,c.proposal.approvalDigest);
+  assert.equal(result.measurement.links.objective,null); assert.equal(result.measurement.links.opportunity,null);
+  const scaled = JSON.stringify(f.sourceAction).replaceAll('"revision":1,','"revision":1.000,');
+  assert.deepEqual((await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source',[scaled,f.workspaceId])).rows[0].source,f.sourceAction);
+  const r = await publish(objectiveRequest(f)); assert.deepEqual(await storedAction(f,r.publication.head.versionId),f.sourceAction);
+  assert.equal(r.publication.version.publicationAuthority,false); assert.equal(r.publication.version.sourceReferencesResolved,false); assert.equal(r.publication.version.runvaraAttribution,'unestablished');
+  const selected = await review(f); assert.deepEqual(selected.currentActionAssociation,f.source.intervention);
+  assert.deepEqual(selected.actionChoices,[{id:f.write.id,account:f.write.account,productId:f.write.input.productId,title:f.write.input.title,completedAt:f.write.completedAt,digest:f.sourceAction.digest,origin:'owner_objective_content',originatingObjective:c.originatingObjective}]);
+  for (const secret of ['stableApproval','actorSessionVersion','claimIdentity','approvalDigest','dispatchRequestDigest','runvara-objective-content-source/v1']) assert.equal(JSON.stringify(selected).includes(secret),false,secret);
+});
+
+test('stable approval hashes are reconstructed from full captured bytes, and every v2 source relationship remains strict after resigning', async () => {
+  const f = await objectiveFixture(), mutations = [
+    s => { s.context.stableApproval.reason += ' changed'; },
+    s => { s.context.stableApproval.payload.extra='future'; },
+    s => { s.context.stableApproval.evidence.reverse(); },
+    s => { s.context.stableApproval.evidence[0].id='objective_review_'+'0'.repeat(32); },
+    s => { s.context.stableApproval.financialImpact=1; },
+    s => { s.context.stableApproval.source='owner-manual'; },
+    s => { s.context.stableApproval.createdAt='2099-01-01T00:00:00.000Z'; },
+    s => { s.context.stableApproval.agentId='x'.repeat(81); },
+    s => { s.context.stableApproval.reason=' untrimmed'; },
+    s => { s.context.stableApproval.futureContext={secret:'unsupported'}; },
+    s => { s.context.originatingObjective=null; },
+    s => { s.context.originatingObjective.revision++; },
+    s => { s.context.origin='owner_manual'; },
+    s => { s.context.proposal.source.actorSessionVersion++; },
+    s => { s.context.proposal.source.actorId='another-owner'; },
+    s => { s.context.executedBy='another-owner'; },
+    s => { s.context.proposal.source.jobId='job_other'; },
+    s => { s.context.proposal.source.reportId='objective_review_'+'1'.repeat(32); },
+    s => { s.context.proposal.source.productId='gid://shopify/Product/999'; },
+    s => { s.context.proposal.source.inputFingerprint='0'.repeat(32); },
+    s => { s.context.proposal.policies[0].digest='1'.repeat(64); s.context.policies[0].digest='1'.repeat(64); },
+    s => { s.context.approval.payload.connectionWriteId='write-other'; },
+    s => { s.context.proposal.approvalId='approval-other'; },
+    s => { s.context.stableApproval.evidence[1].workspaceId='foreign'; },
+    s => { s.context.proposal.source.tenantId='foreign'; }
+  ];
+  for (const [index,mutate] of mutations.entries()) {
+    let source=structuredClone(f.sourceAction); mutate(source);
+    source=resignObjectiveSource(source,{stable:index!==0,claim:![24].includes(index)});
+    await assert.rejects(admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[source,f.workspaceId]),code('P0O01'),`mutation ${index}`);
+  }
+  // A forged matching pair of supplied digest strings never replaces hashing.
+  const matching=structuredClone(f.sourceAction); matching.context.proposal.approvalDigest='a'.repeat(64);
+  matching.context.stableApproval.reason='coherently declared digest but different body';
+  await assert.rejects(admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[resignObjectiveSource(matching,{stable:false}),f.workspaceId]),code('P0O01'));
+  await unchanged(f);
+});
+
+test('fresh objective publication rejects retained approval edits, duplicate identities, foreign scope and substituted source', async () => {
+  const mutations = [
+    f => { f.state.approvals[0].reason+=' changed'; },
+    f => { f.state.approvals[0].futureStableField='unknown'; },
+    ...['history','workStatus','executedExternally','executionStatus','decisionNote'].map(key=>f=>{delete f.state.approvals[0][key];}),
+    f => { f.state.approvals[0].payload.future='unknown'; },
+    f => { f.state.approvals[0].status='rejected'; },
+    f => { f.state.approvals.push(structuredClone(f.approval)); },
+    f => { f.state.connections.push(structuredClone(f.connection)); },
+    f => { f.state.connectionWrites.push({...structuredClone(f.write),id:'other-write'}); },
+    f => { f.state.connectionWrites.push({...structuredClone(f.write),id:'other-write',requestId:'different-request-0001'}); },
+    f => { f.write.workspaceId='foreign'; },
+    f => { f.write.dispatchClaim.workspaceId='foreign'; },
+    f => { f.write.result.externalId='gid://shopify/Product/999'; },
+    f => { f.write.status='uncertain'; },
+    f => { delete f.write.recordedActionContext; },
+    f => { f.state.connections[0].metadata.shopDomain='other.myshopify.com'; },
+    f => { const source=resignObjectiveSource({...f.sourceAction,input:{...f.sourceAction.input,title:'Coherent later title'}},{input:true});
+      f.write.input=source.input; f.write.digest=source.context.inputDigest; f.write.objectivePolicyProposal=source.context.proposal;
+      f.write.recordedActionContext={...source.context,snapshotDigest:source.digest}; f.write.dispatchClaim.identity=source.context.claimIdentity;
+      f.write.dispatchClaim.phases.shopify_mutation.requestDigest=source.context.dispatchRequestDigest;
+      f.approval.payload=source.context.approval.payload; }
+  ];
+  for (const mutate of mutations) {
+    const f=await objectiveFixture(); mutate(f); await setState(f,f.state);
+    await assert.rejects(publish(objectiveRequest(f)),code('P0O01')); await unchanged(f);
+  }
+});
+
+test('objective association/report schema and captured origin cannot be downgraded or supplied as generic goal links', async () => {
+  for (const mutate of [m=>{m.schema='runvara-experiment-measurement/v2';},m=>{m.report.schema='runvara-measurement-report/v2';},
+    m=>{m.intervention.schema='runvara-owner-action-association/v1';},m=>{m.intervention.originatingObjective.revision++;},
+    m=>{m.links.objective=m.intervention.originatingObjective;},m=>{m.links.opportunity={workspaceId:m.workspaceId,id:'opportunity-content',revision:1,digest:'a'.repeat(64)};},
+    m=>{m.intervention.originatingObjective.workspaceId='foreign';},m=>{m.intervention.origin='owner_manual';}]) {
+    const f=await objectiveFixture(); mutate(f.source); f.source.report.facts.intervention=structuredClone(f.source.intervention); f.source=resign(f.source);
+    f.state.revenueEngine.experiments[0].outcomeMeasurement=f.source; await setState(f,f.state);
+    await assert.rejects(publish(objectiveRequest(f)),code('P0O01')); await unchanged(f);
+  }
+});
+
+test('immutable objective reuse survives all mutable history disappearing; corrections and final withdrawal retain exact source and replay receipt', async () => {
+  const f=await objectiveFixture(), firstRequest=objectiveRequest(f), first=await publish(firstRequest);
+  const cleared=await state(f); for(const key of ['connectionWrites','approvals','connections','businessObjectives','products','opportunities']) delete cleared[key];
+  await setState(f,cleared);
+  const secondRequest=await objectiveCorrection(f,first,{reuseVersionId:first.publication.head.versionId}), second=await publish(secondRequest);
+  assert.deepEqual(await storedAction(f,second.publication.head.versionId),f.sourceAction);
+  const replay=await publish(firstRequest); assert.equal(replay.replayed,true); assert.equal(replay.isCurrent,false); assert.deepEqual(replay.publication,first.publication);
+  await assert.rejects(publish({...firstRequest,withdrawalReason:'incorrect_scope'}),code('P0O01'));
+  const before=await state(f), draft=sourceMeasurement(f.workspaceId,f.experimentId,{revision:3}); before.revenueEngine.experiments[0].outcomeMeasurement=draft; await setState(f,before);
+  const withdrawal=objectiveRequest(f,{action:'withdraw',workspaceRevision:before._revision,measurementRevision:second.publication.version.source.measurementRevision,
+    measurementDigest:second.publication.version.source.measurementDigest,headVersionId:second.publication.head.versionId,headDigest:second.publication.head.digest,withdrawalReason:'evidence_retracted'});
+  const final=await publish(withdrawal); assert.equal(final.publication.head.status,'withdrawn');
+  assert.deepEqual(await storedAction(f,final.publication.head.versionId),f.sourceAction); assert.deepEqual((await state(f)).revenueEngine.experiments[0].outcomeMeasurement,draft);
+  const retry=await publish(secondRequest); assert.equal(retry.replayed,true); assert.equal(retry.isCurrent,false);
+  await assert.rejects(publish({...withdrawal,publicationId:randomUUID(),workspaceRevision:(await state(f))._revision,headVersionId:final.publication.head.versionId,headDigest:final.publication.head.digest}),e=>['P0O04','P0O08'].includes(e.code));
+});
+
+test('objective correction reuse requires exact tenant/outcome/version/digest and explicit unlinked removal retains manual v1', async () => {
+  const a=await objectiveFixture(), b=await objectiveFixture(), ar=await publish(objectiveRequest(a)), br=await publish(objectiveRequest(b));
+  const bad=await objectiveCorrection(a,ar,{reuseVersionId:br.publication.head.versionId}); const prior=await state(a);
+  await assert.rejects(publish(bad),code('P0O01')); assert.deepEqual(await state(a),prior);
+  const removed=await objectiveCorrection(a,ar,{remove:true}), r=await publish(removed);
+  assert.equal(await storedAction(a,r.publication.head.versionId),null); assert.equal((await state(a)).revenueEngine.experiments[0].outcomeMeasurement.schema,'runvara-experiment-measurement/v1');
+  const initial=await objectiveFixture(); initial.source.intervention.reuseVersionId=ar.publication.head.versionId;
+  initial.source.report.facts.intervention=structuredClone(initial.source.intervention); initial.source=resign(initial.source); initial.state.revenueEngine.experiments[0].outcomeMeasurement=initial.source;
+  await setState(initial,initial.state); await assert.rejects(publish(objectiveRequest(initial)),code('P0O01')); await unchanged(initial);
+});
+
+test('objective publishers and corrections serialize and same-intent retries cannot rewind a newer head', async () => {
+  const f=await objectiveFixture(), req=objectiveRequest(f), c1=await connect(), c2=await connect();
+  try {
+    const [a,b]=await Promise.all([publish(req,c1),publish(req,c2)]); assert.equal([a,b].filter(r=>r.replayed).length,1); assert.deepEqual(a.publication,b.publication);
+    const correction=await objectiveCorrection(f,a,{reuseVersionId:a.publication.head.versionId});
+    const results=await Promise.allSettled([publish(correction,c1),publish({...correction,publicationId:randomUUID()},c2)]);
+    assert.equal(results.filter(r=>r.status==='fulfilled').length,1); assert.equal(results.find(r=>r.status==='rejected').reason.code,'P0O04');
+    assert.equal((await publish(req)).isCurrent,false);
+    await assert.rejects(publish({...req,actorId:'unknown-owner'}),code('P0O03'));
+    await assert.rejects(publish({...req,measurementDigest:'0'.repeat(64)}),code('P0O06'));
+  } finally {await close(c1);await close(c2);}
+});
+
+test('fresh objective resolution and owner/session checks happen after acquiring the workspace lock', async () => {
+  for(const mode of ['action','session']) {
+    const f=await objectiveFixture(), holder=await connect('postgres'), publisher=await connect();
+    try {
+      await holder.query('BEGIN'); await holder.query('SELECT 1 FROM public.saas_workspace_state WHERE workspace_id=$1 FOR UPDATE',[f.workspaceId]);
+      const pid=(await publisher.query('SELECT pg_backend_pid() pid')).rows[0].pid, blocker=(await holder.query('SELECT pg_backend_pid() pid')).rows[0].pid;
+      const pending=publish(objectiveRequest(f),publisher), rejected=assert.rejects(pending,code(mode==='action'?'P0O01':'P0O03')); await blocked(pid,blocker);
+      const changed=structuredClone(f.state); if(mode==='action') changed.approvals[0].reason+='changed while waiting'; else changed.users[0].sessionVersion++;
+      await holder.query('UPDATE public.saas_workspace_state SET state=$2 WHERE workspace_id=$1',[f.workspaceId,changed]); await holder.query('COMMIT');
+      await rejected; await unchanged(f,changed);
+    } finally {await holder.query('ROLLBACK');await close(holder);await close(publisher);}
+  }
+});
+
+test('objective audit failures atomically roll back source/version/head/workspace and all new helpers stay closed', async () => {
+  const f=await objectiveFixture();
+  await admin.query(`CREATE FUNCTION public.objective_outcome_test_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION USING ERRCODE='P0T03',MESSAGE='synthetic rollback'; END $$;
+    CREATE TRIGGER objective_outcome_test_failure BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.objective_outcome_test_failure()`);
+  try {await assert.rejects(publish(objectiveRequest(f)),code('P0T03'));await unchanged(f);}
+  finally {await admin.query('DROP TRIGGER objective_outcome_test_failure ON public.audit_events; DROP FUNCTION public.objective_outcome_test_failure()');}
+  await assertObjectiveSecurity();
+  for(const role of ['service_role','anon','authenticated']) await using(role,c=>assert.rejects(c.query("SELECT public.runvara_outcome_validate_objective_action('{}','x')"),code('42501')));
+});
+
+test('forward union keeps manual/unlinked canonical bytes and exact source/measurement/choice limits', async () => {
+  for(const options of [{},{policyCount:2}]) {const f=await linkedFixture(options),r=await publish(request(f));assert.deepEqual(await storedAction(f,r.publication.head.versionId),f.sourceAction);}
+  const manual=await fixture(),m=await publish(request(manual));assert.equal(await storedAction(manual,m.publication.head.versionId),null);
+  const f=await objectiveFixture(), empty=resignObjectiveSource({...f.sourceAction,input:{...f.sourceAction.input,description:''}},{input:true});
+  const remaining=24576-Buffer.byteLength(canonical(empty));
+  const exact=resignObjectiveSource({...empty,input:{...empty.input,description:'雪'.repeat(Math.floor(remaining/3))+'x'.repeat(remaining%3)}},{input:true});
+  assert.equal(Buffer.byteLength(canonical(exact)),24576);
+  assert.deepEqual((await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source',[exact,f.workspaceId])).rows[0].source,exact);
+  const over=resignObjectiveSource({...exact,input:{...exact.input,description:exact.input.description+'x'}},{input:true});
+  await assert.rejects(admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[over,f.workspaceId]),code('P0O10'));
+  const stable=structuredClone(f.sourceAction); for(const key of ['reason','risk','expectedBenefit']) stable.context.stableApproval[key]='雪'.repeat(1000);
+  await assert.rejects(admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[resignObjectiveSource(stable),f.workspaceId]),code('P0O10'));
+  const choices=await objectiveFixture(); choices.state.connectionWrites=Array.from({length:20},(_,i)=>{
+    const w=structuredClone(choices.write);w.id='objective-choice-'+i;w.input.title='雪'.repeat(200);return w;});
+  await setState(choices,choices.state);const reviewResult=await review(choices);
+  assert.ok(reviewResult.actionChoices.length>0&&reviewResult.actionChoices.length<20);assert.ok(Buffer.byteLength(JSON.stringify(reviewResult.actionChoices))<=16384);
+  assert.ok(Buffer.byteLength(JSON.stringify(reviewResult))<=131072);
+  console.log('OBJECTIVE_OUTCOME_BOUNDS='+JSON.stringify({sourceCanonical:Buffer.byteLength(canonical(exact)),stableCanonical:Buffer.byteLength(canonical(stable.context.stableApproval)),choices:reviewResult.actionChoices.length,choiceBytes:Buffer.byteLength(JSON.stringify(reviewResult.actionChoices)),reviewBytes:Buffer.byteLength(JSON.stringify(reviewResult))}));
+  await assertObjectiveSecurity();
+});
+
+
+test('fresh captured objective association survives current goal/report disappearance and producer truncation preserves stable approval bytes', async () => {
+  const f=await objectiveFixture(), disappeared=await state(f); for(const key of ['businessObjectives','products','opportunities']) delete disappeared[key];
+  await setState(f,disappeared); const r=await publish(objectiveRequest(f)); assert.deepEqual(await storedAction(f,r.publication.head.versionId),f.sourceAction);
+  for(const key of ['action','reason','expectedBenefit','risk','agentId']) {
+    const limit=key==='action'?180:key==='agentId'?80:1000;
+    const source=structuredClone(f.sourceAction); source.context.stableApproval[key]='x'.repeat(limit-1)+' ';
+    const signed=resignObjectiveSource(source);
+    assert.deepEqual(validateReviewedSourceAction(signed,{workspaceId:f.workspaceId}),signed);
+    assert.deepEqual((await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source',[signed,f.workspaceId])).rows[0].source,signed);
+  }
+  const evidence=structuredClone(f.sourceAction); evidence.context.stableApproval.evidence[0].detail='x'.repeat(999)+' ';
+  const signed=resignObjectiveSource(evidence); assert.deepEqual(validateReviewedSourceAction(signed,{workspaceId:f.workspaceId}),signed);
+  assert.deepEqual((await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source',[signed,f.workspaceId])).rows[0].source,signed);
+  const reviewState=await state(f); await admin.query('UPDATE public.saas_workspace_state SET state=$2::jsonb WHERE workspace_id=$1',[f.workspaceId,JSON.stringify(reviewState).replaceAll('"revision":1,','"revision":1.0,')]);
+  assert.equal((await review(f)).actionChoices.length,1,'JSONB numeric spelling does not remove a valid objective choice');
+});
+
+test('v2 stable approval SQL matches ECMAScript trim/slice and UTF16 caps, including exact 8 KiB bytes', async () => {
+  const f=await objectiveFixture(), cases=[];
+  const add=(name,expected,mutate)=>{const source=structuredClone(f.sourceAction);mutate(source.context.stableApproval);cases.push({name,expected,source:resignObjectiveSource(source)});};
+  for(const [field,cap] of [['action',180],['reason',1000],['expectedBenefit',1000],['risk',1000],['agentId',80]]) {
+    add(field+' astral exact UTF16 cap',true,s=>s[field]='😀'.repeat(cap/2));
+    add(field+' astral over UTF16 cap',false,s=>s[field]='😀'.repeat(cap/2)+'a');
+    add(field+' ASCII trailing whitespace at cap',true,s=>s[field]='a'.repeat(cap-1)+' ');
+    add(field+' astral trailing NBSP at cap',true,s=>s[field]='😀'.repeat(cap/2-1)+'a\u00a0');
+    add(field+' trailing whitespace below cap',false,s=>s[field]='a'.repeat(cap-2)+' ');
+    add(field+' leading FEFF at cap',false,s=>s[field]='\ufeff'+'a'.repeat(cap-1));
+  }
+  for(const value of ['','a']) add('agentId '+(value?'one char':'empty'),true,s=>s.agentId=value);
+  for(const ws of ['\t','\n','\r','\v','\f','\u00a0','\u1680','\u2000','\u200a','\u2028','\u2029','\u202f','\u205f','\u3000','\ufeff']) {
+    add('reason U+'+ws.codePointAt(0).toString(16)+' at cap',true,s=>s.reason='a'.repeat(999)+ws);
+    add('reason U+'+ws.codePointAt(0).toString(16)+' below cap',false,s=>s.reason='a'.repeat(998)+ws);
+  }
+  for(const char of ['\u0085','\u180e','\u200b']) add('non-ECMAScript-whitespace U+'+char.codePointAt(0).toString(16),true,s=>s.reason=char+'retained'+char);
+  for(const [name,value,expected] of [['astral cap','😀'.repeat(500),true],['astral over','😀'.repeat(500)+'a',false],
+    ['max trailing FEFF','a'.repeat(999)+'\ufeff',true],['below trailing FEFF','a'.repeat(998)+'\ufeff',false],['empty','',true]]) add('evidence '+name,expected,s=>s.evidence[0].detail=value);
+  const bounded=structuredClone(f.sourceAction.context.stableApproval);
+  for(const field of ['action','reason','expectedBenefit','risk'])bounded[field]='a';bounded.agentId='';for(const row of bounded.evidence)row.detail='';
+  for(const [target,key] of [[bounded,'reason'],[bounded,'expectedBenefit'],[bounded,'risk'],[bounded.evidence[0],'detail'],[bounded.evidence[1],'detail']]) {
+    while(target[key].length<1000&&Buffer.byteLength(canonical(bounded))+3<=8192)target[key]+='雪';
+    while(target[key].length<1000&&Buffer.byteLength(canonical(bounded))+1<=8192)target[key]+='a';
+  }
+  assert.equal(Buffer.byteLength(canonical(bounded)),8192);
+  add('stable exact 8192 canonical bytes',true,s=>{for(const key of Object.keys(s))delete s[key];Object.assign(s,structuredClone(bounded));});
+  add('stable over 8192 canonical bytes',false,s=>{for(const key of Object.keys(s))delete s[key];Object.assign(s,structuredClone(bounded));s.agentId='a';});
+  const results=[];
+  for(const {name,expected,source} of cases) {
+    let js=true,sql=true;try{validateReviewedSourceAction(source,{workspaceId:f.workspaceId});}catch{js=false;}
+    try{await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[source,f.workspaceId]);}catch(error){assert.ok(['P0O01','P0O10'].includes(error.code),error.message);sql=false;}
+    assert.equal(js,expected,name+' JS');assert.equal(sql,expected,name+' SQL');results.push({name,expected,js,sql});
+  }
+  console.log('OBJECTIVE_STABLE_UNICODE_PARITY='+JSON.stringify(results));
+});
+
+test('v2 preserves original product identity and proposal byte bounds without changing manual v1 limits', async () => {
+  const f=await objectiveFixture(), prefix='gid://shopify/Product/';
+  for(const length of [100,101]) {
+    const source=structuredClone(f.sourceAction), productId=prefix+'1'.repeat(length-prefix.length);
+    source.input.productId=productId;source.context.resultId=productId;source.context.proposal.source.productId=productId;source.context.stableApproval.evidence[1].id=productId;
+    const signed=resignObjectiveSource(source,{input:true,claim:false});
+    signed.context.claimIdentity=(await admin.query('SELECT public.runvara_outcome_action_identity_digest($1::jsonb) claim',[signed])).rows[0].claim;
+    delete signed.digest;signed.digest=hash(signed);
+    if(length===100){assert.deepEqual(validateReviewedSourceAction(signed,{workspaceId:f.workspaceId}),signed);assert.deepEqual((await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source',[signed,f.workspaceId])).rows[0].source,signed);}
+    else{assert.throws(()=>validateReviewedSourceAction(signed,{workspaceId:f.workspaceId}));await assert.rejects(admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[signed,f.workspaceId]),code('P0O01'));}
+  }
+  for(const bytes of [8192,8193]) {
+    const source=structuredClone(f.sourceAction), p=source.context.proposal;
+    p.policies.push(...Array.from({length:49},(_,i)=>({objectiveId:'policy-'+i,revision:1,digest:'a'.repeat(64)})));
+    assert.ok(Buffer.byteLength(canonical(p))<bytes);
+    for(const row of p.policies.slice(1))while(row.objectiveId.length<160&&Buffer.byteLength(canonical(p))<bytes)row.objectiveId+='x';
+    assert.equal(Buffer.byteLength(canonical(p)),bytes);source.context.policies=structuredClone(p.policies);
+    const signed=resignObjectiveSource(source);
+    assert.ok(Buffer.byteLength(canonical(signed))<24576,'Isolate the original proposal bound from the full source cap');
+    if(bytes===8192){assert.deepEqual(validateReviewedSourceAction(signed,{workspaceId:f.workspaceId}),signed);assert.deepEqual((await admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2) source',[signed,f.workspaceId])).rows[0].source,signed);}
+    else{assert.throws(()=>validateReviewedSourceAction(signed,{workspaceId:f.workspaceId}));await assert.rejects(admin.query('SELECT public.runvara_outcome_validate_source_action($1::jsonb,$2)',[signed,f.workspaceId]),code('P0O10'));}
+  }
+});
+
+
+test('excluded mutable approval history is not a stable evidence gate while decisions, stable bytes and tenant scope remain bound', async () => {
+  const f=await objectiveFixture();
+  f.approval.history=Array.from({length:60},(_,index)=>({'future-key':index+0.25,details:{'future-note':'Excluded mutable history'}}));
+  const source=resolveRecordedActionEvidence(f.state,f.write.id);assert.deepEqual(source,f.sourceAction);
+  assert.equal(hash(source.context.stableApproval),source.context.proposal.approvalDigest);
+  const resolved=(await admin.query('SELECT public.runvara_outcome_resolve_action($1::jsonb,$2,$3) source',[f.state,f.workspaceId,f.write.id])).rows[0].source;
+  assert.deepEqual(resolved,f.sourceAction);
+  for(const [label,mutate] of [
+    ['stable bytes',approval=>{approval.reason+=' changed';}],
+    ['captured decision',approval=>{approval.decidedBy='different-owner';}],
+    ['foreign nested scope',approval=>{approval.history[0].workspaceId='foreign';}]
+  ]) {
+    const changed=structuredClone(f.state);mutate(changed.approvals.find(row=>row.id===f.write.approvalId));
+    assert.throws(()=>resolveRecordedActionEvidence(changed,f.write.id),label);
+    await assert.rejects(admin.query('SELECT public.runvara_outcome_resolve_action($1::jsonb,$2,$3)',[changed,f.workspaceId,f.write.id]),code('P0O01'),label);
+  }
+  await setState(f,f.state);const published=await publish(objectiveRequest(f));
+  assert.deepEqual(await storedAction(f,published.publication.head.versionId),f.sourceAction);
+  console.log('OBJECTIVE_EXCLUDED_HISTORY_PARITY='+JSON.stringify({entries:60,fractionalNumbers:true,futureKeys:true,jsFreshSourceUnchanged:true,sqlFreshSourceUnchanged:true,stableDigestUnchanged:true,publishedSourceUnchanged:true,stableDecisionForeignScopeMutationsRejected:true}));
 });

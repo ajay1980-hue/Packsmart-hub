@@ -49,10 +49,15 @@ async function completed(f) {
       'approverId', 'approvalId', 'writeIndex', 'connectionIndex', 'actorIndex', 'approverIndex', 'approvalIndex'].sort());
   }
   if (f.family === 'objective-v2') {
-    assert.equal(result.recordedActionContext, undefined);
-    assert.equal(result.recordedActionUnavailable, 'objective_origin_unsupported');
+    const source = sourceActionFromRecordedContext(result, CONTENT_WORKSPACE);
+    assert.equal(source.schema, 'runvara-reviewed-source-action/v2');
+    assert.equal(source.context.origin, 'owner_objective_content');
+    assert.equal(reviewedActionClaimIdentity(source.input, source.context), f.expected.identity);
+    assert.equal(result.recordedActionUnavailable, undefined);
   } else {
     const source = sourceActionFromRecordedContext(result, CONTENT_WORKSPACE);
+    assert.equal(source.context.origin, 'owner_manual');
+    assert.equal(source.context.originatingObjective, null, 'enforcing a policy does not fabricate objective origin for a manual request');
     assert.equal(reviewedActionClaimIdentity(source.input, source.context), f.expected.identity,
       'Existing manual v1 evidence validator and identity remain compatible');
     assert.equal(result.recordedActionUnavailable, undefined);

@@ -84,3 +84,8 @@ Local alignment verification passed 141 focused Node22.23.3 tests, all 25 outcom
 ## Prepared reviewed action extension (not applied)
 
 `20261007175355_reviewed_action_outcome_snapshot.sql` prepares publication-time immutable snapshots for explicitly owner-associated recorded Shopify product-content actions. Existing unlinked v1 publication remains supported, with new linking disabled until the compatible SQL contract is installed. Public RPC signatures and existing grants are preserved. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md) for bounds, acknowledgement limits, correction/withdrawal behavior and the separate real-application/release hold. This does not complete original milestone 2 or establish causal/commercial benefit.
+
+
+## Prepared objective-content publication union (not applied)
+
+The new forward union extends the held manual source-action contract for prospectively captured objective-content actions. It adds private source/context v2, origin-aware association v2 and measurement/report v3, with an explicit forward storage marker and a separate public v2 display projection. Deploy compatible readers before any separately approved forward SQL application; retain them for immutable history even if new linking is disabled. Manual and unlinked bytes, existing role split, grants and request/response/state limits stay unchanged. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md#objective-origin-content-forward-union). No real migration or deployment is part of this preparation.

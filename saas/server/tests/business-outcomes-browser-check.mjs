@@ -10,11 +10,14 @@ import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, hashPassword } from '../lib/security.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
-import { createBusinessOutcomeCandidate, createOutcomePublicationBoundary, aggregateBusinessOutcomes } from '../lib/business-outcomes.mjs';
-import { actionUiFixture } from './business-outcomes-action-ui-fixture.mjs';
+import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate, createOutcomePublicationBoundary, aggregateBusinessOutcomes } from '../lib/business-outcomes.mjs';
+import { objectivePublicationFixture } from './objective-publication-fixture.mjs';
+import { publicReviewedSourceAction } from '../lib/reviewed-action-evidence.mjs';
+import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
+import { captureOutcomeViewports } from './business-outcomes-browser-capture.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 
-async function selectedReviewPayload({ workspaceId, workspaceRevision, experiment, measurement, publication, action, now }) {
+async function selectedReviewPayload({ workspaceId, workspaceRevision, experiment, measurement, publication, publicationMeasurement, action, choicesAvailable, now }) {
   let reads = 0;
   const adapter = createBusinessOutcomePersistence({ now: () => new Date(now), request: async (pathname, options) => {
     reads++;
@@ -27,7 +30,7 @@ async function selectedReviewPayload({ workspaceId, workspaceRevision, experimen
         digest: version.digest, status: version.status, payload: version, publication_id: head.publicationId,
         intent_digest: digestMeasurementValue(['synthetic_browser_review', head.publicationId]), committed_at: head.committedAt, commit_revision: head.commitRevision } } : null;
     // The real review RPC bounds its title; bootstrap retains the long fixture.
-    return structuredClone({ workspaceId, workspaceRevision, experiment: { ...experiment, title: experiment.title.slice(0, 180) }, measurement, current, actionLinkContract: 'runvara-reviewed-action/v1', actionChoices: [action.choice], currentActionAssociation: publication ? measurement.intervention : null });
+    return structuredClone({ workspaceId, workspaceRevision, experiment: { ...experiment, title: experiment.title.slice(0, 180) }, measurement, current, actionLinkContract: 'runvara-reviewed-action/v2', actionChoices: choicesAvailable ? [action.choice] : [], currentActionAssociation: publication ? publicationMeasurement.intervention : null });
   } });
   const result = await adapter.review(workspaceId, experiment.id);
   assert.equal(reads, 1, 'selected relationships use the existing single review snapshot');
@@ -68,8 +71,11 @@ async function assertNoOverflow(page, width, label) {
     `${label} escapes the ${width}px viewport: ${JSON.stringify(dimensions)}`);
 }
 let browser;
+const captures = [];
 try {
-  const state = seedWorkspaceState({}, { workspaceId: 'outcomes-browser', userId: 'user_outcomes_owner',
+  const completed = await objectivePublicationFixture({ contentInput: { title: 'Recorded product ' + hostile, description: 'Retained Shopify description ' + hostile + '\n' + 'long-synthetic-product-content '.repeat(36) + ' EXACT RETAINED END' } });
+  const action = { source: completed.source, choice: { id: completed.source.context.writeId, account: completed.source.context.account, productId: completed.source.input.productId, title: completed.source.input.title, completedAt: completed.source.context.completedAt, digest: completed.source.digest, origin: completed.source.context.origin, originatingObjective: completed.source.context.originatingObjective } };
+  const state = seedWorkspaceState({}, { workspaceId: completed.workspaceId, userId: 'user_outcomes_owner',
     name: 'Synthetic business outcome checks', email: 'outcomes@example.test', passwordHash: hashPassword(password) });
   state.products = [];
   state.revenueEngine.experiments = [experiment];
@@ -97,8 +103,9 @@ try {
       };
     });
     const page = await context.newPage(), errors = [], calls = [], writes = [], external = [];
-    let measurement = null, publication = null, workspaceRevision = 'browser_workspace_revision_1', holdNext = null;
-    const now = new Date().toISOString(), action = actionUiFixture(state.workspace.id, { title: 'Recorded product ' + hostile, description: 'Retained Shopify description ' + hostile + '\n' + 'long-synthetic-product-content'.repeat(200) });
+    let measurement = null, publication = null, publicationMeasurement = null, workspaceRevision = 'browser_workspace_revision_1', holdNext = null;
+    let choicesAvailable = true, losePublicationResponse = false;
+    const versions = new Map(), receipts = new Map(), now = new Date().toISOString();
     const detailPayload = () => ({ workspaceId: state.workspace.id, workspaceRevision, experiment,
       measurement, assessment: measurement ? assessExperimentOutcomeMeasurement(measurement,
         { workspaceId: state.workspace.id, experimentId: experiment.id, now }) : null, currentPublication: publication });
@@ -139,42 +146,54 @@ try {
       if (gate && gate.status !== 200) response = { status: gate.status, json: { error: 'Synthetic expired request', code: 'AUTH_REQUIRED' } };
       else if (method === 'GET' && url.pathname === '/api/business-outcomes') response = { json: summaryPayload() };
       else if (method === 'GET' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}`) response = {
-        json: await selectedReviewPayload({ workspaceId: state.workspace.id, workspaceRevision, experiment, measurement, publication, action, now }) };
+        json: await selectedReviewPayload({ workspaceId: state.workspace.id, workspaceRevision, experiment, measurement, publication, publicationMeasurement, action, choicesAvailable, now }) };
       else if (method === 'PUT' && url.pathname === `/api/business-outcomes/experiments/${experiment.id}/measurement`) {
         const input = request.postDataJSON();
         measurement = prepareExperimentOutcomeMeasurement(input, { workspaceId: state.workspace.id,
-          experimentId: experiment.id, actorId: state.users[0].id, now, previousMeasurement: measurement, actionEvidence: action.source });
-        workspaceRevision = 'browser_workspace_revision_2';
+          experimentId: experiment.id, actorId: state.users[0].id, now, previousMeasurement: measurement, ...(input.actionSelection ? { actionEvidence: action.source, reuseVersionId: input.actionSelection.reuseVersionId ?? null } : {}) });
+        workspaceRevision = 'browser_draft_revision_' + measurement.revision;
         response = { json: detailPayload() };
       } else if (method === 'POST' && url.pathname === '/api/business-outcomes/publish') {
         const input = request.postDataJSON();
         assert.deepEqual(Object.keys(input).sort(), ['publicationId', 'action', 'experimentId', 'expectedWorkspaceRevision', 'expectedMeasurementRevision', 'expectedMeasurementDigest', 'expectedHeadVersionId', 'expectedHeadDigest', 'withdrawalReason'].sort(), 'publication uses only the reviewed conflict-safe input fields');
-        assert.equal(input.action, 'publish');
-        assert.equal(input.experimentId, experiment.id);
-        assert.equal(input.expectedMeasurementRevision, measurement.revision);
-        assert.equal(input.expectedMeasurementDigest, measurement.digest);
-        assert.equal(input.expectedWorkspaceRevision, workspaceRevision);
-        assert.equal(input.expectedHeadVersionId, null); assert.equal(input.expectedHeadDigest, null);
-        assert.equal(input.withdrawalReason, null); assert.match(input.publicationId, /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/);
-        const version = createBusinessOutcomeCandidate({ source: { type: 'experiment_measurement', experimentId: experiment.id,
-          measurementRevision: measurement.revision, measurementDigest: measurement.digest }, metric: measurement.metric,
-          amount: measurement.amount, currency: measurement.currency, window: measurement.window, coverage: measurement.coverage,
-          method: measurement.method, provenance: measurement.provenance, links: measurement.links,
-          verification: { kind: 'owner_attestation', actorId: state.users[0].id, verifiedAt: now, measurementDigest: measurement.digest } },
-        { workspaceId: state.workspace.id, now });
-        workspaceRevision = 'browser_workspace_revision_3';
-        publication = { head: { schema: 'runvara-outcome-head/v1', workspaceId: state.workspace.id,
-          outcomeId: version.outcomeId, revision: version.revision, versionId: version.versionId, digest: version.digest,
-          status: 'published', publicationId: input.publicationId, committedAt: now, commitRevision: workspaceRevision }, version };
-        response = { json: { workspaceId: state.workspace.id, publication, replayed: false, isCurrent: true } };
-      } else if (method === 'GET' && publication && url.pathname === `/api/business-outcomes/versions/${publication.version.versionId}`) {
-        response = { json: { workspaceId: state.workspace.id, publication, sourceMeasurement: measurement, sourceAction: action.source,
-          currentStatus: 'not_checked', source: 'immutable_business_outcome_version' } };
+        const retainedReceipt = receipts.get(input.publicationId);
+        if (retainedReceipt) {
+          assert.deepEqual(input, retainedReceipt.input, 'an explicit retry preserves every reviewed intent byte');
+          response = { json: { ...retainedReceipt.result, replayed: true } };
+        } else {
+          assert.equal(input.experimentId, experiment.id);
+          const retained = input.action === 'withdraw' ? publicationMeasurement : measurement;
+          assert.equal(input.expectedMeasurementRevision, retained.revision);
+          assert.equal(input.expectedMeasurementDigest, retained.digest);
+          assert.equal(input.expectedWorkspaceRevision, workspaceRevision);
+          assert.equal(input.expectedHeadVersionId, publication?.head.versionId ?? null); assert.equal(input.expectedHeadDigest, publication?.head.digest ?? null);
+          assert.equal(input.withdrawalReason, input.action === 'withdraw' ? 'incorrect_measurement' : null);
+          const verification = { kind: 'owner_attestation', actorId: state.users[0].id, verifiedAt: now, measurementDigest: retained.digest };
+          const record = { source: { type: 'experiment_measurement', experimentId: experiment.id, measurementRevision: retained.revision, measurementDigest: retained.digest },
+            ...Object.fromEntries(['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'links'].map(key => [key, retained[key]])), verification };
+          const version = input.action === 'withdraw' ? withdrawBusinessOutcomeCandidate(publication.version, { reason: input.withdrawalReason, verification }, { workspaceId: state.workspace.id, now })
+            : input.action === 'correct' ? correctBusinessOutcomeCandidate(publication.version, record, { workspaceId: state.workspace.id, now })
+            : createBusinessOutcomeCandidate(record, { workspaceId: state.workspace.id, now });
+          workspaceRevision = 'browser_publication_revision_' + version.revision;
+          publication = { head: { schema: 'runvara-outcome-head/v1', workspaceId: state.workspace.id,
+            outcomeId: version.outcomeId, revision: version.revision, versionId: version.versionId, digest: version.digest,
+            status: version.status === 'withdrawn' ? 'withdrawn' : 'published', publicationId: input.publicationId, committedAt: now, commitRevision: workspaceRevision }, version };
+          publicationMeasurement = structuredClone(retained);
+          versions.set(version.versionId, { publication: structuredClone(publication), sourceMeasurement: publicationMeasurement, sourceAction: publicReviewedSourceAction(action.source, { workspaceId: state.workspace.id }) });
+          const result = { workspaceId: state.workspace.id, publication, replayed: false, isCurrent: true };
+          receipts.set(input.publicationId, { input: structuredClone(input), result: structuredClone(result) });
+          response = { json: result };
+          if (losePublicationResponse) { losePublicationResponse = false; response = { status: 503, json: { code: 'SYNTHETIC_UNCONFIRMED' } }; }
+        }
+      } else if (method === 'GET' && url.pathname.startsWith('/api/business-outcomes/versions/')) {
+        const retained = versions.get(decodeURIComponent(url.pathname.split('/').at(-1))); assert.ok(retained);
+        response = { json: { ...structuredClone(retained), currentStatus: 'not_checked', source: 'immutable_business_outcome_version' } };
       } else assert.fail(`Unexpected outcome request: ${method} ${url.pathname}`);
       await route.fulfill(response);
       if (gate) gate.done = true;
     });
 
+    const capture = (name, subtree, controls = []) => captureOutcomeViewports({ page, width, name, subtree, controls, captures, typographyFactory: createRestrictionTypographySession });
     const panel = page.locator('#business-outcomes-panel'), status = page.locator('#business-outcomes-status');
     const summary = page.locator('#business-outcomes-summary'), detail = page.locator('#business-outcomes-detail');
     const select = page.locator('#business-outcomes-experiment'), load = page.locator('#business-outcomes-load');
@@ -227,6 +246,7 @@ try {
     await form.locator('[name="actionSelection"]').selectOption('action:' + action.choice.id);
     assert.equal(calls.length, beforeSelection, 'choosing an action uses the same selected snapshot without another request');
     for (const value of [action.choice.id, action.choice.account, action.choice.productId, action.choice.completedAt]) assert.ok((await page.locator('#business-outcomes-action-details').textContent()).includes(value));
+    for (const value of [action.choice.originatingObjective.id, String(action.choice.originatingObjective.revision), action.choice.originatingObjective.digest]) assert.ok((await page.locator('#business-outcomes-action-details').textContent()).includes(value));
     await assertNoOverflow(page, width, 'explicit recorded action selector');
     const input = { actionSelection: { actionId: action.choice.id }, expectedRevision: 0, amount: '-12.004000', currency: 'GBP',
       window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-04T00:00:00.000Z' },
@@ -240,6 +260,7 @@ try {
       await form.locator(`[name="${name}"]`).fill(value);
     for (const [name, value] of Object.entries({ coverageStatus: 'complete', method: 'reconciled_manual', costsComplete: 'true' }))
       await form.locator(`[name="${name}"]`).selectOption(value);
+    await capture('selection', page.locator('#business-outcomes-action-details'), [form.locator('[name="actionSelection"]'), form.locator('button[type="submit"]')]);
     const savePath = `${detailPath}/measurement`, draftSave = holdRequest('PUT', savePath), readsBeforeSave = callCount('GET');
     await form.evaluate(element => {
       element.requestSubmit();
@@ -273,16 +294,34 @@ try {
     await review.waitFor({ state: 'hidden' });
     assert.equal(callCount('POST'), 0, 'cancelled review sends no publication request');
 
+    // Actual Back/Forward events invalidate a dismissed review and send no API work.
+    const beforeHistory = calls.length;
+    await page.evaluate(() => history.pushState(null, '', '#synthetic-outcome-review'));
+    await page.goBack(); await page.goForward();
+    assert.equal(await panel.getAttribute('open'), null); assert.equal(calls.length, beforeHistory);
+    await open(); assert.equal(await review.isVisible(), false);
+
     await publicationReview.click(); await page.locator('#business-outcomes-attest').check();
     assert.equal(callCount('POST'), 0, 'attestation alone does not publish');
     await assertNoOverflow(page, width, 'reviewed measurement');
+    await capture('owner-review', review, [page.locator('#business-outcomes-attest'), page.locator('#business-outcomes-confirm'), page.locator('#business-outcomes-cancel')]);
+    losePublicationResponse = true;
     const publicationWrite = holdRequest('POST', '/api/business-outcomes/publish');
     await tripleClick(page.locator('#business-outcomes-confirm'));
     await waitUntil(() => publicationWrite.seen, 'confirmed publication reaches the transport');
     assert.equal(callCount('POST'), 1, 'repeated confirm clicks submit one reviewed publication');
     assert.equal(await page.locator('#business-outcomes-confirm').isDisabled(), true);
     await releaseRequest(publicationWrite);
+    await status.getByText('Confirmation was not received.', { exact: false }).waitFor();
+    assert.equal(callCount('POST'), 1, 'unknown confirmation never retries automatically');
+    assert.equal(await page.locator('#business-outcomes-confirm').isDisabled(), true);
+    await capture('unknown-publication', review, [page.locator('#business-outcomes-attest'), page.locator('#business-outcomes-confirm'), page.locator('#business-outcomes-cancel')]);
+    const firstIntent = calls.find(call => call.method === 'POST').body;
+    await page.locator('#business-outcomes-cancel').click(); await review.waitFor({ state: 'hidden' });
+    await panel.locator(':scope > summary').click(); await open(); await review.waitFor({ state: 'visible' });
+    assert.equal(callCount('POST'), 1); await page.locator('#business-outcomes-attest').check(); await tripleClick(page.locator('#business-outcomes-confirm'));
     await status.getByText('Review saved.', { exact: false }).waitFor();
+    assert.equal(callCount('POST'), 2); assert.deepEqual(calls.filter(call => call.method === 'POST')[1].body, firstIntent);
     await review.waitFor({ state: 'hidden' });
     assert.match(await detail.textContent(), /This saved version has already been reviewed/);
     assert.doesNotMatch(await detail.textContent(), /ready for owner review/);
@@ -310,6 +349,8 @@ try {
     assert.ok((await summary.textContent()).includes(action.source.input.description), 'the retained action description is complete and untruncated');
     assert.match(await summary.textContent(), /Saved with this result; its current status has not been rechecked/);
     assert.match(await summary.textContent(), /Synthetic retained evidence/);
+    assert.match(await summary.textContent(), /cannot recompute the private action snapshot digest/);
+    assert.ok((await summary.textContent()).includes(action.choice.originatingObjective.id));
     assert.equal(await summary.locator('img,script,[onerror]').count(), 0);
     assert.equal(await page.evaluate(() => window.outcomeInjected), undefined);
     await tripleClick(evidence);
@@ -321,7 +362,44 @@ try {
     assert.match(await relationship.textContent(), /Only this experiment was checked; the rest of the workspace was not/);
     assert.doesNotMatch(await relationship.evaluate(element => element.outerHTML), /outcomes-browser|user_outcomes_owner|experiment_browser_outcome|-12\.004|GBP|Synthetic retained evidence|selected_snapshot|selected_revision|selected_outcome|digest|qualification|canonical|forecast|learning|execution/);
     await assertNoOverflow(page, width, 'committed result and retained evidence');
-    await panel.screenshot({ path: `/tmp/runvara-business-outcomes-${width}.png` });
+    await capture('exact-evidence', summary.locator('[data-outcome-evidence-result]'), [evidence]);
+
+    // A removed mutable action requires an explicit immutable reuse choice.
+    const originalVersionId = publication.version.versionId;
+    choicesAvailable = false; await loadExperiment();
+    await form.locator('button[type="submit"]').click(); await status.getByText('The saved action is no longer an exact current choice.', { exact: false }).waitFor();
+    assert.equal(callCount('PUT'), 1);
+    await form.locator('[name="actionSelection"]').selectOption('reuse:' + originalVersionId);
+    await form.locator('[name="amount"]').fill('7.5');
+    await capture('explicit-reuse', page.locator('#business-outcomes-action-details'), [form.locator('[name="actionSelection"]'), form.locator('button[type="submit"]')]);
+    await form.locator('button[type="submit"]').click(); await status.getByText('Draft saved.', { exact: false }).waitFor();
+    assert.equal(measurement.schema, 'runvara-experiment-measurement/v3'); assert.equal(measurement.intervention.reuseVersionId, originalVersionId);
+    assert.deepEqual(measurement.intervention.originatingObjective, action.choice.originatingObjective);
+    await detail.locator('[data-outcome-action="correct"]').click();
+    await capture('correction-review', review, [page.locator('#business-outcomes-attest'), page.locator('#business-outcomes-confirm'), page.locator('#business-outcomes-cancel')]);
+    await page.locator('#business-outcomes-attest').check(); await tripleClick(page.locator('#business-outcomes-confirm'));
+    await status.getByText('Review saved.', { exact: false }).waitFor(); await loadExperiment();
+    assert.equal(publication.version.revision, 2);
+    await detail.locator('[data-outcome-source-current]').click();
+    await page.locator('#business-outcomes-current-source').getByText('Exact recorded action input', { exact: true }).waitFor();
+    assert.ok((await page.locator('#business-outcomes-current-source').textContent()).includes('EXACT RETAINED END'));
+    // Unlink only the later draft, then withdraw the exact reviewed correction.
+    await form.locator('[name="actionSelection"]').selectOption(''); await form.locator('button[type="submit"]').click();
+    await status.getByText('Draft saved.', { exact: false }).waitFor(); assert.equal(measurement.schema, 'runvara-experiment-measurement/v1');
+    const laterDraftDigest = measurement.digest;
+    await detail.locator('[data-outcome-action="withdraw"]').click();
+    await page.locator('#business-outcomes-reason').selectOption('incorrect_measurement');
+    await capture('withdrawal-review', review, [page.locator('#business-outcomes-reason'), page.locator('#business-outcomes-attest'), page.locator('#business-outcomes-confirm'), page.locator('#business-outcomes-cancel')]);
+    await page.locator('#business-outcomes-attest').check(); await tripleClick(page.locator('#business-outcomes-confirm'));
+    await status.getByText('Review saved.', { exact: false }).waitFor(); await loadExperiment();
+    assert.equal(publication.version.revision, 3); assert.equal(publication.head.status, 'withdrawn'); assert.equal(measurement.digest, laterDraftDigest);
+    assert.equal(await detail.locator('[data-outcome-action]').count(), 0);
+    assert.equal(await form.locator('[name="actionSelection"] option[value^="reuse:"]').count(), 0);
+    const withdrawnEvidence = detail.locator('[data-outcome-source-current]'); await withdrawnEvidence.click();
+    await page.locator('#business-outcomes-current-source').getByText('Exact recorded action input', { exact: true }).waitFor();
+    assert.ok((await page.locator('#business-outcomes-current-source').textContent()).includes(action.choice.originatingObjective.id));
+    await capture('withdrawn-evidence', page.locator('#business-outcomes-current-source'), [withdrawnEvidence]);
+    assert.equal(callCount('PUT'), 3); assert.equal(callCount('POST'), 4);
 
     // A late 401 belongs to its abandoned navigation, not the freshly loaded UI.
     await page.evaluate(() => { window.__holdOutcomePastCancellation = true; });
@@ -362,15 +440,17 @@ try {
     assert.equal(await page.locator('#login-screen').isVisible(), false);
     assert.equal(await detail.textContent(), newSessionDetail, 'old-session completion cannot change replacement detail');
     assert.equal(await summary.textContent(), newSessionSummary, 'old-session completion cannot change replacement summary');
-    assert.equal(callCount('POST'), 1, 'navigation and reauthentication never replay publication');
-    assert.equal(callCount('PUT'), 1, 'navigation and reauthentication never replay draft preparation');
+    assert.equal(callCount('POST'), 4, 'navigation and reauthentication never replay publication');
+    assert.equal(callCount('PUT'), 3, 'navigation and reauthentication never replay draft preparation');
     assert.deepEqual(errors, [], 'browser must remain free of unhandled errors');
     assert.deepEqual(external, [], 'synthetic checks never contact external providers');
     assert.deepEqual(writes.filter(write => !write.endsWith('/api/auth/logout') && !write.endsWith('/api/auth/login')),
-      [`PUT ${savePath}`, 'POST /api/business-outcomes/publish'], 'outcomes never execute commercial/provider actions');
+      [`PUT ${savePath}`, 'POST /api/business-outcomes/publish', 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish'], 'outcomes never execute commercial/provider actions');
+    const images = captures.filter(row => row.width === width), bytes = (await Promise.all(images.map(row => fs.stat(row.file)))).reduce((sum, stat) => sum + stat.size, 0);
+    assert.ok(bytes < 32 * 1024 * 1024); console.log(`${width}px objective outcome evidence: ${images.length} viewport images, ${bytes} bytes; exact 200% source/review subtree typography, normal-size interactions, real fixed chrome.`);
     await context.close();
   }
-  console.log('Action-linked business outcome browser checks passed at 320, 390 and 1200 pixels using synthetic measurements and publications.');
+  console.log('Objective action outcome selection, review, unknown acknowledgement recovery, exact public evidence, correction reuse, unlink and withdrawal passed at 320, 390 and 1200 pixels. Separate normal/exact 200% subtree captures cover contiguous real scrolling source and action controls; no app-wide zoom claim. Synthetic services only; no provider mutation.');
 } finally {
   if (browser) await browser.close();
   if (server.listening) await new Promise(resolve => server.close(resolve));

@@ -5,12 +5,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { webcrypto } from 'node:crypto';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { actionUiFixture } from './business-outcomes-action-ui-fixture.mjs';
+import { objectivePublicationFixture } from './objective-publication-fixture.mjs';
 import { createActivityMeter } from '../lib/activity-meter.mjs';
 
 const workspaceId = 'outcome-app-lifecycle', experimentId = 'experiment_one', actorId = 'owner_one';
@@ -36,21 +38,25 @@ async function until(predicate) {
 }
 const expired = () => Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 });
 
-async function harness(t, { linked = false } = {}) {
-  const action = linked ? actionUiFixture(workspaceId) : null;
-  const selectedMeasurement = action ? prepareExperimentOutcomeMeasurement({ expectedRevision: 0, actionSelection: { actionId: action.choice.id }, amount: '10', currency: 'GBP', window: measurement.window, coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' }, observedAt: measurement.provenance.observedAt, report: { description: 'Linked lifecycle fixture', costsComplete: true } }, { workspaceId, experimentId, actorId, now, actionEvidence: action.source }) : measurement;
-  const selectedDetail = structuredClone(detail); selectedDetail.measurement = selectedMeasurement; selectedDetail.relationships.publication.draftDigest = selectedMeasurement.digest;
-  if (action) Object.assign(selectedDetail, { actionLinkContract: 'runvara-reviewed-action/v1', actionChoices: [action.choice], currentActionAssociation: null });
+async function harness(t, { linked = false, objective = false } = {}) {
+  const captured = objective ? await objectivePublicationFixture() : null;
+  const tenant = captured?.workspaceId || workspaceId, recordedAt = captured ? new Date().toISOString() : now;
+  const c = captured?.source.context;
+  const action = captured ? { source: captured.source, choice: { id: c.writeId, account: c.account, productId: captured.source.input.productId,
+    title: captured.source.input.title, completedAt: c.completedAt, digest: captured.source.digest, origin: c.origin, originatingObjective: c.originatingObjective } } : linked ? actionUiFixture(tenant) : null;
+  const selectedMeasurement = action ? prepareExperimentOutcomeMeasurement({ expectedRevision: 0, actionSelection: { actionId: action.choice.id }, amount: '10', currency: 'GBP', window: measurement.window, coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' }, observedAt: measurement.provenance.observedAt, report: { description: 'Linked lifecycle fixture', costsComplete: true } }, { workspaceId: tenant, experimentId, actorId, now: recordedAt, actionEvidence: action.source }) : measurement;
+  const selectedDetail = structuredClone(detail); selectedDetail.workspaceId = tenant; selectedDetail.measurement = selectedMeasurement; selectedDetail.relationships.publication.draftDigest = selectedMeasurement.digest;
+  if (action) Object.assign(selectedDetail, { actionLinkContract: objective ? 'runvara-reviewed-action/v2' : 'runvara-reviewed-action/v1', actionChoices: [action.choice], currentActionAssociation: null });
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-outcome-app-'));
   const secret = 'outcome-app-lifecycle-fixture-over-thirty-two-characters';
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
     SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false'
   }, { schedulerEnabled: false, agentOpsEnabled: false });
-  const state = seedWorkspaceState({}, { workspaceId, userId: actorId, email: 'owner@outcome-app.test', passwordHash: 'synthetic-only' });
+  const state = seedWorkspaceState({}, { workspaceId: tenant, userId: actorId, email: 'owner@outcome-app.test', passwordHash: 'synthetic-only' });
   state.products = []; state.revenueEngine.experiments = [detail.experiment];
-  await server.packsmart.store.save(workspaceId, state);
+  await server.packsmart.store.save(tenant, state);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const token = createSessionToken({ workspaceId, userId: actorId, email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
+  const token = createSessionToken({ workspaceId: tenant, userId: actorId, email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
   const response = await fetch(`http://127.0.0.1:${server.address().port}/api/bootstrap`, { headers: { Cookie: `packsmart_session=${token}` } });
   assert.equal(response.status, 200); const bootstrap = await response.json();
   await new Promise(r => server.close(r));
@@ -58,7 +64,8 @@ async function harness(t, { linked = false } = {}) {
   const html = await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8');
   const dom = new JSDOM(html, { url: 'https://outcome-app.test', runScripts: 'outside-only', pretendToBeVisual: true, virtualConsole });
   const w = dom.window, d = w.document;
-  w.Headers = Headers; w.AbortController = AbortController; w.scrollTo = () => {}; w.HTMLElement.prototype.scrollIntoView = () => {};
+  w.Headers = Headers; w.TextEncoder = TextEncoder; w.AbortController = AbortController; w.scrollTo = () => {}; w.HTMLElement.prototype.scrollIntoView = () => {};
+  Object.defineProperty(w.crypto, 'subtle', { value: webcrypto.subtle });
   w.HTMLDialogElement.prototype.showModal = function () { this.open = true; };
   w.HTMLDialogElement.prototype.close = function () { this.open = false; };
   t.after(async () => { await new Promise(r => setTimeout(r, 15)); dom.window.close(); await fs.rm(directory, { recursive: true, force: true }); assert.deepEqual(errors, []); });
@@ -74,7 +81,7 @@ async function harness(t, { linked = false } = {}) {
     if (route === '/api/activity') return h.activityHandler ? h.activityHandler() : Response.json(createActivityMeter({ dbAvailable: false }).snapshot(workspaceId));
     if (route.startsWith('/api/business-outcomes')) {
       const held = h.handler?.(route, config); if (held) return held;
-      if (route === '/api/business-outcomes') return Response.json({ workspaceId, current: [], summary: { groups: [], coverage: { complete: true } } });
+      if (route === '/api/business-outcomes') return Response.json({ workspaceId: tenant, current: [], summary: { groups: [], coverage: { complete: true } } });
       return Response.json(selectedDetail);
     }
     throw new Error('Unexpected fixture route ' + route);
@@ -211,14 +218,14 @@ for (const kind of ['read', 'save', 'publish']) {
   });
 }
 
-for (const kind of ['save', 'publish']) {
-  test(`linked ${kind} preserves exact selection and ignores responses after navigation and replacement login`, async t => {
-    const h = await harness(t, { linked: true }), old = await h.begin(kind);
+for (const objective of [false, true]) for (const kind of ['save', 'publish']) {
+  test(`${objective ? 'objective' : 'manual'} linked ${kind} preserves exact selection and ignores responses after navigation and replacement login`, async t => {
+    const h = await harness(t, { linked: true, objective }), old = await h.begin(kind);
     const body = JSON.parse(old.request.config.body);
     if (kind === 'save') assert.deepEqual(body.actionSelection, { actionId: h.action.choice.id });
     else {
       assert.equal(body.expectedMeasurementDigest, h.measurement.digest);
-      assert.match(h.$('business-outcomes-review').textContent, /write_reviewed_action/);
+      assert.ok(h.$('business-outcomes-review').textContent.includes(h.action.choice.id));
       assert.match(h.$('business-outcomes-review').textContent, /explicitly associate/);
     }
     h.navigate('overview'); assert.equal(old.request.config.isCurrent(), false); assert.equal(old.request.config.signal.aborted, true);

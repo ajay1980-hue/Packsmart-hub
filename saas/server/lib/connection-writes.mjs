@@ -489,6 +489,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const preparedInput = immutable(structuredClone(write.input));
   const approvedActionDecision = write.provider === 'shopify' && preparedInput.operation === 'product_content'
     ? immutable(structuredClone(approval)) : null;
+  const approvedActionProposal = objectiveContent ? immutable(structuredClone(write.objectivePolicyProposal)) : null;
   const identity = digest(writeIdentity(write, comparisonContract));
   const workspaceId = state.workspace?.id;
   const config = write.provider === 'shopify' ? { ...integrations.shopifyConfig(state), connection: undefined } : {};
@@ -696,9 +697,8 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   // same final save below acknowledges the retained context and terminal result.
   if (write.status === 'completed' && approvedActionDecision) {
     try {
-      if (objectiveContent) throw Object.assign(new Error('Objective-origin action context is outside the manual v1 evidence contract.'), { code: 'OBJECTIVE_CONTENT_CONTEXT_UNSUPPORTED' });
       write.recordedActionContext = createRecordedActionContext({ state, write, preparedInput, actor,
-        approval: approvedActionDecision, objectivePolicy, dispatchRequestDigest: digest(expectedShopifyRequest),
+        approval: approvedActionDecision, approvedProposal: approvedActionProposal, objectivePolicy, dispatchRequestDigest: digest(expectedShopifyRequest),
         claimId: executionClaimId, claimIdentity: identity, apiVersion: config.apiVersion || '2026-07' });
       // Leave conservative headroom for the existing store's revision/reporting
       // metadata. No full action text is duplicated in the mutable context.
@@ -708,8 +708,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
       }
     } catch (error) {
       delete write.recordedActionContext;
-      write.recordedActionUnavailable = error.code === 'OBJECTIVE_CONTENT_CONTEXT_UNSUPPORTED' ? 'objective_origin_unsupported'
-        : error.code === 'OUTCOME_ACTION_TOO_LARGE' ? 'source_size_limit' : 'context_unavailable';
+      write.recordedActionUnavailable = error.code === 'OUTCOME_ACTION_TOO_LARGE' ? 'source_size_limit' : 'context_unavailable';
     }
     if (write.recordedActionUnavailable && Buffer.byteLength(JSON.stringify(state)) >= REVIEWED_ACTION_STATE_MAX_BYTES - 16384) delete write.recordedActionUnavailable;
   }

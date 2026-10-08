@@ -8,7 +8,8 @@ import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, decryptCredentials, sessionCookie } from '../lib/security.mjs';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
-import { createOutcomePublicationBoundary } from '../lib/business-outcomes.mjs';
+import { createOutcomePublicationBoundary, createBusinessOutcomeCandidate, validateBusinessOutcomePublication } from '../lib/business-outcomes.mjs';
+import { prepareExperimentOutcomeMeasurement } from '../lib/experiment-measurements.mjs';
 import { objectiveContentFixture } from './objective-content-fixture.mjs';
 
 const SESSION_SECRET = 'server-integration-session-secret-more-than-thirty-two-characters';
@@ -84,7 +85,25 @@ test('explicit current graph reads share outcome allowance, keep roles and read 
   for (const method of ['save', 'publishBusinessOutcome', 'reserveProviderUsage', 'settleProviderUsage', 'enqueueAgentJob']) store[method] = async () => { writes++; assert.fail(`Unexpected write ${method}`); };
   for (const method of ['getAgentJob', 'listAgentJobs', 'getArchivedAutomationRun', 'getDailyBrief']) store[method] = async () => { historyReads++; assert.fail(`Graph must not hydrate retained history through ${method}`); };
   store.getBusinessOutcomeReview = async () => { reviewReads++; return { selected: true }; };
-  store.getBusinessOutcomeEvidence = async () => { evidenceReads++; return { currentStatus: 'not_checked' }; };
+  // The role stub uses the complete existing unlinked evidence contract, so the
+  // exact HTTP boundary can validate its shape without changing the role test.
+  const golden = JSON.parse(await fs.readFile(new URL('./fixtures/business-outcome-measurement-golden.json', import.meta.url)));
+  const at = new Date().toISOString(), workspaceId = state.workspace.id, actorId = state.users[0].id;
+  const sourceMeasurement = prepareExperimentOutcomeMeasurement(golden.input, { workspaceId, experimentId: 'example', actorId, now: at, previousMeasurement: null });
+  const version = createBusinessOutcomeCandidate({ source: { type: 'experiment_measurement', experimentId: 'example',
+    measurementRevision: sourceMeasurement.revision, measurementDigest: sourceMeasurement.digest },
+    ...Object.fromEntries(['metric','amount','currency','window','coverage','method','provenance','links'].map(key => [key, sourceMeasurement[key]])),
+    verification: { kind: 'owner_attestation', actorId, verifiedAt: at, measurementDigest: sourceMeasurement.digest }
+  }, { workspaceId, now: at });
+  const publication = validateBusinessOutcomePublication({ version, head: { schema: 'runvara-outcome-head/v1', workspaceId,
+    outcomeId: version.outcomeId, revision: version.revision, versionId: version.versionId, digest: version.digest, status: 'published',
+    publicationId: '00000000-0000-4000-8000-000000000001', committedAt: at, commitRevision: 'auth_fixture_committed' }
+  }, { workspaceId, now: at });
+  const evidenceEnvelope = { publication, sourceMeasurement, sourceAction: null, currentStatus: 'not_checked', source: 'immutable_business_outcome_version' };
+  store.getBusinessOutcomeEvidence = async (tenant, versionId) => {
+    evidenceReads++; assert.equal(tenant, workspaceId); assert.equal(versionId, version.versionId);
+    return structuredClone(evidenceEnvelope);
+  };
 
   await t.test('bootstrap and default/detail graph add no outcome calls and preserve fixed bounds', async () => {
     for (const target of ['/api/bootstrap', '/api/business-graph', '/api/business-graph?detail=true&nodeLimit=999999&workspaceId=foreign']) {
@@ -132,8 +151,9 @@ test('explicit current graph reads share outcome allowance, keep roles and read 
     for (const role of ['owner', 'admin', 'member', 'viewer']) {
       const review = await request('/api/business-outcomes/experiments/example', { cookie: cookieFor(role) });
       assert.equal(review.response.status, ['owner', 'admin'].includes(role) ? 200 : 403);
-      const evidence = await request(`/api/business-outcomes/versions/outcome_version_${'a'.repeat(64)}`, { cookie: cookieFor(role) });
+      const evidence = await request(`/api/business-outcomes/versions/${version.versionId}`, { cookie: cookieFor(role) });
       assert.equal(evidence.response.status, 200); assert.equal(evidence.payload.currentStatus, 'not_checked');
+      assert.deepEqual(evidence.payload, evidenceEnvelope);
     }
     assert.equal(reviewReads, 2); assert.equal(evidenceReads, 4);
   });

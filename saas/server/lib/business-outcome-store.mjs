@@ -1,4 +1,4 @@
-import { REVIEWED_ACTION_CONTRACT, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
+import { REVIEWED_OBJECTIVE_ACTION_CONTRACT, supportsReviewedActions, publicReviewedSourceAction, validateRecordedObjectiveReference, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
 import { randomUUID } from 'node:crypto';
 import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
 import { assessExperimentOutcomeMeasurement, digestMeasurementValue, validateExperimentOutcomeMeasurement } from './experiment-measurements.mjs';
@@ -328,10 +328,13 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
       }
       let actionLinkContract = null, actionChoices = [], currentActionAssociation = null;
       if (Object.hasOwn(result, 'actionLinkContract')) {
-        if (result.actionLinkContract !== REVIEWED_ACTION_CONTRACT || !Array.isArray(result.actionChoices) || result.actionChoices.length > 20) throw failure('OUTCOME_REVIEW_INVALID');
+        if (!supportsReviewedActions(result.actionLinkContract) || !Array.isArray(result.actionChoices) || result.actionChoices.length > 20) throw failure('OUTCOME_REVIEW_INVALID');
         const ids = new Set();
         actionChoices = result.actionChoices.map(row => {
-          exact(row, ['id','account','productId','title','completedAt','digest']); identifier(row.id); hash(row.digest);
+          const objective = Object.hasOwn(row, 'origin');
+          exact(row, ['id','account','productId','title','completedAt','digest', ...(objective ? ['origin','originatingObjective'] : [])]); identifier(row.id); hash(row.digest);
+          if (objective && (result.actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT || row.origin !== 'owner_objective_content')) throw failure('OUTCOME_REVIEW_INVALID');
+          if (objective) validateRecordedObjectiveReference(row.originatingObjective, workspaceId);
           if (ids.has(row.id) || typeof row.account !== 'string' || row.account.length > 253 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(row.account)
             || typeof row.productId !== 'string' || row.productId.length > 160 || !/^gid:\/\/shopify\/Product\/\d+$/.test(row.productId)
             || typeof row.title !== 'string' || row.title.length > 200 || !row.title.isWellFormed()
@@ -339,15 +342,27 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
             || !Number.isFinite(Date.parse(row.completedAt)) || new Date(row.completedAt).toISOString() !== row.completedAt) throw failure('OUTCOME_REVIEW_INVALID');
           ids.add(row.id); return { ...row };
         });
-        bounded(actionChoices, 16384); actionLinkContract = REVIEWED_ACTION_CONTRACT;
+        bounded(actionChoices, 16384); actionLinkContract = result.actionLinkContract;
         if (result.currentActionAssociation !== null) {
           currentActionAssociation = validateActionIntervention(result.currentActionAssociation, workspaceId);
           if (!currentPublication || digestMeasurementValue(currentPublication.version.links) !== digestMeasurementValue({ action: currentActionAssociation.action, approval: currentActionAssociation.approval, objective: null, opportunity: null })) throw failure('OUTCOME_REVIEW_INVALID');
         } else if (currentPublication?.version.links.action !== null && currentPublication?.version.links.action !== undefined) throw failure('OUTCOME_REVIEW_INVALID');
       } else if (Object.hasOwn(result, 'actionChoices') || Object.hasOwn(result, 'currentActionAssociation') || measurement?.intervention || currentPublication?.version.links.action) throw failure('OUTCOME_REVIEW_INVALID');
+      if (actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT
+        && (measurement?.schema === 'runvara-experiment-measurement/v3' || currentActionAssociation?.schema === 'runvara-owner-action-association/v2')) throw failure('OUTCOME_REVIEW_INVALID');
       const review = { actionLinkContract, actionChoices, currentActionAssociation, workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
       return bounded({ ...review, relationships: projectValidatedSelectedReview(review, at) }, 128 * 1024);
     } catch { throw failure('OUTCOME_REVIEW_INVALID'); }
   }
   return { publish, current, one, evidence, review };
+}
+
+// Keep evidence() private and complete for same-outcome correction/reuse. Only
+// this explicit HTTP projection omits private v2 proposal/claim/approval data.
+export function publicBusinessOutcomeEvidence(result, { workspaceId }) {
+  exact(result, ['publication','sourceMeasurement','sourceAction','currentStatus','source']);
+  if (result.currentStatus !== 'not_checked' || result.source !== 'immutable_business_outcome_version') throw failure('OUTCOME_SOURCE_INVALID');
+  const sourceAction = result.sourceAction === null ? null : publicReviewedSourceAction(result.sourceAction, { workspaceId });
+  return bounded({ publication: result.publication, sourceMeasurement: result.sourceMeasurement, sourceAction,
+    currentStatus: result.currentStatus, source: result.source }, 128 * 1024);
 }

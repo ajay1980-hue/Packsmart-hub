@@ -122,13 +122,13 @@ qualified financial execution as separate, unresolved work.
 
 ## Prepared owner-selected action association
 
-The selected review may include compact action candidates and `currentActionAssociation` from the same committed review snapshot when `actionLinkContract` is supported. No full action text is added to summary or current-head reads. Exact action/approval links are descriptive owner associations only; originating objective and opportunity remain null. Historical action text is fetched only for an exact immutable version and does not check current head. Existing refresh-only/session/stale-response safeguards apply. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md); real migration/application is held.
+The selected review may include compact action candidates and `currentActionAssociation` from the same committed review snapshot when `actionLinkContract` is supported. No full action text is added to summary or current-head reads. Exact action/approval links are descriptive owner associations only. An objective-content association retains its captured objective origin; generic outcome objective/opportunity links remain null. Historical action text is fetched only for an exact immutable version and does not check current head. Existing refresh-only/session/stale-response safeguards apply. See [reviewed-action-outcomes.md](reviewed-action-outcomes.md); real migration/application is held.
 
 ## Prepared reviewed-action selection UI (2026-10-07)
 
 The optional action selector is separate from the opaque relationship indication
-above. It is enabled only by `actionLinkContract: runvara-reviewed-action/v1`
-with a bounded, unique compact candidate list from the existing selected review
+above. Manual selection is enabled by `actionLinkContract: runvara-reviewed-action/v1`
+or the forward `runvara-reviewed-action/v2` contract; objective-content selection requires the forward contract, with a bounded, unique compact candidate list from the existing selected review
 snapshot. New drafts start with no action. A choice sends only `actionId`; an
 explicit reuse choice sends only the exact `reuseVersionId`. Removing a saved
 association sends `actionSelection: null`. No choice triggers provider work,
