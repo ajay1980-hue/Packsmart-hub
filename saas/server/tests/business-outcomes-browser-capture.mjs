@@ -40,7 +40,7 @@ export function createOutcomeViewportSession(panel) {
   };
 }
 
-export async function captureOutcomeViewports({ page, width, name, subtree, controls, captures, typographyFactory }) {
+export async function captureOutcomeViewports({ page, width, name, subtree, controls, captures, typographyFactory, assertControl = async () => {} }) {
   assert.ok(Object.hasOwn(CAPTURE_GROUPS, name), 'Every outcome capture stage belongs to an uploaded artifact group');
   const group = CAPTURE_GROUPS[name];
   const typography = await subtree.evaluateHandle(typographyFactory), viewport = await subtree.evaluateHandle(createOutcomeViewportSession);
@@ -66,6 +66,7 @@ export async function captureOutcomeViewports({ page, width, name, subtree, cont
       const view = controlViews[index]; await view.evaluate(session => session.reveal(0));
       const bounds = await view.evaluate(session => session.bounds()); horizontal(bounds, name + ' control ' + index);
       assert.ok(bounds.height > 0 && bounds.right > bounds.left && bounds.from <= 1 && bounds.to >= bounds.height - 1, `Entire control must be visible below real chrome: ${JSON.stringify(bounds)}`);
+      await assertControl(controls[index], { index, suffix, bounds });
       await image(suffix, `control-${index + 1}`, bounds);
     }
   };

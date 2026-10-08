@@ -70,6 +70,23 @@ async function assertNoOverflow(page, width, label) {
   assert.ok(dimensions.left >= -2 && dimensions.right <= width + 2,
     `${label} escapes the ${width}px viewport: ${JSON.stringify(dimensions)}`);
 }
+async function assertWithdrawalReasonText(control, { index, suffix, bounds }) {
+  if (index !== 1) return;
+  const text = await control.evaluate(element => {
+    const range = document.createRange(); range.selectNodeContents(element);
+    const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+    return { content: element.textContent, visibleText: element.innerText, childElements: element.childElementCount,
+      top: rect.top, visibility: style.visibility, opacity: style.opacity,
+      lines: Array.from(range.getClientRects(), line => ({ left: line.left, right: line.right, top: line.top, bottom: line.bottom })) };
+  });
+  assert.equal(text.content, 'Selected reason: Incorrect measurement'); assert.equal(text.visibleText, text.content);
+  assert.equal(text.childElements, 0); assert.equal(text.visibility, 'visible'); assert.equal(text.opacity, '1');
+  assert.ok(text.lines.length > 0, 'selected reason must have rendered text');
+  for (const line of text.lines) assert.ok(line.left >= Math.max(bounds.left, bounds.visibleLeft) - 1
+    && line.right <= Math.min(bounds.right, bounds.visibleRight) + 1
+    && line.top >= text.top + bounds.from - 1 && line.bottom <= text.top + bounds.to + 1,
+  `Full selected reason must be readable${suffix}: ${JSON.stringify({ line, bounds, text })}`);
+}
 let browser;
 const captures = [];
 try {
@@ -136,7 +153,7 @@ try {
       const request = route.request(), url = new URL(request.url()), method = request.method();
       if (url.origin !== base) { external.push(url.origin); return route.abort(); }
       if (!url.pathname.startsWith('/api/business-outcomes')) return route.continue();
-      calls.push({ path: url.pathname, method, body: request.postData() ? request.postDataJSON() : null });
+      calls.push({ path: url.pathname, method, body: request.postData() ? request.postDataJSON() : null, rawBody: request.postData() });
       let gate = null;
       if (holdNext?.method === method && holdNext.pathname === url.pathname) {
         gate = holdNext; holdNext = null; gate.seen = true;
@@ -193,7 +210,7 @@ try {
       if (gate) gate.done = true;
     });
 
-    const capture = (name, subtree, controls = []) => captureOutcomeViewports({ page, width, name, subtree, controls, captures, typographyFactory: createRestrictionTypographySession });
+    const capture = (name, subtree, controls = [], assertControl) => captureOutcomeViewports({ page, width, name, subtree, controls, captures, typographyFactory: createRestrictionTypographySession, assertControl });
     const panel = page.locator('#business-outcomes-panel'), status = page.locator('#business-outcomes-status');
     const summary = page.locator('#business-outcomes-summary'), detail = page.locator('#business-outcomes-detail');
     const select = page.locator('#business-outcomes-experiment'), load = page.locator('#business-outcomes-load');
@@ -388,10 +405,27 @@ try {
     await status.getByText('Draft saved.', { exact: false }).waitFor(); assert.equal(measurement.schema, 'runvara-experiment-measurement/v1');
     const laterDraftDigest = measurement.digest;
     await detail.locator('[data-outcome-action="withdraw"]').click();
+    const selectedReason = page.locator('#business-outcomes-selected-reason');
+    assert.equal(await selectedReason.textContent(), 'Selected reason: No reason selected');
     await page.locator('#business-outcomes-reason').selectOption('incorrect_measurement');
-    await capture('withdrawal-review', review, [page.locator('#business-outcomes-reason'), page.locator('#business-outcomes-attest'), page.locator('#business-outcomes-confirm'), page.locator('#business-outcomes-cancel')]);
+    assert.equal(await page.locator('#business-outcomes-reason').getAttribute('aria-describedby'), 'business-outcomes-selected-reason');
+    await capture('withdrawal-review', review, [page.locator('#business-outcomes-reason'), selectedReason, page.locator('#business-outcomes-attest'), page.locator('#business-outcomes-confirm'), page.locator('#business-outcomes-cancel')], assertWithdrawalReasonText);
+    losePublicationResponse = true;
     await page.locator('#business-outcomes-attest').check(); await tripleClick(page.locator('#business-outcomes-confirm'));
-    await status.getByText('Review saved.', { exact: false }).waitFor(); await loadExperiment();
+    await review.getByText('Confirmation was not received.', { exact: false }).waitFor();
+    const withdrawalBody = calls.filter(call => call.method === 'POST').at(-1).rawBody;
+    assert.equal(callCount('POST'), 4, 'unknown withdrawal acknowledgement never retries automatically');
+    assert.equal(await page.locator('#business-outcomes-reason').isDisabled(), true);
+    await page.locator('#business-outcomes-reason').evaluate(element => { element.value = 'evidence_retracted'; element.dispatchEvent(new Event('change', { bubbles: true })); });
+    assert.equal(await selectedReason.textContent(), 'Selected reason: Incorrect measurement', 'pending text uses the frozen request despite a mutated disabled select');
+    await page.locator('#business-outcomes-cancel').click(); await review.waitFor({ state: 'hidden' });
+    await panel.locator(':scope > summary').click(); await open(); await review.waitFor({ state: 'visible' });
+    assert.equal(await selectedReason.textContent(), 'Selected reason: Incorrect measurement');
+    assert.equal(callCount('POST'), 4); assert.equal(await page.locator('#business-outcomes-confirm').isDisabled(), true);
+    await page.locator('#business-outcomes-attest').check(); await tripleClick(page.locator('#business-outcomes-confirm'));
+    await status.getByText('Review saved.', { exact: false }).waitFor();
+    assert.equal(calls.filter(call => call.method === 'POST').at(-1).rawBody, withdrawalBody, 'withdrawal retry preserves exact request bytes');
+    await loadExperiment();
     assert.equal(publication.version.revision, 3); assert.equal(publication.head.status, 'withdrawn'); assert.equal(measurement.digest, laterDraftDigest);
     assert.equal(await detail.locator('[data-outcome-action]').count(), 0);
     assert.equal(await form.locator('[name="actionSelection"] option[value^="reuse:"]').count(), 0);
@@ -399,7 +433,7 @@ try {
     await page.locator('#business-outcomes-current-source').getByText('Exact recorded action input', { exact: true }).waitFor();
     assert.ok((await page.locator('#business-outcomes-current-source').textContent()).includes(action.choice.originatingObjective.id));
     await capture('withdrawn-evidence', page.locator('#business-outcomes-current-source'), [withdrawnEvidence]);
-    assert.equal(callCount('PUT'), 3); assert.equal(callCount('POST'), 4);
+    assert.equal(callCount('PUT'), 3); assert.equal(callCount('POST'), 5);
 
     // A late 401 belongs to its abandoned navigation, not the freshly loaded UI.
     await page.evaluate(() => { window.__holdOutcomePastCancellation = true; });
@@ -440,12 +474,12 @@ try {
     assert.equal(await page.locator('#login-screen').isVisible(), false);
     assert.equal(await detail.textContent(), newSessionDetail, 'old-session completion cannot change replacement detail');
     assert.equal(await summary.textContent(), newSessionSummary, 'old-session completion cannot change replacement summary');
-    assert.equal(callCount('POST'), 4, 'navigation and reauthentication never replay publication');
+    assert.equal(callCount('POST'), 5, 'navigation and reauthentication never replay publication');
     assert.equal(callCount('PUT'), 3, 'navigation and reauthentication never replay draft preparation');
     assert.deepEqual(errors, [], 'browser must remain free of unhandled errors');
     assert.deepEqual(external, [], 'synthetic checks never contact external providers');
     assert.deepEqual(writes.filter(write => !write.endsWith('/api/auth/logout') && !write.endsWith('/api/auth/login')),
-      [`PUT ${savePath}`, 'POST /api/business-outcomes/publish', 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish'], 'outcomes never execute commercial/provider actions');
+      [`PUT ${savePath}`, 'POST /api/business-outcomes/publish', 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish', 'POST /api/business-outcomes/publish'], 'outcomes never execute commercial/provider actions');
     for (const group of ['preparation', 'publication', 'withdrawal']) {
       const images = captures.filter(row => row.width === width && row.group === group);
       assert.ok(images.length > 0, `${width}px ${group} evidence must be captured`);

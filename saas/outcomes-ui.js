@@ -17,6 +17,7 @@
   const coverageLabel = value => labelFrom({ complete: 'Complete', partial: 'Partial', unknown: 'Unknown' }, value, 'Unknown');
   const totalLabel = value => labelFrom({ measured_sum: 'Recorded total', standalone_observations: 'Separate results; no combined total', incomplete_publication_read: 'Results incomplete; total unavailable' }, value, 'Total unavailable');
   const reviewLabel = action => labelFrom({ publish: 'result', correct: 'correction', withdraw: 'withdrawal' }, action, 'result');
+  const WITHDRAWAL_REASON_LABELS = Object.freeze({ incorrect_measurement: 'Incorrect measurement', duplicate_observation: 'Duplicate observation', incorrect_scope: 'Incorrect scope', evidence_retracted: 'Evidence retracted' });
   const REASON_LABELS = Object.freeze({
     AMOUNT_UNKNOWN: 'The measured amount is unknown.', CURRENCY_UNKNOWN: 'The currency is unknown.', WINDOW_UNKNOWN: 'The measurement period is unknown.',
     COVERAGE_INCOMPLETE: 'Measurement coverage is incomplete.', METHOD_UNKNOWN: 'The measurement method is unknown.',
@@ -49,6 +50,7 @@
     if (pending?.attempted && $('business-outcomes-reason')) $('business-outcomes-reason').disabled = true;
     const confirm = $('business-outcomes-confirm'); if (confirm) confirm.disabled = busy.has('publish') || !$('business-outcomes-attest').checked;
     $('business-outcomes-detail').querySelectorAll('[data-outcome-action]').forEach(el => { el.disabled = stale || busy.has('save') || busy.has('publish') || Boolean(pending?.attempted); });
+    renderWithdrawalReason();
   }
   const ACTION_CONTRACT = 'runvara-reviewed-action/v1';
   const OBJECTIVE_ACTION_CONTRACT = 'runvara-reviewed-action/v2';
@@ -530,11 +532,17 @@
     const root = $('business-outcomes-review'); root.classList.toggle('hidden', !pending); if (!pending) { root.replaceChildren(); controls(); return; }
     const p = pending;
     root.innerHTML = `<h3>Review ${esc(reviewLabel(p.action))}</h3>${facts(p.facts)}${p.action === 'withdraw' && !p.association && p.facts.links?.action ? '<p>The exact retained action snapshot stays in this withdrawn result’s history.</p>' : associationFacts(p.association)}<p>Measurement version ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the reviewed result. Any later draft is kept.' : 'Confirm the saved measurement and its complete costs below. This does not prove Runvara caused the result.'}</p>` +
-      (p.action === 'withdraw' ? `<label>Withdrawal reason<select id="business-outcomes-reason" ${p.attempted ? 'disabled' : ''}>${[['','Choose a reason'],['incorrect_measurement','Incorrect measurement'],['duplicate_observation','Duplicate observation'],['incorrect_scope','Incorrect scope'],['evidence_retracted','Evidence retracted']].map(([value,label]) => `<option value="${value}" ${p.payload.withdrawalReason === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>` : `<p>All relevant costs included: ${p.facts.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(p.facts.report?.description))}</p>`) +
+      (p.action === 'withdraw' ? `<label>Withdrawal reason<select id="business-outcomes-reason" aria-describedby="business-outcomes-selected-reason" ${p.attempted ? 'disabled' : ''}>${[['','Choose a reason'], ...Object.entries(WITHDRAWAL_REASON_LABELS)].map(([value,label]) => `<option value="${value}" ${p.payload.withdrawalReason === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><p id="business-outcomes-selected-reason" aria-live="polite" aria-atomic="true"></p>` : `<p>All relevant costs included: ${p.facts.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(p.facts.report?.description))}</p>`) +
       `<label class="outcome-attest"><input id="business-outcomes-attest" type="checkbox">I reviewed these exact details and ${p.action === 'withdraw' ? 'want to withdraw this result' : 'attest that this measurement and its costs are complete' + (p.association ? ' and explicitly associate the recorded action shown above' : '')}.</label>` +
       (p.uncertain ? '<p class="outcome-error">Confirmation was not received. Nothing was retried automatically. Retrying submits the same reviewed details as the same request.</p>' : '') +
       `<div class="outcome-actions"><button id="business-outcomes-confirm" class="primary" type="button" disabled>${p.uncertain ? 'Retry same reviewed action' : 'Confirm ' + esc(reviewLabel(p.action))}</button><button id="business-outcomes-cancel" class="secondary" type="button">${p.attempted ? 'Close review (keep pending action)' : 'Cancel'}</button></div>`;
     controls();
+  }
+  function renderWithdrawalReason() {
+    const confirmation = $('business-outcomes-selected-reason'); if (!confirmation || pending?.action !== 'withdraw') return;
+    const reason = pending.attempted ? pending.payload.withdrawalReason : $('business-outcomes-reason').value;
+    const text = 'Selected reason: ' + labelFrom(WITHDRAWAL_REASON_LABELS, reason, reason ? 'Unknown reason' : 'No reason selected');
+    if (confirmation.textContent !== text) confirmation.textContent = text;
   }
   async function publish() {
     if (!pending || busy.has('publish') || role() !== 'owner' || !$('business-outcomes-attest')?.checked) return;

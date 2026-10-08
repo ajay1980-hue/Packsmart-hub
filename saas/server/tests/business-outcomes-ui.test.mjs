@@ -136,6 +136,69 @@ test('withdrawal binds old published measurement and leaves later draft untouche
   assert.equal(h.writes()[0].method, 'POST'); assert.equal(h.m.digest, later.digest);
 });
 
+test('withdrawal confirmation names every selected reason safely without changing request or cancel behavior', async t => {
+  const h = await harness(t, { publication: publication(measurement()) }); await h.open(); await h.load(); h.review('withdraw');
+  const select = h.$('business-outcomes-reason'), confirmation = h.$('business-outcomes-selected-reason'), calls = h.calls.length;
+  const choose = value => { select.value = value; select.dispatchEvent(new h.w.Event('change', { bubbles: true })); };
+  assert.equal(select.tagName, 'SELECT'); assert.equal(select.getAttribute('aria-describedby'), confirmation.id);
+  assert.equal(confirmation.getAttribute('aria-live'), 'polite'); assert.equal(confirmation.getAttribute('aria-atomic'), 'true');
+  assert.equal(confirmation.textContent, 'Selected reason: No reason selected');
+  h.confirm(); assert.equal(h.writes().length, 0); assert.match(h.$('business-outcomes-status').textContent, /Give a reason/);
+  for (const [value, label] of [['incorrect_measurement', 'Incorrect measurement'], ['duplicate_observation', 'Duplicate observation'], ['incorrect_scope', 'Incorrect scope'], ['evidence_retracted', 'Evidence retracted']]) {
+    choose(value); assert.equal(confirmation.textContent, 'Selected reason: ' + label); assert.equal(confirmation.childElementCount, 0);
+  }
+  for (const value of ['constructor', '__proto__', 'toString', '<img src=x onerror="window.injected=true">']) {
+    select.add(new h.w.Option('Untrusted option label', value)); choose(value);
+    assert.equal(confirmation.textContent, 'Selected reason: Unknown reason'); assert.equal(confirmation.childElementCount, 0);
+  }
+  select.options[1].textContent = '<img src=x onerror="window.injected=true">'; choose('incorrect_measurement');
+  assert.equal(confirmation.textContent, 'Selected reason: Incorrect measurement', 'display uses closed labels, not mutable option text');
+  choose(''); assert.equal(confirmation.textContent, 'Selected reason: No reason selected');
+  choose('duplicate_observation'); assert.equal(h.calls.length, calls, 'selection changes send no requests');
+  assert.equal(h.w.injected, undefined); h.$('business-outcomes-cancel').click();
+  assert.equal(h.$('business-outcomes-selected-reason'), null); h.review('withdraw');
+  assert.equal(h.$('business-outcomes-reason').value, '');
+  assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: No reason selected');
+  assert.equal(h.calls.length, calls, 'cancel and fresh review do not publish or refresh');
+});
+
+test('pending withdrawal confirmation stays frozen through unknown acknowledgement, close and identical explicit retry', async t => {
+  const h = await harness(t, { publication: publication(measurement()) }); await h.open(); await h.load(); h.review('withdraw');
+  const choose = value => { const select = h.$('business-outcomes-reason'); select.value = value; select.dispatchEvent(new h.w.Event('change', { bubbles: true })); };
+  choose('duplicate_observation'); choose('incorrect_measurement');
+  const hold = deferred(); h.handler = () => hold.promise; h.confirm();
+  const firstBody = h.writes()[0].body; assert.equal(JSON.parse(firstBody).withdrawalReason, 'incorrect_measurement');
+  assert.equal(h.$('business-outcomes-reason').disabled, true); choose('evidence_retracted');
+  assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: Incorrect measurement');
+  assert.equal(h.writes().length, 1); hold.reject(new Error('lost withdrawal response'));
+  await until(() => h.$('business-outcomes-confirm').textContent.includes('Retry same'));
+  assert.equal(h.$('business-outcomes-confirm').disabled, true); assert.equal(h.$('business-outcomes-reason').value, 'incorrect_measurement');
+  choose('incorrect_scope'); assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: Incorrect measurement');
+  const calls = h.calls.length; h.$('business-outcomes-cancel').click();
+  assert.ok(h.$('business-outcomes-review').classList.contains('hidden'));
+  h.panel.open = false; await new Promise(resolve => setTimeout(resolve, 10));
+  h.panel.open = true; await until(() => !h.$('business-outcomes-review').classList.contains('hidden'));
+  assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: Incorrect measurement');
+  assert.equal(h.$('business-outcomes-reason').disabled, true); assert.equal(h.calls.length, calls, 'reopening cannot replay the attempt');
+  choose('duplicate_observation'); h.confirm(); await until(() => h.writes().length === 2);
+  assert.equal(h.writes()[1].body, firstBody, 'retry preserves the exact original request bytes despite disabled DOM changes');
+  await until(() => h.$('business-outcomes-confirm').textContent.includes('Retry same') && !h.$('business-outcomes-attest').checked);
+  assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: Incorrect measurement');
+});
+
+test('replacement session clears the pending withdrawal reason and opens a fresh blank review', async t => {
+  const h = await harness(t, { publication: publication(measurement()) }); await h.open(); await h.load(); h.review('withdraw');
+  const original = h.handler; h.$('business-outcomes-reason').value = 'evidence_retracted';
+  h.handler = async () => { throw new Error('lost withdrawal response'); }; h.confirm();
+  await until(() => h.$('business-outcomes-confirm').textContent.includes('Retry same'));
+  assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: Evidence retracted');
+  h.context = { ...h.context, session: {} }; h.w.RunvaraOutcomes.reset();
+  assert.equal(h.panel.open, false); assert.equal(h.$('business-outcomes-selected-reason'), null); assert.equal(h.writes().length, 1);
+  h.handler = original; await h.open(); await h.load(); h.review('withdraw');
+  assert.equal(h.$('business-outcomes-reason').disabled, false); assert.equal(h.$('business-outcomes-reason').value, '');
+  assert.equal(h.$('business-outcomes-selected-reason').textContent, 'Selected reason: No reason selected'); assert.equal(h.writes().length, 1);
+});
+
 test('admins prepare but cannot publish; members only read', async t => {
   for (const role of ['admin','member']) {
     const h = await harness(t, { role }); await h.open(); await h.load();
