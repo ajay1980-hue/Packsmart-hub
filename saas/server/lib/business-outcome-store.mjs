@@ -1,4 +1,5 @@
-import { REVIEWED_OBJECTIVE_ACTION_CONTRACT, supportsReviewedActions, publicReviewedSourceAction, validateRecordedObjectiveReference, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
+import { REVIEWED_OBJECTIVE_ACTION_CONTRACT, supportsReviewedActions, supportsReviewedActionSource, publicReviewedSourceAction, validateRecordedObjectiveReference, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
+import { validateProtectedReceiptSelector, validateProtectedReceiptSource, validateProtectedReceiptChoice, resolveProtectedReceiptEvidence, publicProtectedReceiptSource } from './protected-receipt-source.mjs';
 import { randomUUID } from 'node:crypto';
 import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
 import { assessExperimentOutcomeMeasurement, digestMeasurementValue, validateExperimentOutcomeMeasurement } from './experiment-measurements.mjs';
@@ -69,6 +70,23 @@ function readError(cause) {
 // Separate, private proof for one validated review RPC snapshot. It cannot be
 // serialized into an aggregate publication boundary or minted by a client DTO.
 const selectedReviewContexts = new WeakMap();
+// Receipt admission/session/claim material never becomes an enumerable review
+// property, including on the internal result. Only the trusted draft adapter can
+// retrieve this detached proof from its validated review identity.
+const protectedReviewEvidence = new WeakMap();
+export const selectedProtectedReceiptEvidence = review => protectedReviewEvidence.get(review) ?? null;
+export const OUTCOME_RECEIPT_LINK_CONTRACT = 'runvara-protected-content-source/v1';
+const PROTECTED_MEASUREMENT_SCHEMA = 'runvara-experiment-measurement/v4';
+const ATTEMPT = /^content_attempt_[a-f0-9]{64}$/;
+export function outcomeContentSourceReadOptions(input = {}) {
+  exact(input, ['receipt', 'afterAttemptId']);
+  const receipt = input.receipt == null ? null : validateProtectedReceiptSelector(input.receipt);
+  const afterAttemptId = input.afterAttemptId ?? null;
+  if (afterAttemptId !== null && (typeof afterAttemptId !== 'string' || !ATTEMPT.test(afterAttemptId))
+    || receipt && afterAttemptId !== null) throw failure('OUTCOME_REQUEST_INVALID', 400);
+  return { receipt, afterAttemptId };
+}
+
 function selectedReviewRelationships(token) {
   const context = selectedReviewContexts.get(token);
   if (!context) throw failure('OUTCOME_REVIEW_INVALID');
@@ -273,6 +291,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
       const stored = rows[0].source_action ?? null;
       if (sourceMeasurement.intervention) {
         sourceAction = validateReviewedSourceAction(stored, { workspaceId });
+        if (sourceMeasurement.schema === PROTECTED_MEASUREMENT_SCHEMA) validateProtectedReceiptSource(sourceMeasurement.receiptSource, { workspaceId, sourceDigest: sourceAction.digest });
         if (digestMeasurementValue(actionIntervention(sourceAction, sourceMeasurement.intervention.reuseVersionId)) !== digestMeasurementValue(sourceMeasurement.intervention)
           || digestMeasurementValue(publication.version.links) !== digestMeasurementValue(sourceMeasurement.links)) throw failure('OUTCOME_SOURCE_INVALID');
       } else if (stored !== null || publication.version.links.action !== null || publication.version.links.approval !== null) throw failure('OUTCOME_SOURCE_INVALID');
@@ -296,17 +315,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
       || publication.version.source.experimentId !== experimentId) throw failure('OUTCOME_PUBLICATION_INVALID');
     return publication;
   }
-  async function review(workspaceId, experimentId) {
-    tenant(workspaceId); identifier(experimentId);
-    let result;
-    try {
-      result = await request('rpc/runvara_read_business_outcome_review', { method: 'POST', maxResponseBytes: 128 * 1024,
-        body: JSON.stringify({ p_workspace_id: workspaceId, p_experiment_id: experimentId }) });
-    } catch (cause) {
-      const mapped = failures[cause?.databaseCode];
-      if (mapped) throw failure(...mapped);
-      throw readError(cause);
-    }
+  function validatedReview(result, workspaceId, experimentId, { protectedReader = false } = {}) {
     bounded(result, 128 * 1024);
     try {
       exact(result, ['workspaceId', 'workspaceRevision', 'experiment', 'measurement', 'current', 'actionLinkContract', 'actionChoices', 'currentActionAssociation']);
@@ -316,6 +325,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
         || (result.experiment.status !== null && (typeof result.experiment.status !== 'string' || result.experiment.status.length > 40))) throw failure('OUTCOME_PUBLICATION_INVALID');
       identifier(result.workspaceRevision);
       const at = now();
+      if (!protectedReader && result.measurement?.schema === PROTECTED_MEASUREMENT_SCHEMA) throw failure('OUTCOME_REVIEW_INVALID');
       const measurement = result.measurement === null ? null : validateExperimentOutcomeMeasurement(result.measurement, { workspaceId, experimentId, now: at });
       const assessment = measurement === null ? null : assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId, now: at });
       let currentPublication = null;
@@ -349,9 +359,88 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
         } else if (currentPublication?.version.links.action !== null && currentPublication?.version.links.action !== undefined) throw failure('OUTCOME_REVIEW_INVALID');
       } else if (Object.hasOwn(result, 'actionChoices') || Object.hasOwn(result, 'currentActionAssociation') || measurement?.intervention || currentPublication?.version.links.action) throw failure('OUTCOME_REVIEW_INVALID');
       if (actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT
-        && (measurement?.schema === 'runvara-experiment-measurement/v3' || currentActionAssociation?.schema === 'runvara-owner-action-association/v2')) throw failure('OUTCOME_REVIEW_INVALID');
+        && (measurement?.schema === 'runvara-experiment-measurement/v3' || measurement?.intervention?.schema === 'runvara-owner-action-association/v2' || currentActionAssociation?.schema === 'runvara-owner-action-association/v2')) throw failure('OUTCOME_REVIEW_INVALID');
       const review = { actionLinkContract, actionChoices, currentActionAssociation, workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
       return bounded({ ...review, relationships: projectValidatedSelectedReview(review, at) }, 128 * 1024);
+    } catch { throw failure('OUTCOME_REVIEW_INVALID'); }
+  }
+  async function review(workspaceId, experimentId, actor = null, options = {}) {
+    tenant(workspaceId); identifier(experimentId);
+    exact(options, ['receipt', 'afterAttemptId', 'requireReceiptContract', 'resolveSavedSource']);
+    const requireReceiptContract = options.requireReceiptContract ?? false, resolveSavedSource = options.resolveSavedSource ?? true;
+    if (typeof requireReceiptContract !== 'boolean' || typeof resolveSavedSource !== 'boolean') throw failure('OUTCOME_REQUEST_INVALID', 400);
+    const selection = outcomeContentSourceReadOptions({ receipt: options.receipt, afterAttemptId: options.afterAttemptId });
+    const legacyParams = { p_workspace_id: workspaceId, p_experiment_id: experimentId };
+    // The retained no-actor internal signature is strictly the old invoker
+    // reader. It cannot request protected evidence or accept a v4 draft.
+    if (actor === null) {
+      if (!resolveSavedSource || requireReceiptContract || selection.receipt || selection.afterAttemptId) throw failure('OUTCOME_REQUEST_INVALID', 400);
+      let result;
+      try { result = await request('rpc/runvara_read_business_outcome_review', { method: 'POST', maxResponseBytes: 128 * 1024, body: JSON.stringify(legacyParams) }); }
+      catch (cause) { const mapped = failures[cause?.databaseCode]; if (mapped) throw failure(...mapped); throw readError(cause); }
+      return validatedReview(result, workspaceId, experimentId);
+    }
+    exact(actor, ['id', 'sessionVersion']); identifier(actor.id); positive(actor.sessionVersion);
+    let result;
+    try {
+      result = await request('rpc/runvara_read_outcome_content_sources', { method: 'POST', maxResponseBytes: 128 * 1024,
+        body: JSON.stringify({ ...legacyParams, p_actor_id: actor.id, p_actor_session_version: actor.sessionVersion,
+          p_receipt_selector: selection.receipt, p_after_attempt_id: selection.afterAttemptId, p_resolve_saved_source: resolveSavedSource }) });
+    } catch (cause) {
+      // Exactly one compatibility fallback, and only for the absent function.
+      // Denials, timeouts, missing tables, unknown responses and every explicit
+      // protected request remain closed. The legacy parser rejects v4.
+      if (cause?.databaseCode === 'PGRST202' && !requireReceiptContract && !selection.receipt && !selection.afterAttemptId) {
+        let legacy;
+        try { legacy = await request('rpc/runvara_read_business_outcome_review', { method: 'POST', maxResponseBytes: 128 * 1024, body: JSON.stringify(legacyParams) }); }
+        catch (fallbackCause) { const mapped = failures[fallbackCause?.databaseCode]; if (mapped) throw failure(...mapped); throw readError(fallbackCause); }
+        return validatedReview(legacy, workspaceId, experimentId);
+      }
+      const mapped = failures[cause?.databaseCode]; if (mapped) throw failure(...mapped); throw readError(cause);
+    }
+    bounded(result, 128 * 1024);
+    try {
+      exact(result, ['schema', 'review', 'receiptChoices', 'nextCursor', 'hasMore', 'selectedEvidence']);
+      if (result.schema !== 'runvara-outcome-content-source-reader/v1' || !Array.isArray(result.receiptChoices)
+        || result.receiptChoices.length > 20 || typeof result.hasMore !== 'boolean'
+        || result.nextCursor !== null && !ATTEMPT.test(result.nextCursor)) throw failure('OUTCOME_REVIEW_INVALID');
+      if (!resolveSavedSource && (result.review?.measurement !== null || result.receiptChoices.length
+        || result.nextCursor !== null || result.hasMore)) throw failure('OUTCOME_REVIEW_INVALID');
+      const parsed = validatedReview(result.review, workspaceId, experimentId, { protectedReader: true });
+      const choices = result.receiptChoices.map(row => validateProtectedReceiptChoice(row, { workspaceId }));
+      bounded(choices, 16384);
+      if (choices.length && !supportsReviewedActions(parsed.actionLinkContract)
+        || choices.some(choice => choice.origin === 'owner_objective_content') && parsed.actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT) throw failure('OUTCOME_REVIEW_INVALID');
+      let previous = selection.afterAttemptId;
+      for (const choice of choices) {
+        if (previous !== null && choice.receiptSource.attemptId <= previous) throw failure('OUTCOME_REVIEW_INVALID');
+        previous = choice.receiptSource.attemptId;
+      }
+      if (result.hasMore ? !choices.length || result.nextCursor !== previous : result.nextCursor !== null) throw failure('OUTCOME_REVIEW_INVALID');
+      let selectedReceiptSource = null, privateEvidence = null;
+      if (result.selectedEvidence !== null) {
+        const resolved = resolveProtectedReceiptEvidence(result.selectedEvidence, { workspaceId, selector: selection.receipt ?? undefined });
+        if (!supportsReviewedActionSource(parsed.actionLinkContract, resolved.source)) throw failure('OUTCOME_REVIEW_INVALID');
+        if (!selection.receipt) {
+          if (selection.afterAttemptId || parsed.measurement?.schema !== PROTECTED_MEASUREMENT_SCHEMA
+            || parsed.measurement.intervention.reuseVersionId !== null
+            || digestMeasurementValue(resolved.receiptSource) !== digestMeasurementValue(parsed.measurement.receiptSource)
+            || digestMeasurementValue(actionIntervention(resolved.source)) !== digestMeasurementValue(parsed.measurement.intervention)) throw failure('OUTCOME_REVIEW_INVALID');
+        }
+        selectedReceiptSource = publicProtectedReceiptSource(resolved.source, { workspaceId, receiptSource: resolved.receiptSource });
+        const listed = choices.find(choice => choice.receiptSource.attemptId === resolved.receiptSource.attemptId);
+        if (listed && digestMeasurementValue(listed) !== digestMeasurementValue({ receiptSource: resolved.receiptSource,
+          actionId: resolved.source.context.writeId, account: resolved.source.context.account, productId: resolved.source.input.productId,
+          title: resolved.source.input.title, completedAt: resolved.source.context.completedAt, origin: resolved.source.context.origin,
+          originatingObjective: resolved.source.context.originatingObjective })) throw failure('OUTCOME_REVIEW_INVALID');
+        privateEvidence = freezeRecorded(structuredClone(result.selectedEvidence));
+      } else if (selection.receipt || !selection.afterAttemptId && parsed.measurement?.schema === PROTECTED_MEASUREMENT_SCHEMA
+        && parsed.measurement.intervention.reuseVersionId === null) throw failure('OUTCOME_REVIEW_INVALID');
+      const combined = { ...parsed, receiptLinkContract: OUTCOME_RECEIPT_LINK_CONTRACT,
+        receiptChoices: choices, nextReceiptCursor: result.nextCursor, hasMoreReceipts: result.hasMore, selectedReceiptSource };
+      bounded(combined, 128 * 1024);
+      if (privateEvidence) protectedReviewEvidence.set(combined, privateEvidence);
+      return combined;
     } catch { throw failure('OUTCOME_REVIEW_INVALID'); }
   }
   return { publish, current, one, evidence, review };
@@ -362,7 +451,31 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
 export function publicBusinessOutcomeEvidence(result, { workspaceId }) {
   exact(result, ['publication','sourceMeasurement','sourceAction','currentStatus','source']);
   if (result.currentStatus !== 'not_checked' || result.source !== 'immutable_business_outcome_version') throw failure('OUTCOME_SOURCE_INVALID');
-  const sourceAction = result.sourceAction === null ? null : publicReviewedSourceAction(result.sourceAction, { workspaceId });
+  if (result.sourceMeasurement?.schema === PROTECTED_MEASUREMENT_SCHEMA) {
+    const source = validateReviewedSourceAction(result.sourceAction, { workspaceId });
+    const measurement = validateExperimentOutcomeMeasurement(result.sourceMeasurement, { workspaceId,
+      experimentId: result.publication.version.source.experimentId, now: new Date() });
+    if (measurement.digest !== result.publication.version.source.measurementDigest
+      || measurement.revision !== result.publication.version.source.measurementRevision
+      || digestMeasurementValue(actionIntervention(source, measurement.intervention.reuseVersionId)) !== digestMeasurementValue(measurement.intervention)
+      || digestMeasurementValue(measurement.links) !== digestMeasurementValue(result.publication.version.links)) throw failure('OUTCOME_SOURCE_INVALID');
+    validateProtectedReceiptSource(measurement.receiptSource, { workspaceId, sourceDigest: source.digest });
+  }
+  const sourceAction = result.sourceAction === null ? null : result.sourceMeasurement?.schema === PROTECTED_MEASUREMENT_SCHEMA
+    ? publicProtectedReceiptSource(result.sourceAction, { workspaceId, receiptSource: result.sourceMeasurement.receiptSource })
+    : publicReviewedSourceAction(result.sourceAction, { workspaceId });
   return bounded({ publication: result.publication, sourceMeasurement: result.sourceMeasurement, sourceAction,
     currentStatus: result.currentStatus, source: result.source }, 128 * 1024);
+}
+
+// Never spread the internal RPC result into an HTTP response. In particular,
+// neither a future private property nor selectedEvidence may reach the browser.
+export function publicBusinessOutcomeReview(result) {
+  return bounded({ workspaceId: result.workspaceId, workspaceRevision: result.workspaceRevision,
+    experiment: result.experiment, measurement: result.measurement, assessment: result.assessment,
+    currentPublication: result.currentPublication, actionLinkContract: result.actionLinkContract,
+    actionChoices: result.actionChoices, currentActionAssociation: result.currentActionAssociation,
+    relationships: result.relationships, receiptLinkContract: result.receiptLinkContract ?? null,
+    receiptChoices: result.receiptChoices ?? [], nextReceiptCursor: result.nextReceiptCursor ?? null,
+    hasMoreReceipts: result.hasMoreReceipts ?? false, selectedReceiptSource: result.selectedReceiptSource ?? null }, 128 * 1024);
 }

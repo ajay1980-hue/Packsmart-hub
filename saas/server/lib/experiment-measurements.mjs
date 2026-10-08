@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 import { actionIntervention, validateActionIntervention, validateActionSelection, validateReviewedSourceAction } from './reviewed-action-evidence.mjs';
+import { resolveProtectedReceiptEvidence, validateProtectedReceiptSource } from './protected-receipt-source.mjs';
+import { contentReceiptJsonbBytes } from './content-execution-receipt.mjs';
 import { normalizeOutcomeDecimal, BUSINESS_OUTCOME_CURRENCIES } from './business-outcomes.mjs';
 
 /**
@@ -29,8 +31,11 @@ export const LINKED_EXPERIMENT_MEASUREMENT_SCHEMA = 'runvara-experiment-measurem
 export const LINKED_MEASUREMENT_REPORT_SCHEMA = 'runvara-measurement-report/v2';
 export const OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA = 'runvara-experiment-measurement/v3';
 export const OBJECTIVE_LINKED_MEASUREMENT_REPORT_SCHEMA = 'runvara-measurement-report/v3';
+export const PROTECTED_EXPERIMENT_MEASUREMENT_SCHEMA = 'runvara-experiment-measurement/v4';
+export const PROTECTED_MEASUREMENT_REPORT_SCHEMA = 'runvara-measurement-report/v4';
 export const MEASUREMENT_REPORT_SCHEMA = 'runvara-measurement-report/v1';
 export const EXPERIMENT_MEASUREMENT_MAX_BYTES = 8192;
+export const EXPERIMENT_MEASUREMENT_JSONB_MAX_BYTES = 12288;
 export const MEASUREMENT_REPORT_DESCRIPTION_MAX = 1000;
 const METRIC = 'incrementalContribution';
 const DEFINITION = 'incremental-contribution/v1';
@@ -175,27 +180,29 @@ function normalizeInput(input, context) {
 function buildMeasurement(facts, context, revision) {
   const { workspaceId, experimentId, actorId: recordedBy, recordedAt } = context;
   const reportFacts = { metric: METRIC, amount: facts.amount, currency: facts.currency, window: facts.window,
-    coverage: facts.coverage, method: facts.method, observedAt: facts.observedAt, ...(facts.intervention ? { intervention: facts.intervention } : {}) };
+    coverage: facts.coverage, method: facts.method, observedAt: facts.observedAt, ...(facts.intervention ? { intervention: facts.intervention } : {}),
+    ...(facts.receiptSource ? { receiptSource: facts.receiptSource } : {}) };
   const objective = facts.intervention?.schema === 'runvara-owner-action-association/v2';
-  const reportBody = { schema: objective ? OBJECTIVE_LINKED_MEASUREMENT_REPORT_SCHEMA : facts.intervention ? LINKED_MEASUREMENT_REPORT_SCHEMA : MEASUREMENT_REPORT_SCHEMA,
+  const reportBody = { schema: facts.receiptSource ? PROTECTED_MEASUREMENT_REPORT_SCHEMA : objective ? OBJECTIVE_LINKED_MEASUREMENT_REPORT_SCHEMA : facts.intervention ? LINKED_MEASUREMENT_REPORT_SCHEMA : MEASUREMENT_REPORT_SCHEMA,
     id: `measurement_report_${digestMeasurementValue([workspaceId, experimentId, revision])}`,
     workspaceId, experimentId, measurementRevision: revision, recordedBy, recordedAt,
     description: facts.description, costsComplete: facts.costsComplete, facts: reportFacts };
   const report = { ...reportBody, digest: digestMeasurementValue(reportBody) };
-  const body = { schema: objective ? OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA : facts.intervention ? LINKED_EXPERIMENT_MEASUREMENT_SCHEMA : EXPERIMENT_MEASUREMENT_SCHEMA, workspaceId, experimentId, revision, recordedBy, recordedAt,
+  const body = { schema: facts.receiptSource ? PROTECTED_EXPERIMENT_MEASUREMENT_SCHEMA : objective ? OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA : facts.intervention ? LINKED_EXPERIMENT_MEASUREMENT_SCHEMA : EXPERIMENT_MEASUREMENT_SCHEMA, workspaceId, experimentId, revision, recordedBy, recordedAt,
     metric: METRIC, amount: facts.amount, currency: facts.currency, window: facts.window, coverage: facts.coverage, method: facts.method,
     provenance: { observationId: `measurement_observation_${digestMeasurementValue([workspaceId, experimentId])}`,
       sourceRefs: [{ type: 'measurement_report', id: report.id, digest: report.digest }], observedAt: facts.observedAt, aggregation: 'standalone' },
     links: { action: facts.intervention?.action ?? null, opportunity: null, approval: facts.intervention?.approval ?? null, objective: null },
-    ...(facts.intervention ? { intervention: facts.intervention } : {}), report };
+    ...(facts.intervention ? { intervention: facts.intervention } : {}), ...(facts.receiptSource ? { receiptSource: facts.receiptSource } : {}), report };
   const envelope = { ...body, digest: digestMeasurementValue(body) };
   if (Buffer.byteLength(JSON.stringify(envelope), 'utf8') > EXPERIMENT_MEASUREMENT_MAX_BYTES) throw fail('Typed measurement exceeds its 8 KiB serialized bound', 'MEASUREMENT_TOO_LARGE', 413);
+  if (facts.receiptSource && contentReceiptJsonbBytes(envelope) > EXPERIMENT_MEASUREMENT_JSONB_MAX_BYTES) throw fail('Typed measurement exceeds its 12 KiB JSONB bound', 'MEASUREMENT_TOO_LARGE', 413);
   // Return detached ordinary data: the repeated report facts must not share
   // mutable nested objects with top-level fields or the caller's input.
   return JSON.parse(JSON.stringify(envelope));
 }
 function readContext(options, preparing = false) {
-  exact(options, preparing ? ['workspaceId', 'experimentId', 'actorId', 'now', 'previousMeasurement', 'actionEvidence', 'reuseVersionId'] : ['workspaceId', 'experimentId', 'now'], 'trusted measurement context');
+  exact(options, preparing ? ['workspaceId', 'experimentId', 'actorId', 'now', 'previousMeasurement', 'actionEvidence', 'reuseVersionId', 'receiptEvidence', 'reuseSourceMeasurement'] : ['workspaceId', 'experimentId', 'now'], 'trusted measurement context');
   return { workspaceId: workspace(options.workspaceId), experimentId: opaque(options.experimentId, 'Experiment ID'),
     ...(preparing ? { actorId: opaque(options.actorId, 'Recording actor ID') } : {}), recordedAt: trustedNow(options.now) };
 }
@@ -204,12 +211,29 @@ export function prepareExperimentOutcomeMeasurement(input, options) {
   const context = readContext(options, true), facts = normalizeInput(input, context);
   const selection = validateActionSelection(input.actionSelection);
   if (selection) {
-    const source = validateReviewedSourceAction(options.actionEvidence, { workspaceId: context.workspaceId });
-    if (selection.actionId ? selection.actionId !== source.context.writeId || options.reuseVersionId != null
-      : selection.reuseVersionId !== options.reuseVersionId) throw fail('Action selection does not match resolved evidence');
+    let source;
+    if (selection.receipt) {
+      if (options.actionEvidence != null || options.reuseVersionId != null || options.reuseSourceMeasurement != null) throw fail('Receipt selection cannot reuse other action evidence');
+      const resolved = resolveProtectedReceiptEvidence(options.receiptEvidence, { workspaceId: context.workspaceId, selector: selection.receipt });
+      source = resolved.source; facts.receiptSource = resolved.receiptSource;
+    } else {
+      if (options.receiptEvidence != null) throw fail('Protected evidence requires an explicit receipt selection');
+      source = validateReviewedSourceAction(options.actionEvidence, { workspaceId: context.workspaceId });
+      if (selection.actionId ? selection.actionId !== source.context.writeId || options.reuseVersionId != null || options.reuseSourceMeasurement != null
+        : selection.reuseVersionId !== options.reuseVersionId) throw fail('Action selection does not match resolved evidence');
+      if (options.reuseSourceMeasurement != null) {
+        // This envelope must come from the exact immutable same-outcome version
+        // supplied by the trusted adapter. It is never a mutable reference or a
+        // receipt-ledger/current-history lookup during published-version reuse.
+        const reused = validateExperimentOutcomeMeasurement(options.reuseSourceMeasurement, {
+          workspaceId: context.workspaceId, experimentId: context.experimentId, now: context.recordedAt });
+        if (!reused.intervention || digestMeasurementValue(actionIntervention(source, reused.intervention.reuseVersionId)) !== digestMeasurementValue(reused.intervention)) throw fail('Published action and source measurement do not match');
+        if (reused.receiptSource) facts.receiptSource = validateProtectedReceiptSource(reused.receiptSource, { workspaceId: context.workspaceId, sourceDigest: source.digest });
+      }
+    }
     facts.intervention = actionIntervention(source, options.reuseVersionId ?? null);
     if (facts.intervention.completedAt > context.recordedAt) throw fail('Action completion is in the future');
-  } else if (options.actionEvidence != null || options.reuseVersionId != null) throw fail('Action evidence requires an explicit owner selection');
+  } else if (options.actionEvidence != null || options.reuseVersionId != null || options.receiptEvidence != null || options.reuseSourceMeasurement != null) throw fail('Action evidence requires an explicit owner selection');
   const previous = options.previousMeasurement ?? null;
   const before = previous === null ? null : validateExperimentOutcomeMeasurement(previous, {
     workspaceId: context.workspaceId, experimentId: context.experimentId, now: context.recordedAt
@@ -230,10 +254,12 @@ const REPORT_FIELDS = ['schema', 'id', 'workspaceId', 'experimentId', 'measureme
 export function validateExperimentOutcomeMeasurement(envelope, options) {
   const trusted = readContext(options);
   const envelopeFields = descriptors(envelope, 'measurement envelope');
-  exact(envelope, [LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA].includes(envelopeFields.schema?.value) ? [...ENVELOPE_FIELDS, 'intervention'] : ENVELOPE_FIELDS, 'measurement envelope');
+  const protectedSource = envelopeFields.schema?.value === PROTECTED_EXPERIMENT_MEASUREMENT_SCHEMA;
+  const linked = [LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, PROTECTED_EXPERIMENT_MEASUREMENT_SCHEMA].includes(envelopeFields.schema?.value);
+  exact(envelope, linked ? [...ENVELOPE_FIELDS, 'intervention', ...(protectedSource ? ['receiptSource'] : [])] : ENVELOPE_FIELDS, 'measurement envelope');
   if (envelope.workspaceId !== trusted.workspaceId) throw fail('Measurement workspace mismatch', 'WORKSPACE_MISMATCH', 403);
   if (envelope.experimentId !== trusted.experimentId) throw fail('Measurement experiment mismatch', 'EXPERIMENT_MISMATCH', 403);
-  if (![EXPERIMENT_MEASUREMENT_SCHEMA, LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA].includes(envelope.schema)) throw fail('Unsupported measurement schema');
+  if (![EXPERIMENT_MEASUREMENT_SCHEMA, LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, PROTECTED_EXPERIMENT_MEASUREMENT_SCHEMA].includes(envelope.schema)) throw fail('Unsupported measurement schema');
   const revision = number(envelope.revision, 'Server measurement revision', { minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
   const context = { ...trusted, actorId: opaque(envelope.recordedBy, 'Recording actor ID'), recordedAt: timestamp(envelope.recordedAt, 'Recording timestamp') };
   if (context.recordedAt > trusted.recordedAt) throw fail('Measurement recording time is in the future');
@@ -245,10 +271,12 @@ export function validateExperimentOutcomeMeasurement(envelope, options) {
     coverage: { status: envelope.coverage.status, observedCount: envelope.coverage.observedCount, expectedCount: envelope.coverage.expectedCount },
     method: { kind: envelope.method.kind }, observedAt: envelope.provenance.observedAt,
     report: { description: envelope.report.description, costsComplete: envelope.report.costsComplete } }, context);
-  if ([LINKED_EXPERIMENT_MEASUREMENT_SCHEMA, OBJECTIVE_LINKED_EXPERIMENT_MEASUREMENT_SCHEMA].includes(envelope.schema)) {
+  if (linked) {
     facts.intervention = validateActionIntervention(envelope.intervention, trusted.workspaceId);
     if (facts.intervention.completedAt > context.recordedAt) throw fail('Action completion is in the future');
   }
+  if (protectedSource) facts.receiptSource = validateProtectedReceiptSource(envelope.receiptSource, {
+    workspaceId: trusted.workspaceId, sourceDigest: facts.intervention.action.digest });
   const expected = buildMeasurement(facts, context, revision);
   if (typeof envelope.digest !== 'string' || !HASH.test(envelope.digest) || canonicalMeasurementJson(envelope) !== canonicalMeasurementJson(expected)) throw fail('Measurement/report facts, identity or canonical digest do not match', 'MEASUREMENT_INTEGRITY_FAILED', 409);
   return expected;

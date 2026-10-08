@@ -43,9 +43,9 @@ test('summary, review and exact evidence use compact auth/reads without whole st
   }
   assert.equal(f.counts.identities,3); assert.equal(f.calls.length,3); assert.equal(f.counts.saves,0); assert.equal(f.counts.providerCalls,0);
   assert.equal(f.calls[0].options.maxResponseBytes,2*1024*1024); assert.equal(f.calls[0].options.headers.Prefer,'count=exact');
-  assert.match(f.calls[0].path,/limit=51/); assert.equal(f.calls[1].path,'rpc/runvara_read_business_outcome_review');
+  assert.match(f.calls[0].path,/limit=51/); assert.equal(f.calls[1].path,'rpc/runvara_read_outcome_content_sources');
   assert.equal(f.calls[1].options.maxResponseBytes,128*1024); assert.match(f.calls[2].path,/limit=2/);
-  assert.deepEqual(JSON.parse(f.calls[1].options.body),{p_workspace_id:'outcome-alpha',p_experiment_id:EXPERIMENT});
+  assert.deepEqual(JSON.parse(f.calls[1].options.body),{p_workspace_id:'outcome-alpha',p_experiment_id:EXPERIMENT,p_actor_id:f.states.get('outcome-alpha').users[0].id,p_actor_session_version:1,p_receipt_selector:null,p_after_attempt_id:null,p_resolve_saved_source:true});
 });
 
 test('HTTP authentication, CSRF and roles distinguish review/draft from owner-only publication', async t => {

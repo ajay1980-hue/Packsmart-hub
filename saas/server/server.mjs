@@ -72,7 +72,7 @@ import { derivePortfolioAllocation } from './lib/portfolio-engine.mjs';
 import { deriveExecutionPlan } from './lib/execution-plan.mjs';
 import { deriveLearning } from './lib/learning-engine.mjs';
 import { supportsReviewedActions, supportsReviewedActionSource, resolveRecordedActionEvidence, validateActionSelection } from './lib/reviewed-action-evidence.mjs';
-import { publicBusinessOutcomeEvidence } from './lib/business-outcome-store.mjs';
+import { publicBusinessOutcomeEvidence, publicBusinessOutcomeReview, selectedProtectedReceiptEvidence, outcomeContentSourceReadOptions, OUTCOME_RECEIPT_LINK_CONTRACT } from './lib/business-outcome-store.mjs';
 import { prepareExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement } from './lib/experiment-measurements.mjs';
 import { evidenceInWorkspace } from './lib/business-evidence-scope.mjs';
 
@@ -1208,6 +1208,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
         if (pathname === '/api/business-outcomes' || pathname.startsWith('/api/business-outcomes/')) {
           const workspaceId = auth.session.workspaceId;
+          const reviewActor = { id: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) };
           if ([...url.searchParams.keys()].length) throw Object.assign(new Error('Outcome reads do not accept tenant or query overrides'), { status: 400, code: 'OUTCOME_REQUEST_INVALID' });
           const consume = consumeOutcome;
           const decodeId = raw => {
@@ -1224,23 +1225,39 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const source = pathname.match(/^\/api\/business-outcomes\/experiments\/([^/]+)(\/measurement)?$/);
           if (source && req.method === 'GET' && !source[2]) {
             requireOwner(auth); consume(outcomeReadLimiter);
-            const result = await store.getBusinessOutcomeReview(workspaceId, decodeId(source[1]));
-            send(res, 200, result); return;
+            const result = await store.getBusinessOutcomeReview(workspaceId, decodeId(source[1]), reviewActor);
+            send(res, 200, publicBusinessOutcomeReview(result)); return;
+          }
+          const receiptRead = pathname.match(/^\/api\/business-outcomes\/experiments\/([^/]+)\/content-sources$/);
+          if (receiptRead && req.method === 'POST') {
+            requireOwner(auth); consume(outcomeReadLimiter);
+            const selection = outcomeContentSourceReadOptions(await jsonBody(req, 1024));
+            const result = await store.getBusinessOutcomeReview(workspaceId, decodeId(receiptRead[1]), reviewActor, selection);
+            send(res, 200, publicBusinessOutcomeReview(result)); return;
           }
           if (source && req.method === 'PUT' && source[2]) {
             requireOwner(auth); consume(outcomeDraftLimiter);
             const id = decodeId(source[1]), body = await jsonBody(req, 16384);
             const selection = validateActionSelection(body.actionSelection);
-            let reusedAction = null, actionLinkContract = null;
+            let reusedAction = null, reuseSourceMeasurement = null, actionLinkContract = null, sourceReview = null, receiptEvidence = null;
             if (selection) {
-              const compatible = await store.getBusinessOutcomeReview(workspaceId, id);
-              if (!supportsReviewedActions(compatible.actionLinkContract)) throw Object.assign(new Error('Reviewed action linking requires the compatible storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
-              actionLinkContract = compatible.actionLinkContract;
               if (selection.reuseVersionId) {
+                // Resolve immutable reuse first so a protected version can never
+                // trigger a legacy compatibility fallback. An old-column fallback
+                // produces unlinked evidence only and cannot pass this check.
                 const evidence = await store.getBusinessOutcomeEvidence(workspaceId, selection.reuseVersionId);
                 if (evidence.publication.version.source.experimentId !== id || !evidence.sourceAction) throw Object.assign(new Error('Selected immutable action is not available for this experiment'), { status: 409, code: 'OUTCOME_ACTION_INVALID' });
-                reusedAction = evidence.sourceAction;
+                reusedAction = evidence.sourceAction; reuseSourceMeasurement = evidence.sourceMeasurement;
               }
+              const compatible = await store.getBusinessOutcomeReview(workspaceId, id, reviewActor, { receipt: selection.receipt ?? null,
+                requireReceiptContract: reuseSourceMeasurement?.schema === 'runvara-experiment-measurement/v4', resolveSavedSource: false });
+              sourceReview = compatible;
+              if (!supportsReviewedActions(compatible.actionLinkContract)) throw Object.assign(new Error('Reviewed action linking requires the compatible storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
+              actionLinkContract = compatible.actionLinkContract;
+              if (selection.receipt) {
+                if (compatible.receiptLinkContract !== OUTCOME_RECEIPT_LINK_CONTRACT || !(receiptEvidence = selectedProtectedReceiptEvidence(compatible))) throw Object.assign(new Error('Protected content source storage is unavailable'), { status: 503, code: 'OUTCOME_RECEIPT_STORAGE_UNAVAILABLE' });
+              }
+              if (reuseSourceMeasurement?.schema === 'runvara-experiment-measurement/v4' && compatible.receiptLinkContract !== OUTCOME_RECEIPT_LINK_CONTRACT) throw Object.assign(new Error('Protected content source storage is unavailable'), { status: 503, code: 'OUTCOME_RECEIPT_STORAGE_UNAVAILABLE' });
             }
             const result = await mutate(auth, async state => {
               const owned = (value, depth = 0) => depth <= 4 && evidenceInWorkspace(value, workspaceId)
@@ -1251,11 +1268,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 || actors.length !== 1 || !owned(actors[0]) || actors[0].passwordChangeRequired) {
                 throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
               }
-              const actionEvidence = selection ? reusedAction ?? resolveRecordedActionEvidence(state, selection.actionId) : null;
-              if (selection && !supportsReviewedActionSource(actionLinkContract, actionEvidence)) throw Object.assign(new Error('Objective action linking requires the forward storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
+              if ((selection?.receipt || reuseSourceMeasurement?.schema === 'runvara-experiment-measurement/v4')
+                && state._revision !== sourceReview.workspaceRevision) throw Object.assign(new Error('Workspace changed; reload before editing'), { status: 409, code: 'OUTCOME_WORKSPACE_CONFLICT' });
+              if (matches[0].outcomeMeasurement?.schema === 'runvara-experiment-measurement/v4' && !Object.hasOwn(body, 'actionSelection')) throw Object.assign(new Error('Choose explicitly whether to retain, replace or remove the protected content source'), { status: 409, code: 'MEASUREMENT_INVALID' });
+              const actionEvidence = selection && !selection.receipt ? reusedAction ?? resolveRecordedActionEvidence(state, selection.actionId) : null;
+              if (selection && !selection.receipt && !supportsReviewedActionSource(actionLinkContract, actionEvidence)) throw Object.assign(new Error('Objective action linking requires the forward storage contract'), { status: 503, code: 'OUTCOME_ACTION_STORAGE_UNAVAILABLE' });
               const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
                 actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null,
-                ...(selection ? { actionEvidence, reuseVersionId: selection.reuseVersionId ?? null } : {}) });
+                ...(selection?.receipt ? { receiptEvidence } : selection ? { actionEvidence, reuseVersionId: selection.reuseVersionId ?? null, ...(reuseSourceMeasurement ? { reuseSourceMeasurement } : {}) } : {}) });
               matches[0].outcomeMeasurement = measurement;
               const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
               addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,

@@ -48,3 +48,5 @@ jobs:
         run: node --test --test-concurrency=1 saas/server/tests/business-outcome-postgres.mjs
       - name: Verify protected content receipts, capacity and rollback boundaries
         run: node --test --test-concurrency=1 saas/server/tests/content-execution-receipt-postgres.mjs
+      - name: Verify receipt-backed outcome review and publication
+        run: node --test --test-concurrency=1 saas/server/tests/receipt-outcome-consumer-postgres.mjs

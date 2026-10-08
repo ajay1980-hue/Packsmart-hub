@@ -15,7 +15,8 @@ import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.
 import { prepareExperimentOutcomeMeasurement, validateExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { reviewedActionFixture } from './reviewed-action-test-fixture.mjs';
-import { resolveRecordedActionEvidence, REVIEWED_ACTION_CONTRACT } from '../lib/reviewed-action-evidence.mjs';
+import { resolveRecordedActionEvidence, actionIntervention, REVIEWED_ACTION_CONTRACT } from '../lib/reviewed-action-evidence.mjs';
+import { resolveProtectedReceiptEvidence } from '../lib/protected-receipt-source.mjs';
 import { evidenceInWorkspace } from '../lib/business-evidence-scope.mjs';
 
 export const BASE = '/api/business-outcomes', EXPERIMENT = 'experiment_alpha';
@@ -42,9 +43,10 @@ function publicationRow(workspaceId, version, publicationId, commitRevision, at,
 }
 const joinedRow = row => { const { source_measurement, source_action, ...compact } = row; return { workspace_id: row.workspace_id, outcome_id: row.outcome_id, version_id: row.version_id, version: compact }; };
 
-export async function fixture(t, { measured = true, published = false, env = {}, linkedContract = false, primaryState = null } = {}) {
+export async function fixture(t, { measured = true, published = false, env = {}, linkedContract = false, primaryState = null, protectedSources = [] } = {}) {
   const primaryWorkspace = primaryState?.workspace.id || 'outcome-alpha';
   const states = new Map(), rows = new Map(), receipts = new Map(), calls = [], invalidations = [];
+  const protectedEvidence = new Map(protectedSources.map(value => [value.receipt.attemptId, structuredClone(value)]));
   const counts = { identities: 0, gets: 0, saves: 0, providerCalls: 0 };
   const hooks = { afterIdentity: null, transport: null };
   for (const workspaceId of [primaryWorkspace,'outcome-beta']) {
@@ -77,14 +79,55 @@ export async function fixture(t, { measured = true, published = false, env = {},
   const persistence = createBusinessOutcomePersistence({ invalidate: id => invalidations.push(id), request: async (path, options = {}) => {
     calls.push({ path, options: structuredClone(options) });
     if (hooks.transport) return hooks.transport(path, options);
-    if (path === 'rpc/runvara_read_business_outcome_review') {
+    if (path === 'rpc/runvara_read_business_outcome_review' || path === 'rpc/runvara_read_outcome_content_sources') {
       const { p_workspace_id: id, p_experiment_id: experimentId } = JSON.parse(options.body), s = states.get(id);
+      const p = JSON.parse(options.body);
+      if (path === 'rpc/runvara_read_outcome_content_sources') {
+        const actor = s?.users?.find(user => user.id === p.p_actor_id);
+        if (!actor || !['owner', 'admin'].includes(actor.role) || actor.active === false || actor.passwordChangeRequired || (actor.sessionVersion ?? 1) !== p.p_actor_session_version) throw sqlError('P0O03');
+      }
       const matches = s?.revenueEngine?.experiments?.filter(x => x?.id === experimentId) || [];
       if (matches.length !== 1) throw sqlError('P0O09');
       const e = matches[0], current = [...rows.values()].filter(x => x.workspace_id === id && x.payload.source.experimentId === experimentId).sort((a,b) => b.revision-a.revision)[0];
-      return structuredClone({ workspaceId: id, workspaceRevision: s._revision, experiment: { id: e.id, title: e.title ?? null, status: e.status ?? null }, measurement: e.outcomeMeasurement ?? null, current: current ? joinedRow(current) : null,
+      const review = structuredClone({ workspaceId: id, workspaceRevision: s._revision, experiment: { id: e.id, title: e.title ?? null, status: e.status ?? null }, measurement: e.outcomeMeasurement ?? null, current: current ? joinedRow(current) : null,
         ...(linkedContract ? { actionLinkContract: linkedContract === true ? REVIEWED_ACTION_CONTRACT : linkedContract, currentActionAssociation: current?.source_measurement?.intervention ?? null,
           actionChoices: (s.connectionWrites || []).filter(w=>w.recordedActionContext && (![true, REVIEWED_ACTION_CONTRACT].includes(linkedContract) || w.recordedActionContext.origin !== 'owner_objective_content')).map(w=>({ id:w.id, account:w.account, productId:w.input.productId, title:w.input.title, completedAt:w.completedAt, digest:w.recordedActionContext.snapshotDigest, ...(w.recordedActionContext.origin === 'owner_objective_content' ? { origin: 'owner_objective_content', originatingObjective: w.recordedActionContext.originatingObjective } : {}) })) } : {}) });
+      if (path === 'rpc/runvara_read_business_outcome_review') return review;
+      const choices = p.p_resolve_saved_source === false ? [] : [...protectedEvidence.values()].filter(value => value.receipt.workspaceId === id).map(value => {
+        const { source, receiptSource } = resolveProtectedReceiptEvidence(value, { workspaceId: id });
+        return { receiptSource, actionId: source.context.writeId, account: source.context.account, productId: source.input.productId,
+          title: source.input.title, completedAt: source.context.completedAt, origin: source.context.origin, originatingObjective: source.context.originatingObjective };
+      }).sort((a,b) => a.receiptSource.attemptId.localeCompare(b.receiptSource.attemptId)).filter(value => !p.p_after_attempt_id || value.receiptSource.attemptId > p.p_after_attempt_id);
+      if (p.p_resolve_saved_source !== false && e.outcomeMeasurement?.schema === 'runvara-experiment-measurement/v4') {
+        const m = e.outcomeMeasurement, ref = m.receiptSource;
+        let resolved;
+        try {
+          if (m.intervention.reuseVersionId) {
+            const reused = rows.get(m.intervention.reuseVersionId);
+            if (!reused || reused.workspace_id !== id || reused.payload.source.experimentId !== experimentId) throw sqlError('P0O01');
+            resolved = { source: reused.source_action, receiptSource: reused.source_measurement.receiptSource };
+          } else {
+            resolved = resolveProtectedReceiptEvidence(protectedEvidence.get(ref.attemptId), { workspaceId: id,
+              selector: { attemptId: ref.attemptId, receiptDigest: ref.receiptDigest, sourceDigest: ref.sourceDigest } });
+          }
+          if (digestMeasurementValue(resolved.receiptSource) !== digestMeasurementValue(ref)
+            || digestMeasurementValue(actionIntervention(resolved.source, m.intervention.reuseVersionId)) !== digestMeasurementValue(m.intervention)) throw sqlError('P0O01');
+        } catch { throw sqlError('P0O01'); }
+      }
+      let selected = p.p_receipt_selector;
+      if (!selected && p.p_resolve_saved_source !== false && !p.p_after_attempt_id && e.outcomeMeasurement?.schema === 'runvara-experiment-measurement/v4' && e.outcomeMeasurement.intervention.reuseVersionId === null) {
+        const ref = e.outcomeMeasurement.receiptSource;
+        selected = { attemptId: ref.attemptId, receiptDigest: ref.receiptDigest, sourceDigest: ref.sourceDigest };
+      }
+      const selectedEvidence = selected ? protectedEvidence.get(selected.attemptId) : null;
+      if (selected) {
+        if (!selectedEvidence || selectedEvidence.receipt.workspaceId !== id) throw sqlError('P0O01');
+        resolveProtectedReceiptEvidence(selectedEvidence, { workspaceId: id, selector: selected });
+      }
+      if (p.p_resolve_saved_source === false) review.measurement = null;
+      const page = choices.slice(0,20), hasMore = choices.length > page.length;
+      return structuredClone({ schema: 'runvara-outcome-content-source-reader/v1', review, receiptChoices: page,
+        nextCursor: hasMore ? page.at(-1).receiptSource.attemptId : null, hasMore, selectedEvidence: selectedEvidence ?? null });
     }
     if (path === 'rpc/runvara_publish_business_outcome') {
       const p = JSON.parse(options.body), s = states.get(p.p_workspace_id), actors = s?.users?.filter(x => x.id === p.p_actor_id) || [];
@@ -108,7 +151,9 @@ export async function fixture(t, { measured = true, published = false, env = {},
       const value = publicationRow(p.p_workspace_id, version, p.p_publication_id, randomUUID(), at, measurement);
       if (measurement.intervention) {
         value.row.source_action = p.p_action === 'withdraw' ? previous.source_action
-          : measurement.intervention.reuseVersionId ? rows.get(measurement.intervention.reuseVersionId)?.source_action : resolveRecordedActionEvidence(s, measurement.intervention.action.id);
+          : measurement.intervention.reuseVersionId ? rows.get(measurement.intervention.reuseVersionId)?.source_action
+          : measurement.schema === 'runvara-experiment-measurement/v4' ? resolveProtectedReceiptEvidence(protectedEvidence.get(measurement.receiptSource.attemptId), { workspaceId: p.p_workspace_id, selector: { attemptId: measurement.receiptSource.attemptId, receiptDigest: measurement.receiptSource.receiptDigest, sourceDigest: measurement.receiptSource.sourceDigest } }).source
+          : resolveRecordedActionEvidence(s, measurement.intervention.action.id);
       } else value.row.source_action = null;
       rows.set(version.versionId, value.row); receipts.set(p.p_publication_id, value.receipt);
       s._revision = value.receipt.publication.head.commitRevision; e.currentOutcome = value.receipt.publication.head;
@@ -129,7 +174,7 @@ export async function fixture(t, { measured = true, published = false, env = {},
     assert.fail('Unexpected synthetic database path: ' + path);
   } });
   store.businessOutcomeSummary = workspace => persistence.current(workspace);
-  store.getBusinessOutcomeReview = (workspace,id) => persistence.review(workspace,id);
+  store.getBusinessOutcomeReview = (workspace,id,actor,options) => persistence.review(workspace,id,actor,options);
   store.getBusinessOutcomeEvidence = (workspace,id) => persistence.evidence(workspace,id);
   store.publishBusinessOutcome = (workspace,actor,input) => persistence.publish(workspace,actor,input);
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: SECRET, CREDENTIALS_KEY: SECRET, SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', ...env }, {
@@ -159,6 +204,6 @@ export async function fixture(t, { measured = true, published = false, env = {},
     return { publicationId: randomUUID(), action: 'publish', experimentId: EXPERIMENT, expectedWorkspaceRevision: s._revision,
       expectedMeasurementRevision: m.revision, expectedMeasurementDigest: m.digest, expectedHeadVersionId: null, expectedHeadDigest: null, withdrawalReason: null };
   }
-  return { states, store, server, hooks, calls, counts, invalidations, rows, primaryWorkspace, request, auth, publicationInput, initialPublication, seedPublication };
+  return { states, store, server, hooks, calls, counts, invalidations, rows, protectedEvidence, primaryWorkspace, request, auth, publicationInput, initialPublication, seedPublication };
 }
 

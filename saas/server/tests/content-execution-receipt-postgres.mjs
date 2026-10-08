@@ -297,6 +297,8 @@ before(async () => {
   migration = await readFile(new URL('../supabase/migrations/20261008144414_protected_content_execution_receipts.sql', import.meta.url), 'utf8');
   assert.ok(migration.trim(), 'Prepared migration must exist');
   await admin.query(migration);
+  // Forward consumer installation must preserve the entire frozen capture contract.
+  await admin.query(await readFile(new URL('../supabase/migrations/20261008163558_receipt_outcome_consumer.sql', import.meta.url), 'utf8'));
   securityBefore = await assertSecurity();
   assert.deepEqual(await roles(), roleStateBefore, 'Receipt migration never creates/expands roles');
   console.log('CONTENT_RECEIPT_SAFETY=' + JSON.stringify({ ...info, host: admin.connection.stream.remoteAddress,

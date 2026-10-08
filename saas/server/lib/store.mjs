@@ -711,7 +711,7 @@ class SupabaseStore {
   }
   async businessOutcomeSummary(workspaceId) { return this.businessOutcomePersistence().current(workspaceId); }
   async getBusinessOutcome(workspaceId, experimentId) { return this.businessOutcomePersistence().one(workspaceId, experimentId); }
-  async getBusinessOutcomeReview(workspaceId, experimentId) { return this.businessOutcomePersistence().review(workspaceId, experimentId); }
+  async getBusinessOutcomeReview(workspaceId, experimentId, actor, options) { return this.businessOutcomePersistence().review(workspaceId, experimentId, actor, options); }
   async getBusinessOutcomeEvidence(workspaceId, versionId) { return this.businessOutcomePersistence().evidence(workspaceId, versionId); }
   async publishBusinessOutcome(workspaceId, actor, input) { return this.businessOutcomePersistence().publish(workspaceId, actor, input); }
 

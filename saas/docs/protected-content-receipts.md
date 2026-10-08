@@ -25,6 +25,11 @@ not downgrade a known success or discard a separately prepared receipt. Existing
 outcome publication, graph display and learning do not automatically consume this
 new ledger or acquire new authority from it.
 
+The separate [outcome consumer contract](receipt-outcome-consumer.md) prepares
+explicit selection of an exact receipt in the existing review/publication flow.
+It preserves this capture boundary and requires compatible outcome readers;
+reader readiness itself does not activate protected dispatch.
+
 ## Finite retention and size policy
 
 - At most 256 retained attempts per workspace and 1,024 across the ledger.

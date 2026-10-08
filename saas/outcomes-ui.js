@@ -4,7 +4,7 @@
   const LIMIT = 20;
   let api, generation = 0, scope = null, session = null, selected = null, overview = null;
   let pending = null, stale = false, busy = new Set(), controllers = new Set();
-  let relationship = null;
+  let relationship = null, receiptPreview = null, receiptRead = null, receiptEpoch = 0;
   const $ = id => document.getElementById(id);
   const esc = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;');
   const bounded = (value, max = 1000) => String(value ?? '').slice(0, max);
@@ -35,26 +35,37 @@
   const canPrepare = () => ['owner', 'admin'].includes(role());
   const key = c => `${c.workspaceId || ''}:${c.userId || ''}`;
   const context = () => api.getContext();
-  const active = ticket => ticket.generation === generation && ticket.scope === key(context()) && ticket.session === context().session && context().view === 'revenue-engine' && $('business-outcomes-panel').open;
-  const ticket = () => ({ generation, scope: key(context()), session: context().session });
+  const active = ticket => ticket.generation === generation && ticket.scope === key(context()) && ticket.session === context().session && ticket.role === context().role && context().view === 'revenue-engine' && $('business-outcomes-panel').open;
+  const ticket = () => ({ generation, scope: key(context()), session: context().session, role: context().role });
   function status(text, error = false) { $('business-outcomes-status').textContent = text; $('business-outcomes-status').classList.toggle('outcome-error', error); }
   function clearRelationship() { relationship = null; $('business-outcomes-relationship')?.remove(); }
-  function invalidate() { generation++; clearRelationship(); controllers.forEach(c => c.abort()); controllers.clear(); for (const name of busy) if (!['save', 'publish'].includes(name)) busy.delete(name); }
+  function invalidate() { cancelReceiptRead(); receiptPreview = null; $('business-outcomes-receipt-preview')?.replaceChildren(); generation++; clearRelationship(); controllers.forEach(c => c.abort()); controllers.clear(); for (const name of busy) if (!['save', 'publish'].includes(name)) busy.delete(name); }
   function controls() {
     $('business-outcomes-refresh').disabled = busy.has('overview');
     $('business-outcomes-load').disabled = busy.has('detail') || busy.has('save') || busy.has('publish');
     $('business-outcomes-experiment').disabled = busy.has('save') || busy.has('publish') || Boolean(pending?.attempted);
     $('business-outcomes-form').querySelectorAll('input,select,textarea,button').forEach(el => { el.disabled = !canPrepare() || busy.has('save') || busy.has('publish') || stale || Boolean(pending?.attempted); });
-    if ($('business-outcomes-action')) $('business-outcomes-action').disabled ||= !actionChoices(selected) && !selected?.measurement?.intervention;
+    const saveButton = $('business-outcomes-form').querySelector('button[type="submit"]'); if (saveButton) saveButton.disabled ||= busy.has('receipt');
+    if ($('business-outcomes-action')) $('business-outcomes-action').disabled ||= !actionChoices(selected) && !receiptChoices(selected) && !selected?.measurement?.intervention;
     $('business-outcomes-review').querySelectorAll('button,input,textarea').forEach(el => { el.disabled = busy.has('publish'); });
     if (pending?.attempted && $('business-outcomes-reason')) $('business-outcomes-reason').disabled = true;
     const confirm = $('business-outcomes-confirm'); if (confirm) confirm.disabled = busy.has('publish') || !$('business-outcomes-attest').checked;
     $('business-outcomes-detail').querySelectorAll('[data-outcome-action]').forEach(el => { el.disabled = stale || busy.has('save') || busy.has('publish') || Boolean(pending?.attempted); });
+    document.querySelectorAll('[data-receipt-read]').forEach(el => { el.disabled = !canPrepare() || stale || busy.has('receipt') || busy.has('save') || busy.has('publish') || Boolean(pending?.attempted); });
     renderWithdrawalReason();
   }
   const ACTION_CONTRACT = 'runvara-reviewed-action/v1';
   const OBJECTIVE_ACTION_CONTRACT = 'runvara-reviewed-action/v2';
   const OBJECTIVE_ASSOCIATION = 'runvara-owner-action-association/v2';
+  const RECEIPT_CONTRACT = 'runvara-protected-content-source/v1';
+  const protectedMeasurement = m => m?.schema === 'runvara-experiment-measurement/v4';
+  const attemptIdentifier = value => typeof value === 'string' && /^content_attempt_[a-f0-9]{64}$/.test(value);
+  const receiptSelector = ref => ({ attemptId: ref.attemptId, receiptDigest: ref.receiptDigest, sourceDigest: ref.sourceDigest });
+  const sameReceipt = (a, b) => Boolean(a && b) && canonical(a) === canonical(b);
+  const receiptRef = value => exact(value, ['schema', 'workspaceId', 'attemptId', 'receiptDigest', 'sourceDigest', 'commitRevision'])
+    && value.schema === RECEIPT_CONTRACT && value.workspaceId === context().workspaceId && recordedText(value.workspaceId, 256)
+    && value.workspaceId.length > 0 && attemptIdentifier(value.attemptId) && hash(value.receiptDigest) && hash(value.sourceDigest)
+    && typeof value.commitRevision === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value.commitRevision) && withinBytes(value, 2048);
   const objectiveOrigin = value => value?.origin === 'owner_objective_content';
   const exact = (value, fields) => value !== null && typeof value === 'object' && !Array.isArray(value)
     && Reflect.ownKeys(value).length === fields.length && fields.every(field => Object.hasOwn(value, field)
@@ -83,21 +94,23 @@
   }
   function measurementAssociation(m) {
     if (!m) return null;
-    if (['runvara-experiment-measurement/v2', 'runvara-experiment-measurement/v3'].includes(m.schema)) {
-      const objective = m.schema === 'runvara-experiment-measurement/v3';
+    if (['runvara-experiment-measurement/v2', 'runvara-experiment-measurement/v3', 'runvara-experiment-measurement/v4'].includes(m.schema)) {
+      const protectedSource = protectedMeasurement(m), objective = protectedSource ? objectiveOrigin(m.intervention) : m.schema === 'runvara-experiment-measurement/v3';
       if (!validAssociation(m.intervention, m.links) || objective !== (m.intervention.schema === OBJECTIVE_ASSOCIATION)
-        || m.report?.schema !== (objective ? 'runvara-measurement-report/v3' : 'runvara-measurement-report/v2')
+        || m.report?.schema !== (protectedSource ? 'runvara-measurement-report/v4' : objective ? 'runvara-measurement-report/v3' : 'runvara-measurement-report/v2')
         || !validAssociation(m.report.facts?.intervention, m.links)
         || canonical(m.report.facts.intervention) !== canonical(m.intervention)) throw new Error('Invalid recorded action association');
-      if (objective) checkObjectiveMeasurementShape(m);
+      if (protectedSource && (!receiptRef(m.receiptSource) || !sameReceipt(m.receiptSource, m.report.facts.receiptSource) || m.receiptSource.sourceDigest !== m.intervention.action.digest)) throw new Error('Invalid protected receipt association');
+      if (objective || protectedSource) checkObjectiveMeasurementShape(m);
       return m.intervention;
     }
     if (m.schema !== 'runvara-experiment-measurement/v1' || m.intervention != null || m.links?.action != null || m.links?.approval != null) throw new Error('Invalid unlinked measurement');
     return null;
   }
-  function associationFacts(a) {
+  function associationFacts(a, receipt = null, historical = false) {
     if (!a) return '<p class="muted">No recorded action associated with this measurement.</p>';
-    const rows = [['Recorded action ID', a.action.id], ['Shopify account', a.account], ['Product ID', a.productId], ['Recorded completion (UTC)', a.completedAt]];
+    const rows = [['Recorded action ID', a.action.id], ['Shopify account', a.account], ['Product ID', a.productId], [receipt ? 'Application-observed completion (UTC)' : 'Recorded completion (UTC)', a.completedAt]];
+    if (receipt) rows.push(['Protected attempt ID', receipt.attemptId], ['Receipt digest', receipt.receiptDigest], ['Protected source digest', receipt.sourceDigest], ['Protected completion commit revision', receipt.commitRevision]);
     if (objectiveOrigin(a)) {
       rows.push(['Action origin', 'Captured objective-content action'], ['Captured objective ID', a.originatingObjective.id],
         ['Captured objective revision', a.originatingObjective.revision], ['Captured objective definition digest', a.originatingObjective.digest]);
@@ -105,7 +118,7 @@
     }
     return '<section class="outcome-association"><h4>Owner-selected recorded action</h4><dl class="outcome-facts">'
       + rows.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')
-      + '</dl><p class="muted tiny">This association does not establish a comparison, causality or commercial benefit. The response was recorded by the application; the action snapshot becomes immutable only when the outcome is published.</p>'
+      + '</dl><p class="muted tiny">This association does not establish a comparison, causality or commercial benefit. ' + (receipt ? 'The application observed completion; the source was protected at its completion workspace commit. The observation time is not a database commit timestamp. Current status was not checked. Provider authentication is not established.' : historical ? 'This is the exact historical association retained with the reviewed result. Its source is not rechecked during reuse or withdrawal.' : 'The response was recorded by the application; the action snapshot becomes immutable only when the outcome is published.') + '</p>'
       + (objectiveOrigin(a) ? '<p class="muted tiny">The objective reference was captured with the action. It does not establish the current objective definition, objective progress or goal attainment.</p>' : '') + '</section>';
   }
   function actionChoices(detail) {
@@ -126,36 +139,82 @@
     const value = detail?.currentActionAssociation, p = detail?.currentPublication;
     return p && validAssociation(value, p.version.links) && (!objectiveOrigin(value) || detail.actionLinkContract === OBJECTIVE_ACTION_CONTRACT) ? value : null;
   }
+  function currentReceiptReference(detail) {
+    const m = detail?.measurement, p = detail?.currentPublication;
+    return protectedMeasurement(m) && p && (m.digest === p.version.source.measurementDigest || m.intervention.reuseVersionId === p.head.versionId)
+      && sameRef(m.intervention.action, currentAssociation(detail)?.action) ? m.receiptSource : null;
+  }
   function checkActionCapability(detail) {
-    if ((detail?.measurement?.schema === 'runvara-experiment-measurement/v3' || detail?.currentActionAssociation?.schema === OBJECTIVE_ASSOCIATION)
+    if ((detail?.measurement?.schema === 'runvara-experiment-measurement/v3' || (protectedMeasurement(detail?.measurement) && objectiveOrigin(detail.measurement.intervention)) || detail?.currentActionAssociation?.schema === OBJECTIVE_ASSOCIATION)
       && detail.actionLinkContract !== OBJECTIVE_ACTION_CONTRACT) throw new Error('Objective action storage is unavailable');
   }
-  function populateActionSelection() {
-    const field = $('business-outcomes-action'), hint = $('business-outcomes-action-hint');
-    const choices = actionChoices(selected), m = measurementAssociation(selected?.measurement), current = currentAssociation(selected);
+  function receiptChoices(detail) {
+    if (detail?.receiptLinkContract !== RECEIPT_CONTRACT || !actionChoices(detail) || !Array.isArray(detail.receiptChoices) || detail.receiptChoices.length > LIMIT) return null;
+    try {
+      if (!withinBytes(detail.receiptChoices, 16384) || typeof detail.hasMoreReceipts !== 'boolean'
+        || !(detail.nextReceiptCursor === null || attemptIdentifier(detail.nextReceiptCursor))) return null;
+      let previous = null;
+      for (const c of detail.receiptChoices) {
+        if (!exact(c, ['receiptSource', 'actionId', 'account', 'productId', 'title', 'completedAt', 'origin', 'originatingObjective'])
+          || !receiptRef(c.receiptSource) || !identifier(c.actionId) || !accountIdentifier(c.account) || !productIdentifier(c.productId)
+          || !recordedText(c.title, 200) || !c.title.trim() || c.title !== c.title.trim() || !timestamp(c.completedAt)
+          || !(objectiveOrigin(c) ? detail.actionLinkContract === OBJECTIVE_ACTION_CONTRACT && actionRef(c.originatingObjective) : c.origin === 'owner_manual' && c.originatingObjective === null)
+          || (previous && c.receiptSource.attemptId <= previous)) return null;
+        previous = c.receiptSource.attemptId;
+      }
+      if (detail.hasMoreReceipts ? !previous || detail.nextReceiptCursor !== previous : detail.nextReceiptCursor !== null) return null;
+      return detail.receiptChoices;
+    } catch { return null; }
+  }
+  function cancelReceiptRead() {
+    receiptEpoch++;
+    if (receiptRead) { receiptRead.controller.abort(); controllers.delete(receiptRead.controller); receiptRead = null; }
+    busy.delete('receipt');
+  }
+  function populateActionSelection({ preserve = false } = {}) {
+    const field = $('business-outcomes-action'), hint = $('business-outcomes-action-hint'), previous = field.value;
+    const choices = actionChoices(selected), receipts = receiptChoices(selected), m = measurementAssociation(selected?.measurement), current = currentAssociation(selected);
     const options = [{ value: '', label: 'No recorded action' }];
-    if (m) options.push({ value: 'saved', label: `Keep saved association · ${m.action.id} · ${m.account}` });
+    if (m) options.push({ value: 'saved', label: `Keep saved ${protectedMeasurement(selected.measurement) ? 'protected receipt' : 'association'} · ${m.action.id} · ${m.account}` });
     if (choices) for (const c of choices) options.push({ value: 'action:' + c.id, label: `${c.id} · ${c.account} · ${c.title}` });
+    if (receipts) for (const c of receipts) options.push({ value: 'receipt:' + c.receiptSource.attemptId, label: `Protected completion · ${c.actionId} · ${c.account} · ${c.title}` });
     if (choices && current && selected.currentPublication.head.status === 'published') options.push({ value: 'reuse:' + selected.currentPublication.head.versionId, label: `Reuse exact published snapshot · ${current.action.id} · ${current.account}` });
     field.innerHTML = options.map(o => `<option value="${esc(o.value)}">${esc(o.label)}</option>`).join('');
-    field.value = m ? 'saved' : '';
+    field.value = preserve && options.some(o => o.value === previous) ? previous : m ? 'saved' : '';
     hint.textContent = !choices ? 'Recorded action linking is unavailable until compatible storage is installed. Unlinked drafts remain available.'
       : (selected.actionLinkContract === ACTION_CONTRACT ? 'This storage supports manual actions only. Objective action linking requires compatible storage. ' : 'Manual and captured objective actions are supported. ')
         + 'Optional. Choose a recorded action explicitly, then save and review the association. No action is selected for you.';
+    if (receipts) hint.textContent += ' Protected completions are shown one page at a time. Preview a chosen receipt before saving. Refresh to see concurrent additions; pages are not a lifetime snapshot.';
     renderActionSelection();
   }
+  function selectedReceipt() {
+    const value = $('business-outcomes-action').value;
+    return value === 'saved' && protectedMeasurement(selected?.measurement) ? selected.measurement.receiptSource
+      : value.startsWith('receipt:') ? receiptChoices(selected)?.find(c => c.receiptSource.attemptId === value.slice(8))?.receiptSource ?? null : null;
+  }
   function renderActionSelection() {
-    const value = $('business-outcomes-action').value, m = measurementAssociation(selected?.measurement);
-    const c = value.startsWith('action:') ? actionChoices(selected)?.find(row => row.id === value.slice(7)) : null;
+    const value = $('business-outcomes-action').value, m = measurementAssociation(selected?.measurement), receipts = receiptChoices(selected);
+    const c = value.startsWith('action:') ? actionChoices(selected)?.find(row => row.id === value.slice(7))
+      : value.startsWith('receipt:') ? receipts?.find(row => row.receiptSource.attemptId === value.slice(8)) : null;
     const association = value === 'saved' ? m : value.startsWith('reuse:') ? currentAssociation(selected)
-      : c ? { action: { id: c.id }, account: c.account, productId: c.productId, completedAt: c.completedAt,
+      : c ? { action: { id: c.id || c.actionId }, account: c.account, productId: c.productId, completedAt: c.completedAt,
         ...(objectiveOrigin(c) ? { origin: c.origin, originatingObjective: c.originatingObjective } : {}) } : null;
-    $('business-outcomes-action-details').innerHTML = associationFacts(association);
+    const ref = selectedReceipt(), preview = ref && receiptPreview && sameReceipt(ref, receiptPreview.source.receiptSource) ? receiptPreview : null;
+    $('business-outcomes-action-details').innerHTML = associationFacts(association, ref || (value.startsWith('reuse:') ? currentReceiptReference(selected) : null), value.startsWith('reuse:'))
+      + (ref ? `<button type="button" class="secondary" data-receipt-read="preview">${value === 'saved' && m.reuseVersionId ? 'View exact reused publication source' : preview ? 'Refresh selected receipt preview' : 'Preview selected protected receipt'}</button><div id="business-outcomes-receipt-preview">${preview?.markup || '<p class="muted">The exact source preview has not been loaded for this selection.</p>'}</div>` : '')
+      + (receipts ? `<div class="outcome-actions"><button type="button" class="secondary" data-receipt-read="first">Refresh first receipt page</button>${selected.hasMoreReceipts ? '<button type="button" class="secondary" data-receipt-read="next">Next receipt page</button>' : ''}</div><p class="muted tiny">${receipts.length} protected completion${receipts.length === 1 ? '' : 's'} on this page. ${selected.hasMoreReceipts ? 'More are available.' : 'No further page was reported at this read.'}</p>` : '');
+    controls();
   }
   function selectedActionInput() {
     const value = $('business-outcomes-action').value, m = measurementAssociation(selected?.measurement);
     if (!value) return m ? { actionSelection: null } : {};
-    const choices = actionChoices(selected);
+    const choices = actionChoices(selected), ref = selectedReceipt();
+    if (ref && !(value === 'saved' && m.reuseVersionId)) {
+      if (!receiptChoices(selected) || !receiptPreview || !sameReceipt(receiptPreview.source.receiptSource, ref)) throw new Error('Preview this exact protected receipt before saving.');
+      const receipt = receiptSelector(ref); if (!withinBytes({ receipt }, 512)) throw new Error('Invalid protected receipt selection');
+      return { actionSelection: { receipt } };
+    }
+    if (value.startsWith('receipt:')) throw new Error('Choose a receipt from the current page and preview it before saving.');
     if (!choices) throw new Error('Recorded action linking is unavailable. Refresh after compatible storage is installed, or explicitly choose no action.');
     checkActionCapability(selected);
     if (value === 'saved') {
@@ -171,13 +230,15 @@
   }
   function selectedActionSnapshot(selection) {
     if (!selection) return null;
+    if (selection.receipt) return { ...receiptPreview.source, receiptSource: receiptPreview.source.receiptSource };
     if (selection.actionId) {
       const c = actionChoices(selected)?.find(row => row.id === selection.actionId);
       return c ? { ...c, action: { id: c.id, digest: c.digest } } : null;
     }
-    return $('business-outcomes-action').value === 'saved' ? measurementAssociation(selected.measurement) : currentAssociation(selected);
+    return $('business-outcomes-action').value === 'saved' ? { ...measurementAssociation(selected.measurement), ...(protectedMeasurement(selected.measurement) ? { receiptSource: selected.measurement.receiptSource } : {}) } : currentAssociation(selected);
   }
-  function sameSelectedOrigin(before, after) {
+  function sameSelectedOrigin(before, after, measurement) {
+    if (before?.receiptSource && (!protectedMeasurement(measurement) || !sameReceipt(before.receiptSource, measurement.receiptSource) || !sameRef(before.action, after?.action) || !sameRef(before.approval, after?.approval) || ['account', 'productId', 'completedAt'].some(k => before[k] !== after?.[k]))) return false;
     if (!objectiveOrigin(before) && !objectiveOrigin(after)) return true;
     return objectiveOrigin(before) && objectiveOrigin(after) && before.action.id === after.action.id && before.action.digest === after.action.digest
       && ['account', 'productId', 'completedAt'].every(k => before[k] === after[k]) && sameRef(before.originatingObjective, after.originatingObjective);
@@ -202,8 +263,8 @@
   const positiveRevision = value => Number.isSafeInteger(value) && value > 0;
   const count = value => value === null || (Number.isSafeInteger(value) && value >= 0 && value <= 1000000000);
   function checkObjectiveMeasurementShape(m) {
-    const r = m.report, p = m.provenance, f = r?.facts;
-    if (!exact(m, ['schema', 'workspaceId', 'experimentId', 'revision', 'recordedBy', 'recordedAt', 'metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'links', 'report', 'intervention', 'digest'])
+    const r = m.report, p = m.provenance, f = r?.facts, receiptFields = protectedMeasurement(m) ? ['receiptSource'] : [];
+    if (!exact(m, ['schema', 'workspaceId', 'experimentId', 'revision', 'recordedBy', 'recordedAt', 'metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'links', 'report', 'intervention', 'digest', ...receiptFields])
       || m.workspaceId !== context().workspaceId || !identifier(m.experimentId) || !positiveRevision(m.revision)
       || !identifier(m.recordedBy) || !timestamp(m.recordedAt) || !hash(m.digest) || !withinBytes(m, 8192)
       || m.metric !== 'incrementalContribution' || !(m.amount === null || (typeof m.amount === 'string' && /^-?(?:0|[1-9]\d{0,17})(?:\.\d{1,6})?$/.test(m.amount)))
@@ -220,7 +281,7 @@
       || r.workspaceId !== m.workspaceId || r.experimentId !== m.experimentId || r.measurementRevision !== m.revision
       || r.recordedBy !== m.recordedBy || r.recordedAt !== m.recordedAt || !identifier(r.id) || !hash(r.digest)
       || !recordedText(r.description, 1000) || !r.description.trim() || r.description.trim() !== r.description || /[\u0000-\u001f\u007f]/.test(r.description)
-      || ![true, false, null].includes(r.costsComplete) || !exact(f, ['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'observedAt', 'intervention'])
+      || ![true, false, null].includes(r.costsComplete) || !exact(f, ['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'observedAt', 'intervention', ...receiptFields])
       || ['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'intervention'].some(k => canonical(f[k]) !== canonical(m[k]))
       || f.observedAt !== p.observedAt || p.sourceRefs[0].type !== 'measurement_report' || p.sourceRefs[0].id !== r.id || p.sourceRefs[0].digest !== r.digest
       || m.intervention.completedAt > m.recordedAt) throw new Error('Invalid public objective measurement');
@@ -232,7 +293,7 @@
   }
   async function checkObjectiveMeasurement(m) {
     measurementAssociation(m);
-    if (m?.schema !== 'runvara-experiment-measurement/v3') return;
+    if (m?.schema !== 'runvara-experiment-measurement/v3' && !protectedMeasurement(m)) return;
     const { digest: recordedDigest, ...body } = m, { digest: reportDigest, ...report } = m.report;
     if (await digest(body) !== recordedDigest || await digest(report) !== reportDigest
       || m.report.id !== 'measurement_report_' + await digest([m.workspaceId, m.experimentId, m.revision])
@@ -285,9 +346,105 @@
     const refs = [['Action snapshot reference', source.action.digest], ['Approval decision reference', source.approval.digest], ['Approved by', d.decidedBy], ['Recorded approval (UTC)', d.decidedAt]];
     return `${associationFacts(association)}<h4>Exact recorded action input</h4><p class="muted tiny">Historical snapshot retained with this outcome version. Current status was not checked. The server validated the complete private action snapshot before returning this public view. This browser checks the public references and measurement hashes; it cannot recompute the private action snapshot digest. Provider authentication is not established.</p><dl class="outcome-facts"><div><dt>Product title</dt><dd class="outcome-description">${esc(i.title)}</dd></div><div><dt>Product description</dt><dd class="outcome-description">${esc(i.description)}</dd></div>${refs.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl><h4>Captured objective policy references</h4><ul>${source.policies.map(p => `<li>${esc(p.objectiveId)} · revision ${esc(p.revision)} · ${esc(p.digest)}</li>`).join('')}</ul>`;
   }
+  function protectedSourceMarkup(source, association = null, ref = null) {
+    if (!exact(source, ['schema', 'receiptSource', 'action', 'approval', 'origin', 'originatingObjective', 'account', 'productId', 'completedAt', 'input', 'decision', 'policies', 'validation'])
+      || source.schema !== 'runvara-protected-content-source-display/v1' || !withinBytes(source, 36 * 1024)
+      || !receiptRef(source.receiptSource) || (ref && !sameReceipt(source.receiptSource, ref))
+      || !actionRef(source.action) || source.action.revision !== 1 || source.action.digest !== source.receiptSource.sourceDigest
+      || !actionRef(source.approval) || source.approval.revision !== 1 || !accountIdentifier(source.account) || !productIdentifier(source.productId) || !timestamp(source.completedAt)
+      || !(objectiveOrigin(source) ? actionRef(source.originatingObjective) : source.origin === 'owner_manual' && source.originatingObjective === null)) throw new Error('Invalid protected source display');
+    if (association && (!sameRef(source.action, association.action) || !sameRef(source.approval, association.approval)
+      || objectiveOrigin(source) !== objectiveOrigin(association) || (objectiveOrigin(source) && !sameRef(source.originatingObjective, association.originatingObjective))
+      || ['account', 'productId', 'completedAt'].some(k => source[k] !== association[k]))) throw new Error('Protected source association mismatch');
+    const i = source.input, d = source.decision, v = source.validation;
+    if (!exact(i, ['productId', 'operation', 'title', 'description']) || i.productId !== source.productId || i.operation !== 'product_content'
+      || !recordedText(i.title, 200) || !i.title.trim() || i.title !== i.title.trim() || !recordedText(i.description, 10000)
+      || !exact(d, ['status', 'decidedBy', 'decidedAt']) || d.status !== 'approved' || !identifier(d.decidedBy) || !timestamp(d.decidedAt) || d.decidedAt > source.completedAt
+      || !Array.isArray(source.policies) || source.policies.length > 50
+      || source.policies.some(p => !exact(p, ['objectiveId', 'revision', 'digest']) || !identifier(p.objectiveId) || !positiveRevision(p.revision) || !hash(p.digest))
+      || new Set(source.policies.map(p => p.objectiveId)).size !== source.policies.length
+      || (objectiveOrigin(source) && !source.policies.some(p => p.objectiveId === source.originatingObjective.id && p.revision === source.originatingObjective.revision && p.digest === source.originatingObjective.digest))
+      || !exact(v, ['protection', 'currentStatus', 'providerAuthentication', 'causalAttribution']) || v.protection !== 'completion_workspace_commit'
+      || v.currentStatus !== 'not_checked' || v.providerAuthentication !== 'not_established' || v.causalAttribution !== 'not_established') throw new Error('Invalid protected source details');
+    const refs = [['Action snapshot reference', source.action.digest], ['Approval decision reference', source.approval.digest], ['Approved by', d.decidedBy], ['Recorded approval (UTC)', d.decidedAt]];
+    return `<h4>Exact protected action input</h4><p class="muted tiny">The server validated this protected source before returning this display. Browser checks of public references do not authenticate the provider or establish current eligibility, causality or financial qualification.</p><dl class="outcome-facts"><div><dt>Product title</dt><dd class="outcome-description">${esc(i.title)}</dd></div><div><dt>Product description</dt><dd class="outcome-description">${esc(i.description)}</dd></div>${refs.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`
+      + (source.policies.length ? `<h4>Captured policy references</h4><ul>${source.policies.map(p => `<li>${esc(p.objectiveId)} · revision ${esc(p.revision)} · ${esc(p.digest)}</li>`).join('')}</ul>` : '')
+      + (objectiveOrigin(source) ? '' : '<p class="muted tiny">Manual action. Any captured policy references describe restrictions; they do not establish an originating objective.</p>');
+  }
+  function checkReceiptReview(detail, { expectedReceipt = null, afterAttemptId = null, allowSavedMissing = false } = {}) {
+    const marker = detail?.receiptLinkContract;
+    if (marker === undefined || marker === null) {
+      if (protectedMeasurement(detail?.measurement) || detail?.selectedReceiptSource != null || (detail?.receiptChoices?.length ?? 0) > 0 || expectedReceipt || afterAttemptId) throw new Error('Protected source storage is unavailable');
+      return null;
+    }
+    if (marker !== RECEIPT_CONTRACT || !withinBytes(detail, 128 * 1024) || !receiptChoices(detail)) throw new Error('Unsupported protected source review');
+    if (afterAttemptId && detail.receiptChoices.some(c => c.receiptSource.attemptId <= afterAttemptId)) throw new Error('Receipt page did not advance');
+    const source = detail.selectedReceiptSource;
+    const ref = expectedReceipt || (protectedMeasurement(detail.measurement) ? detail.measurement.receiptSource : null);
+    if (source === null) { if (expectedReceipt || (ref && !allowSavedMissing && !detail.measurement?.intervention?.reuseVersionId)) throw new Error('Protected receipt preview is missing'); return null; }
+    if (!ref || !source) throw new Error('Unexpected protected receipt preview');
+    const association = !expectedReceipt && protectedMeasurement(detail.measurement) ? measurementAssociation(detail.measurement) : null;
+    const markup = protectedSourceMarkup(source, association, ref);
+    if (expectedReceipt) {
+      const c = receiptChoices(selected)?.find(row => sameReceipt(row.receiptSource, ref));
+      if (c && (c.actionId !== source.action.id || c.origin !== source.origin || c.title !== source.input.title || ['account', 'productId', 'completedAt'].some(k => c[k] !== source[k])
+        || (objectiveOrigin(c) && !sameRef(c.originatingObjective, source.originatingObjective)))) throw new Error('Receipt preview changed the selected choice');
+    }
+    return { source, markup };
+  }
+  const reviewFence = detail => canonical({ workspaceRevision: detail.workspaceRevision, experimentId: detail.experiment.id,
+    measurementRevision: detail.measurement?.revision ?? null, measurementDigest: detail.measurement?.digest ?? null,
+    versionId: detail.currentPublication?.head.versionId ?? null, versionDigest: detail.currentPublication?.head.digest ?? null });
+  async function readReceipt(kind) {
+    if (!selected || !canPrepare() || stale || pending?.attempted || busy.has('receipt') || busy.has('save') || busy.has('publish') || !receiptChoices(selected)) return;
+    const ref = kind === 'preview' ? selectedReceipt() : null, cursor = kind === 'next' ? selected.nextReceiptCursor : null;
+    if (kind === 'preview' && !ref || kind === 'next' && (!selected.hasMoreReceipts || !cursor) || !['preview', 'first', 'next'].includes(kind)) return;
+    cancelReceiptRead(); receiptPreview = null; pending = null; renderReview(); renderActionSelection();
+    const t = ticket(), epoch = receiptEpoch, id = selected.experiment.id, fence = reviewFence(selected), value = $('business-outcomes-action').value;
+    const controller = new AbortController(); receiptRead = { controller, epoch }; controllers.add(controller); busy.add('receipt'); controls();
+    const isCurrent = () => active(t) && epoch === receiptEpoch && selected?.experiment?.id === id && $('business-outcomes-action').value === value;
+    status(kind === 'preview' ? 'Loading the exact protected receipt preview…' : 'Loading the requested receipt page…');
+    try {
+      const reuseVersion = kind === 'preview' && value === 'saved' ? selected.measurement?.intervention?.reuseVersionId : null;
+      if (reuseVersion) {
+        const result = await api.request('/api/business-outcomes/versions/' + encodeURIComponent(reuseVersion), { signal: controller.signal, isCurrent });
+        if (!isCurrent()) return;
+        if (!withinBytes(result, 128 * 1024) || !exact(result, ['publication', 'sourceMeasurement', 'sourceAction', 'currentStatus', 'source'])
+          || result.source !== 'immutable_business_outcome_version' || result.currentStatus !== 'not_checked'
+          || result.publication?.version?.versionId !== reuseVersion || result.sourceMeasurement?.experimentId !== id
+          || !protectedMeasurement(result.sourceMeasurement) || !sameReceipt(result.sourceMeasurement.receiptSource, ref)) throw new Error('Invalid reused protected source');
+        await sourceActionMarkup(result.sourceAction, result.sourceMeasurement, result.publication);
+        const markup = protectedSourceMarkup(result.sourceAction, measurementAssociation(selected.measurement), ref);
+        if (!isCurrent()) return;
+        receiptPreview = { source: result.sourceAction, markup }; renderActionSelection(); status('Exact reused publication source loaded. Its current receipt status was not rechecked.'); return;
+      }
+      const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/content-sources', {
+        method: 'POST', body: JSON.stringify({ receipt: ref ? receiptSelector(ref) : null, afterAttemptId: cursor }), signal: controller.signal, isCurrent });
+      if (!isCurrent()) return;
+      if (result.workspaceId !== context().workspaceId || result.experiment?.id !== id || reviewFence(result) !== fence) {
+        stale = true; clearRelationship(); status('The experiment changed while loading receipts. Reload it before saving or reviewing.', true); return;
+      }
+      checkActionCapability(result); await checkObjectiveMeasurement(result.measurement);
+      const preview = checkReceiptReview(result, { expectedReceipt: ref, afterAttemptId: cursor, allowSavedMissing: kind !== 'preview' });
+      if (!isCurrent()) return;
+      if (kind === 'preview') { receiptPreview = preview; renderActionSelection(); status('Exact protected receipt preview loaded. Save the draft to associate it.'); }
+      else {
+        selected = { ...selected, receiptChoices: result.receiptChoices, nextReceiptCursor: result.nextReceiptCursor, hasMoreReceipts: result.hasMoreReceipts, selectedReceiptSource: result.selectedReceiptSource };
+        receiptPreview = preview; populateActionSelection({ preserve: false });
+        status('Receipt page loaded. Choose and preview a protected completion explicitly; draft fields were kept.');
+      }
+    } catch (error) { if (isCurrent()) { receiptPreview = null; renderActionSelection(); status('Could not load the protected receipt. Reload the experiment before trying again.', true); } }
+    finally { controllers.delete(controller); if (receiptRead?.epoch === epoch) { receiptRead = null; busy.delete('receipt'); if (active(t)) controls(); } }
+  }
   async function sourceActionMarkup(source, m, publication) {
     const a = measurementAssociation(m);
     if (!a) { if (source != null || publication.version.links?.action != null || publication.version.links?.approval != null) throw new Error('Unexpected linked evidence'); return ''; }
+    if (protectedMeasurement(m)) {
+      if (!validAssociation(a, publication.version.links)) throw new Error('Protected publication association mismatch');
+      const markup = protectedSourceMarkup(source, a, m.receiptSource);
+      await checkObjectiveMeasurement(m); await checkObjectivePublication(publication, m);
+      return associationFacts(a, m.receiptSource) + markup;
+    }
     if (objectiveOrigin(a)) return objectiveSourceMarkup(source, m, publication, a);
     if (!validAssociation(a, publication.version.links) || !exact(source, ['schema', 'revision', 'context', 'input', 'digest'])
       || source.schema !== 'runvara-reviewed-source-action/v1' || source.revision !== 1 || source.digest !== a.action.digest
@@ -450,11 +607,11 @@
     populateActionSelection(); f.classList.toggle('hidden', !canPrepare()); controls();
   }
   function renderDetail(justReviewed = false) {
-    const d = selected; if (!d) { $('business-outcomes-detail').replaceChildren(); $('business-outcomes-form').classList.add('hidden'); return; }
+    const d = selected; if (!d) { $('business-outcomes-detail').replaceChildren(); $('business-outcomes-action-details').replaceChildren(); $('business-outcomes-action').innerHTML = '<option value="">No recorded action</option>'; $('business-outcomes-action-hint').textContent = 'Recorded action linking is unavailable until compatible experiment details are loaded.'; $('business-outcomes-form').classList.add('hidden'); return; }
     const m = d.measurement, publication = d.currentPublication;
     const blockers = Array.isArray(d.assessment?.blockers) ? d.assessment.blockers : [];
     let html = `<h3>${esc(bounded(d.experiment.title || d.experiment.id, 180))}</h3>${relationshipText()}<p class="muted">${m ? `Saved measurement · version ${esc(m.revision)}` : 'No business result recorded yet.'} · Earlier legacy reviews do not count as reviewed business results.</p>`;
-    if (m) html += facts(m) + associationFacts(measurementAssociation(m)) + `<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : m.report?.costsComplete === false ? 'No' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
+    if (m) html += facts(m) + associationFacts(measurementAssociation(m), protectedMeasurement(m) ? m.receiptSource : null) + `<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : m.report?.costsComplete === false ? 'No' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>`;
     const alreadyReviewed = justReviewed || (m && publication?.head.status === 'published' && m.revision === publication.version.source.measurementRevision && m.digest === publication.version.source.measurementDigest);
     const reviewStatus = alreadyReviewed ? 'This saved version has already been reviewed. Save an updated draft to request a correction.'
       : stale ? 'Refresh the experiment before reviewing these details.'
@@ -475,13 +632,14 @@
     if (busy.has('detail') || busy.has('save') || busy.has('publish')) return;
     const id = $('business-outcomes-experiment').value; if (!id) return status('Choose an experiment.');
     if (pending?.attempted) return status('Finish checking the pending action before editing this result. Retrying keeps the same request.', true);
-    generation++; clearRelationship(); controllers.forEach(c => c.abort()); controllers.clear(); busy.clear(); pending = null; renderReview();
+    cancelReceiptRead(); receiptPreview = null; generation++; clearRelationship(); controllers.forEach(c => c.abort()); controllers.clear(); busy.clear(); pending = null; renderReview();
     selected = null; renderDetail(); status('Loading the selected experiment…');
     return read('detail', '/api/business-outcomes/experiments/' + encodeURIComponent(id), async (result, isCurrent) => {
       if (result.workspaceId !== context().workspaceId || result.experiment?.id !== id || (result.measurement && (result.measurement.workspaceId !== result.workspaceId || result.measurement.experimentId !== id)) || (result.currentPublication && !validPublication(result.currentPublication))) throw new Error('Mismatched experiment');
       checkActionCapability(result); await checkObjectiveMeasurement(result.measurement);
+      const preview = checkReceiptReview(result);
       if (!isCurrent()) return;
-      selected = result; relationship = selectedRelationship(result); stale = false; renderDetail(); populateForm(); status('Experiment loaded. Edit a draft or review the saved measurement.');
+      receiptPreview = preview; selected = result; relationship = selectedRelationship(result); stale = false; renderDetail(); populateForm(); status('Experiment loaded. Edit a draft or review the saved measurement.');
     });
   }
   function measurementInput() {
@@ -495,10 +653,10 @@
       method: { kind: get('method') }, observedAt: utc('observedAt'), report: { description: get('description'), costsComplete: get('costsComplete') === '' ? null : get('costsComplete') === 'true' } };
   }
   async function save(event) {
-    event.preventDefault(); if (!selected || !canPrepare() || stale || pending?.attempted || busy.has('save') || busy.has('publish')) return;
+    event.preventDefault(); if (!selected || !canPrepare() || stale || pending?.attempted || busy.has('receipt') || busy.has('save') || busy.has('publish')) return;
     let body; try { body = measurementInput(); } catch (error) { status(error.message, true); return; }
     const selectedSnapshot = selectedActionSnapshot(body.actionSelection);
-    pending = null; renderReview(); const t = ticket(), id = selected.experiment.id, controller = new AbortController(); controllers.add(controller);
+    cancelReceiptRead(); pending = null; renderReview(); const t = ticket(), id = selected.experiment.id, controller = new AbortController(); controllers.add(controller);
     clearRelationship(); busy.add('save'); controls(); status('Saving measurement…');
     try {
       const result = await api.request('/api/business-outcomes/experiments/' + encodeURIComponent(id) + '/measurement', { method: 'PUT', body: JSON.stringify(body), signal: controller.signal, isCurrent: () => active(t) });
@@ -506,11 +664,17 @@
       if (result.workspaceId !== context().workspaceId || result.measurement?.experimentId !== id) throw new Error('Unexpected measurement response');
       checkActionCapability({ ...selected, ...result }); await checkObjectiveMeasurement(result.measurement);
       if (!active(t)) return;
-      if (!sameSelectedOrigin(selectedSnapshot, measurementAssociation(result.measurement))) {
+      if (!sameSelectedOrigin(selectedSnapshot, measurementAssociation(result.measurement), result.measurement)) {
         selected = { ...selected, ...result }; stale = true; renderDetail(); populateForm();
         status('The draft was saved with changed action evidence. Reload the experiment and review the new association before publishing, or explicitly select another action.', true); return;
       }
-      selected = { ...selected, ...result }; renderDetail(); populateForm(); status('Draft saved. Owner review is still required.');
+      const merged = { ...selected, ...result };
+      if (protectedMeasurement(result.measurement)) {
+        // Save responses may omit a new preview; retain only the already-validated exact source.
+        if (result.selectedReceiptSource === undefined) merged.selectedReceiptSource = receiptPreview && sameReceipt(receiptPreview.source.receiptSource, result.measurement.receiptSource) ? receiptPreview.source : null;
+        receiptPreview = checkReceiptReview(merged, { allowSavedMissing: true });
+      } else receiptPreview = null;
+      selected = merged; renderDetail(); populateForm(); status('Draft saved. Owner review is still required.');
     } catch (error) { if (active(t)) { stale = true; status(error.status === 409 ? 'The measurement changed. Refresh the experiment before editing again.' : 'Save was not confirmed. Refresh the experiment before making another change.', true); } }
     finally { controllers.delete(controller); if (t.scope === scope && t.session === session) { busy.delete('save'); if (!active(t)) stale = true; controls(); } }
   }
@@ -519,10 +683,10 @@
     const p = selected.currentPublication, m = selected.measurement;
     if (action === 'withdraw' ? p?.head.status !== 'published' : !m || selected.assessment?.readyForOwnerVerification !== true || p?.head.status === 'withdrawn') return;
     const association = action === 'withdraw' ? currentAssociation(selected) : measurementAssociation(m);
-    if (action !== 'withdraw' && association && !actionChoices(selected)) return status('Refresh after compatible action-link storage is installed before reviewing this association.', true);
+    if (action !== 'withdraw' && association && (protectedMeasurement(m) ? !receiptChoices(selected) : !actionChoices(selected))) return status('Refresh after compatible action-link storage is installed before reviewing this association.', true);
     const source = action === 'withdraw' ? p.version.source : { measurementRevision: m.revision, measurementDigest: m.digest };
     const id = window.crypto?.randomUUID?.(); if (!id) return status('This browser cannot safely submit the review. Refresh in a supported secure browser.', true);
-    pending = { action, attempted: false, uncertain: false, association, facts: action === 'withdraw' ? p.version : m,
+    pending = { action, attempted: false, uncertain: false, association, receiptSource: action === 'withdraw' ? currentReceiptReference(selected) : protectedMeasurement(m) ? m.receiptSource : null, facts: action === 'withdraw' ? p.version : m,
       payload: { publicationId: id, action, experimentId: selected.experiment.id, expectedWorkspaceRevision: selected.workspaceRevision,
         expectedMeasurementRevision: source.measurementRevision, expectedMeasurementDigest: source.measurementDigest,
         expectedHeadVersionId: p?.head.versionId || null, expectedHeadDigest: p?.head.digest || null, withdrawalReason: null } };
@@ -531,7 +695,7 @@
   function renderReview() {
     const root = $('business-outcomes-review'); root.classList.toggle('hidden', !pending); if (!pending) { root.replaceChildren(); controls(); return; }
     const p = pending;
-    root.innerHTML = `<h3>Review ${esc(reviewLabel(p.action))}</h3>${facts(p.facts)}${p.action === 'withdraw' && !p.association && p.facts.links?.action ? '<p>The exact retained action snapshot stays in this withdrawn result’s history.</p>' : associationFacts(p.association)}<p>Measurement version ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the reviewed result. Any later draft is kept.' : 'Confirm the saved measurement and its complete costs below. This does not prove Runvara caused the result.'}</p>` +
+    root.innerHTML = `<h3>Review ${esc(reviewLabel(p.action))}</h3>${facts(p.facts)}${p.action === 'withdraw' && !p.association && p.facts.links?.action ? '<p>The exact retained action snapshot stays in this withdrawn result’s history.</p>' : associationFacts(p.association, p.receiptSource, p.action === 'withdraw')}<p>Measurement version ${esc(p.payload.expectedMeasurementRevision)}. ${p.action === 'withdraw' ? 'This withdraws the reviewed result. Any later draft is kept.' : 'Confirm the saved measurement and its complete costs below. This does not prove Runvara caused the result.'}</p>` +
       (p.action === 'withdraw' ? `<label>Withdrawal reason<select id="business-outcomes-reason" aria-describedby="business-outcomes-selected-reason" ${p.attempted ? 'disabled' : ''}>${[['','Choose a reason'], ...Object.entries(WITHDRAWAL_REASON_LABELS)].map(([value,label]) => `<option value="${value}" ${p.payload.withdrawalReason === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label><p id="business-outcomes-selected-reason" aria-live="polite" aria-atomic="true"></p>` : `<p>All relevant costs included: ${p.facts.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(p.facts.report?.description))}</p>`) +
       `<label class="outcome-attest"><input id="business-outcomes-attest" type="checkbox">I reviewed these exact details and ${p.action === 'withdraw' ? 'want to withdraw this result' : 'attest that this measurement and its costs are complete' + (p.association ? ' and explicitly associate the recorded action shown above' : '')}.</label>` +
       (p.uncertain ? '<p class="outcome-error">Confirmation was not received. Nothing was retried automatically. Retrying submits the same reviewed details as the same request.</p>' : '') +
@@ -553,10 +717,10 @@
       const result = await api.request('/api/business-outcomes/publish', { method: 'POST', body: JSON.stringify(p.payload), signal: controller.signal, isCurrent: () => active(t) });
       if (!active(t)) { p.uncertain = true; return; }
       if (!validPublication(result.publication) || result.publication.head.publicationId !== p.payload.publicationId) throw new Error('Publication response did not match the reviewed action');
-      if (objectiveOrigin(p.association)) {
+      if (objectiveOrigin(p.association) || p.receiptSource) {
         if (!validAssociation(p.association, result.publication.version.links)
           || result.publication.version.source?.measurementDigest !== p.payload.expectedMeasurementDigest) throw new Error('Publication association mismatch');
-        await checkObjectivePublication(result.publication, p.facts.schema === 'runvara-experiment-measurement/v3' ? p.facts : null);
+        await checkObjectivePublication(result.publication, p.facts.schema === 'runvara-experiment-measurement/v3' || protectedMeasurement(p.facts) ? p.facts : null);
         if (!active(t)) { p.uncertain = true; return; }
       }
       pending = null; stale = true; renderDetail(result.isCurrent === true && p.action !== 'withdraw' && result.publication.version.source?.measurementDigest === selected?.measurement?.digest); renderReview(); status(result.isCurrent === false ? 'This action was recorded; a newer result is now available. Refresh the experiment and results.' : 'Review saved. Refresh the experiment and results to see the latest version.');
@@ -572,7 +736,7 @@
       if (!withinBytes(result, 128 * 1024)) throw new Error('Evidence response exceeds its bound');
       if (result.source !== 'immutable_business_outcome_version' || result.currentStatus !== 'not_checked' || !validPublication(result.publication) || result.publication.version.versionId !== publication.version.versionId || result.publication.version.digest !== publication.version.digest || result.sourceMeasurement?.digest !== publication.version.source.measurementDigest || result.sourceMeasurement?.workspaceId !== context().workspaceId) throw new Error('Evidence mismatch');
       const m = result.sourceMeasurement;
-      if (m?.schema === 'runvara-experiment-measurement/v3' && !exact(result, ['publication', 'sourceMeasurement', 'sourceAction', 'currentStatus', 'source'])) throw new Error('Unsupported public evidence envelope');
+      if ((m?.schema === 'runvara-experiment-measurement/v3' || protectedMeasurement(m)) && !exact(result, ['publication', 'sourceMeasurement', 'sourceAction', 'currentStatus', 'source'])) throw new Error('Unsupported public evidence envelope');
       const actionMarkup = await sourceActionMarkup(result.sourceAction, m, result.publication);
       if (!isCurrent() || !target.isConnected) return;
       target.innerHTML = `<h4>Original measurement report</h4><p class="muted tiny">Saved with this result; its current status has not been rechecked. Recorded by an owner or admin, not independently verified.</p>${facts(m)}<p>All relevant costs included: ${m.report?.costsComplete === true ? 'Yes (reported)' : 'Unknown'}</p><p class="outcome-description">${esc(bounded(m.report?.description))}</p>${actionMarkup}`;
@@ -606,9 +770,10 @@
     $('business-outcomes-load').addEventListener('click', loadDetail);
     $('business-outcomes-experiment').addEventListener('change', () => { if (pending?.attempted) return; invalidate(); pending = null; selected = null; renderDetail(); renderReview(); status('Select Load experiment to read current details.'); });
     $('business-outcomes-form').addEventListener('submit', save);
-    $('business-outcomes-action').addEventListener('change', () => { renderActionSelection(); if (!pending?.attempted) { pending = null; renderReview(); } });
+    $('business-outcomes-action').addEventListener('change', () => { cancelReceiptRead(); receiptPreview = null; renderActionSelection(); if (!pending?.attempted) { pending = null; renderReview(); } });
     $('business-outcomes-form').addEventListener('input', () => { if (!pending?.attempted) { pending = null; renderReview(); } });
     $('business-outcomes-panel').addEventListener('click', event => {
+      const receiptButton = event.target.closest('[data-receipt-read]'); if (receiptButton) readReceipt(receiptButton.dataset.receiptRead);
       const action = event.target.closest('[data-outcome-action]'); if (action) review(action.dataset.outcomeAction);
       if (event.target.id === 'business-outcomes-cancel') { if (!pending?.attempted) { pending = null; renderReview(); } else { $('business-outcomes-review').classList.add('hidden'); status('Pending action retained. Reopen the panel to review the same retry.'); } }
       if (event.target.id === 'business-outcomes-confirm') publish();

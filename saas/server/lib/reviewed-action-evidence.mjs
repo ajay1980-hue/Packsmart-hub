@@ -263,8 +263,20 @@ export function validateActionIntervention(v, workspaceId) {
 export function validateActionSelection(v) {
   if (v == null) return null;
   if (own(v, 'actionId')) { exact(v, ['actionId']); identifier(v.actionId); }
+  else if (own(v, 'receipt')) { exact(v, ['receipt']); return { receipt: validateProtectedReceiptSelector(v.receipt) }; }
   else { exact(v, ['reuseVersionId']); if (!VERSION.test(v.reuseVersionId)) throw fail('MEASUREMENT_INVALID', 400); }
   return { ...v };
+}
+
+// A receipt selector identifies evidence only. It supplies no tenant, reviewer,
+// executor, commit revision or authority, and cannot establish protection.
+export function validateProtectedReceiptSelector(v) {
+  exact(v, ['attemptId', 'receiptDigest', 'sourceDigest']);
+  if (typeof v.attemptId !== 'string' || !/^content_attempt_[a-f0-9]{64}$/.test(v.attemptId)) throw fail('MEASUREMENT_INVALID', 400);
+  digest(v.receiptDigest); digest(v.sourceDigest);
+  const encoded = canonicalReviewedActionJson(v);
+  if (Buffer.byteLength(encoded, 'utf8') > 512) throw fail('MEASUREMENT_INVALID', 400);
+  return JSON.parse(encoded);
 }
 
 // This is a display DTO, not a substitute for private source validation or

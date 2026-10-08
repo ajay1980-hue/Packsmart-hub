@@ -52,6 +52,8 @@ jobs:
         run: node saas/server/tests/automation-history-browser-check.mjs
       - name: Verify owner outcome review on mobile and desktop
         run: node saas/server/tests/business-outcomes-browser-check.mjs
+      - name: Verify protected content sources in outcome review
+        run: node saas/server/tests/business-outcomes-receipt-browser-check.mjs
       - name: Verify workspace activity on mobile and desktop
         run: node saas/server/tests/activity-browser-check.mjs
       - name: Verify imported order evidence on mobile and desktop
@@ -166,6 +168,29 @@ jobs:
         with:
           name: runvara-manual-content-responsive
           path: /tmp/runvara-manual-content-*.png
+          if-no-files-found: ignore
+      - name: Upload protected outcome 320px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-receipt-outcomes-320-responsive
+          path: |
+            /tmp/runvara-receipt-outcomes-320-*.png
+            /tmp/runvara-receipt-outcomes-report.json
+          if-no-files-found: ignore
+      - name: Upload protected outcome 390px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-receipt-outcomes-390-responsive
+          path: /tmp/runvara-receipt-outcomes-390-*.png
+          if-no-files-found: ignore
+      - name: Upload protected outcome 1200px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-receipt-outcomes-1200-responsive
+          path: /tmp/runvara-receipt-outcomes-1200-*.png
           if-no-files-found: ignore
       - name: Upload objective content 320px verification images
         if: always()

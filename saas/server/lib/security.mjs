@@ -288,10 +288,19 @@ const contentReceiptErrors = Object.freeze({
   CONTENT_RECEIPT_COMMIT_UNCONFIRMED: 'Shopify may have applied the change, but Runvara could not confirm its saved completion.'
 });
 
+// Source review does not submit a provider action. Keep private reader details
+// out of public errors and avoid the dispatch-specific retry wording above.
+const outcomeReceiptErrors = Object.freeze({
+  OUTCOME_RECEIPT_INVALID: 'The protected content source could not be verified. Reload the review and select the exact completion again.',
+  OUTCOME_RECEIPT_TOO_LARGE: 'The protected content evidence exceeds the supported size limit.',
+  OUTCOME_RECEIPT_STORAGE_UNAVAILABLE: 'Protected content source review is unavailable on this storage version.'
+});
+
 export function sanitizeError(error) {
   const status = Number(error?.status) || 500;
   const receiptMessage = typeof error?.code === 'string' && Object.hasOwn(contentReceiptErrors, error.code) ? contentReceiptErrors[error.code] : null;
-  const publicMessage = receiptMessage ? receiptMessage + ' Review the existing request before taking further action.' : status >= 500 ? 'Internal server error' : String(error?.message || 'Request failed').slice(0, 240);
+  const outcomeMessage = typeof error?.code === 'string' && Object.hasOwn(outcomeReceiptErrors, error.code) ? outcomeReceiptErrors[error.code] : null;
+  const publicMessage = outcomeMessage || (receiptMessage ? receiptMessage + ' Review the existing request before taking further action.' : status >= 500 ? 'Internal server error' : String(error?.message || 'Request failed').slice(0, 240));
   return { status, publicMessage, code: String(error?.code || (status >= 500 ? 'INTERNAL_ERROR' : 'REQUEST_ERROR')).slice(0, 80) };
 }
 
