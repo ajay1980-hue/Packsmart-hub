@@ -365,6 +365,34 @@
             <p class="muted tiny">Status checks run only while this review is visible, with at most eight checks per request. Leaving the view or hiding this tab pauses checks; returning does not restart them.</p>
             <div id="business-objective-review-result"></div>
           </section>
+          <button id="resume-objective-content" class="secondary hidden" type="button">Review retained goal-associated content request</button>
+          <section id="objective-content-editor" class="objective-review hidden" aria-labelledby="objective-content-heading">
+            <h3 id="objective-content-heading">Request your own content change for this goal</h3>
+            <p>This is an owner-written request associated with a saved objective and diagnostic review. Commercial readiness, financial benefit and objective progress remain unverified.</p>
+            <p id="objective-content-purpose" class="connection-exact-text"></p>
+            <p id="objective-content-policy" role="status"></p>
+            <form id="objective-content-form" class="record-form" aria-busy="false">
+              <label class="wide">Confirm the exact destination account<select id="objective-content-account" required><option value="">Choose the destination Shopify account</option></select></label>
+              <label class="wide">Confirm the retained product reference<select id="objective-content-product" required><option value="">Choose the exact product reference</option></select></label>
+              <p class="muted wide">The retained product’s import account is unverified. Confirm that this exact product reference belongs to the destination account. Retained content is not a current Shopify check.</p>
+              <details class="wide"><summary>Inspect retained product content</summary><p id="objective-content-baseline" class="connection-exact-text"></p></details>
+              <label class="wide">Exact new title<input id="objective-content-title" maxlength="200" required></label>
+              <label class="wide">Exact new description<textarea id="objective-content-description" maxlength="10000" rows="5"></textarea></label>
+              <p class="muted wide">Both fields will be replaced by your exact text. Leaving the description empty clears the Shopify description.</p>
+              <p id="objective-content-status" class="wide" role="status"></p>
+              <p id="objective-content-exact" class="connection-exact-text wide"></p>
+              <label class="wide"><span class="check-label"><input id="objective-content-ack" type="checkbox"> I confirm this product reference belongs to this destination account. I reviewed this exact goal, report, opportunity, title and description, and request separate owner approval.</span></label>
+              <button id="objective-content-prepare" class="primary" type="submit">Prepare this exact request</button>
+              <button id="objective-content-check" class="secondary hidden" type="button">Check exact saved request</button>
+              <button id="objective-content-retry" class="secondary hidden" type="button">Retry the same exact request reference</button>
+              <button id="objective-content-reload" class="secondary" type="button">Discard unsent draft and reload source</button>
+              <button id="objective-content-cancel" class="secondary" type="button">Close content request</button>
+              <button id="objective-content-approvals" class="secondary hidden" type="button">Open Approval Centre</button>
+              <p id="objective-content-error" class="form-error wide" role="alert"></p>
+            </form>
+            <p class="muted tiny">This server-recorded diagnostic history is not independently immutable proof. The source belongs to the same owner and account security version, not necessarily the same login. Exact publishing approval and a separate Apply action remain required. This request cannot be linked as a reviewed outcome through the current manual-action linking feature.</p>
+            <p class="muted tiny">An unconfirmed request reference is kept only in this session. Leaving or cancelling a request cannot undo a server save. A full page reload cannot establish whether it was recorded.</p>
+          </section>
           <form id="business-objective-form" class="record-form">
             <label class="wide">Objective<input name="title" maxlength="160" required placeholder="Grow profitable packaging sales"></label>
             <label>Metric<select name="metric"><option value="revenue">Revenue</option><option value="gross_profit">Gross profit</option><option value="contribution_profit">Contribution profit</option><option value="gross_margin_percent">Gross margin %</option><option value="monthly_ad_spend">Monthly ad spend</option><option value="stock_cover_days">Stock cover days</option><option value="orders">Orders</option></select></label>

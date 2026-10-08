@@ -46,6 +46,8 @@ jobs:
         run: node saas/server/tests/objective-review-browser-check.mjs
       - name: Verify exact manual content preparation on mobile and desktop
         run: node saas/server/tests/manual-content-browser-check.mjs
+      - name: Verify objective-bound content preparation on mobile and desktop
+        run: node saas/server/tests/objective-content-browser-check.mjs
       - name: Verify archived automation history on mobile and desktop
         run: node saas/server/tests/automation-history-browser-check.mjs
       - name: Verify owner outcome review on mobile and desktop
@@ -88,6 +90,27 @@ jobs:
         with:
           name: runvara-manual-content-responsive
           path: /tmp/runvara-manual-content-*.png
+          if-no-files-found: ignore
+      - name: Upload objective content 320px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-content-320-responsive
+          path: /tmp/runvara-objective-content-320-*.png
+          if-no-files-found: ignore
+      - name: Upload objective content 390px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-content-390-responsive
+          path: /tmp/runvara-objective-content-390-*.png
+          if-no-files-found: ignore
+      - name: Upload objective content 1200px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-content-1200-responsive
+          path: /tmp/runvara-objective-content-1200-*.png
           if-no-files-found: ignore
       - name: Upload legacy usage verification images
         if: always()

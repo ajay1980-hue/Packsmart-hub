@@ -47,7 +47,9 @@ import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
-import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, readManualContentRequest } from './lib/connection-writes.mjs';
+import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, readManualContentRequest,
+  prepareObjectiveContentRequest, readObjectiveContentRequest } from './lib/connection-writes.mjs';
+import { objectiveContentContext } from './lib/objective-content-source.mjs';
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
 import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
@@ -363,6 +365,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const objectiveReviewLimiter = new SlidingWindowLimiter({ limit: 3, windowMs: 60000, blockMs: 60000 });
   const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
   const contentRequestReadLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 60000 });
+  const objectiveContentLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 60000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const outcomeReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const outcomeDraftLimiter = new SlidingWindowLimiter({ limit: 5, windowMs: 60000, blockMs: 60000 });
@@ -1185,7 +1188,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -2208,6 +2211,24 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        const objectiveContentRead = pathname.match(/^\/api\/objective-content\/requests\/([A-Za-z0-9_-]{16,100})$/);
+        if (pathname === '/api/objective-content/context' && req.method === 'GET'
+          || pathname === '/api/objective-content/requests' && req.method === 'POST' || objectiveContentRead && req.method === 'GET') {
+          requireApprover(auth);
+          if (!objectiveContentLimiter.check(rateKey).allowed) throw connectionError('Objective content review limit reached. Wait before checking again.', 'OBJECTIVE_CONTENT_RATE_LIMITED', 429);
+          objectiveContentLimiter.fail(rateKey);
+          const session = { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) };
+          const loadJob = jobId => store.getAgentJob(session.workspaceId, jobId, { includeReport: true });
+          const contextRead = pathname === '/api/objective-content/context';
+          if (contextRead ? [...url.searchParams.keys()].length !== 2 || url.searchParams.getAll('jobId').length !== 1 || url.searchParams.getAll('opportunityId').length !== 1
+            : [...url.searchParams.keys()].length !== 0) throw connectionError('Invalid exact source read options.', 'OBJECTIVE_CONTENT_INPUT_INVALID');
+          const body = req.method === 'POST' ? await jsonBody(req, 24000) : null;
+          const result = await mutate(auth, state => contextRead
+            ? objectiveContentContext(state, url.searchParams.get('jobId'), url.searchParams.get('opportunityId'), session, loadJob)
+            : objectiveContentRead ? readObjectiveContentRequest(state, objectiveContentRead[1], session, loadJob)
+              : prepareObjectiveContentRequest(state, body, session, { loadJob, persist: options => store.save(session.workspaceId, state, options) }), { persist: false });
+          send(res, 200, result); return;
+        }
         const contentRequestRead = pathname.match(/^\/api\/connections\/shopify\/content-requests\/([A-Za-z0-9_-]{16,100})$/);
         if (req.method === 'GET' && contentRequestRead) {
           requireOwner(auth);
@@ -2314,7 +2335,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const executionRate = connectionWriteLimiter.check(auth.session.workspaceId);
           if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
           connectionWriteLimiter.fail(auth.session.workspaceId);
-          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), durableStore: store.provider === 'supabase',
+          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, options => store.save(auth.session.workspaceId, state, options), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), loadObjectiveJob: jobId => store.getAgentJob(auth.session.workspaceId, jobId, { includeReport: true }), durableStore: store.provider === 'supabase',
             actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write, executedExternally: write.status === 'completed' }); return;
         }

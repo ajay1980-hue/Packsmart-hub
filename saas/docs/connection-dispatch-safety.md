@@ -186,3 +186,8 @@ No remote publication, provider call, production mutation or deployment was
 performed for this preparation. Local Chromium remains unavailable; responsive
 browser/container gates are not claimed as passed and no installation or
 workaround was attempted. No migration is needed for PR75.
+# Objective-bound content extension
+
+The prepared [objective content bridge](objective-content-bridge.md) reuses these claims, CAS saves and exact publish approval for owner-requested Shopify title/description only. V2 adds original-owner/account-version and canonical job/report/opportunity/product bindings, exact job rereads before credentials and both phase checks, and an owned save snapshot with a synchronous pre-serialization guard. The final narrow workspace authority read remains last in each phase. Reports are server-recorded diagnostics; these reads are not atomic across job/workspace rows.
+
+After actual submission, exact result recording retains immutable request/decision/claim/admission checks and CAS without re-authorizing an already-sent operation against newly stale source eligibility. Known completion survives source disappearance/expiry; uncertainty and claimed phases never replay. V2 has no manual source-action context. Manual v1 bytes and dispatch restrictions remain unchanged. A rollback must retain the prepared policy-envelope rejection guard; pre-policy production object `d32da62` is unsafe for persisted v2 records.

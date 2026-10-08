@@ -39,6 +39,19 @@ function conflict() { return Object.assign(new Error('Workspace changed; refresh
 function assertWorkspace(workspaceId, state) {
   if (!workspaceId || state?.workspace?.id !== workspaceId) throw Object.assign(new Error('Workspace identity mismatch'), { status: 403, code: 'WORKSPACE_MISMATCH' });
 }
+function saveGuard(beforeCommit) {
+  if (beforeCommit === undefined) return () => {};
+  if (typeof beforeCommit !== 'function') throw new TypeError('Save guard must be a synchronous function');
+  return snapshot => {
+    const result = beforeCommit(snapshot);
+    if (result && typeof result.then === 'function') {
+      // A guard must finish before serialization, not create another unchecked
+      // asynchronous boundary. Consume rejection without hiding the error here.
+      Promise.resolve(result).catch(() => {});
+      throw new TypeError('Save guard must be synchronous');
+    }
+  };
+}
 const fileQueues = new Map();
 async function boundedResponseText(response, maxBytes) {
   if (maxBytes === undefined) return response.text();
@@ -152,6 +165,10 @@ function connectionWriteContextResult(rows, workspaceId, input) {
     approvals: input.approvalId === null ? [] : [row.approval], connectionWrites: [row.write] };
 }
 const JOB_FIELDS = 'id,workspace_id,type,provider,status,priority,attempts,max_attempts,ai_units,concurrency_limit,idempotency_key,actor,ai_provider,ai_model,ai_tier,available_at,lease_until,worker_id,error_code,created_at,updated_at,completed_at';
+// Exact reads request two rows so duplicate identities cannot be hidden by a
+// limit of one. Allow both bounded report bodies plus their payload/metadata.
+const JOB_STATUS_RESPONSE_MAX_BYTES = 16384;
+const JOB_REPORT_RESPONSE_MAX_BYTES = 163840;
 const JOB_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
 const jobError = (code = 'AGENT_JOB_INPUT_INVALID') => Object.assign(new Error(code), { code, status: 400 });
 function validateJobIdentity(workspaceId, jobId) {
@@ -400,22 +417,28 @@ class FileStore {
     return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
   }
 
-  async save(workspaceId, state) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit } = {}) {
     assertWorkspace(workspaceId, state);
+    const assertCurrent = saveGuard(beforeCommit);
+    assertCurrent(state);
+    const source = ownedSnapshot ? structuredClone(state) : state;
+    const wasPersisted = Boolean(state[PERSISTED]);
     const previous = fileQueues.get(this.filePath) || Promise.resolve();
     const write = previous.catch(() => {}).then(async () => {
       const all = await this.readAll();
       const existing = all[workspaceId];
-      if (existing && (!(state[PERSISTED] || state._revision) || (existing._revision || null) !== (state._revision || null))) throw conflict();
-      for (const other of Object.values(all)) if (other.workspace.id !== workspaceId && (other.users || []).some(user => (state.users || []).some(next => normalizeEmail(next.email) === normalizeEmail(user.email)))) {
+      if (existing && (!(wasPersisted || source._revision) || (existing._revision || null) !== (source._revision || null))) throw conflict();
+      for (const other of Object.values(all)) if (other.workspace.id !== workspaceId && (other.users || []).some(user => (source.users || []).some(next => normalizeEmail(next.email) === normalizeEmail(user.email)))) {
         throw Object.assign(new Error('An account already exists for this email'), { status: 409, code: 'ACCOUNT_EXISTS' });
       }
-      const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: false };
+      const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: false };
       all[workspaceId] = upgraded;
+      assertCurrent(upgraded);
+      const serialized = JSON.stringify(all);
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
       const handle = await fs.open(temp, 'wx', 0o600);
-      try { await handle.writeFile(JSON.stringify(all)); await handle.sync(); } finally { await handle.close(); }
+      try { await handle.writeFile(serialized); await handle.sync(); } finally { await handle.close(); }
       await fs.rename(temp, this.filePath);
       state._revision = upgraded._revision;
       markPersisted(state);
@@ -451,7 +474,7 @@ class FileStore {
     const existing = this.agentJobs.find(item => item.workspace_id === workspaceId && item.idempotency_key === job.idempotencyKey);
     if (existing) return structuredClone(existing);
     const row = {
-      id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: job.payload,
+      id: job.id, workspace_id: workspaceId, type: job.type, provider: job.provider, payload: structuredClone(job.payload),
       result: null, status: 'queued', priority: job.priority, attempts: 0, max_attempts: job.maxAttempts,
       ai_units: job.aiUnits, concurrency_limit: job.concurrencyLimit, idempotency_key: job.idempotencyKey,
       actor: job.actor, ai_provider:job.aiProvider || null, ai_model:job.aiModel || null, ai_tier:job.aiTier || null,
@@ -492,7 +515,7 @@ class FileStore {
     if (!sameLiveClaim(row, job)) return null;
     if (row.type === 'objective_prepare' && update.status === 'succeeded') validateObjectiveResult(row, update.result);
     Object.assign(row, {
-      status:update.status, result:update.result ?? row.result, error_code:update.errorCode ?? null,
+      status:update.status, result:update.result == null ? row.result : structuredClone(update.result), error_code:update.errorCode ?? null,
       completed_at:update.completedAt || null, lease_until:null, worker_id:null, updated_at:new Date().toISOString()
     });
     this.activityMeter.observeJob(job.workspace_id, update.status);
@@ -514,7 +537,9 @@ class FileStore {
 
   async getAgentJob(workspaceId, jobId, { includeReport = false } = {}) {
     validateJobIdentity(workspaceId, jobId);
-    const row = this.agentJobs.find(item => item.workspace_id === workspaceId && item.id === jobId);
+    const rows = this.agentJobs.filter(item => item.workspace_id === workspaceId && item.id === jobId);
+    if (rows.length > 1) throw jobError('AGENT_JOB_RESPONSE_INVALID');
+    const row = rows[0];
     if (!row) return null;
     const result = { ...compactJobRow(row), payload: structuredClone(row.payload) };
     if (includeReport && row.type === 'objective_prepare' && row.status === 'succeeded') {
@@ -1369,8 +1394,13 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit } = {}) {
     assertWorkspace(workspaceId, state);
+    const assertCurrent = saveGuard(beforeCommit);
+    assertCurrent(state);
+    // Opt-in source-bound requests own every value serialized after an archive
+    // await. Keep live state mutable for legitimate completion bookkeeping.
+    const source = ownedSnapshot ? structuredClone(state) : state;
     // Digests only describe rows mirrored by this process at its last saved
     // revision. A different replica may have changed them since then.
     if (this.mirrorRevisions.get(workspaceId) !== state._revision) {
@@ -1381,7 +1411,7 @@ class SupabaseStore {
     // Plan against the predecessor and original run references, not the new
     // revision or a deep clone. Scheduler claim handles survive save/finish.
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(state) : null;
-    const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
+    const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: true };
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
     let acknowledgedArchives = [];
@@ -1411,10 +1441,18 @@ class SupabaseStore {
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
     // Revalidate the source after every archive await, just before serializing
     // the CAS write. Caller state is changed only after that commit succeeds.
-    if (automationPlan) upgraded.automationRuns = applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns;
+    const retainedAutomationRuns = automationPlan ? applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns : null;
+    if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
+    assertCurrent(upgraded);
     await this.commit(workspaceId, upgraded, expectedRevision, existing);
     state._revision = upgraded._revision;
-    for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) state[key] = upgraded[key];
+    for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) {
+      // Retention plans deliberately keep original run handles for scheduler
+      // finish. Do not share the private snapshot with caller-owned histories.
+      if (key === 'automationRuns' && (retainedAutomationRuns || ownedSnapshot && state.automationRuns)) {
+        state[key] = retainedAutomationRuns || state.automationRuns;
+      } else state[key] = ownedSnapshot ? structuredClone(upgraded[key]) : upgraded[key];
+    }
     markPersisted(state);
     const failures = await this.mirrorNormalized(workspaceId, upgraded);
     this.telemetry.reportingFailures = failures.length;
@@ -1556,7 +1594,8 @@ class SupabaseStore {
 
   async getAgentJob(workspaceId, jobId, { includeReport = false } = {}) {
     validateJobIdentity(workspaceId, jobId);
-    const rows = await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=${JOB_FIELDS},payload${includeReport ? ',result' : ''}&limit=1`);
+    const rows = await this.scopedRequest(workspaceId, 'job_read', `runvara_agent_jobs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(jobId)}&select=${JOB_FIELDS},payload${includeReport ? ',result' : ''}&limit=2`,
+      { maxResponseBytes: includeReport ? JOB_REPORT_RESPONSE_MAX_BYTES : JOB_STATUS_RESPONSE_MAX_BYTES });
     if (!Array.isArray(rows) || rows.length > 1) throw jobError('AGENT_JOB_RESPONSE_INVALID');
     const row = rows[0];
     if (!row) return null;

@@ -57,13 +57,60 @@ test('direct job reads are one exact-tenant bounded projection; only explicit re
   const status = await store.getAgentJob('alpha', job.id);
   assert.equal(status.result, undefined); assert.equal(calls.length, 1);
   assert.equal(calls[0].url.searchParams.get('workspace_id'), 'eq.alpha');
-  assert.equal(calls[0].url.searchParams.get('id'), 'eq.job_test'); assert.equal(calls[0].url.searchParams.get('limit'), '1');
+  assert.equal(calls[0].url.searchParams.get('id'), 'eq.job_test'); assert.equal(calls[0].url.searchParams.get('limit'), '2');
   assert.ok(!calls[0].url.searchParams.get('select').split(',').includes('result'));
   const report = await store.getAgentJob('alpha', job.id, { includeReport: true });
   assert.equal(report.result.jobId, job.id); assert.equal(calls.length, 2);
   assert.ok(calls[1].url.searchParams.get('select').split(',').includes('result'));
   const foreign = fixture(() => [{ ...row, workspace_id: 'beta' }]);
   await assert.rejects(() => foreign.store.getAgentJob('alpha', job.id, { includeReport: true }), e => e.code === 'AGENT_JOB_RESPONSE_INVALID');
+  const duplicate = fixture(() => [row, structuredClone(row)]);
+  await assert.rejects(() => duplicate.store.getAgentJob('alpha', job.id, { includeReport: true }), e => e.code === 'AGENT_JOB_RESPONSE_INVALID');
+});
+
+test('exact job reads reject oversized declared and streamed responses before JSON parsing', async () => {
+  for (const includeReport of [false, true]) {
+    const maxBytes = includeReport ? 163840 : 16384;
+    let bodyRead = false, cancelled = false;
+    const declared = createStore({ SUPABASE_URL: 'https://objective-test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'fixture' }, {
+      fetchImpl: async () => ({ ok: true, status: 200, headers: new Headers({ 'content-length': String(maxBytes + 1) }),
+        body: { cancel: async () => { cancelled = true; } }, text: async () => { bodyRead = true; return 'not JSON'; } })
+    });
+    await assert.rejects(() => declared.getAgentJob('alpha', 'job_test', { includeReport }), e => e.code === 'SUPABASE_RESPONSE_TOO_LARGE');
+    assert.equal(bodyRead, false); assert.equal(cancelled, true);
+    cancelled = false;
+    const streamed = createStore({ SUPABASE_URL: 'https://objective-test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'fixture' }, {
+      fetchImpl: async () => new Response(new ReadableStream({
+        start(controller) { controller.enqueue(new TextEncoder().encode('x'.repeat(maxBytes + 1))); },
+        cancel() { cancelled = true; }
+      }))
+    });
+    await assert.rejects(() => streamed.getAgentJob('alpha', 'job_test', { includeReport }), e => e.code === 'SUPABASE_RESPONSE_TOO_LARGE');
+    assert.equal(cancelled, true);
+  }
+});
+
+test('FileStore owns enqueued payloads and finished reports but remains volatile and unable to authorize dispatch', async () => {
+  const { job, report } = records(), store = createStore({});
+  const payload = structuredClone(job.payload), originalReport = structuredClone(report);
+  const queued = { id: job.id, workspaceId: 'alpha', type: 'objective_prepare', provider: null,
+    aiProvider: null, aiModel: null, aiTier: 'deterministic', aiUnits: 0, priority: 60, maxAttempts: 3,
+    actor: job.actor, payload, idempotencyKey: `objective_prepare:v1:${'a'.repeat(64)}`, concurrencyLimit: 1,
+    availableAt: new Date().toISOString(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+  await store.enqueueAgentJob('alpha', queued);
+  payload.objectiveRevision = 99;
+  const retained = await store.getAgentJob('alpha', job.id);
+  assert.deepEqual(retained.payload, job.payload);
+  retained.payload.actorSessionVersion = 99;
+  const [claim] = await store.claimAgentJobs('worker_test');
+  await store.finishAgentJob(claim, { status: 'succeeded', result: report, completedAt: new Date().toISOString() });
+  report.proposals.push({ forged: true }); report.summary.proposalsReady = 999;
+  assert.deepEqual((await store.getAgentJob('alpha', job.id, { includeReport: true })).result, originalReport);
+  assert.equal((await store.getAgentJob('alpha', job.id)).payload.actorSessionVersion, 1);
+  assert.equal(await createStore({}).getAgentJob('alpha', job.id, { includeReport: true }), null);
+  await assert.rejects(() => store.getConnectionWriteContext(), e => e.code === 'WRITE_CONTEXT_UNAVAILABLE');
+  store.agentJobs.push(structuredClone(store.agentJobs[0]));
+  await assert.rejects(() => store.getAgentJob('alpha', job.id, { includeReport: true }), e => e.code === 'AGENT_JOB_RESPONSE_INVALID');
 });
 
 test('objective reports reject tenant/job/source mismatch, unbounded payloads and unsafe proof before storage or return', async () => {

@@ -12,6 +12,7 @@
     orderFilter: 'all', approvalFilter: 'pending'
   };
   const objectiveUI = { epoch: 0, editor: null, read: null, mutation: null, snapshotContext: null, referenceCache: null, planningBaseline: '', needsReload: false, unknownSave: false };
+  const objectiveContent = { editor:null, ticket:null, handoff:null, epoch:0, previous:null };
   let invitationToken = '';
   let ownerActivationToken = '';
   try {
@@ -784,9 +785,12 @@
     const pending = item.status === 'pending';
     const write = (state.data.connectionWrites || []).find(write => write.approvalId === item.id);
     const affected = write ? (state.data.connectionCentre || []).find(channel => channel.id === write.provider)?.name || statusLabel(write.provider) : 'See proposal and supporting evidence';
+    const source = write?.objectivePolicyProposal?.schema === 'runvara-objective-dispatch-proposal/v2' && write.objectivePolicyProposal.origin === 'owner_objective_content' ? write.objectivePolicyProposal.source : null;
+    const sourceDetail = source ? '<details><summary>Review full goal-associated content</summary><p class="connection-exact-text">' + escapeHtml('Owner-written content associated with a saved goal. Commercial readiness and objective progress remain unverified.\nGoal: ' + source.objectiveId + ' · revision ' + source.objectiveRevision + '\nReport: ' + source.reportId + '\nReview job: ' + source.jobId + '\nOpportunity: ' + source.opportunityId + '\nDestination: ' + write.account + '\nConnection: ' + write.connectionId + '\nProduct: ' + write.input.productId + '\nExact title: ' + write.input.title + '\nExact description:\n' + (write.input.description === '' ? 'Empty description: this clears the Shopify description.' : write.input.description)) + '</p><p class="muted tiny">The retained product’s import account is unverified. Server-recorded history is not independently immutable proof. Saved financial and stock restrictions still apply; approval does not supply missing evidence. Applying the approved change is separate.</p></details>' : '';
+
     const executionNote = item.executionStatus === 'ready' ? 'Ready to apply in the Connection Centre.' : item.executionStatus === 'completed' ? 'The channel confirmed the change.' : item.executionStatus === 'cancelled' ? 'No channel change made.' : 'External execution: disabled';
     const actions = pending && state.data.user?.role === 'owner' ? '<div class="approval-actions">' + (item.payload?.connectionWriteId ? '<button class="secondary" data-view-link="channels">Review exact change</button>' : '<button class="secondary" data-modify-approval="' + escapeHtml(item.id) + '">Modify</button>') + '<button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">' + (pending ? 'Awaiting owner decision' : 'Decision recorded ' + date(item.decidedAt)) + ' · ' + escapeHtml(executionNote) + '</p>' + (item.executionStatus === 'ready' ? '<button class="secondary" data-view-link="channels">Open Connection Centre</button>' : '');
-    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Affected channel / scope</dt><dd>' + escapeHtml(affected) + '</dd></div><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Runvara') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + actions + '</article>';
+    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Affected channel / scope</dt><dd>' + escapeHtml(affected) + '</dd></div><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Runvara') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + sourceDetail + actions + '</article>';
   }
 
   function renderApprovals() {
@@ -1288,6 +1292,7 @@
     objectiveReview.controller?.abort(); objectiveReview.controller = null;
   }
   function resetObjectiveReview() {
+    interruptObjectiveContent('The selected review changed');
     stopReviewRequests(); objectiveReview.active = null;
     $('#business-objective-review').classList.add('hidden');
     $('#business-objective-review-result').replaceChildren();
@@ -1335,7 +1340,7 @@
       '<section><h4>Specialist findings</h4>' + (reviewRows(report.specialists, 3).map(task => '<article class="objective-review-specialist"><h5>' + escapeHtml(statusLabel(task.agentId)) + ' · ' + escapeHtml(statusLabel(task.status)) + '</h5><p class="muted tiny">' + escapeHtml(statusLabel(task.mode)) + ' mode</p>' + list([...reviewRows(task.findings, 8), ...reviewRows(task.blockers, 8), ...reviewRows(task.recommendations, 4)]) + '</article>').join('') || '<p>No specialist findings are available.</p>') + '</section>' +
       '<section><h4>Blocked commercial proposals</h4>' + (reviewRows(report.proposals, 10).map(proposal => {
         const sourceExists = proposal.sourceReferenceResolved === true && (state.data?.opportunities || []).some(item => item.id === proposal.opportunityId && item.present === true);
-        return '<article class="objective-review-proposal"><h5>' + escapeHtml(proposal.title || 'Recorded opportunity') + '</h5><p>' + (proposal.approvalRequired ? 'Blocked · owner approval required' : 'Blocked · missing verified evidence') + '</p>' + list(proposal.blockers) + '<p>' + escapeHtml(proposal.nextStep || 'Inspect the original record and resolve missing evidence.') + '</p>' + (sourceExists ? '<button class="secondary" type="button" data-investigate-review-opportunity="' + escapeHtml(proposal.opportunityId) + '">Investigate original opportunity</button>' : '<p class="muted tiny">Original opportunity is not available in the current workspace snapshot.</p>') + '</article>';
+        return '<article class="objective-review-proposal"><h5>' + escapeHtml(proposal.title || 'Recorded opportunity') + '</h5><p>' + (proposal.approvalRequired ? 'Blocked · owner approval required' : 'Blocked · missing verified evidence') + '</p>' + list(proposal.blockers) + '<p>' + escapeHtml(proposal.nextStep || 'Inspect the original record and resolve missing evidence.') + '</p>' + (sourceExists ? '<button class="secondary" type="button" data-investigate-review-opportunity="' + escapeHtml(proposal.opportunityId) + '">Investigate original opportunity</button>' : '<p class="muted tiny">Original opportunity is not available in the current workspace snapshot.</p>') + (contentCandidate(active,proposal.opportunityId) ? '<p class="muted tiny">You can request your own exact title/description change for this goal. This does not qualify this commercial proposal.</p><button class="secondary" type="button" data-request-objective-content="' + escapeHtml(proposal.opportunityId) + '">Write a goal-associated content request</button>' : '') + '</article>';
       }).join('') || '<p>No commercial proposals were prepared. This is not a statement that the objective is achieved.</p>') + '</section>';
   }
   function acceptReviewJob(active, payload) {
@@ -1418,8 +1423,280 @@
   $('.business-objectives-panel').addEventListener('toggle', () => { if (!$('.business-objectives-panel').open) pauseObjectiveReview('Status checks paused while the objectives panel is closed. Select Check status to continue.'); });
   document.addEventListener('visibilitychange', () => { if (document.hidden) pauseObjectiveReview('Status checks paused while this tab is hidden. Select Check status to continue.'); });
   $('#business-objective-review-result').addEventListener('click', event => {
+    const content = event.target.closest('[data-request-objective-content]');
+    if (content) { openObjectiveContent(content.dataset.requestObjectiveContent); return; }
     const button = event.target.closest('[data-investigate-review-opportunity]');
     if (button) investigateOpportunity(button.dataset.investigateReviewOpportunity);
+  });
+
+  // A separate, owner-authored source-bound request. Diagnostic readiness never
+  // authorizes this form, and its exact history is not manual v1 history.
+  const objectiveContentIdentityError = error => error.status === 401 || (error.status === 403 &&
+    ['WRITE_ACTOR_CHANGED','OWNER_APPROVAL_REQUIRED','ROLE_DENIED','PASSWORD_CHANGE_REQUIRED','CSRF_INVALID'].includes(error.code));
+  const objectiveContentSchema = 'runvara-objective-content-source/v1';
+  const objectiveContentKeys = ['schema','objectiveId','objectiveRevision','objectiveDigest','jobId','reportId','payloadDigest','resultDigest','jobIdentityDigest','actorId','actorSessionVersion','inputFingerprint','opportunityId','opportunityDigest','productId','productDigest','approvalSourceDigest'];
+  const contentRecordKeys = ['id','requestId','provider','input','digest','connectionId','account','requestedBy','status','approvalId','source','origin'];
+  const exactContentKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === [...keys].sort().join(',');
+  const canonicalContent = value => JSON.stringify(value, function(_key, item) { return item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key,item[key]])) : item; });
+  const contentReference = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
+  function sameObjectiveContentOwner(context) {
+    const current = objectiveContext();
+    return sameObjectiveSession(current, true) && context?.session === current.session && context.userId === current.userId &&
+      context.workspaceId === current.workspaceId && context.sessionWorkspaceId === current.sessionWorkspaceId && context.csrf === current.csrf && context.sessionCsrf === current.sessionCsrf;
+  }
+  function contentCandidate(active, opportunityId) {
+    const objective = state.objectiveSnapshot?.objectives?.find(row => row.id === active?.objectiveId);
+    const candidates = active?.report?.proposals?.filter(row => row.opportunityId === opportunityId) || [];
+    const rows = state.data?.opportunities?.filter(row => row.id === opportunityId) || [];
+    const row = rows[0], evidence = Array.isArray(row?.evidence) ? row.evidence.filter(item => item?.type === 'product') : [];
+    return sameObjectiveSession(objectiveContext(), true) && active && sameReviewSession(active) && !active.stale && active.job?.status === 'succeeded' &&
+      active.report?.jobId === active.job.id && objective?.effectiveStatus === 'active' && objective.revision === active.objectiveRevision && objective.executionPolicy?.mode === 'enforce' &&
+      candidates.length === 1 && candidates[0].sourceReferenceResolved === true && candidates[0].readyForPreparation === false && candidates[0].commercialReady === false && candidates[0].externalExecutionAllowed === false &&
+      rows.length === 1 && row.present === true && !['dismissed','rejected'].includes(row.status) && row.kind === 'seo' && evidence.length === 1 &&
+      ['Thin product title','Thin product description'].includes(evidence[0].detail);
+  }
+  function objectiveContentLocalKey(editor) {
+    return canonicalContent([state.objectiveSnapshot?.objectives?.filter(row => row.id === editor.selection.objectiveId), state.data?.connections,
+      state.data?.products?.filter(row => row.id === editor.loaded?.product.id), state.data?.opportunities?.filter(row => row.id === editor.selection.opportunityId),
+      editor.review?.report, editor.review?.stale]);
+  }
+  function interruptObjectiveContent(reason = 'Editing interrupted', clear = false, hide = true) {
+    objectiveContent.epoch++;
+    objectiveContent.handoff?.controller.abort(); objectiveContent.handoff = null;
+    const ticket = objectiveContent.ticket; objectiveContent.ticket = null; ticket?.controller.abort();
+    const editor = objectiveContent.editor;
+    if (!editor) return;
+    if (clear || !sameObjectiveContentOwner(editor.context)) {
+      objectiveContent.editor = null; objectiveContent.previous = null;
+      $('#objective-content-form').reset();
+      for (const id of ['purpose','policy','baseline','status','exact','error']) $('#objective-content-' + id).textContent = '';
+      for (const id of ['account','product']) $('#objective-content-' + id).replaceChildren();
+      $('#resume-objective-content').classList.add('hidden'); $('#objective-content-editor').classList.add('hidden'); return;
+    }
+    if (editor.attempt && !['saved','refused'].includes(editor.attempt.phase)) {
+      if (editor.attempt.sent) { editor.attempt.phase = 'unknown'; editor.attempt.hadUnknown = true; editor.attempt.retryReady = false; } else editor.attempt = null;
+    }
+    editor.stale = true; editor.ackKey = null; editor.message = reason + '. Reload and review the source before preparing an unsent draft.';
+    if (hide) { $('#objective-content-editor').classList.add('hidden'); $('#resume-objective-content').classList.remove('hidden'); }
+    renderObjectiveContent();
+  }
+  function currentObjectiveContent(ticket) {
+    clearClosedObjectivePanel(objectivePanelObserver.takeRecords());
+    if (objectiveContent.ticket === ticket && !sameObjectiveContentOwner(ticket.context)) { interruptObjectiveContent('Owner session changed',true); return false; }
+    if (objectiveContent.ticket === ticket && ticket.kind !== 'history' && ticket.sourceKey !== objectiveContentLocalKey(ticket.editor)) {
+      interruptObjectiveContent('The selected source changed while the request was pending',false,false); return false;
+    }
+    return objectiveContent.ticket === ticket && ticket.epoch === objectiveContent.epoch && objectiveContent.editor === ticket.editor &&
+      sameObjectiveSession(ticket.context, true) && reviewVisible() && !$('#objective-content-editor').classList.contains('hidden');
+  }
+  function objectiveContentTicket(kind, editor) {
+    const ticket = { kind, editor, sourceKey:objectiveContentLocalKey(editor), context:objectiveContext(), epoch:objectiveContent.epoch, controller:new AbortController() };
+    objectiveContent.ticket = ticket; return ticket;
+  }
+  function checkObjectiveContentIdentity() {
+    const editor = objectiveContent.editor;
+    if (editor && !sameObjectiveContentOwner(editor.context)) { interruptObjectiveContent('Owner session changed', true); return false; }
+    return sameObjectiveSession(objectiveContext(), true) && reviewVisible();
+  }
+  function observeObjectiveContent() {
+    const editor = objectiveContent.editor;
+    if (!editor || !checkObjectiveContentIdentity()) return;
+    if (editor.loaded && !editor.stale && (!sameObjectiveSession(editor.context, true) || editor.localKey !== objectiveContentLocalKey(editor))) {
+      interruptObjectiveContent('The objective, report, product or destination changed', false, false);
+    }
+  }
+  function objectiveContentFields() {
+    return { account:$('#objective-content-account').value, product:$('#objective-content-product').value, title:$('#objective-content-title').value, description:$('#objective-content-description').value };
+  }
+  function objectiveContentChoiceKey() { return canonicalContent([objectiveContent.editor?.loaded, objectiveContentFields()]); }
+  function validObjectiveContentDraft(editor) {
+    const fields = objectiveContentFields();
+    return editor.loaded && !editor.stale && fields.account === editor.loaded.target.connectionId && fields.product === editor.loaded.product.id &&
+      fields.title.trim().length > 0 && fields.title.length <= 200 && fields.description.length <= 10000;
+  }
+  function renderObjectiveContent() {
+    const editor = objectiveContent.editor; if (!editor) return;
+    const attempt = editor.attempt, working = Boolean(objectiveContent.ticket), saved = attempt?.phase === 'saved', unresolved = attempt && !['saved','refused'].includes(attempt.phase);
+    const ready = !working && (attempt ? Boolean(unresolved && attempt.retryReady && !editor.stale) : validObjectiveContentDraft(editor)), locked = working || Boolean(attempt) || editor.stale || !editor.loaded;
+    for (const id of ['account','product','title','description']) $('#objective-content-' + id).disabled = locked;
+    $('#objective-content-ack').disabled = !ready; if (!editor.ackKey) $('#objective-content-ack').checked = false;
+    $('#objective-content-prepare').disabled = !ready || !$('#objective-content-ack').checked || editor.ackKey !== objectiveContentChoiceKey();
+    $('#objective-content-prepare').classList.toggle('hidden', Boolean(attempt));
+    $('#objective-content-retry').classList.toggle('hidden', !unresolved || !attempt.retryReady);
+    $('#objective-content-retry').disabled = !ready || !$('#objective-content-ack').checked || editor.ackKey !== objectiveContentChoiceKey();
+    $('#objective-content-check').classList.toggle('hidden', !unresolved); $('#objective-content-check').disabled = working;
+    $('#objective-content-reload').classList.toggle('hidden', Boolean(unresolved) || saved); $('#objective-content-reload').disabled = working;
+    $('#objective-content-approvals').classList.toggle('hidden', !saved); $('#objective-content-approvals').disabled = working;
+    $('#objective-content-form').setAttribute('aria-busy', String(working));
+    const source = attempt?.intent.source || editor.loaded?.source, target = attempt?.intent.target || editor.loaded?.target;
+    const fields = attempt ? { product:attempt.intent.input.productId, title:attempt.intent.input.title, description:attempt.intent.input.description } : objectiveContentFields();
+    $('#objective-content-exact').textContent = source ? 'Goal: ' + source.objectiveId + ' · revision ' + source.objectiveRevision + '\nReport: ' + source.reportId + '\nReview job: ' + source.jobId +
+      '\nOpportunity: ' + source.opportunityId + '\nDestination account: ' + (attempt || objectiveContentFields().account ? target.account : 'Not selected') + '\nConnection: ' + (attempt || objectiveContentFields().account ? target.connectionId : 'Not selected') +
+      '\nProduct reference: ' + (fields.product || 'Not selected') + '\nExact new title: ' + (fields.title.trim() || 'Not entered') + '\nExact new description:\n' + (fields.description === '' ? 'Empty description: this clears the Shopify description.' : fields.description) + (attempt ? '\nRequest reference: ' + attempt.requestId : '') : '';
+    $('#objective-content-status').textContent = saved ? 'Exact goal-associated request found: ' + attempt.record.id + ' · ' + statusLabel(attempt.record.status) + '. Saved history does not authorize another apply. Source check: ' + attempt.sourceStatus.status + (attempt.sourceStatus.message ? '. ' + attempt.sourceStatus.message : '.') :
+      attempt?.phase === 'submitting' ? 'Preparing this exact request. Leaving cannot cancel a server save.' : attempt?.phase === 'reconciling' ? 'Checking this exact request and its original goal/report source…' :
+      unresolved ? (attempt.retryReady ? 'No matching request was found in the checked snapshot, and the original source and target still match. An earlier save could still commit. Review the retained exact fields and acknowledge them before deliberately retrying this same reference.' : 'The preparation outcome is unknown. Keep this exact request reference and check again. An absent lookup cannot prove an earlier save will not commit. No new request or retry is sent automatically.') :
+      editor.message || (working ? 'Reading the selected report, opportunity, product and destination…' : 'Choose the exact destination and product, write the content, then acknowledge the full review.');
+  }
+  function validObjectiveContentSource(source, editor) {
+    return exactContentKeys(source, objectiveContentKeys) && source.schema === objectiveContentSchema && source.objectiveId === editor.selection.objectiveId && source.objectiveRevision === editor.selection.objectiveRevision &&
+      source.jobId === editor.selection.jobId && source.reportId === editor.selection.reportId && source.opportunityId === editor.selection.opportunityId && source.actorId === editor.context.userId &&
+      Number.isSafeInteger(source.actorSessionVersion) && source.actorSessionVersion > 0 && /^gid:\/\/shopify\/Product\/\d+$/.test(source.productId) &&
+      /^[a-f0-9]{32}$/.test(source.inputFingerprint) && ['objectiveDigest','payloadDigest','resultDigest','jobIdentityDigest','opportunityDigest','productDigest','approvalSourceDigest'].every(key => /^[a-f0-9]{64}$/.test(source[key]));
+  }
+  function validObjectiveContentContext(value, editor) {
+    const target = value?.target;
+    return exactContentKeys(value,['schema','workspaceId','requestedBy','source','sourceRevision','target','objective','candidate','product','policy','notice']) && value.schema === 'runvara-objective-content-context/v1' &&
+      value.workspaceId === editor.context.workspaceId && value.requestedBy === editor.context.userId && /^[a-f0-9]{64}$/.test(value.sourceRevision) && validObjectiveContentSource(value.source,editor) &&
+      exactContentKeys(target,['schema','connectionId','account','settingsRevision']) && target.schema === 'runvara-manual-content-target/v1' && contentReference(target.connectionId) &&
+      typeof target.account === 'string' && target.account.length <= 253 && /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(target.account) && Number.isSafeInteger(target.settingsRevision) && target.settingsRevision >= 0 &&
+      value.objective?.id === value.source.objectiveId && value.objective.revision === value.source.objectiveRevision && typeof value.objective.title === 'string' &&
+      value.candidate?.opportunityId === value.source.opportunityId && ['Thin product title','Thin product description'].includes(value.candidate.issue) &&
+      value.product?.id === value.source.productId && value.product.provenance === 'unverified' && typeof value.product.title === 'string' && typeof value.product.description === 'string' &&
+      typeof value.policy?.allowed === 'boolean' && Array.isArray(value.policy.blockers) && value.policy.blockers.length <= 100 && typeof value.notice === 'string';
+  }
+  async function loadObjectiveContent(editor) {
+    if (!checkObjectiveContentIdentity() || objectiveContent.ticket || editor !== objectiveContent.editor || (editor.attempt && editor.attempt.phase !== 'refused')) return;
+    editor.ackKey = null; editor.message = ''; $('#objective-content-error').textContent = '';
+    const ticket = objectiveContentTicket('context',editor); renderObjectiveContent();
+    try {
+      const value = await request('/api/objective-content/context?jobId=' + encodeURIComponent(editor.selection.jobId) + '&opportunityId=' + encodeURIComponent(editor.selection.opportunityId), { signal:ticket.controller.signal,isCurrent:()=>currentObjectiveContent(ticket) });
+      if (!currentObjectiveContent(ticket)) return;
+      if (!validObjectiveContentContext(value,editor)) throw new Error('The response did not match the selected owner, objective, report and candidate. Reload the review before continuing.');
+      const sourceHash = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(canonicalContent(value.source)));
+      if (!currentObjectiveContent(ticket)) return;
+      if (Array.from(new Uint8Array(sourceHash),byte=>byte.toString(16).padStart(2,'0')).join('') !== value.sourceRevision) throw new Error('The returned source and preview revision did not match. Reload the selected source.');
+      editor.loaded = freezeObjective(objectiveCopy(value)); editor.context = objectiveContext(); editor.localKey = objectiveContentLocalKey(editor); editor.stale = false; editor.attempt = null;
+      $('#objective-content-form').reset();
+      $('#objective-content-account').innerHTML = '<option value="">Choose the destination Shopify account</option><option value="' + escapeHtml(value.target.connectionId) + '">' + escapeHtml(value.target.account + ' · ' + value.target.connectionId) + '</option>';
+      $('#objective-content-product').innerHTML = '<option value="">Choose the exact product reference</option><option value="' + escapeHtml(value.product.id) + '">' + escapeHtml(value.product.title + ' · ' + value.product.id) + '</option>';
+      $('#objective-content-purpose').textContent = value.objective.title + ' · revision ' + value.objective.revision + '\nSelected issue: ' + value.candidate.issue + '\nReport: ' + value.source.reportId + '\n' + value.notice;
+      $('#objective-content-baseline').textContent = 'Retained title: ' + value.product.title + '\nRetained description:\n' + value.product.description;
+      $('#objective-content-policy').textContent = (value.policy.allowed ? 'No financial qualification is claimed. Other safeguards and exact approval still apply.' : 'Execution is blocked by the saved conditions: ' + value.policy.blockers.map(row => typeof row === 'string' ? row : row.message || row.code || 'Unresolved condition').join(' · ')) +
+        ' Profit-first and any financial or stock limit, including an explicit zero, require evidence this content request does not supply. Preparation does not remove those limits.';
+      $('#objective-content-account').focus();
+    } catch(error) {
+      if (!currentObjectiveContent(ticket)) return;
+      if (objectiveContentIdentityError(error)) { interruptObjectiveContent('Owner access unavailable',true); return; }
+      editor.stale = true; editor.message = 'The selected source could not be loaded. No request was prepared.'; $('#objective-content-error').textContent = error.message;
+    } finally { if (objectiveContent.ticket === ticket) { objectiveContent.ticket = null; renderObjectiveContent(); } }
+  }
+  function openObjectiveContent(opportunityId) {
+    clearClosedObjectivePanel(objectivePanelObserver.takeRecords());
+    const active = objectiveReview.active;
+    if (!checkObjectiveContentIdentity() || objectiveUI.editor || objectiveUI.mutation || planningDraftOpen() || !contentCandidate(active,opportunityId)) return;
+    if (objectiveContent.editor) {
+      $('#objective-content-editor').classList.remove('hidden'); $('#resume-objective-content').classList.add('hidden');
+      $('#objective-content-error').textContent = 'Review or close the retained request first. An unknown request must be reconciled before starting a different one.'; renderObjectiveContent(); return;
+    }
+    const editor = { context:objectiveContext(), review:active, selection:freezeObjective({objectiveId:active.objectiveId,objectiveRevision:active.objectiveRevision,jobId:active.job.id,reportId:active.report.id,opportunityId}), loaded:null, attempt:null, stale:false, ackKey:null, message:'' };
+    objectiveContent.editor = editor; $('#objective-content-editor').classList.remove('hidden'); $('#resume-objective-content').classList.add('hidden'); loadObjectiveContent(editor);
+  }
+  function validObjectiveContentHistory(value, attempt) {
+    const row = value?.request, intent = attempt.intent;
+    if (!exactContentKeys(value,['schema','workspaceId','requestId','requestedBy','found','request','sourceStatus']) || value.schema !== 'runvara-objective-content-request/v1' || value.workspaceId !== attempt.context.workspaceId ||
+      value.requestedBy !== attempt.context.userId || value.requestId !== attempt.requestId || typeof value.found !== 'boolean') return false;
+    if (!value.found) return row === null && value.sourceStatus === null;
+    return exactContentKeys(row,contentRecordKeys) && contentReference(row.id) && row.requestId === attempt.requestId && row.provider === 'shopify' && row.origin === 'owner_objective_content' &&
+      row.requestedBy === attempt.context.userId && row.connectionId === intent.target.connectionId && row.account === intent.target.account && row.digest === intent.digest &&
+      contentReference(row.approvalId) && ['pending_approval','ready','executing','processing','completed','uncertain','failed','rejected'].includes(row.status) &&
+      canonicalContent(row.input) === canonicalContent(intent.input) && canonicalContent(row.source) === canonicalContent(intent.source) &&
+      value.sourceStatus && ['current','changed','unavailable'].includes(value.sourceStatus.status) && Object.keys(value.sourceStatus).every(key=>['status','code','message'].includes(key)) &&
+      (value.sourceStatus.code === undefined || typeof value.sourceStatus.code === 'string') && (value.sourceStatus.message === undefined || typeof value.sourceStatus.message === 'string');
+  }
+  function acceptObjectiveContentHistory(editor,value) {
+    editor.attempt.phase = 'saved'; editor.attempt.retryReady = false; editor.attempt.record = freezeObjective(objectiveCopy(value.request)); editor.attempt.sourceStatus = freezeObjective(objectiveCopy(value.sourceStatus)); editor.ackKey = null;
+    objectiveContent.previous = { key:editor.attempt.key,requestId:editor.attempt.requestId }; $('#objective-content-error').textContent = '';
+  }
+  async function prepareObjectiveContent(retry = false) {
+    observeObjectiveContent();
+    const editor = objectiveContent.editor;
+    if (!editor || !checkObjectiveContentIdentity() || objectiveContent.ticket || editor.stale || !$('#objective-content-ack').checked || editor.ackKey !== objectiveContentChoiceKey()) return;
+    let attempt = editor.attempt;
+    if (retry) {
+      if (!attempt?.retryReady || !sameObjectiveContentOwner(attempt.context)) return;
+    } else {
+      if (attempt || !validObjectiveContentDraft(editor)) return;
+      const fields = objectiveContentFields(), input = {productId:fields.product,operation:'product_content',title:fields.title.trim(),description:fields.description};
+      const key = canonicalContent([editor.loaded.source,editor.loaded.target.connectionId,editor.loaded.target.account,input]);
+      if (objectiveContent.previous?.key === key) { $('#objective-content-error').textContent = 'This exact source and content already have a saved request. Prepare a fresh review for a different request.'; return; }
+      attempt = {context:objectiveContext(),requestId:crypto.randomUUID(),key,phase:'submitting',sent:false,hadUnknown:false,retryReady:false,intent:freezeObjective({source:objectiveCopy(editor.loaded.source),sourceRevision:editor.loaded.sourceRevision,target:objectiveCopy(editor.loaded.target),input})};
+      editor.attempt = attempt; $('#objective-content-title').value = input.title;
+    }
+    const input = attempt.intent.input;
+    attempt.phase = 'submitting'; attempt.retryReady = false;
+    const ticket = objectiveContentTicket('prepare',editor); $('#objective-content-error').textContent = ''; renderObjectiveContent();
+    try {
+      const hash = await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(input)));
+      if (!currentObjectiveContent(ticket)) return;
+      attempt.intent = freezeObjective({...attempt.intent,digest:Array.from(new Uint8Array(hash),byte=>byte.toString(16).padStart(2,'0')).join('')});
+      const visible = objectiveContentFields();
+      if (editor.localKey !== objectiveContentLocalKey(editor) || visible.account !== attempt.intent.target.connectionId || visible.product !== input.productId || visible.title.trim() !== input.title || visible.description !== input.description) throw Object.assign(new Error('The exact reviewed source or fields changed. Reload and review again.'),{status:400});
+      attempt.sent = true;
+      const value = await request('/api/objective-content/requests',{method:'POST',body:JSON.stringify({requestId:attempt.requestId,jobId:attempt.intent.source.jobId,opportunityId:attempt.intent.source.opportunityId,sourceRevision:attempt.intent.sourceRevision,target:attempt.intent.target,productId:input.productId,title:input.title,description:input.description,confirmedDestinationProduct:true}),signal:ticket.controller.signal,isCurrent:()=>currentObjectiveContent(ticket)});
+      if (!currentObjectiveContent(ticket)) return;
+      if (!validObjectiveContentHistory(value,attempt) || !value.found) throw new Error('The response did not confirm this exact goal-associated request.');
+      acceptObjectiveContentHistory(editor,value);
+    } catch(error) {
+      if (!currentObjectiveContent(ticket)) return;
+      if (objectiveContentIdentityError(error)) { interruptObjectiveContent('Owner access unavailable',true); return; }
+      if (attempt.sent && (attempt.hadUnknown || !error.status || error.status >= 500 || error.code === 'STATE_CONFLICT')) { attempt.phase = 'unknown'; attempt.hadUnknown = true; editor.ackKey = null; }
+      else { attempt.phase = 'refused'; editor.stale = true; editor.ackKey = null; editor.message = 'Preparation was refused. Reload and review the source before another draft.'; }
+      $('#objective-content-error').textContent = error.message;
+    } finally { if (objectiveContent.ticket === ticket) { objectiveContent.ticket = null; renderObjectiveContent(); } }
+  }
+  $('#objective-content-form').addEventListener('submit',event=>{event.preventDefault();prepareObjectiveContent();});
+  $('#objective-content-retry').addEventListener('click',()=>prepareObjectiveContent(true));
+  $('#objective-content-check').addEventListener('click',async()=>{
+    const editor = objectiveContent.editor, attempt = editor?.attempt;
+    if (!attempt?.sent || !attempt.intent.digest || ['saved','refused'].includes(attempt.phase) || !checkObjectiveContentIdentity() || objectiveContent.ticket) return;
+    const ticket = objectiveContentTicket('history',editor); attempt.phase = 'reconciling'; attempt.retryReady = false; editor.ackKey = null; $('#objective-content-error').textContent = ''; renderObjectiveContent();
+    try {
+      const value = await request('/api/objective-content/requests/' + encodeURIComponent(attempt.requestId),{signal:ticket.controller.signal,isCurrent:()=>currentObjectiveContent(ticket)});
+      if (!currentObjectiveContent(ticket)) return;
+      if (!validObjectiveContentHistory(value,attempt)) throw new Error('The saved response did not match the original source, owner, account, product and content.');
+      if (value.found) acceptObjectiveContentHistory(editor,value);
+      else {
+        attempt.phase = 'unknown'; attempt.hadUnknown = true;
+        $('#objective-content-error').textContent = 'No matching request was found in this checked snapshot. The original save could still commit. Checking whether the original source and target still match; no request is being resent.';
+        const fresh = await request('/api/objective-content/context?jobId=' + encodeURIComponent(attempt.intent.source.jobId) + '&opportunityId=' + encodeURIComponent(attempt.intent.source.opportunityId),{signal:ticket.controller.signal,isCurrent:()=>currentObjectiveContent(ticket)});
+        if (!currentObjectiveContent(ticket)) return;
+        if (!validObjectiveContentContext(fresh,editor) || fresh.sourceRevision !== attempt.intent.sourceRevision || canonicalContent(fresh.source) !== canonicalContent(attempt.intent.source) || canonicalContent(fresh.target) !== canonicalContent(attempt.intent.target)) throw new Error('The original source or destination no longer matches. Keep checking this exact saved reference; it cannot be replaced or rebased.');
+        // Matching the original source (already hashed before submission) never
+        // substitutes fresh content or a new request ID into the retained intent.
+        editor.context = objectiveContext(); editor.localKey = objectiveContentLocalKey(editor); editor.stale = false; attempt.retryReady = true;
+        $('#objective-content-error').textContent = 'No matching request was found in this checked snapshot. The original save could still commit. A retry requires a new acknowledgement and uses only the original exact reference.';
+      }
+    } catch(error) {
+      if (!currentObjectiveContent(ticket)) return;
+      if (objectiveContentIdentityError(error)) { interruptObjectiveContent('Owner access unavailable',true); return; }
+      attempt.phase = 'unknown'; attempt.hadUnknown = true; attempt.retryReady = false; $('#objective-content-error').textContent = 'Could not reconcile this exact request. ' + error.message;
+    } finally { if (objectiveContent.ticket === ticket) { objectiveContent.ticket = null; renderObjectiveContent(); } }
+  });
+  for (const type of ['input','change']) $('#objective-content-form').addEventListener(type,event=>{
+    if (!checkObjectiveContentIdentity() || objectiveContent.ticket || !objectiveContent.editor) return;
+    observeObjectiveContent(); const editor = objectiveContent.editor; if (!editor) return;
+    editor.ackKey = event.target.id === 'objective-content-ack' && event.target.checked ? objectiveContentChoiceKey() : null; renderObjectiveContent();
+  });
+  $('#objective-content-reload').addEventListener('click',()=>{const editor=objectiveContent.editor;if(editor && !objectiveContent.ticket && (!editor.attempt || editor.attempt.phase==='refused')) loadObjectiveContent(editor);});
+  $('#objective-content-cancel').addEventListener('click',()=>{
+    const editor=objectiveContent.editor;if(!editor)return;
+    interruptObjectiveContent('Content editor closed');
+    if (!editor.attempt || editor.attempt.phase === 'refused' || editor.attempt.phase === 'saved') { objectiveContent.editor=null;$('#resume-objective-content').classList.add('hidden'); }
+  });
+  $('#resume-objective-content').addEventListener('click',()=>{if(checkObjectiveContentIdentity() && objectiveContent.editor){$('#objective-content-editor').classList.remove('hidden');$('#resume-objective-content').classList.add('hidden');observeObjectiveContent();renderObjectiveContent();}});
+  $('#objective-content-approvals').addEventListener('click',async()=>{
+    const editor=objectiveContent.editor;if(editor?.attempt?.phase!=='saved'||!checkObjectiveContentIdentity())return;
+    setView('approvals');
+    const ticket={context:objectiveContext(),epoch:objectiveContent.epoch,controller:new AbortController()}; objectiveContent.handoff=ticket;
+    const current=()=>objectiveContent.handoff===ticket && ticket.epoch===objectiveContent.epoch && sameObjectiveSession(ticket.context,true) && state.view==='approvals' && !document.hidden;
+    try {
+      const snapshot=await request('/api/bootstrap',{signal:ticket.controller.signal,isCurrent:current});
+      if(!current())return;
+      if(snapshot?.workspace?.id!==ticket.context.workspaceId || snapshot.user?.id!==ticket.context.userId || snapshot.user.role!=='owner' || snapshot.user.active===false || snapshot.user.passwordChangeRequired || snapshot.csrf!==ticket.context.csrf || !Array.isArray(snapshot.approvals) || !Array.isArray(snapshot.connectionWrites)) throw new Error('A matching saved approval snapshot was not returned.');
+      state.data.approvals=snapshot.approvals; state.data.connectionWrites=snapshot.connectionWrites; renderApprovals();
+    } catch(error) {if(current())showMessage('Could not refresh the saved approval: '+error.message,'error');}
+    finally {if(objectiveContent.handoff===ticket)objectiveContent.handoff=null;}
   });
 
   const restrictionSchema = 'runvara-objective-execution-policy/v1';
@@ -1466,7 +1743,8 @@
     }
     return restrictionVisible();
   }
-  function resetObjectiveEditing(clearPrivate = false) {
+  function resetObjectiveEditing(clearPrivate = false, preserveContent = false) {
+    if (!preserveContent) interruptObjectiveContent('Workspace or navigation changed', clearPrivate);
     const editor = objectiveUI.editor;
     // Leaving a sent PUT does not cancel the saved change. Require a fresh read.
     if (objectiveUI.mutation) { objectiveUI.needsReload = true; objectiveUI.unknownSave = true; }
@@ -1695,6 +1973,7 @@
   objectivePanel.addEventListener('toggle', () => { if (!objectivePanel.open) resetObjectiveEditing(); });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) return;
+    interruptObjectiveContent('The tab was hidden');
     const editor = objectiveUI.editor;
     if (!editor || editor.busy === 'save' || !sameObjectiveSession(editor.context, true)) { resetObjectiveEditing(); return; }
     // Merely switching tabs keeps unsent choices, but never their acknowledgement
@@ -1716,6 +1995,7 @@
   }
   function renderBusinessObjectives(snapshot) {
     state.objectiveSnapshot = snapshot;
+    observeObjectiveContent();
     objectiveUI.snapshotContext = objectiveContext();
     const editor = objectiveUI.editor;
     if (editor && JSON.stringify(snapshot.objectives?.find(row => row.id === editor.source.id)) !== JSON.stringify(editor.source)) staleRestriction(editor, 'Saved objective data changed. Discard the draft and reload/review before saving.');
@@ -2383,7 +2663,8 @@
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
     window.RunvaraConnections?.interruptContent('Password change started');
-    resetObjectiveEditing(true);
+    interruptObjectiveContent('Password change started');
+    resetObjectiveEditing(true, true);
     resetBusinessGraph();
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
     try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); window.RunvaraConnections?.interruptContent('Password changed', true); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }

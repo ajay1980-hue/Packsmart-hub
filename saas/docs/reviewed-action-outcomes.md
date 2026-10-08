@@ -72,3 +72,6 @@ The migration is prepared and tested only in disposable localhost PostgreSQL 17 
 ### Reader-first rollout, only after separate approval
 
 Deploy the backward-compatible application/readers first and verify existing unlinked v1 behavior before applying this forward SQL. New linking stays unavailable until its compatible SQL contract is present. The new review RPC adds fields that the previous reader's exact-shape validator rejects, so applying SQL first while old readers remain would temporarily break selected review. This is a sequencing requirement for a later authorized rollout, not permission to deploy or apply the migration now.
+# Objective-origin content boundary
+
+The separately prepared [objective content bridge](objective-content-bridge.md) creates owner-requested `runvara-objective-dispatch-proposal/v2` content actions. They are outside this document's manual v1 `recordedActionContext`/`source_action` union. A successful v2 action keeps its known completion with optional evidence marked `objective_origin_unsupported`; it is never relabelled `owner_manual` or given a fabricated null originating objective. No SQL or outcome-union expansion is included. Existing manual v1 bytes and publication behavior remain unchanged.

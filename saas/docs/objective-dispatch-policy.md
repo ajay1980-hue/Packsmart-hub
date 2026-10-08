@@ -1,5 +1,7 @@
 # Owner restrictions at Shopify content dispatch
 
+The later [objective content bridge](objective-content-bridge.md) adds a distinct owner-requested v2 source contract for the same title/description operation. The v1 manual restriction and claim bytes described here remain unchanged. A diagnostic still supplies no financial qualification or autonomous execution authority.
+
 The original dispatch stage was prepared from `ccdd506162612477a66dafc917fa3b050c2f6d77`. It adds an inactive-by-default execution-policy contract to existing business objectives and enforces it on the existing manually requested Shopify `product_content` action. The subsequent preparation adds an owner editor for restrictions on already saved objectives. Neither change adds SQL, grants, databases, credentials, provider activation, recurring work or automatic customer policy configuration.
 
 Owners can deliberately add, move or remove a saved objective's restriction in the cockpit through the existing API. There is no qualified-financial executor or Commander action path in this stage. The existing default `profitFirst: true` makes an explicitly enforced objective evidence-blocked. Only a deliberately configured policy with profit-first false and no financial/stock constraints can admit an otherwise approved manual content change. The restriction editor preserves those saved conditions; this gate is not an executable profit optimizer.

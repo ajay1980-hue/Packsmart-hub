@@ -217,7 +217,8 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     });
     if (!queued || queued.workspace_id !== workspaceId || queued.type !== 'objective_prepare' || queued.actor !== auth.actorId
       || Object.keys(payload).some(key => queued.payload?.[key] !== payload[key])) throw objectiveError('AGENT_JOB_RESPONSE_INVALID', 503);
-    // No workspace save or extra audit: the immutable job row is provenance.
+    // No workspace save or extra audit: this is server-recorded diagnostic
+    // history, not independently authenticated immutable execution proof.
     if (queued.status === 'queued') wake();
     return { job: objectiveStatus(queued), stale: false, staleReason: null };
   }

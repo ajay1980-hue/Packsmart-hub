@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { businessObjectivesSnapshot } from './business-objectives.mjs';
 
 export const OBJECTIVE_DISPATCH_PROPOSAL_SCHEMA = 'runvara-objective-dispatch-proposal/v1';
+export const OBJECTIVE_CONTENT_PROPOSAL_SCHEMA = 'runvara-objective-dispatch-proposal/v2';
 export const OBJECTIVE_DISPATCH_PROPOSAL_MAX_BYTES = 8192;
 const SOURCE_MAX_BYTES = 131072;
 const own = (value, key) => Object.hasOwn(value, key);
@@ -34,6 +35,8 @@ function serialized(value) {
   return result;
 }
 const hash = value => crypto.createHash('sha256').update(serialized(value)).digest('hex');
+export const objectiveCanonicalDigest = hash;
+export const objectiveCanonicalText = serialized;
 function freeze(value) {
   if (value && typeof value === 'object') { for (const item of Object.values(value)) freeze(item); Object.freeze(value); }
   return value;
@@ -103,7 +106,17 @@ export function prepareObjectiveDispatchProposal(write, context) {
   return freeze(proposal);
 }
 
-export function assertObjectiveDispatchBinding(write, approval, context) {
+export function prepareObjectiveContentDispatchProposal(write, context, binding) {
+  if (!context || !context.policies.length || !binding) throw invalid();
+  const body = { ...proposalBody(write, context), schema: OBJECTIVE_CONTENT_PROPOSAL_SCHEMA,
+    origin: 'owner_objective_content', source: binding.source,
+    approvalId: binding.approvalId, approvalDigest: binding.approvalDigest };
+  const proposal = { ...body, digest: hash(body) };
+  if (Buffer.byteLength(serialized(proposal)) > OBJECTIVE_DISPATCH_PROPOSAL_MAX_BYTES) throw invalid();
+  return freeze(proposal);
+}
+
+export function assertObjectiveDispatchBinding(write, approval, context, contentBinding = null) {
   if (!context) {
     if (own(write, 'objectivePolicyProposal')) throw invalid();
     return;
@@ -112,7 +125,8 @@ export function assertObjectiveDispatchBinding(write, approval, context) {
     if (context.policies.length) throw blocked('WRITE_POLICY_REVIEW_REQUIRED', 'This request predates the current execution restrictions. Prepare a new exact request for owner review.');
     return; // Byte-identical legacy manual claim contracts stay usable.
   }
-  const expected = prepareObjectiveDispatchProposal(write, context);
+  const expected = contentBinding ? prepareObjectiveContentDispatchProposal(write, context, contentBinding)
+    : prepareObjectiveDispatchProposal(write, context);
   if (!expected || serialized(write.objectivePolicyProposal) !== serialized(expected)) {
     throw blocked('WRITE_POLICY_REVIEW_REQUIRED', 'The execution restrictions or proposal changed. Prepare a new exact request for owner review.');
   }
