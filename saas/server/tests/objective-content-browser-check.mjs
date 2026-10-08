@@ -43,6 +43,73 @@ async function capture(page,width,name){
  };
  try {await typography.evaluate(session=>session.assertBaseline());await image('');await typography.evaluate(session=>session.begin());try{await typography.evaluate(session=>session.enlarge());await image('-large-text');}finally{await typography.evaluate(session=>session.restore());}await typography.evaluate(session=>session.assertBaseline());}finally{await typography.dispose();}
 }
+// Capture the live generic DTO consumers in overlapping real viewports. An
+// element screenshot taller than a dialog can silently clip content or repeat
+// sticky chrome. Scroll the actual containers instead; leave all chrome intact.
+function createConsumerViewportSession(panel) {
+ const view=panel.ownerDocument.defaultView,document=panel.ownerDocument,modal=panel.closest('dialog');
+ const ancestors=[];
+ for(let node=panel.parentElement;node&&node!==document.body&&node!==document.documentElement;node=node.parentElement)ancestors.push(node);
+ const scrolling=()=>ancestors.filter(node=>/^(auto|scroll)$/.test(view.getComputedStyle(node).overflowY)&&node.scrollHeight>node.clientHeight);
+ const chrome=()=>Array.from(document.querySelectorAll(modal?'#connection-close':'.topbar, .global-message')).filter(node=>{
+  const style=view.getComputedStyle(node),rect=node.getBoundingClientRect();
+  return ['sticky','fixed'].includes(style.position)&&rect.width>0&&rect.height>0&&rect.bottom>0&&rect.top<view.innerHeight;
+ });
+ const clearance=node=>Math.max(12,...chrome().filter(item=>node?node.contains(item):!modal).map(item=>item.getBoundingClientRect().height+24));
+ return {
+  async reveal(offset) {
+   // Inner lists can scroll independently of the page; the dialog has its own
+   // scrollport too. Re-read geometry after each scroll and allow native clamps.
+   for(const node of scrolling()){
+    const top=node.getBoundingClientRect().top+node.clientTop+clearance(node);
+    node.scrollBy({top:panel.getBoundingClientRect().top+offset-top,behavior:'instant'});
+   }
+   if(!modal)view.scrollBy({top:panel.getBoundingClientRect().top+offset-clearance(null),behavior:'instant'});
+   await new Promise(resolve=>view.requestAnimationFrame(()=>view.requestAnimationFrame(resolve)));
+  },
+  bounds() {
+   const rect=panel.getBoundingClientRect();
+   let top=0,bottom=view.innerHeight,left=0,right=view.innerWidth;
+   for(const node of ancestors){
+    const style=view.getComputedStyle(node),box=node.getBoundingClientRect();
+    if(/^(auto|scroll|hidden|clip)$/.test(style.overflowY)){top=Math.max(top,box.top+node.clientTop);bottom=Math.min(bottom,box.top+node.clientTop+node.clientHeight);}
+    if(/^(auto|scroll|hidden|clip)$/.test(style.overflowX)){left=Math.max(left,box.left+node.clientLeft);right=Math.min(right,box.left+node.clientLeft+node.clientWidth);}
+   }
+   // Reserve the whole horizontal band occupied by sticky chrome. This is
+   // conservative even for the close button, which only covers the right edge.
+   for(const node of chrome())top=Math.max(top,node.getBoundingClientRect().bottom+12);
+   return {from:Math.max(0,top-rect.top),to:Math.min(rect.height,bottom-rect.top),height:rect.height,
+    left:rect.left,right:rect.right,visibleLeft:left,visibleRight:right,scroll:panel.scrollWidth,client:panel.clientWidth};
+  }
+ };
+}
+async function captureConsumer(page,width,name,panel){
+ const typography=await panel.evaluateHandle(createRestrictionTypographySession),viewport=await panel.evaluateHandle(createConsumerViewportSession);
+ const images=async suffix=>{
+  // Keep focus visible on a real non-text control without changing inline
+  // styles or triggering any approval/apply action.
+  await panel.locator('summary').evaluate(node=>node.focus({preventScroll:true}));
+  let covered=0,part=0;
+  while(true){
+   await viewport.evaluate((session,offset)=>session.reveal(offset),Math.max(0,covered-80));
+   const bounds=await viewport.evaluate(session=>session.bounds()),label=`${width}px ${name}${suffix} slice ${part+1}`;
+   assert.ok(bounds.left>=bounds.visibleLeft-2&&bounds.right<=bounds.visibleRight+2&&bounds.scroll<=bounds.client+2,`${label} horizontal clipping: ${JSON.stringify(bounds)}`);
+   assert.ok(bounds.from<=covered+2&&bounds.to>covered+1,`${label} does not extend contiguous visible coverage: ${JSON.stringify({covered,...bounds})}`);
+   const file=`/tmp/runvara-objective-content-${width}-${name}${suffix}-viewport-${++part}.png`;
+   await page.screenshot({path:file,fullPage:false,caret:'initial'});captures.push({width,file});
+   console.log(`${label}: visible source pixels ${Math.round(bounds.from)}-${Math.round(bounds.to)} of ${Math.round(bounds.height)}`);
+   covered=bounds.to;if(covered>=bounds.height-1)break;
+   assert.ok(part<60,`${label} exceeded the bounded viewport capture budget`);
+  }
+ };
+ try {
+  await typography.evaluate(session=>session.assertBaseline());await images('');
+  await typography.evaluate(session=>session.begin());
+  try{await typography.evaluate(session=>session.enlarge());await images('-large-text');}
+  finally{await typography.evaluate(session=>session.restore());}
+  await typography.evaluate(session=>session.assertBaseline());
+ }finally{await typography.dispose();await viewport.dispose();}
+}
 try{
  server.listen(port,'127.0.0.1');await once(server,'listening');assert.equal(base,`http://${server.address().address}:${server.address().port}`);
  browser=await chromium.launch({headless:true});
@@ -99,16 +166,19 @@ try{
   await page.locator('#connection-refresh').click();await page.waitForFunction(()=>!document.querySelector('#connection-refresh').disabled);
   await page.locator('#connection-grid [data-provider="shopify"][data-connection-action="open"]').first().click();await page.locator('#connection-dialog').waitFor();
   await page.locator('#connection-dialog .connection-write').getByText('Review exact change',{exact:true}).first().waitFor();await page.locator('#connection-dialog .connection-write summary').first().click();
-  const exact=page.locator('#connection-dialog .connection-write').first();assert.ok((await exact.textContent()).includes(first.jobId));assert.ok((await exact.textContent()).includes(candidate.id));assert.match(await exact.textContent(),/commercial readiness and objective progress remain unverified/);await page.locator('#connection-close').click();
+  const exact=page.locator('#connection-dialog .connection-write').first();assert.ok((await exact.textContent()).includes(first.jobId));assert.ok((await exact.textContent()).includes(candidate.id));assert.match(await exact.textContent(),/commercial readiness and objective progress remain unverified/);
+  await captureConsumer(page,width,'connection-exact-write',exact.locator('details'));await page.locator('#connection-close').click();
   await navigate('ai-team');await page.locator('#refresh-objective-review').click();await entry.waitFor();await entry.click();await page.waitForFunction(()=>document.querySelector('#objective-content-form').getAttribute('aria-busy')==='false');await fill('Explicit same-reference retry');await ack.check();postMode='lose-before-send';await page.locator('#objective-content-prepare').click();await status.getByText('The preparation outcome is unknown.',{exact:false}).waitFor();
   const second=JSON.parse(writes()[1].body);await page.locator('#objective-content-check').click();await status.getByText('No matching request was found in the checked snapshot',{exact:false}).waitFor();assert.equal(writes().length,2);assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#objective-content-retry').isDisabled(),true);await capture(page,width,'retry');
   await ack.check();await page.locator('#objective-content-retry').click();await status.getByText('Exact goal-associated request found:',{exact:false}).waitFor();assert.equal(writes().length,3);assert.deepEqual(JSON.parse(writes()[2].body),second);
   await page.locator('#objective-content-approvals').click();await page.locator('#approval-list summary').getByText('Review full goal-associated content',{exact:true}).first().waitFor();assert.ok((await page.locator('#approval-list').textContent()).includes(second.jobId));assert.equal(calls.some(call=>call.path.includes('/decision')||call.path.endsWith('/execute')),false);
+  const approvalSource=page.locator('#approval-list .approval-card').filter({hasText:second.jobId}).locator('details').filter({has:page.getByText('Review full goal-associated content',{exact:true})}).first();
+  await approvalSource.locator('summary').click();await captureConsumer(page,width,'approval-source',approvalSource);
   await navigate('ai-team');await page.locator('#resume-objective-content').click();await page.locator('#objective-content-cancel').click();await page.locator('#refresh-objective-review').click();await entry.waitFor();await entry.click();await page.waitForFunction(()=>document.querySelector('#objective-content-form').getAttribute('aria-busy')==='false');await fill('Refused because retained source changed');await ack.check();
   stored=await server.packsmart.store.get(seed.workspace.id);stored.products[0].title='New';await server.packsmart.store.save(seed.workspace.id,stored);
   await page.locator('#objective-content-prepare').click();await status.getByText('Preparation was refused.',{exact:false}).waitFor();assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#objective-content-prepare').isDisabled(),true);assert.equal(writes().length,4);await capture(page,width,'stale');
   stored=await server.packsmart.store.get(seed.workspace.id);assert.equal(stored.connectionWrites.length,2);assert.equal(stored.approvals.length,2);assert.ok(stored.approvals.every(row=>row.status==='pending'));assert.equal(providerRequests,0);assert.equal(modelRequests,0);assert.deepEqual(external,[]);assert.deepEqual(unexpected,[]);assert.deepEqual(errors,[]);await context.close();
   const bytes=(await Promise.all(captures.filter(row=>row.width===width).map(row=>fs.stat(row.file)))).reduce((sum,row)=>sum+row.size,0);assert.ok(bytes<32*1024*1024,`${width}px screenshot artifact exceeds32MiB`);
  }
- console.log('Objective/report-bound content passed real local source/prepare/reconcile routes at320,390,1200 and200% text, explicit same-ID retry, saved history/approval review, stale-source refusal, separate approval/apply, zero provider/model calls.');
+ console.log('Objective/report-bound content passed normal-size source/prepare/reconcile flows at320,390,1200, explicit same-ID retry, saved history/approval review and stale-source refusal. Separate normal/exact200% source-subtree captures cover both generic displays; surrounding app typography is unchanged. Approval/apply remain separate; zero provider/model calls.');
 }finally{if(browser)await browser.close();if(server.listening)await new Promise(resolve=>server.close(resolve));await server.packsmart.drain();await fs.rm(directory,{recursive:true,force:true});assert.equal(providerRequests,0);assert.equal(modelRequests,0);}
