@@ -10,6 +10,8 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
 import { createSessionToken, hashPasswordAsync } from '../lib/security.mjs';
+import { deriveBusinessGraph } from '../lib/business-graph.mjs';
+import { objectiveContentFixture } from './objective-content-fixture.mjs';
 
 test('cockpit renders authenticated controls and submits real persisted workflows', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-cockpit-'));
@@ -87,7 +89,7 @@ test('cockpit renders authenticated controls and submits real persisted workflow
   graphButton.click(); graphButton.click();
   await until(() => !graphButton.disabled);
   assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1, 'repeated clicks coalesce through the disabled button');
-  assert.match(document.getElementById('business-graph-result').textContent, /Evidence-backed links/);
+  assert.match(document.getElementById('business-graph-result').textContent, /Recorded links inspected/);
   assert.equal(document.getElementById('business-graph-result').querySelector('[onerror]'), null);
   graphDetails.open = false; graphDetails.dispatchEvent(new window.Event('toggle')); graphDetails.open = true;
   assert.equal(calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1, 'close/reopen does not add a provider or graph request');
@@ -328,7 +330,13 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
   const secret = 'graph-dom-fixture-session-secret-more-than-32-characters';
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
     SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
-  const stored = seedWorkspaceState({}, { workspaceId: 'graph-dom', email: 'graph@example.test', passwordHash: 'fixture-only' });
+  const prepared = await objectiveContentFixture(), stored = prepared.state;
+  upsertBusinessObjective(stored, { id: stored.businessObjectives[0].id, revision: stored.businessObjectives[0].revision, title: 'Changed saved goal definition' }, { actorId: stored.users[0].id });
+  const retained = deriveBusinessGraph(stored, { workspaceId: stored.workspace.id, nodeLimit: 200, edgeLimit: 400, recordLimit: 50, scanLimit: 2000 }).retainedRequests;
+  assert.equal(retained.records[0].origin, 'owner_objective_content', 'the DOM consumes the real v2 preparation projection');
+  assert.equal(retained.records[0].objective.revisionComparison, 'saved_revision_changed');
+  assert.equal(retained.records[0].approval.status, 'resolved');
+  assert.deepEqual(prepared.counts, { job: 0, credentials: 0, saves: 0, fresh: 0, mutations: 0 }, 'graph projection neither reads current sources nor executes');
   await server.packsmart.store.save(stored.workspace.id, stored);
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(async () => { await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
@@ -338,7 +346,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
   assert.equal(bootstrapResponse.status, 200);
   const bootstrap = await bootstrapResponse.json();
   const [html, presentation, app] = await Promise.all(['../../index.html', '../../presentation.js', '../../app.js'].map(file => fs.readFile(new URL(file, import.meta.url), 'utf8')));
-  const graph = () => ({ summary: { nodes: 4, edges: 2, unknownMappings: 1, nodesByType: { reviewed_outcome: 3 }, unknownByReason: { target_not_found: 1 } }, coverage: { complete: true },
+  const graph = () => ({ summary: { nodes: 4, edges: 2, unknownMappings: 1, nodesByType: { reviewed_outcome: 3 }, unknownByReason: { target_not_found: 1 } }, coverage: { complete: true }, retainedRequests: structuredClone(retained),
     reviewedOutcomes: { status: 'available', unavailableReason: null,
       snapshots: { workspace: { revisionRef: 'workspace_revision_one', readCompletedAt: '2026-10-07T12:00:00.000Z' }, outcomes: { id: 'outcome_snapshot_two', readCompletedAt: '2026-10-07T12:00:01.000Z' }, independent: true },
       counts: { currentHeadsRead: 3, publishedHeads: 2, withdrawnHeads: 1, projectedRecords: 3, resolvedExperimentLinks: 2, unresolvedExperimentLinks: 1, qualifiedMeasurements: 1 },
@@ -393,7 +401,7 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       h.document.getElementById('open-reviewed-results').click();
       assert.equal(h.panel.open, true); assert.equal(h.document.activeElement, h.button); assert.equal(h.pending.length, 0);
       const first = h.begin(); h.button.click(); h.button.dispatchEvent(new h.window.Event('click'));
-      assert.equal(h.pending.length, 1); assert.equal(h.calls.filter(call => call.route.startsWith('/api/business-graph'))[0].route, '/api/business-graph?outcomes=current');
+      assert.equal(h.pending.length, 1); assert.equal(h.calls.filter(call => call.route.startsWith('/api/business-graph'))[0].route, '/api/business-graph?outcomes=current&detail=true');
       assert.equal(first.options.method || 'GET', 'GET'); assert.ok(first.signal); assert.equal(typeof first.options.isCurrent, 'function');
       first.resolve(Response.json(graph())); await h.until(() => !h.button.disabled);
       assert.match(h.result.textContent, /Published results loaded2/); assert.match(h.result.textContent, /Withdrawn results loaded1/);
@@ -401,6 +409,11 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       assert.match(h.result.textContent, /2026-10-01T00:00:00.000Z/); assert.match(h.result.textContent, /2026-10-06T00:00:00.000Z/);
       assert.match(h.result.textContent, /Excluded or withheld from groups/); assert.match(h.result.textContent, /Experiment absent from retained records; deletion is not established/);
       assert.match(h.result.textContent, /independent, not atomic or synchronized/); assert.match(h.result.textContent, /not commit times or freshness guarantees/);
+      assert.match(h.result.textContent, /Saved goals and request history/); assert.match(h.result.textContent, /Request application statusRecorded ready/);
+      assert.match(h.result.textContent, /Recorded approval statusRecorded approved/); assert.match(h.result.textContent, /Recorded goal linkLinked to saved goal 1/);
+      assert.match(h.result.textContent, /Saved revision changed; recorded association preserved/);
+      assert.match(h.result.textContent, /Current source and execution eligibility were not checked/);
+      assert.equal(h.result.querySelectorAll('.retained-request-history button').length, 3);
       h.panel.open = false; h.panel.open = true; await h.settle();
       assert.equal(h.result.textContent, ''); assert.equal(h.pending.length, 1);
       const second = h.begin(); assert.match(h.result.textContent, /^Reading current/); assert.doesNotMatch(h.result.textContent, /workspace_revision_one/);
@@ -450,11 +463,13 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
     } finally { h.close(); }
   });
 
-  for (const replacement of ['same identities', 'different workspace', 'password setup']) await t.test('session replacement invalidates graph work: ' + replacement, async () => {
+  for (const replacement of ['same identities', 'different workspace', 'different role', 'different csrf', 'password setup']) await t.test('session replacement invalidates graph work: ' + replacement, async () => {
     const h = await harness();
     try {
       const old = h.begin(), payload = structuredClone(h.login());
       if (replacement === 'different workspace') { payload.workspace.id = 'replacement-workspace'; payload.user.id = 'replacement-user'; payload.csrf = 'replacement-csrf'; }
+      if (replacement === 'different role') payload.user.role = 'viewer';
+      if (replacement === 'different csrf') payload.csrf = 'replacement-csrf';
       if (replacement === 'password setup') payload.user.passwordChangeRequired = true;
       h.authenticate(payload);
       await h.until(() => old.signal.aborted);
@@ -511,6 +526,103 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
       h.begin().resolve(Response.json({ code: 'AUTH_REQUIRED' }, { status: 401 }));
       await h.until(() => !h.document.getElementById('login-screen').classList.contains('hidden'));
       assert.equal(h.result.textContent, ''); assert.equal(h.button.disabled, false);
+    } finally { h.close(); }
+  });
+
+  await t.test('recorded history keeps statuses, saved revision comparisons and unresolved reasons distinct', async () => {
+    const h = await harness();
+    try {
+      const payload = graph(), history = payload.retainedRequests, actual = structuredClone(history.records[0]);
+      const statuses = ['pending_approval', 'ready', 'executing', 'processing', 'completed', 'uncertain', 'failed', 'rejected'];
+      history.records = statuses.map((recordedStatus, index) => ({ ...structuredClone(actual), nodeId: 'request_' + index, recordedStatus }));
+      const reasons = ['target_index_incomplete', 'ambiguous_reference', 'unresolved_reference', 'archived_reference', 'target_outside_projection', 'edge_limit', 'invalid_proposal', 'approval_binding_mismatch', 'source_identity_ambiguous', 'source_index_incomplete', 'output_byte_limit'];
+      history.records.push(...reasons.map((reason, index) => ({ ...structuredClone(actual), nodeId: 'unresolved_' + index,
+        approval: { status: 'unresolved', reason }, objective: { status: 'unresolved', reason } })));
+      history.records.push({ ...structuredClone(actual), nodeId: 'manual', origin: 'owner_manual', objective: { status: 'not_recorded', reason: 'not_recorded' } });
+      history.records.push({ ...structuredClone(actual), nodeId: 'legacy', origin: 'not_recorded', objective: { status: 'not_recorded', reason: 'not_recorded' } });
+      history.counts.projectedRequests = history.records.length; history.counts.requestsInspected = history.records.length;
+      history.status = 'incomplete'; history.coverage.complete = false; history.omitted = { objectives: 1, requests: 2, relationships: 3, mappings: 4 };
+      h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+      const shown = h.result.querySelector('.retained-request-history');
+      for (const status of statuses) assert.match(shown.textContent, new RegExp('Recorded ' + status.replaceAll('_', ' ')));
+      for (const phrase of ['Target records are incomplete', 'More than one retained record', 'Reference absent from the inspected retained snapshot', 'referenced record is archived', 'known target was omitted', 'recorded link was omitted', 'proposal is inconsistent', 'reciprocal approval binding', 'More than one retained request', 'Request records are incomplete', 'output size limit']) assert.ok(shown.textContent.includes(phrase), phrase);
+      assert.match(shown.textContent, /Saved goals omitted1Requests omitted2Recorded relationships omitted3Unresolved history details omitted4/);
+      assert.match(shown.textContent, /Owner manual; originating goal not recorded/); assert.match(shown.textContent, /Origin not recorded/);
+      for (const row of [...shown.querySelectorAll('.retained-request')].slice(-2)) {
+        assert.match(row.textContent, /Originating goal not recorded/); assert.doesNotMatch(row.textContent, /Linked to saved goal|Recorded goal revision|Saved definition comparison/);
+      }
+      assert.match(shown.textContent, /do not authorize execution or retry/); assert.match(shown.textContent, /No archives were read/);
+      assert.equal(h.document.getElementById('hg-value').textContent, '—'); assert.equal(h.document.getElementById('hg-hours').textContent, '—');
+      assert.match(h.document.getElementById('hg-learning').textContent, /do not establish qualified learning priors/);
+      assert.equal(h.calls.filter(call => call.route.startsWith('/api/business-graph')).length, 1);
+    } finally { h.close(); }
+  });
+
+  await t.test('saved-history links only navigate to existing views and clear the inspected snapshot', async () => {
+    const h = await harness();
+    try {
+      for (const view of ['ai-team', 'approvals', 'channels']) {
+        h.control.setView('overview');
+        h.begin().resolve(Response.json(graph())); await h.until(() => !h.button.disabled);
+        const before = h.calls.length;
+        h.result.querySelector('.retained-request-history [data-view-link="' + view + '"]').click();
+        assert.equal(h.document.querySelector('.view.active').id, 'view-' + view);
+        assert.equal(h.calls.length, before, 'navigation never prepares, edits, retries or executes a request');
+        assert.equal(h.result.textContent, ''); assert.equal(h.panel.open, false);
+        assert.equal(h.document.querySelector('.business-objectives-panel').open, false, 'goal navigation does not load or open an editor');
+      }
+      assert.equal(h.pending.length, 3); assert.deepEqual(h.errors, []);
+    } finally { h.close(); }
+  });
+
+  await t.test('missing, malformed and adversarial saved history fails closed without exposing private fields', async () => {
+    const h = await harness();
+    try {
+      for (const malformed of [undefined, null, [], 'history', {}, { ...retained, schema: 'unsupported' }, { ...retained, records: {} }, { ...retained, objectives: null }]) {
+        const payload = graph(); payload.retainedRequests = malformed;
+        h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+        assert.match(h.result.textContent, /Saved goal and request history is unavailable/);
+        assert.match(h.result.textContent, /does not establish that no goals or requests exist/);
+        assert.equal(h.result.querySelectorAll('.retained-request').length, 0);
+        assert.match(h.result.textContent, /Published results loaded2/, 'malformed saved history does not suppress independent reviewed results');
+      }
+      const payload = graph(), history = payload.retainedRequests, injection = '<img src=x onerror=alert(1)>', sentinel = 'PRIVATE_RECORD_ACCOUNT_REQUESTER_CONTENT_SOURCE';
+      history.records[0].requestRef = sentinel; history.records[0].account = sentinel; history.records[0].requestedBy = sentinel;
+      history.records[0].input = { title: injection + sentinel, description: sentinel }; history.records[0].source = { id: sentinel };
+      history.records[0].approval = { status: 'unresolved', reason: injection, recordedStatus: injection, targetNodeId: sentinel };
+      history.records[0].objective.savedRevision = injection; history.records[0].objective.revisionComparison = injection;
+      history.objectives[0].effectiveStatus = injection; history.objectives[0].title = sentinel;
+      history.records.push(null, [], { recordedStatus: injection }); history.objectives.push(null);
+      history.counts.requestsInspected = injection;
+      h.begin().resolve(Response.json(payload)); await h.until(() => !h.button.disabled);
+      const shown = h.result.querySelector('.retained-request-history');
+      assert.equal(shown.querySelector('img'), null); assert.equal(shown.querySelector('[onerror]'), null);
+      assert.doesNotMatch(shown.innerHTML, /PRIVATE_RECORD_ACCOUNT_REQUESTER_CONTENT_SOURCE|<img|onerror/);
+      assert.match(shown.textContent, /malformed or exceeded the display limit/); assert.match(shown.textContent, /Requests inspected \/ shownUnknown \/ 1/);
+      assert.match(shown.textContent, /Saved definition comparisonSaved definition comparison unavailable/);
+      assert.match(shown.textContent, /Recorded approval statusUnavailable/); assert.match(shown.textContent, /Incomplete within this inspected display/);
+      // Even a claimed resolved goal must point to exactly one displayed goal.
+      const duplicate = graph(); duplicate.retainedRequests.objectives.push(structuredClone(duplicate.retainedRequests.objectives[0]));
+      h.begin().resolve(Response.json(duplicate)); await h.until(() => !h.button.disabled);
+      assert.match(h.result.querySelector('.retained-request').textContent, /Recorded goal linkUnresolved/);
+      assert.doesNotMatch(h.result.querySelector('.retained-request').textContent, /Linked to saved goal/);
+      for (const mutate of [
+        history => { history.records[0].approval.status = 'unrecognized'; },
+        history => { history.records[0].approval.targetNodeId = null; },
+        history => { history.records[0].objective.reason = 'ambiguous_reference'; },
+        history => { history.records[0].objective.savedRevision = -1; },
+        history => { history.records[0].objective.revisionComparison = 'matches_retained_definition'; },
+        history => { history.objectives[0].effectiveStatus = 'unrecognized'; },
+        history => { history.counts.projectedRequests = 999; },
+        history => { history.counts.requestsInspected = 0; },
+        history => { history.omitted.requests = 1; }
+      ]) {
+        const malformed = graph(); mutate(malformed.retainedRequests);
+        h.begin().resolve(Response.json(malformed)); await h.until(() => !h.button.disabled);
+        assert.match(h.result.querySelector('.retained-request-history').textContent, /Incomplete within this inspected display/);
+        assert.doesNotMatch(h.result.querySelector('.retained-request-history').textContent, /Complete within this inspected display/);
+      }
+      assert.deepEqual(h.errors, []);
     } finally { h.close(); }
   });
 

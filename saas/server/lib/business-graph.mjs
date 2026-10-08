@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { unitEconomics } from './profit.mjs';
 import { projectCurrentOutcomeReferences } from './business-outcomes.mjs';
 import { deriveQualifiedOutcomeGroups } from './impact-engine.mjs';
+import { inspectRetainedGraphRow, retainedCollection, projectRetainedRequests } from './retained-request-graph.mjs';
+export { RETAINED_REQUEST_GRAPH_BYTES } from './retained-request-graph.mjs';
 
 // This is an on-demand projection of the existing tenant snapshot. It does not
 // persist a second graph, migrate records, call providers, or infer identities
@@ -59,7 +61,7 @@ function project(state, options, summaryOnly) {
   const limits = limitsFor(options, summaryOnly);
   const nodes = [], edges = [], unknownMappings = [];
   const nodeMap = new Map(), edgeIds = new Set(), unknownIds = new Set(), omittedNodes = new Set(), occurrences = new Map();
-  const sources = new Map(), indices = new Map(), byType = {}, byRelation = {}, unknownByReason = {};
+  const sources = new Map(), indices = new Map(), byType = {}, byRelation = {}, unknownByReason = {}, unknownByNode = new Map();
   let scanned = 0, droppedEdges = 0, unknownTotal = 0;
   const source = (collection, pointer, row, field = null) => ({
     workspaceId, collection, pointer,
@@ -82,8 +84,14 @@ function project(state, options, summaryOnly) {
     const result = [];
     for (let index = 0; index < count; index++) {
       scanned++; meta.scanned++;
-      const row = rows[index];
+      const guarded = ['businessObjectives', 'connectionWrites', 'approvals'].includes(collection);
+      const descriptor = guarded ? Object.getOwnPropertyDescriptor(rows, index) : null;
+      let row = guarded ? descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : null : rows[index];
       if (!object(row)) { meta.invalid++; continue; }
+      if (guarded) {
+        try { row = inspectRetainedGraphRow(row, workspaceId, collection, { shallow: true }); }
+        catch (error) { if (error.code === 'WORKSPACE_MISMATCH') throw error; meta.invalid++; continue; }
+      }
       assertScope(row);
       result.push({ row, ref: source(collection, `${pointer}/${index}`, row) });
     }
@@ -95,6 +103,8 @@ function project(state, options, summaryOnly) {
     if (unknownIds.has(id)) return;
     unknownIds.add(id);
     unknownTotal++;
+    if (!unknownByNode.has(node.id)) unknownByNode.set(node.id, {});
+    const nodeReasons = unknownByNode.get(node.id); nodeReasons[reason] = (nodeReasons[reason] || 0) + 1;
     unknownByReason[reason] = (unknownByReason[reason] || 0) + 1;
     if (unknownMappings.length < limits.unknownLimit) unknownMappings.push({
       id,
@@ -147,10 +157,40 @@ function project(state, options, summaryOnly) {
     customers: readArray(state.channelData?.shopify?.customers, 'channelData.shopify.customers', '/channelData/shopify/customers'),
     campaigns: readArray(state.marketing?.campaigns, 'marketing.campaigns', '/marketing/campaigns'),
     opportunities: readArray(state.opportunities, 'opportunities', '/opportunities'),
-    approvals: readArray(state.approvals, 'approvals', '/approvals'),
+    approvals: readArray(retainedCollection(state, 'approvals'), 'approvals', '/approvals'),
+    objectives: readArray(retainedCollection(state, 'businessObjectives'), 'businessObjectives', '/businessObjectives'),
+    writes: readArray(retainedCollection(state, 'connectionWrites'), 'connectionWrites', '/connectionWrites'),
     work: readArray(state.workRecords, 'workRecords', '/workRecords'),
     experiments: readArray(state.revenueEngine?.experiments, 'revenueEngine.experiments', '/revenueEngine/experiments')
   };
+  // Top-level rows share the root scan reservation before inspecting nested
+  // retained history. Nested validation has the SAME remaining scan allowance;
+  // its bounded fields/UTF-8 preflight never widens collection scans.
+  for (const name of ['businessObjectives', 'connectionWrites', 'approvals']) {
+    const value = retainedCollection(state, name);
+    if (value === undefined || value === null) metadata(name).totalKnown = false;
+  }
+  const validationMeta = metadata('retainedRequests.validation');
+  const consumeRetainedValidation = () => {
+    if (scanned >= limits.scanLimit) {
+      validationMeta.truncated = true; validationMeta.totalKnown = false;
+      throw Object.assign(new Error('Retained validation scan limit'), { code: 'RETAINED_GRAPH_SCAN_LIMIT' });
+    }
+    scanned++; validationMeta.scanned++; validationMeta.available++;
+  };
+  for (const [key, collection] of [['objectives', 'businessObjectives'], ['writes', 'connectionWrites'], ['approvals', 'approvals']]) {
+    top[key] = top[key].filter(entry => {
+      try {
+        entry.row = inspectRetainedGraphRow(entry.row, workspaceId, collection, { consume: consumeRetainedValidation, nestedLimit: limits.nestedLimit });
+        return true;
+      } catch (error) {
+        if (error.code === 'WORKSPACE_MISMATCH') throw error;
+        metadata(collection).invalid++;
+        if (error.code === 'RETAINED_GRAPH_SCAN_LIMIT') metadata(collection).truncated = true;
+        return false;
+      }
+    });
+  }
   const economies = new Map();
   const economicsMeta = metadata('economics');
   const economics = object(state.economics) ? state.economics : {};
@@ -201,6 +241,8 @@ function project(state, options, summaryOnly) {
   const campaigns = top.campaigns.map(entry => record('campaign', entry));
   const opportunities = top.opportunities.map(entry => record('opportunity', entry));
   const approvals = top.approvals.map(entry => record('approval', entry));
+  const objectives = top.objectives.map(entry => record('objective', entry));
+  const writes = top.writes.map(entry => record('connection_write', entry));
   const work = top.work.map(entry => record('work', entry));
   const experiments = top.experiments.map(entry => record('experiment', entry));
   const skuVariants = new Map();
@@ -359,15 +401,52 @@ function project(state, options, summaryOnly) {
     reference(item.node, 'supplier', item.row.supplierId, atField(item.ref, 'supplierId'), 'sourced_from_supplier', null, true);
     if (!item.usedAsSku) unknown(item.node, 'sku_mapping', 'no_recorded_sku_match', item.ref);
   }
+  const retainedRequests = projectRetainedRequests({ workspaceId, summaryOnly, objectives, writes, approvals,
+    metadata, edge, unknown, digest, atField, now: options.now || new Date().toISOString() });
+  const retainedCollections = ['businessObjectives', 'connectionWrites', 'approvals'];
+  function updateRetainedCoverage() {
+    retainedRequests.counts.projectedObjectives = retainedRequests.objectives.length;
+    retainedRequests.counts.projectedRequests = retainedRequests.records.length;
+    retainedRequests.counts.resolvedApprovalLinks = retainedRequests.records.filter(row => row.approval.status === 'resolved').length;
+    retainedRequests.counts.resolvedObjectiveLinks = retainedRequests.records.filter(row => row.objective.status === 'resolved').length;
+    retainedRequests.omitted.objectives = metadata('businessObjectives').available - retainedRequests.objectives.length;
+    retainedRequests.omitted.requests = metadata('connectionWrites').available - retainedRequests.records.length;
+    retainedRequests.omitted.relationships = retainedRequests.omitted.requests * 2 + retainedRequests.records.reduce((total, row) => total
+      + [row.approval, row.objective].filter(link => ['edge_limit', 'target_outside_projection', 'output_byte_limit'].includes(link.reason)).length, 0);
+    const displayedIds = new Set(retainedRequests.records.map(row => row.nodeId));
+    const total = [...displayedIds].reduce((count, nodeId) => count + Object.values(unknownByNode.get(nodeId) || {}).reduce((a, b) => a + b, 0), 0);
+    retainedRequests.omitted.mappings = total - unknownMappings.filter(row => displayedIds.has(row.subjectId)).length;
+    retainedRequests.coverage.complete = retainedCollections.every(name => metadata(name).totalKnown && !metadata(name).truncated && !metadata(name).invalid)
+      && Object.values(retainedRequests.omitted).every(value => value === 0);
+    retainedRequests.status = retainedRequests.coverage.complete ? 'available' : 'incomplete';
+  }
+  function removeProjectedNode(nodeId) {
+    const index = nodes.findIndex(node => node.id === nodeId);
+    if (index < 0) return;
+    const [node] = nodes.splice(index, 1); nodeMap.delete(nodeId); omittedNodes.add(nodeId); byType[node.type]--;
+    for (let index = edges.length - 1; index >= 0; index--) if (edges[index].from === nodeId || edges[index].to === nodeId) {
+      byRelation[edges[index].relation]--; edges.splice(index, 1);
+    }
+    for (let index = unknownMappings.length - 1; index >= 0; index--) if (unknownMappings[index].subjectId === nodeId) unknownMappings.splice(index, 1);
+    for (const [reason, count] of Object.entries(unknownByNode.get(nodeId) || {})) {
+      unknownTotal -= count; unknownByReason[reason] -= count; if (!unknownByReason[reason]) delete unknownByReason[reason];
+    }
+    unknownByNode.delete(nodeId);
+  }
+  function trimRetainedRecord() {
+    const removed = retainedRequests.records.pop() || retainedRequests.objectives.pop();
+    if (!removed) return false;
+    removeProjectedNode(removed.nodeId); updateRetainedCoverage(); return true;
+  }
+  updateRetainedCoverage();
+  while (Buffer.byteLength(JSON.stringify(retainedRequests), 'utf8') > retainedRequests.limits.byteLimit && trimRetainedRecord()) { /* bounded opaque DTO */ }
   // Nested collections have known totals only for the parent rows inspected.
   for (const meta of sources.values()) {
     const parent = [...sources.values()].find(candidate => meta.collection.startsWith(`${candidate.collection}.`) && candidate.truncated);
     if (parent) { meta.totalKnown = false; meta.truncated = true; }
   }
-  const retainedGraphComplete = [...sources.values()].every(item => !item.truncated && !item.invalid)
+  const retainedGraphComplete = retainedRequests.coverage.complete && [...sources.values()].every(item => !item.truncated && !item.invalid)
     && omittedNodes.size === 0 && droppedEdges === 0 && unknownTotal === unknownMappings.length;
-  const existingNodeCount = nodes.length, existingEdgeCount = edges.length, existingUnknownCount = unknownMappings.length;
-  const existingUnknownTotal = unknownTotal, existingUnknownReasons = { ...unknownByReason };
   let reviewedOutcomes = null, currentProjection = null;
   if (options.inspectCurrentOutcomes === true) {
     const now = options.now || new Date().toISOString();
@@ -441,8 +520,8 @@ function project(state, options, summaryOnly) {
       verifiedOutcomeRecords: 0, countsAreProjectionOnly: true, outcomeCountsAreSourceRecords: true },
     outcomeCoverage: { publicationProofAvailable: false, complete: false, unavailableReason: 'COMMITTED_OUTCOME_SNAPSHOT_NOT_SUPPLIED', completeLifetimeHistoryClaimed: false,
       note: 'Outcome nodes are unqualified legacy source records. Recorded reviews and terminal statuses do not establish realised commercial results. This projection does not read current committed outcome heads; a zero verified count does not establish that no qualified outcomes exist.' },
-    coverage: { truncated, complete: !truncated && sourceCoverage.every(item => !item.invalid), scannedRecords: scanned, droppedNodes: omittedNodes.size, droppedEdges, omittedUnknownMappings: unknownTotal - unknownMappings.length, sources: sourceCoverage, scope: 'retained-records-in-this-workspace', ordering: 'source-array-order; duplicate-ID ordinals are snapshot-local', note: 'Missing mappings and truncated indexes never establish a relationship. Shared SKU evidence does not establish product equivalence; channel evidence does not establish campaign attribution.' },
-    limits,
+    coverage: { truncated, complete: retainedRequests.coverage.complete && !truncated && sourceCoverage.every(item => !item.invalid), scannedRecords: scanned, droppedNodes: omittedNodes.size, droppedEdges, omittedUnknownMappings: unknownTotal - unknownMappings.length, sources: sourceCoverage, scope: 'retained-records-in-this-workspace', ordering: 'source-array-order; duplicate-ID ordinals are snapshot-local', note: 'Missing mappings and truncated indexes never establish a relationship. Shared SKU evidence does not establish product equivalence; channel evidence does not establish campaign attribution.' },
+    limits, retainedRequests,
     safeguards: { tenantScope: workspaceId, readOnly: true, externalWrites: false, providerRequests: false, rawSourceRecordsIncluded: false, rawCustomerIdentityIncluded: false, rawRecordIdsIncluded: false, credentialsIncluded: false, promptBodiesIncluded: false, inferredProductEquivalence: false, inferredCampaignAttribution: false, unknownProfitConvertedToZero: false }
   };
   if (reviewedOutcomes) {
@@ -459,7 +538,9 @@ function project(state, options, summaryOnly) {
       reviewedOutcomes.counts.unresolvedExperimentLinks = records.length - reviewedOutcomes.counts.resolvedExperimentLinks;
       reviewedOutcomes.omitted.records = (currentProjection?.records.length || 0) - records.length;
       reviewedOutcomes.omitted.relationships = reviewedOutcomes.omitted.records + records.filter(row => row.relationship.reason === 'edge_limit').length;
-      reviewedOutcomes.omitted.mappings = Math.max(0, unknownTotal - existingUnknownTotal - (unknownMappings.length - existingUnknownCount));
+      const currentIds = new Set(records.map(row => row.nodeId));
+      const currentUnknowns = records.reduce((total, row) => total + Object.values(unknownByNode.get(row.nodeId) || {}).reduce((a, b) => a + b, 0), 0);
+      reviewedOutcomes.omitted.mappings = currentUnknowns - unknownMappings.filter(row => currentIds.has(row.subjectId)).length;
       reviewedOutcomes.coverage.projectionComplete = Boolean(currentProjection) && Object.values(reviewedOutcomes.omitted).every(value => value === 0);
       result.summary.nodes = nodes.length; result.summary.edges = edges.length;
       result.summary.unknownMappings = unknownTotal;
@@ -475,26 +556,21 @@ function project(state, options, summaryOnly) {
     // envelope and added detail rows, including repeated refs and omission counts.
     // This is an extension bound, not a whole legacy graph response byte cap.
     const extensionBytes = () => Buffer.byteLength(JSON.stringify({ ...result,
-      ...(summaryOnly ? {} : { nodes: nodes.slice(existingNodeCount), edges: edges.slice(existingEdgeCount), unknownMappings: unknownMappings.slice(existingUnknownCount) }) }), 'utf8');
+      ...(summaryOnly ? {} : { nodes: nodes.filter(node => node.type === 'reviewed_outcome'), edges: edges.filter(row => row.relation === 'measurement_recorded_for_experiment'), unknownMappings: unknownMappings.filter(row => row.relation === 'measurement_recorded_for_experiment') }) }), 'utf8');
     updateCurrentCoverage();
+    while (extensionBytes() > reviewedOutcomes.limits.byteLimit && trimRetainedRecord()) {
+      reviewedOutcomes.coverage.retainedGraphComplete = false;
+      updateCurrentCoverage();
+    }
     while (extensionBytes() > reviewedOutcomes.limits.byteLimit && (reviewedOutcomes.groups.length || reviewedOutcomes.records.length)) {
       if (reviewedOutcomes.groups.length) { reviewedOutcomes.groups.pop(); reviewedOutcomes.omitted.groups++; }
       else {
         const removed = reviewedOutcomes.records.pop();
-        nodes.splice(nodes.findIndex(node => node.id === removed.nodeId), 1); omittedNodes.add(removed.nodeId);
-        byType.reviewed_outcome = reviewedOutcomes.records.length;
-        for (let index = edges.length - 1; index >= existingEdgeCount; index--) if (edges[index].from === removed.nodeId) {
-          byRelation[edges[index].relation]--; edges.splice(index, 1);
-        }
-        for (let index = unknownMappings.length - 1; index >= existingUnknownCount; index--) if (unknownMappings[index].subjectId === removed.nodeId) unknownMappings.splice(index, 1);
-        for (const key of Object.keys(unknownByReason)) delete unknownByReason[key];
-        Object.assign(unknownByReason, existingUnknownReasons); unknownTotal = existingUnknownTotal;
-        for (const row of reviewedOutcomes.records) if (row.relationship.status === 'unresolved' && row.relationship.reason !== 'edge_limit') {
-          unknownTotal++; unknownByReason[row.relationship.reason] = (unknownByReason[row.relationship.reason] || 0) + 1;
-        }
+        removeProjectedNode(removed.nodeId);
       }
       updateCurrentCoverage();
     }
+    if (retainedRequests.omitted.objectives || retainedRequests.omitted.requests) { result.coverage.truncated = true; result.coverage.complete = false; }
     // Bounded fixed metadata remains below the envelope even without row data.
     if (extensionBytes() > reviewedOutcomes.limits.byteLimit) throw Object.assign(new Error('Reviewed outcome extension exceeded its byte limit'), { code: 'OUTCOME_GRAPH_SIZE_LIMIT', status: 503 });
   }

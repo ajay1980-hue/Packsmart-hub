@@ -70,12 +70,26 @@ jobs:
             /tmp/runvara-activity-*.png
             /tmp/runvara-imported-order-*.png
           if-no-files-found: ignore
-      - name: Upload current outcome graph verification images
+      - name: Upload 320px goal history and outcome graph images
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runvara-current-outcome-graph-responsive
-          path: /tmp/runvara-business-graph-*.png
+          name: runvara-goal-history-outcome-graph-320-responsive
+          path: /tmp/runvara-business-graph-320-*.png
+          if-no-files-found: ignore
+      - name: Upload 390px goal history and outcome graph images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-goal-history-outcome-graph-390-responsive
+          path: /tmp/runvara-business-graph-390-*.png
+          if-no-files-found: ignore
+      - name: Upload 1200px goal history and outcome graph images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-goal-history-outcome-graph-1200-responsive
+          path: /tmp/runvara-business-graph-1200-*.png
           if-no-files-found: ignore
       - name: Upload objective restriction verification images
         if: always()

@@ -2125,16 +2125,110 @@
     return state.graphTicket === ticket && !ticket.controller.signal.aborted &&
       state.session === ticket.session && state.csrf === ticket.csrf &&
       state.session?.csrf === ticket.sessionCsrf && state.session?.user?.id === ticket.userId &&
+      state.session?.user?.role === ticket.sessionRole && state.data?.user?.role === ticket.role &&
+      state.session?.user?.active !== false && !state.session?.user?.passwordChangeRequired &&
+      state.data?.user?.active !== false && !state.data?.user?.passwordChangeRequired &&
       state.session?.workspace?.id === ticket.sessionWorkspaceId && state.data?.workspace?.id === ticket.workspaceId &&
       state.graphGeneration === ticket.generation && state.graphInspectionGeneration === ticket.inspectionGeneration &&
       state.view === 'overview' && ticket.panel.open && !$('#app-shell').classList.contains('hidden');
   }
 
+  function renderRetainedRequests(value) {
+    const object = item => item !== null && typeof item === 'object' && !Array.isArray(item);
+    const labelFrom = (labels, item, fallback = 'Unavailable') => typeof item === 'string' && Object.hasOwn(labels, item) ? labels[item] : fallback;
+    const row = (label, item) => '<div><span>' + escapeHtml(label) + '</span><b>' + escapeHtml(item) + '</b></div>';
+    const revision = item => Number.isSafeInteger(item) && item > 0 ? String(item) : 'Unavailable';
+    const navigation = '<nav class="history-navigation" aria-label="Saved history views"><button class="text-button" type="button" data-view-link="ai-team">Open saved goals in AI Team ↗</button>' +
+      '<button class="text-button" type="button" data-view-link="approvals">Open Approval Centre ↗</button>' +
+      '<button class="text-button" type="button" data-view-link="channels">Open Connection Centre ↗</button></nav>';
+    const start = '<section class="retained-request-history" aria-labelledby="retained-request-history-title"><h3 id="retained-request-history-title">Saved goals and request history</h3>';
+    const boundary = '<p class="muted tiny">These are mutable saved records. Recorded approval and request status do not authorize execution or retry, prove an action, or establish financial progress, goal attainment or causation. Current source and execution eligibility were not checked. No archives were read; full lifetime history is not claimed.</p>';
+    if (!object(value) || value.schema !== 'runvara-retained-requests/v1' || !['available', 'incomplete'].includes(value.status) ||
+      !Array.isArray(value.objectives) || !Array.isArray(value.records) || !object(value.counts) || !object(value.coverage) || !object(value.omitted)) {
+      return start + '<p class="missing-inputs">Saved goal and request history is unavailable. This does not establish that no goals or requests exist.</p>' + boundary + navigation + '</section>';
+    }
+    // Only closed display labels and bounded numbers leave this DTO. Opaque graph
+    // references are used solely to associate visible rows, never as record URLs.
+    const goalStatuses = { active: 'Recorded active', paused: 'Recorded paused', disabled: 'Recorded disabled', completed: 'Recorded completed', cancelled: 'Recorded cancelled' };
+    const effectiveStatuses = { active: 'Active in saved snapshot', paused: 'Paused in saved snapshot', disabled: 'Disabled in saved snapshot', completed: 'Completed in saved snapshot', cancelled: 'Cancelled in saved snapshot', scheduled: 'Scheduled in saved snapshot', expired: 'Expired in saved snapshot' };
+    const requestStatuses = { pending_approval: 'Recorded pending approval', ready: 'Recorded ready', executing: 'Recorded executing', processing: 'Recorded processing', completed: 'Recorded completed', uncertain: 'Recorded uncertain', failed: 'Recorded failed', rejected: 'Recorded rejected' };
+    const approvalStatuses = { pending: 'Recorded pending', approved: 'Recorded approved', rejected: 'Recorded rejected' };
+    const origins = { owner_manual: 'Owner manual; originating goal not recorded', owner_objective_content: 'Recorded goal-associated content request', not_recorded: 'Origin not recorded', invalid: 'Recorded origin could not be validated' };
+    const comparisons = { matches_retained_definition: 'Matches retained definition; source freshness not checked', saved_revision_changed: 'Saved revision changed; recorded association preserved', saved_definition_changed: 'Saved definition changed; recorded association preserved', unavailable: 'Saved definition comparison unavailable' };
+    const reasons = {
+      missing_reference: 'No reference was recorded', not_recorded: 'No originating goal was recorded',
+      ambiguous_reference: 'More than one retained record matches the reference',
+      target_index_incomplete: 'Target records are incomplete; a unique link cannot be confirmed',
+      source_index_incomplete: 'Request records are incomplete; a unique request cannot be confirmed',
+      source_identity_ambiguous: 'More than one retained request has this identity',
+      unresolved_reference: 'Reference absent from the inspected retained snapshot; deletion is not established',
+      archived_reference: 'The referenced record is archived', target_outside_projection: 'The known target was omitted by display limits',
+      edge_limit: 'The recorded link was omitted by display limits', output_byte_limit: 'History details were omitted by the output size limit',
+      invalid_record: 'The retained record is malformed or incomplete', invalid_proposal: 'The recorded proposal is inconsistent or malformed',
+      unsupported_proposal: 'The recorded proposal format is unsupported', approval_binding_mismatch: 'The reciprocal approval binding does not match'
+    };
+    const objectives = value.objectives.slice(0, 50), records = value.records.slice(0, 50);
+    const validGoal = item => object(item) && typeof item.nodeId === 'string' && item.nodeId.length > 0 && Object.hasOwn(goalStatuses, item.recordedStatus) && revision(item.revision) !== 'Unavailable';
+    const validRequest = item => object(item) && typeof item.nodeId === 'string' && item.nodeId.length > 0 && Object.hasOwn(requestStatuses, item.recordedStatus) && Object.hasOwn(origins, item.origin) && object(item.approval) && object(item.objective);
+    const validRelation = item => object(item) && (item.status === 'resolved' ? item.reason === null && typeof item.targetNodeId === 'string' && item.targetNodeId.length > 0 :
+      item.status === 'unresolved' ? typeof item.reason === 'string' && Object.hasOwn(reasons, item.reason) : item.status === 'not_recorded' && item.reason === null);
+    const goalMatches = relation => objectives.map((goal, goalIndex) => ({ goal, goalIndex })).filter(({ goal }) => validGoal(goal) && goal.nodeId === relation.targetNodeId);
+    const validComparison = relation => revision(relation.recordedRevision) !== 'Unavailable' && revision(relation.savedRevision) !== 'Unavailable' &&
+      typeof relation.revisionComparison === 'string' && Object.hasOwn(comparisons, relation.revisionComparison) &&
+      (relation.revisionComparison !== 'matches_retained_definition' || relation.recordedRevision === relation.savedRevision);
+    const invalidRows = objectives.filter(item => !validGoal(item)).length + records.filter(item => !validRequest(item)).length;
+    const locallyLimited = value.objectives.length > 50 || value.records.length > 50;
+    const countsValid = ['objectivesInspected', 'requestsInspected', 'projectedObjectives', 'projectedRequests', 'resolvedApprovalLinks', 'resolvedObjectiveLinks'].every(key => countLabel(value.counts[key]) !== 'Unknown') &&
+      ['objectives', 'requests', 'relationships', 'mappings'].every(key => countLabel(value.omitted[key]) !== 'Unknown') &&
+      value.counts.projectedObjectives === value.objectives.length && value.counts.projectedRequests === value.records.length &&
+      value.counts.projectedObjectives <= value.counts.objectivesInspected && value.counts.projectedRequests <= value.counts.requestsInspected &&
+      value.counts.resolvedApprovalLinks <= value.counts.projectedRequests && value.counts.resolvedObjectiveLinks <= value.counts.projectedRequests;
+    const metadataValid = objectives.every(goal => validGoal(goal) && Object.hasOwn(effectiveStatuses, goal.effectiveStatus)) && records.every(record => validRequest(record) &&
+      validRelation(record.approval) && validRelation(record.objective) &&
+      (record.approval.status !== 'resolved' || Object.hasOwn(approvalStatuses, record.approval.recordedStatus)) &&
+      (record.objective.status !== 'resolved' || record.origin === 'owner_objective_content' && validComparison(record.objective) &&
+        goalMatches(record.objective).length === 1 && goalMatches(record.objective)[0].goal.revision === record.objective.savedRevision));
+    const complete = value.status === 'available' && value.coverage.complete === true && countsValid && metadataValid && !invalidRows && !locallyLimited &&
+      Object.values(value.omitted).every(count => count === 0);
+    const overview = [
+      ['Saved-history display coverage', complete ? 'Complete within this inspected display' : 'Incomplete within this inspected display'],
+      ['Saved goals inspected / shown', countLabel(value.counts.objectivesInspected) + ' / ' + countLabel(objectives.length - objectives.filter(item => !validGoal(item)).length)],
+      ['Requests inspected / shown', countLabel(value.counts.requestsInspected) + ' / ' + countLabel(records.length - records.filter(item => !validRequest(item)).length)],
+      ['Saved goals omitted', countLabel(value.omitted.objectives)], ['Requests omitted', countLabel(value.omitted.requests)],
+      ['Recorded relationships omitted', countLabel(value.omitted.relationships)], ['Unresolved history details omitted', countLabel(value.omitted.mappings)]
+    ];
+    const goalHtml = objectives.map((goal, index) => validGoal(goal) ? '<details class="evidence retained-goal"><summary>Saved goal ' + (index + 1) + ' · ' + escapeHtml(goalStatuses[goal.recordedStatus]) + '</summary><section class="status-list">' +
+      row('Saved goal status', goalStatuses[goal.recordedStatus]) + row('Saved schedule status', labelFrom(effectiveStatuses, goal.effectiveStatus)) + row('Saved revision', revision(goal.revision)) + '</section></details>' : '').join('');
+    const recordHtml = records.map((record, index) => {
+      if (!validRequest(record)) return '';
+      const approval = record.approval, objective = record.objective;
+      const matches = goalMatches(objective);
+      const objectiveResolved = record.origin === 'owner_objective_content' && objective.status === 'resolved' && validRelation(objective) && matches.length === 1;
+      const approvalResolved = approval.status === 'resolved' && validRelation(approval) && Object.hasOwn(approvalStatuses, approval.recordedStatus);
+      const comparisonAvailable = objectiveResolved && validComparison(objective) && matches[0].goal.revision === objective.savedRevision;
+      return '<details class="evidence retained-request"><summary>Request ' + (index + 1) + ' · ' + escapeHtml(requestStatuses[record.recordedStatus]) + '</summary><section class="status-list">' +
+        row('Request application status', requestStatuses[record.recordedStatus]) + row('Recorded origin', origins[record.origin]) +
+        row('Recorded approval link', approvalResolved ? 'Linked to a retained approval' : approval.status === 'not_recorded' ? 'Approval reference not recorded' : 'Unresolved') +
+        row('Recorded approval status', approvalResolved ? approvalStatuses[approval.recordedStatus] : 'Unavailable') +
+        (approvalResolved ? '' : row('Approval link reason', approval.status === 'not_recorded' ? 'No approval reference was recorded' : labelFrom(reasons, approval.reason, 'The recorded approval link could not be established'))) +
+        row('Recorded goal link', objectiveResolved ? 'Linked to saved goal ' + (matches[0].goalIndex + 1) : objective.status === 'not_recorded' && record.origin !== 'owner_objective_content' ? 'Originating goal not recorded' : 'Unresolved') +
+        (objectiveResolved ? '' : row('Goal link reason', objective.status === 'not_recorded' && record.origin !== 'owner_objective_content' ? 'No originating goal was recorded' : labelFrom(reasons, objective.reason, 'The recorded goal link could not be established'))) +
+        (record.origin === 'owner_objective_content' ? row('Recorded goal revision', revision(objective.recordedRevision)) + row('Currently saved revision', objectiveResolved ? revision(objective.savedRevision) : 'Unavailable') +
+          row('Saved definition comparison', comparisonAvailable ? comparisons[objective.revisionComparison] : comparisons.unavailable) : '') +
+        '</section></details>';
+    }).join('');
+    return start + '<p class="muted">Recorded relationships in this saved snapshot. Goal and request numbers identify rows in this display only.</p><section class="status-list">' + overview.map(([label, item]) => row(label, item)).join('') + '</section>' +
+      (invalidRows || locallyLimited ? '<p class="missing-inputs">Some returned history rows were malformed or exceeded the display limit and were withheld.</p>' : '') +
+      (!metadataValid || !countsValid ? '<p class="missing-inputs">Some returned history metadata is incomplete. Relationships and saved definition comparisons may be unavailable.</p>' : '') +
+      goalHtml + recordHtml + (!goalHtml || !recordHtml ? '<p class="muted tiny">An empty or omitted list does not establish that no goals or requests exist.</p>' : '') + boundary + navigation + '</section>';
+  }
+
   function renderBusinessGraph(graph) {
+    graph = graph && typeof graph === 'object' && !Array.isArray(graph) ? graph : {};
     const summary = graph.summary || {}, coverage = graph.coverage || {};
     const rows = [
       ['Recorded entities inspected', countLabel(summary.nodes)],
-      ['Evidence-backed links', countLabel(summary.edges)],
+      ['Recorded links inspected', countLabel(summary.edges)],
       ['Missing or ambiguous mappings', countLabel(summary.unknownMappings)],
       ['Relationship display coverage', coverage.complete === true ? 'Complete within this display' : 'Incomplete within this display'],
       ...Object.entries(summary.nodesByType || {}).map(([kind,count]) => [statusLabel(kind), countLabel(count)]),
@@ -2204,6 +2298,7 @@
       '</section></details>').join('');
     return rows.map(([label,value]) => row(label,value)).join('') +
       '<p class="muted tiny">Read-only links to existing records. A shared SKU is not proof of the same product, and a campaign link is not proof of revenue attribution.</p>' +
+      renderRetainedRequests(graph.retainedRequests) +
       outcomeRows.map(([label,value]) => row(label,value)).join('') +
       (!available ? '<p class="missing-inputs">Proof of current reviewed results is unavailable. This does not establish zero outcomes.</p>' + row('Outcome read reason', statusLabel(reviewed?.unavailableReason || 'publication_snapshot_unavailable')) : '') +
       '<p class="muted tiny">Current reviewed results only; corrections select the current version. Withdrawn results contribute no measured totals. A resolved experiment relationship does not imply inclusion in a descriptive measurement group.</p>' +
@@ -2235,14 +2330,14 @@
     const button = event.currentTarget;
     if (state.graphTicket || button.disabled || !state.session || !state.data?.workspace?.id || state.view !== 'overview' || !graphPanel.open) return;
     const ticket = { controller: new AbortController(), session: state.session, csrf: state.csrf, sessionCsrf: state.session.csrf,
-      userId: state.session.user?.id, sessionWorkspaceId: state.session.workspace?.id, workspaceId: state.data.workspace.id,
+      userId: state.session.user?.id, sessionRole: state.session.user?.role, role: state.data.user?.role, sessionWorkspaceId: state.session.workspace?.id, workspaceId: state.data.workspace.id,
       generation: state.graphGeneration, inspectionGeneration: ++state.graphInspectionGeneration, panel: graphPanel };
     state.graphTicket = ticket;
     const target = $('#business-graph-result');
     setBusy(button, true, 'Inspecting…');
     target.textContent = 'Reading current reviewed results and retained relationships…';
     try {
-      const graph = await request('/api/business-graph?outcomes=current', { signal: ticket.controller.signal, isCurrent: () => graphInspectionCurrent(ticket) });
+      const graph = await request('/api/business-graph?outcomes=current&detail=true', { signal: ticket.controller.signal, isCurrent: () => graphInspectionCurrent(ticket) });
       if (!graphInspectionCurrent(ticket)) return;
       target.innerHTML = renderBusinessGraph(graph);
     } catch(error) {

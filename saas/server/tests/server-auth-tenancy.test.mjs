@@ -9,6 +9,7 @@ import { createSessionToken, decryptCredentials, sessionCookie } from '../lib/se
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 import { createOutcomePublicationBoundary } from '../lib/business-outcomes.mjs';
+import { objectiveContentFixture } from './objective-content-fixture.mjs';
 
 const SESSION_SECRET = 'server-integration-session-secret-more-than-thirty-two-characters';
 const BOOTSTRAP_PASSWORD = 'BootstrapOnly!789Abc';
@@ -49,7 +50,8 @@ test('explicit current graph reads share outcome allowance, keep roles and read 
     aiProvider: { enhanceCommander: async () => { providerCalls++; assert.fail('Graph reads must not invoke a model'); } } });
   t.after(async () => { if (server.listening) await new Promise(resolve => server.close(resolve)); await fs.rm(directory, { recursive: true, force: true }); });
   const { store } = server.packsmart;
-  const state = seedWorkspaceState({}, { workspaceId: 'graph-tenant', email: 'graph-owner@example.test' });
+  const prepared = await objectiveContentFixture();
+  const state = structuredClone(prepared.state);
   state.users[0].passwordChangeRequired = false;
   for (const role of ['admin', 'member', 'viewer']) state.users.push({ ...state.users[0], id: `graph-${role}`, role, email: `graph-${role}@example.test` });
   await store.save(state.workspace.id, state);
@@ -60,10 +62,10 @@ test('explicit current graph reads share outcome allowance, keep roles and read 
   };
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const request = requestFactory(`http://127.0.0.1:${server.address().port}`), owner = cookieFor('owner');
-  let currentReads = 0, stateReads = 0, writes = 0, evidenceReads = 0, reviewReads = 0;
+  let currentReads = 0, stateReads = 0, writes = 0, evidenceReads = 0, reviewReads = 0, historyReads = 0;
   const selectedTenants = [];
   const persistence = createBusinessOutcomePersistence({ request: async (target, options) => {
-    assert.match(target, /^runvara_business_outcome_heads\?workspace_id=eq.graph-tenant&/);
+    assert.ok(target.startsWith(`runvara_business_outcome_heads?workspace_id=eq.${state.workspace.id}&`));
     assert.match(target, /limit=51$/); assert.equal(target.includes('source_action'), false); assert.equal(target.includes('source_measurement'), false);
     assert.equal(options.maxResponseBytes, 2 * 1024 * 1024); return { data: [], contentRange: '*/0' };
   } });
@@ -80,6 +82,7 @@ test('explicit current graph reads share outcome allowance, keep roles and read 
   assert.equal(currentReads, 0, 'bootstrap does not inspect current outcomes');
   const get = store.get.bind(store); store.get = async (...args) => { stateReads++; return get(...args); };
   for (const method of ['save', 'publishBusinessOutcome', 'reserveProviderUsage', 'settleProviderUsage', 'enqueueAgentJob']) store[method] = async () => { writes++; assert.fail(`Unexpected write ${method}`); };
+  for (const method of ['getAgentJob', 'listAgentJobs', 'getArchivedAutomationRun', 'getDailyBrief']) store[method] = async () => { historyReads++; assert.fail(`Graph must not hydrate retained history through ${method}`); };
   store.getBusinessOutcomeReview = async () => { reviewReads++; return { selected: true }; };
   store.getBusinessOutcomeEvidence = async () => { evidenceReads++; return { currentStatus: 'not_checked' }; };
 
@@ -110,8 +113,19 @@ test('explicit current graph reads share outcome allowance, keep roles and read 
       assert.ok(result.payload.reviewedOutcomes.snapshots.workspace.readCompletedAt <= result.payload.reviewedOutcomes.snapshots.outcomes.readCompletedAt);
       assert.equal(result.payload.reviewedOutcomes.snapshots.independent, true);
       assert.equal(result.payload.summary.verifiedOutcomeRecords, 0);
+      const retained = result.payload.retainedRequests;
+      assert.equal(retained.counts.projectedObjectives, 1); assert.equal(retained.counts.projectedRequests, 1);
+      assert.equal(retained.records[0].approval.status, 'resolved'); assert.equal(retained.records[0].objective.status, 'resolved');
+      assert.equal(retained.records[0].objective.revisionComparison, 'matches_retained_definition');
+      assert.equal(retained.coverage.archiveReadsPerformed, 0); assert.equal(retained.coverage.currentSourceChecked, false);
+      for (const privateValue of [prepared.write.id, prepared.write.requestId, prepared.write.approvalId, prepared.objective.id,
+        prepared.write.account, prepared.write.requestedBy, prepared.write.input.title, prepared.write.input.description]) {
+        assert.equal(JSON.stringify(result.payload).includes(privateValue), false, `Redacted retained graph for ${role}`);
+      }
+
     }
-    assert.equal(evidenceReads, 0); assert.equal(reviewReads, 0); assert.equal(writes, 0);
+    assert.equal(evidenceReads, 0); assert.equal(reviewReads, 0); assert.equal(writes, 0); assert.equal(historyReads, 0);
+    assert.deepEqual(prepared.counts, { job: 0, credentials: 0, saves: 0, fresh: 0, mutations: 0 });
     assert.ok(selectedTenants.every(tenant => tenant === state.workspace.id));
   });
   await t.test('existing selected-review and evidence role matrix is unchanged', async () => {

@@ -8,6 +8,7 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 const costs = () => ({ landed: 2, packing: 0.2, handling: 0.1, delivery: 1, paymentFee: 0.3, channelFee: 0.4, advertising: 0, otherVariable: 0, supplierId: 's1' });
 function fixture(workspaceId = 'tenant-a') {
   const state = seedWorkspaceState({}, { workspaceId });
+  state.businessObjectives = []; state.connectionWrites = [];
   state.products = [
     { id: 'p1', externalId: 'external-p1', provider: 'shopify', title: 'Mailing bags', status: 'active', variants: [{ id: 'v1', externalId: 'external-v1', sku: 'BAGS', price: 10, inventory: 50 }] },
     { id: 'p2', provider: 'shopify', title: 'Boxes', variants: [{ id: 'v2', sku: 'BOXES', price: 12 }] }
@@ -569,7 +570,7 @@ test('hot-state summaries and copied publication proofs cannot supply committed 
 });
 
 test('legacy outcome source counts stay bounded and distinct from unavailable publication coverage', () => {
-  const state = { workspace: { id: 'tenant-a' }, revenueEngine: { experiments: Array.from({ length: 12 }, (_, index) => ({
+  const state = { workspace: { id: 'tenant-a' }, businessObjectives: [], connectionWrites: [], approvals: [], revenueEngine: { experiments: Array.from({ length: 12 }, (_, index) => ({
     id: `experiment-${index}`, status: 'completed', impact: { verified: index % 2 === 0, incrementalContribution: index }
   })) } };
   const summary = deriveBusinessGraphSummary(state);

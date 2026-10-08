@@ -496,6 +496,10 @@ main {
 /* Reviewed measurements keep exact values readable without narrowing labels
    and amounts into competing columns on phones. Larger user text can wrap. */
 .business-graph-inspector section.status-list > div { font-size: max(.875rem, 14px); line-height: 1.5; }
+.retained-request-history { min-width: 0; margin: 1rem 0; padding: 1rem 0; border-block: 1px solid var(--line); }
+.retained-request-history h3 { margin: 0 0 .5rem; }
+.history-navigation { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
+.history-navigation button { text-align: left; white-space: normal; }
 @media (max-width: 600px) {
   .business-graph-inspector section.status-list > div {
     display: grid;
