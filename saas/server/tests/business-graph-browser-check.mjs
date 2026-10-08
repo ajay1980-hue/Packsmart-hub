@@ -18,32 +18,56 @@ import { createRestrictionTypographySession } from './objective-browser-typograp
 import { createOutcomeViewportSession } from './business-outcomes-browser-capture.mjs';
 
 async function graphTypography(page) {
-  return page.locator('#business-graph-result section.status-list').evaluateAll(sections => sections.flatMap(section =>
-    [...section.children].map(row => {
+  return page.locator('.business-graph-inspector .status-list > div').evaluateAll(rows => rows.map(row => {
+      const summary = row.parentElement.id === 'business-graph-result';
       const label = row.querySelector('span'), value = row.querySelector('b');
       const measure = element => {
         const style = getComputedStyle(element), range = document.createRange(), bounds = element.getBoundingClientRect();
         range.selectNodeContents(element);
         const textRects = [...range.getClientRects()].filter(rect => rect.width && rect.height);
         const rowBounds = row.getBoundingClientRect();
+        // Whole-box bounds can pass even when "31" or "Complete" has been
+        // split across lines. Measure each summary value word's actual range.
+        const words = [], walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        if (summary && element === value) {
+          for (let text; (text = walker.nextNode());) for (const match of text.textContent.matchAll(/[A-Za-z]+|\d+/g)) {
+            range.setStart(text, match.index); range.setEnd(text, match.index + match[0].length);
+            const rects = [...range.getClientRects()].filter(rect => rect.width && rect.height);
+            words.push({ text: match[0], lineCount: new Set(rects.map(rect => Math.round(rect.top * 100) / 100)).size });
+          }
+        }
         return { text: element.textContent, fontSize: parseFloat(style.fontSize), whiteSpace: style.whiteSpace,
           overflowX: style.overflowX, overflowY: style.overflowY, textOverflow: style.textOverflow,
           lineCount: new Set(textRects.map(rect => Math.round(rect.top * 100) / 100)).size,
+          words,
           width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight,
           textInside: textRects.every(rect => rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1 &&
             rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1),
           insideRow: bounds.left >= rowBounds.left - 1 && bounds.right <= rowBounds.right + 1 &&
             bounds.top >= rowBounds.top - 1 && bounds.bottom <= rowBounds.bottom + 1 };
       };
-      return { label: measure(label), value: measure(value) };
-    })));
+      return { summary, label: measure(label), value: measure(value) };
+    }));
 }
 
-function assertReadableRows(rows, width, { doubled = false } = {}) {
+function assertReadableRows(rows, width, { doubled = false, summaryCounts } = {}) {
   assert.ok(rows.length > 0, 'expanded measurement, result and snapshot rows were inspected');
+  const summaries = rows.filter(row => row.summary);
+  for (const [label, value] of [
+    ['Recorded entities inspected', String(summaryCounts.nodes)], ['Recorded links inspected', String(summaryCounts.edges)],
+    ['Relationship display coverage', 'Complete within this display'], ['Current reviewed results', 'Snapshot available']
+  ]) assert.ok(summaries.some(row => row.label.text === label && row.value.text === value), `actual summary is inspected at ${width}px: ${label} = ${value}`);
+  for (const row of summaries) {
+    const context = `${width}px${doubled ? ' doubled text' : ''}: ${JSON.stringify(row)}`;
+    assert.ok(row.value.words.length > 0, 'summary words were measured: ' + context);
+    for (const word of row.value.words) assert.equal(word.lineCount, 1, 'summary count/status words stay intact: ' + context);
+    if (/^[\d,]+$/.test(row.value.text)) assert.equal(row.value.lineCount, 1, 'summary counts stay on one line: ' + context);
+  }
   for (const row of rows) for (const item of [row.label, row.value]) {
     const context = `${width}px${doubled ? ' doubled text' : ''}: ${JSON.stringify(row)}`;
-    assert.ok(item.fontSize >= (doubled ? 28 : 14), 'nested evidence text stays readable: ' + context);
+    if (row.summary && width > 600) {
+      assert.ok(Math.abs(item.fontSize - 13.12 * (doubled ? 2 : 1)) < .01, 'desktop summary keeps its existing .82rem baseline: ' + context);
+    } else assert.ok(item.fontSize >= (doubled ? 28 : 14), 'phone summaries and nested evidence text stay readable: ' + context);
     assert.notEqual(item.whiteSpace, 'nowrap', 'larger text must be allowed to wrap: ' + context);
     assert.ok(!['hidden', 'clip'].includes(item.overflowX) && !['hidden', 'clip'].includes(item.overflowY), 'text cannot be clipped: ' + context);
     assert.notEqual(item.textOverflow, 'ellipsis', 'exact evidence cannot be shortened: ' + context);
@@ -109,13 +133,9 @@ function publication(index, { experimentId, amount, currency = 'GBP', withdrawn 
     intent_digest: digest('browser_intent_' + index), committed_at: '2026-10-06T19:00:00+00:00', commit_revision: 'browser_fixture_revision' };
   return { workspace_id: WORKSPACE, outcome_id: version.outcomeId, version_id: version.versionId, version: row };
 }
-const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-graph-browser-'));
 const secret = 'graph-browser-test-only-secret-more-than-32-characters';
 let providerRequests = 0;
-const server = createPacksmartServer({ NODE_ENV: 'test', APP_PUBLIC_URL: 'http://127.0.0.1:18787', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
-  SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' },
-  { schedulerEnabled: false, agentOpsEnabled: false, fetchImpl: () => { providerRequests++; throw new Error('Provider transport forbidden in synthetic graph fixture'); } });
-let browser, currentReads = 0, readBarrier = null;
+let browser, currentReads = 0;
 try {
   const prepared = await publishedActionGraphFixture({ kind: 'objective', workspaceId: WORKSPACE }), state = prepared.state;
   const manual = await publishedActionGraphFixture({ workspaceId: WORKSPACE });
@@ -138,18 +158,6 @@ try {
     publication(3, { experimentId: 'browser_experiment_two', amount: '99', withdrawn: true, links: manual.version.links }),
     publication(4, { experimentId: 'browser_long_experiment_one', amount: '999999999999999999.123456', currency: 'EUR' }),
     publication(5, { experimentId: 'browser_long_experiment_two', amount: '1', currency: 'EUR' })];
-  const persistence = createBusinessOutcomePersistence({ now: () => new Date(NOW), request: async (route, options) => {
-    currentReads++;
-    assert.ok(route.startsWith('runvara_business_outcome_heads?workspace_id=eq.' + WORKSPACE + '&'));
-    assert.ok(route.endsWith('&order=outcome_id.asc&limit=51')); assert.equal(options.includeResponseMetadata, true);
-    assert.doesNotMatch(route, /source_measurement|source_action/); assert.equal(options.method || 'GET', 'GET');
-    if (readBarrier) { const barrier = readBarrier; readBarrier = null; await new Promise(resolve => { barrier.release = resolve; }); }
-    return { data: structuredClone(rows), contentRange: '0-4/5' };
-  } });
-  server.packsmart.store.businessOutcomeSummary = workspaceId => persistence.current(workspaceId);
-  await server.packsmart.store.save(state.workspace.id, state);
-  server.listen(18787, '127.0.0.1'); await once(server, 'listening');
-  const base = `http://127.0.0.1:${server.address().port}`;
   const token = createSessionToken({ userId: state.users[0].id, workspaceId: state.workspace.id, email: state.users[0].email, role: 'owner', sessionVersion: 1 }, secret);
   browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
   const until = async condition => {
@@ -157,7 +165,32 @@ try {
     assert.fail('Synthetic current-head request did not reach expected state');
   };
   for (const width of [320, 390, 1200]) {
-    const context = await browser.newContext({ viewport: { width, height: 900 } });
+    // Each viewport is an independent scenario with the same synthetic owner
+    // and source data. Start a fresh server so state and rate budgets cannot
+    // leak from the preceding scenario; production limiter checks stay intact.
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), `runvara-graph-browser-${width}-`));
+    let server, context, readBarrier = null, pendingRead = null;
+    try {
+    server = createPacksmartServer({ NODE_ENV: 'test', APP_PUBLIC_URL: 'http://127.0.0.1:18787', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+      SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' },
+      { schedulerEnabled: false, agentOpsEnabled: false, fetchImpl: () => { providerRequests++; throw new Error('Provider transport forbidden in synthetic graph fixture'); } });
+    const persistence = createBusinessOutcomePersistence({ now: () => new Date(NOW), request: async (route, options) => {
+      currentReads++;
+      assert.ok(route.startsWith('runvara_business_outcome_heads?workspace_id=eq.' + WORKSPACE + '&'));
+      assert.ok(route.endsWith('&order=outcome_id.asc&limit=51')); assert.equal(options.includeResponseMetadata, true);
+      assert.doesNotMatch(route, /source_measurement|source_action/); assert.equal(options.method || 'GET', 'GET');
+      if (readBarrier) {
+        const barrier = pendingRead = readBarrier; readBarrier = null;
+        try { await new Promise(resolve => { barrier.release = resolve; }); }
+        finally { if (pendingRead === barrier) pendingRead = null; }
+      }
+      return { data: structuredClone(rows), contentRange: '0-4/5' };
+    } });
+    server.packsmart.store.businessOutcomeSummary = workspaceId => persistence.current(workspaceId);
+    await server.packsmart.store.save(state.workspace.id, structuredClone(state));
+    server.listen(18787, '127.0.0.1'); await once(server, 'listening');
+    const base = `http://127.0.0.1:${server.address().port}`;
+    context = await browser.newContext({ viewport: { width, height: 900 } });
     await context.addCookies([{ name: 'packsmart_session', value: token, url: base, httpOnly: true, sameSite: 'Strict' }]);
     const page = await context.newPage(), errors = [], calls = [], apiCalls = [], unexpected = [], readsBefore = currentReads;
     page.on('pageerror', error => errors.push(error.message));
@@ -190,8 +223,12 @@ try {
     const details = page.locator('.business-graph-inspector'), result = page.locator('#business-graph-result'), button = page.locator('#load-business-graph');
     await page.locator('#open-reviewed-results').click();
     assert.equal(await details.evaluate(element => element.open), true); assert.equal(calls.length, 0, 'opening never fetches');
+    const graphResponse = page.waitForResponse(response => new URL(response.url()).pathname === '/api/business-graph');
     await button.evaluate(element => { element.click(); element.click(); });
     await result.getByText('Complete current-result read', { exact: true }).waitFor();
+    const { summary: summaryCounts } = await (await graphResponse).json();
+    assert.ok(Number.isSafeInteger(summaryCounts.nodes) && summaryCounts.nodes >= 10 && Number.isSafeInteger(summaryCounts.edges) && summaryCounts.edges >= 10,
+      'the same graph response supplies multi-digit summary counts for the readability regression');
     assert.equal(calls.length, 1); assert.equal(currentReads, readsBefore + 1, 'one explicit request reads one current-head snapshot');
     assert.equal(new URL(calls[0]).search, '?outcomes=current&detail=true');
     assert.match(await result.textContent(), /Published results loaded4/); assert.match(await result.textContent(), /Withdrawn results loaded1/);
@@ -232,7 +269,7 @@ try {
     // typography is checked, including long opaque version/snapshot references.
     await result.locator('details').evaluateAll(elements => elements.forEach(element => { element.open = true; }));
     const normal = await graphTypography(page);
-    assertReadableRows(normal, width);
+    assertReadableRows(normal, width, { summaryCounts });
     const ordinaryAmounts = normal.filter(row => row.label.text === 'Exact scoped amount' && ['-12.340001', '0'].includes(row.value.text));
     assert.equal(ordinaryAmounts.length, 2, 'ordinary exact amounts are present unchanged');
     const timestamps = normal.filter(row => /^(Observation window|Workspace read completed|Outcome read completed)/.test(row.label.text));
@@ -252,7 +289,7 @@ try {
     try {
     await typography.evaluate(session => session.enlarge());
     const doubled = await graphTypography(page);
-    assertReadableRows(doubled, width, { doubled: true });
+    assertReadableRows(doubled, width, { doubled: true, summaryCounts });
     assert.deepEqual(doubled.map(row => [row.label.text, row.value.text]), normal.map(row => [row.label.text, row.value.text]), 'enlarged text preserves every exact value and label');
     if (width < 600) {
       assert.ok(doubled.some(row => row.label.text.startsWith('Observation window') && row.value.lineCount > 1), 'phone timestamps wrap naturally at doubled text size');
@@ -321,7 +358,17 @@ try {
     assert.deepEqual(errors, []);
     await objectives.screenshot({ path: `/tmp/runvara-business-objectives-${width}.png` });
     assert.deepEqual(unexpected, []); assert.equal(providerRequests, 0);
-    await context.close();
+    } finally {
+      // An assertion may fail while a synthetic response is held. Release it
+      // before closing the server, and always remove this scenario's state.
+      readBarrier = null;
+      pendingRead?.release();
+      try { if (context) await context.close(); }
+      finally {
+        try { if (server?.listening) await new Promise(resolve => server.close(resolve)); }
+        finally { await fs.rm(directory, { recursive: true, force: true }); }
+      }
+    }
   }
   assert.equal(currentReads, 12, 'twelve explicit graph inspections, no automatic current-head reads');
   assert.equal(providerRequests, 0, 'the server never used provider transport');
@@ -334,6 +381,4 @@ try {
   console.log('Published manual/v2 references, saved request/approval inspection and objectives verified at 320, 390 and 1200 pixels. Normal interactions and separate exact 200% subtree scrolling source/control captures passed.');
 } finally {
   if (browser) await browser.close();
-  await new Promise(resolve => server.close(resolve));
-  await fs.rm(directory, { recursive: true, force: true });
 }

@@ -493,23 +493,25 @@ main {
 .status-list span { color: var(--muted); }
 .status-list b { max-width: 65%; text-align: right; overflow-wrap: anywhere; }
 
-/* Reviewed measurements keep exact values readable without narrowing labels
-   and amounts into competing columns on phones. Larger user text can wrap. */
+/* Reviewed measurements keep exact values readable. On phones, summaries and
+   details give labels and values a full row, including at larger user text. */
 .business-graph-inspector section.status-list > div { font-size: max(.875rem, 14px); line-height: 1.5; }
 .retained-request-history { min-width: 0; margin: 1rem 0; padding: 1rem 0; border-block: 1px solid var(--line); }
 .retained-request-history h3 { margin: 0 0 .5rem; }
 .history-navigation { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
 .history-navigation button { text-align: left; white-space: normal; }
 @media (max-width: 600px) {
-  .business-graph-inspector section.status-list > div {
+  .business-graph-inspector .status-list > div {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
     gap: .25rem;
     padding: .6rem 0;
+    font-size: max(.875rem, 14px);
+    line-height: 1.5;
   }
-  .business-graph-inspector section.status-list > div > span { overflow-wrap: normal; }
-  .business-graph-inspector section.status-list > div > b { max-width: 100%; min-width: 0; text-align: left; white-space: normal; }
+  .business-graph-inspector .status-list > div > span { overflow-wrap: normal; }
+  .business-graph-inspector .status-list > div > b { max-width: 100%; min-width: 0; text-align: left; white-space: normal; }
 }
 
 .channel-grid {
