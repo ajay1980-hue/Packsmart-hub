@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { before, after, test } from 'node:test';
 import { executeConnectionWrite } from '../lib/connection-writes.mjs';
-import { resolveRecordedActionEvidence, validateReviewedSourceAction } from '../lib/reviewed-action-evidence.mjs';
+import { digestReviewedActionValue, resolveRecordedActionEvidence, validateReviewedSourceAction } from '../lib/reviewed-action-evidence.mjs';
 import { contentJsonbFixture, CONTENT_FAMILIES, CONTENT_CONSENTS } from './content-jsonb-test-fixture.mjs';
 import { openJsonbFixture } from './content-jsonb-postgres-fixture.mjs';
 
@@ -95,7 +95,33 @@ async function assertCompleted(f, { storageOrder = true } = {}) {
     assert.equal(evidence.context.policies.length, f.family === 'manual-v1-policy' ? 1 : 0);
     assert.equal(evidence.context.claimIdentity, f.expected.identity);
   } else {
-    assert.equal(savedWrite.recordedActionContext, undefined, 'No objective-v2 publication evidence is introduced');
+    const originalWrite = f.before.connectionWrites[0], proposal = originalWrite.objectivePolicyProposal;
+    const approval = f.before.approvals.find(row => row.id === originalWrite.approvalId);
+    const evidence = resolveRecordedActionEvidence(cold.state, result.id);
+    assert.deepEqual(validateReviewedSourceAction(evidence, { workspaceId: f.session.workspaceId }), evidence);
+    assert.equal(evidence.schema, 'runvara-reviewed-source-action/v2');
+    assert.equal(evidence.context.schema, 'runvara-recorded-action-context/v2');
+    assert.equal(evidence.context.origin, 'owner_objective_content');
+    assert.deepEqual(savedWrite.recordedActionContext, { ...evidence.context, snapshotDigest: evidence.digest });
+    assert.deepEqual(evidence.input, originalWrite.input);
+    assert.deepEqual(evidence.context.proposal, proposal, 'Cold evidence retains the exact approved source and proposal');
+    assert.deepEqual(evidence.context.originatingObjective, { workspaceId: f.session.workspaceId,
+      id: f.objective.id, revision: f.objective.revision, digest: proposal.source.objectiveDigest });
+    assert.deepEqual(evidence.context.policies, proposal.policies);
+    const decision = { workspaceId: f.session.workspaceId, id: approval.id, revision: approval.revision,
+      status: approval.status, decidedBy: approval.decidedBy, decidedAt: approval.decidedAt, payload: approval.payload };
+    assert.deepEqual(evidence.context.approval, { ...decision, digest: digestReviewedActionValue(decision) });
+    assert.deepEqual(evidence.context.stableApproval, {
+      id: approval.id, type: approval.type, action: approval.action, reason: approval.reason,
+      financialImpact: approval.financialImpact, expectedBenefit: approval.expectedBenefit, risk: approval.risk,
+      requestedBy: approval.requestedBy, source: approval.source,
+      payload: { connectionWriteId: originalWrite.id, digest: f.expected.inputDigest },
+      evidence: approval.evidence, revision: approval.revision, agentId: approval.agentId, createdAt: approval.createdAt
+    }, 'Cold evidence retains the original stable approval, without its circular proposal digest');
+    assert.equal(evidence.context.inputDigest, f.expected.inputDigest);
+    assert.equal(evidence.context.claimIdentity, f.expected.identity, 'Evidence retains original producer claim fingerprint bytes');
+    assert.equal(evidence.context.dispatchRequestDigest, f.expected.requestDigest);
+    assert.equal(savedWrite.dispatchClaim.authority, f.expected.authority);
   }
   const beforeRepeat = { ...f.counts }, claimBeforeRepeat = JSON.stringify(savedWrite.dispatchClaim);
   await executeConnectionWrite(cold.state, result.id, f.session.userId, f.service,

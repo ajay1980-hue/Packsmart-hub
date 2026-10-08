@@ -3,6 +3,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
+// Keep every source/control image, but bound the three independently downloadable
+// artifact groups at each viewport width. A new capture stage must be assigned.
+const CAPTURE_GROUPS = Object.freeze({
+  selection: 'preparation', 'owner-review': 'preparation', 'unknown-publication': 'preparation',
+  'exact-evidence': 'publication', 'explicit-reuse': 'publication', 'correction-review': 'publication',
+  'withdrawal-review': 'withdrawal', 'withdrawn-evidence': 'withdrawal'
+});
+
 export function createOutcomeViewportSession(panel) {
   const view = panel.ownerDocument.defaultView, document = panel.ownerDocument, ancestors = [];
   for (let node = panel.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) ancestors.push(node);
@@ -33,12 +41,14 @@ export function createOutcomeViewportSession(panel) {
 }
 
 export async function captureOutcomeViewports({ page, width, name, subtree, controls, captures, typographyFactory }) {
+  assert.ok(Object.hasOwn(CAPTURE_GROUPS, name), 'Every outcome capture stage belongs to an uploaded artifact group');
+  const group = CAPTURE_GROUPS[name];
   const typography = await subtree.evaluateHandle(typographyFactory), viewport = await subtree.evaluateHandle(createOutcomeViewportSession);
   const controlViews = await Promise.all(controls.map(control => control.evaluateHandle(createOutcomeViewportSession)));
   const image = async (suffix, label, bounds) => {
-    const file = `/tmp/runvara-business-outcomes-${width}-${name}${suffix}-${label}.png`;
+    const file = `/tmp/runvara-business-outcomes-${width}-${group}-${name}${suffix}-${label}.png`;
     assert.equal(captures.some(row => row.file === file), false, 'every evidence capture has a unique path');
-    await page.screenshot({ path: file, fullPage: false, caret: 'initial' }); captures.push({ width, name, file, bounds });
+    await page.screenshot({ path: file, fullPage: false, caret: 'initial' }); captures.push({ width, group, name, file, bounds });
     console.log(`${width}px ${name}${suffix} ${label}: ${JSON.stringify(bounds)}`);
   };
   const horizontal = (bounds, label) => assert.ok(bounds.left >= bounds.visibleLeft - 2 && bounds.right <= bounds.visibleRight + 2 && bounds.scroll <= bounds.client + 2, `${label} clipped horizontally: ${JSON.stringify(bounds)}`);
@@ -65,7 +75,7 @@ export async function captureOutcomeViewports({ page, width, name, subtree, cont
     try { await typography.evaluate(session => session.enlarge()); await images('-large-text'); }
     finally { await typography.evaluate(session => session.restore()); }
     await typography.evaluate(session => session.assertBaseline());
-    const bytes = (await Promise.all(captures.filter(row => row.width === width).map(row => fs.stat(row.file)))).reduce((total, stat) => total + stat.size, 0);
-    assert.ok(bytes < 32 * 1024 * 1024, `${width}px evidence exceeds the 32 MiB artifact bound`);
+    const bytes = (await Promise.all(captures.filter(row => row.width === width && row.group === group).map(row => fs.stat(row.file)))).reduce((total, stat) => total + stat.size, 0);
+    assert.ok(bytes < 31 * 1024 * 1024, `${width}px ${group} evidence leaves room below the 32 MiB ZIP bound`);
   } finally { await typography.dispose(); await viewport.dispose(); await Promise.all(controlViews.map(view => view.dispose())); }
 }

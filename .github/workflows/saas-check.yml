@@ -97,26 +97,68 @@ jobs:
           name: runvara-objective-restrictions-responsive
           path: /tmp/runvara-business-objectives-*.png
           if-no-files-found: ignore
-      - name: Upload objective outcome 320px verification images
+      - name: Upload objective outcome 320px preparation images
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runvara-objective-outcome-320-responsive
-          path: /tmp/runvara-business-outcomes-320-*.png
+          name: runvara-objective-outcome-320-preparation-responsive
+          path: /tmp/runvara-business-outcomes-320-preparation-*.png
           if-no-files-found: ignore
-      - name: Upload objective outcome 390px verification images
+      - name: Upload objective outcome 320px publication images
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runvara-objective-outcome-390-responsive
-          path: /tmp/runvara-business-outcomes-390-*.png
+          name: runvara-objective-outcome-320-publication-responsive
+          path: /tmp/runvara-business-outcomes-320-publication-*.png
           if-no-files-found: ignore
-      - name: Upload objective outcome 1200px verification images
+      - name: Upload objective outcome 320px withdrawal images
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runvara-objective-outcome-1200-responsive
-          path: /tmp/runvara-business-outcomes-1200-*.png
+          name: runvara-objective-outcome-320-withdrawal-responsive
+          path: /tmp/runvara-business-outcomes-320-withdrawal-*.png
+          if-no-files-found: ignore
+      - name: Upload objective outcome 390px preparation images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-outcome-390-preparation-responsive
+          path: /tmp/runvara-business-outcomes-390-preparation-*.png
+          if-no-files-found: ignore
+      - name: Upload objective outcome 390px publication images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-outcome-390-publication-responsive
+          path: /tmp/runvara-business-outcomes-390-publication-*.png
+          if-no-files-found: ignore
+      - name: Upload objective outcome 390px withdrawal images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-outcome-390-withdrawal-responsive
+          path: /tmp/runvara-business-outcomes-390-withdrawal-*.png
+          if-no-files-found: ignore
+      - name: Upload objective outcome 1200px preparation images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-outcome-1200-preparation-responsive
+          path: /tmp/runvara-business-outcomes-1200-preparation-*.png
+          if-no-files-found: ignore
+      - name: Upload objective outcome 1200px publication images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-outcome-1200-publication-responsive
+          path: /tmp/runvara-business-outcomes-1200-publication-*.png
+          if-no-files-found: ignore
+      - name: Upload objective outcome 1200px withdrawal images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-objective-outcome-1200-withdrawal-responsive
+          path: /tmp/runvara-business-outcomes-1200-withdrawal-*.png
           if-no-files-found: ignore
       - name: Upload manual content verification images
         if: always()

@@ -446,8 +446,13 @@ try {
     assert.deepEqual(external, [], 'synthetic checks never contact external providers');
     assert.deepEqual(writes.filter(write => !write.endsWith('/api/auth/logout') && !write.endsWith('/api/auth/login')),
       [`PUT ${savePath}`, 'POST /api/business-outcomes/publish', 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish', `PUT ${savePath}`, 'POST /api/business-outcomes/publish'], 'outcomes never execute commercial/provider actions');
-    const images = captures.filter(row => row.width === width), bytes = (await Promise.all(images.map(row => fs.stat(row.file)))).reduce((sum, stat) => sum + stat.size, 0);
-    assert.ok(bytes < 32 * 1024 * 1024); console.log(`${width}px objective outcome evidence: ${images.length} viewport images, ${bytes} bytes; exact 200% source/review subtree typography, normal-size interactions, real fixed chrome.`);
+    for (const group of ['preparation', 'publication', 'withdrawal']) {
+      const images = captures.filter(row => row.width === width && row.group === group);
+      assert.ok(images.length > 0, `${width}px ${group} evidence must be captured`);
+      const bytes = (await Promise.all(images.map(row => fs.stat(row.file)))).reduce((sum, stat) => sum + stat.size, 0);
+      assert.ok(bytes < 31 * 1024 * 1024, `${width}px ${group} evidence leaves room below the 32 MiB ZIP bound`);
+      console.log(`${width}px ${group} outcome evidence: ${images.length} viewport images, ${bytes} bytes; exact 200% source/review subtree typography, normal-size interactions, real fixed chrome.`);
+    }
     await context.close();
   }
   console.log('Objective action outcome selection, review, unknown acknowledgement recovery, exact public evidence, correction reuse, unlink and withdrawal passed at 320, 390 and 1200 pixels. Separate normal/exact 200% subtree captures cover contiguous real scrolling source and action controls; no app-wide zoom claim. Synthetic services only; no provider mutation.');
