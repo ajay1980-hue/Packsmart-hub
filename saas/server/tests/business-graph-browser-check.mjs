@@ -57,6 +57,9 @@ function assertReadableRows(rows, width, { doubled = false } = {}) {
 async function captureGraphViewports(page, width, suffix = '') {
   const panel = page.locator('.business-graph-inspector');
   const viewport = await panel.evaluateHandle(createOutcomeViewportSession);
+  // The complete expanded graph exceeds 60 real viewports at 320px and 200%
+  // text. Keep a finite enlarged-text budget alongside the per-width byte bound.
+  const maxCaptures = suffix === '-large-text' ? 80 : 60;
   const horizontal = bounds => assert.ok(bounds.left >= bounds.visibleLeft - 2 && bounds.right <= bounds.visibleRight + 2 && bounds.scroll <= bounds.client + 2,
     `graph ${width}px${suffix} horizontal clipping: ${JSON.stringify(bounds)}`);
   try {
@@ -64,11 +67,13 @@ async function captureGraphViewports(page, width, suffix = '') {
     while (true) {
       await viewport.evaluate((session, offset) => session.reveal(offset), Math.max(0, covered - 80));
       const bounds = await viewport.evaluate(session => session.bounds()); horizontal(bounds);
-      assert.ok(bounds.from <= covered + 2 && bounds.to > covered + 1, `graph capture leaves a gap: ${JSON.stringify({ covered, ...bounds })}`);
+      const coverage = { width, suffix, part: part + 1, maxCaptures, covered, advance: bounds.to - covered, remaining: bounds.height - bounds.to, ...bounds };
+      console.log(`graph source capture: ${JSON.stringify(coverage)}`);
+      assert.ok(bounds.from <= covered + 2 && bounds.to > covered + 1, `graph capture leaves a gap or fails to advance: ${JSON.stringify(coverage)}`);
       await page.screenshot({ path: `/tmp/runvara-business-graph-${width}-source${suffix}-${++part}.png`, fullPage: false });
       covered = bounds.to;
       if (covered >= bounds.height - 1) break;
-      assert.ok(part < 60, 'graph source stays within 60 viewport captures');
+      assert.ok(part < maxCaptures, `graph source exceeds its viewport capture budget: ${JSON.stringify(coverage)}`);
     }
     const controls = [page.locator('#load-business-graph'), panel.locator('[data-graph-record-link]').first(), panel.locator('[data-graph-record-link]').nth(1)];
     for (let index = 0; index < controls.length; index++) {
