@@ -37,7 +37,7 @@
 .connection-brand { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 12px; background: #29251b; color: var(--gold-light); font-weight: 800; }
 .connection-title { padding: .35rem 0; border: 0; color: var(--text); background: transparent; font: inherit; text-align: left; }
 .connection-summary { margin: .5rem 0; font-size: .87rem; overflow-wrap: anywhere; }
-.connection-health { font-size: .8rem; line-height: 1.6; }
+.connection-health { font-size: .8rem; line-height: 1.6; overflow-wrap: anywhere; }
 .connection-card-footer { margin-top: auto; padding-top: .7rem; }
 .connection-card-footer small { display: block; color: var(--muted); line-height: 1.6; margin-bottom: 1rem; }
 .connection-card .button-row { gap: .5rem; flex-wrap: wrap; }
@@ -1439,8 +1439,9 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 .connection-brand { color: var(--blue); background: var(--surface-inset); border: 1px solid var(--rule-observation); border-radius: var(--radius-sm); }
 .connection-health { padding-left: .8rem; border-left: 2px solid var(--rule-observation); }
 .connection-health.warn { border-color: var(--rule-judgement); }
-.connection-facts { display: grid; grid-template-columns: 1fr 1fr; gap: .85rem .8rem; padding: 1rem 0; margin: .4rem 0; border-block: 1px solid var(--line); }
-.connection-facts dt { color: var(--muted); font-size: .68rem; }
+.connection-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem .8rem; padding: 1rem 0; margin: .4rem 0; border-block: 1px solid var(--line); }
+.connection-facts > div { min-width: 0; }
+.connection-facts dt { color: var(--muted); font-size: .68rem; overflow-wrap: anywhere; }
 .connection-facts dd { margin: .25rem 0 0; font-size: .76rem; overflow-wrap: anywhere; }
 .connection-coverage { margin: .6rem 0; }
 .connection-coverage .capabilities { margin: .5rem 0; flex-wrap: wrap; }

@@ -87,6 +87,14 @@ read-admission paths, endpoint debt protection, and truthful health/schedule cop
 They use synthetic state and injected providers. These tests establish source
 behavior, not a production rate-limit incident or a deployed repair.
 
+The first cooldown browser run found horizontal card overflow at 1200 pixels
+with the affected text enlarged to 200%. The connection facts now use bounded
+grid columns and shrinkable cells; labels and health text can wrap without
+clipping. The existing normal/enlarged card and management assertions remain
+unchanged. This layout correction changes no retry deadline, saved connection
+setting, provider request, schedule or permission. Its browser acceptance still
+requires a fresh successful CI run and inspection of the generated images.
+
 Sources: [HTTP Retry-After](https://www.rfc-editor.org/rfc/rfc9110.html#section-10.2.3),
 [HTTP date formats](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.7),
 [HTTP 429](https://www.rfc-editor.org/rfc/rfc6585.html#section-4),
