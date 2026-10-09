@@ -8,6 +8,8 @@ import { metaMethods } from './meta-commerce.mjs';
 import { connectionSettings, connectionError, shopifyOrderReadBinding, isShopifyOrderReadAdmissionCurrent, completeShopifyOrderReadBudget } from './connection-centre.mjs';
 import { assertShopifySourceScope, captureShopifyOrderMoney, inspectShopifyOrderPage, prepareShopifyOrderRead,
   recordShopifyOrderReadFailure, shopifyOrderSourceError, shopifyOrderReadWindow, sourceResponseVersion, stageShopifyOrderRead, validateRetainedShopifyOrderState } from './shopify-order-source.mjs';
+import { assertShopifyOrderRecoveryCapability, authorizeShopifyOrderRecovery, claimShopifyOrderRecoveryCapability,
+  checkpointShopifyOrderRecoveryPage, getShopifyOrderRecoveryStage, shopifyOrderRecoveryObservation, shopifyOrderRecoveryError } from './shopify-order-recovery.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -570,13 +572,18 @@ export class IntegrationService {
     }
   }
 
-  async shopifyGraphql(query, variables, config, { dispatch, onReadResponse } = {}) {
+  async shopifyGraphql(query, variables, config, { dispatch, onReadResponse, orderRecovery, resolveReadToken } = {}) {
     const version = String(config.apiVersion || '2026-07');
     if (!/^20\d\d-(01|04|07|10)$/.test(version)) throw integrationError('Invalid Shopify API version', 503, 'SHOPIFY_CONFIG_INVALID');
     const mutation = !/^\s*query\b/.test(query);
     const url = `https://${config.domain}/admin/api/${version}/graphql.json`;
     const body = JSON.stringify({ query, variables });
-    const token = await this.shopifyAccessToken(config);
+    if (orderRecovery) {
+      if (mutation || !onReadResponse) throw shopifyOrderRecoveryError('CAPABILITY_INVALID');
+      await authorizeShopifyOrderRecovery(orderRecovery, 'before_token', config);
+    }
+    const token = orderRecovery && resolveReadToken ? await resolveReadToken() : await this.shopifyAccessToken(config);
+    if (orderRecovery) await authorizeShopifyOrderRecovery(orderRecovery, 'before_fetch', config);
     const submit = () => this.fetch(url, {
       method: 'POST',
       headers: {
@@ -628,7 +635,8 @@ export class IntegrationService {
     return products;
   }
 
-  async fetchShopifyOrders(config) {
+  async fetchShopifyOrders(config, orderRecovery = null, state = null) {
+    if (orderRecovery) return this.fetchShopifyOrderRecovery(config, orderRecovery, state);
     assertShopifySourceScope(config, config.workspaceId);
     const orders = [], legacy = [], pages = [], identities = new Set(), cursors = new Set();
     let after = null;
@@ -656,6 +664,50 @@ export class IntegrationService {
       after = connection.cursor;
     }
     return prepareShopifyOrderRead(config, orders, pages, { query, startedAt, window, legacyBytes: Buffer.byteLength(JSON.stringify(legacy)) });
+  }
+
+  async fetchShopifyOrderRecovery(config, orderRecovery, state) {
+    // Claim before the first await. The plain JSON representation of a stage
+    // is evidence, never permission to fetch or checkpoint provider data.
+    let stage = claimShopifyOrderRecoveryCapability(orderRecovery, config);
+    assertShopifySourceScope(config, config.workspaceId);
+    const resolveReadToken = async () => {
+      if (config.mode === 'oauth') {
+        if (!state) throw shopifyOrderRecoveryError('AUTH_REQUIRED');
+        const credentials = await this.connectorCredentials(state, 'shopify', { allowRefresh: false });
+        if (!credentials.accessToken) throw shopifyOrderRecoveryError('AUTH_REQUIRED');
+        return credentials.accessToken;
+      }
+      // Recovery cannot create or refresh a token inside a protected attempt.
+      if (!config.accessToken) throw shopifyOrderRecoveryError('AUTH_REQUIRED');
+      return this.shopifyAccessToken(config);
+    };
+    const cursors = new Set(stage.pages.map(page => page.cursor).filter(Boolean));
+    while (stage.status === 'reading') {
+      const after = stage.after, query = stage.binding.window.query;
+      let apiVersion = null;
+      const data = await this.shopifyGraphql(SHOPIFY_ORDERS_QUERY, { first: 50, after, query }, config,
+        { orderRecovery, resolveReadToken, onReadResponse: metadata => { apiVersion = metadata.apiVersion; } });
+      const connection = inspectShopifyOrderPage(data, config.workspaceId, after, cursors);
+      const legacy = [], orders = [];
+      // Work only in detached page arrays. An invalid late row cannot leave a
+      // partially captured page behind, including during an interrupted read.
+      for (const raw of connection.nodes) {
+        const money = captureShopifyOrderMoney(raw, config.workspaceId), baseline = legacyOrderEncoding(raw);
+        legacy.push(baseline);
+        orders.push({ ...baseline, ...money.values, lineItems: baseline.lineItems.map((line, index) => ({ ...line, ...money.lines[index] })),
+          ...(money.sourceCurrencyOverrides ? { sourceCurrencyOverrides: money.sourceCurrencyOverrides } : {}) });
+      }
+      const page = { schema: 'shopify-order-recovery-page/v1', index: stage.pages.length, after, cursor: connection.cursor,
+        orders, legacyBytes: Buffer.byteLength(JSON.stringify(legacy)),
+        evidence: { rows: orders.length, hasNextPage: connection.hasNextPage, cursorDigest: connection.cursorDigest, apiVersion }, capturedAt: new Date().toISOString() };
+      stage = await checkpointShopifyOrderRecoveryPage(orderRecovery, page);
+    }
+    if (stage.status !== 'complete') throw shopifyOrderRecoveryError('PAGE_LIMIT');
+    return prepareShopifyOrderRead(config, stage.pages.flatMap(page => page.orders), stage.pages.map(page => page.evidence), {
+      query: stage.binding.window.query, startedAt: stage.binding.startedAt, window: stage.binding.window,
+      legacyBytes: stage.legacyBytes, recovery: shopifyOrderRecoveryObservation(stage)
+    });
   }
 
   async fetchPublicShopifyProducts(state) {
@@ -688,7 +740,11 @@ export class IntegrationService {
     };
   }
 
-  async syncShopify(state, { areas = connectionSettings(state, 'shopify').areas } = {}) {
+  async syncShopify(state, { areas = connectionSettings(state, 'shopify').areas, orderRecovery = null } = {}) {
+    if (orderRecovery) {
+      if (!Array.isArray(areas) || areas.length !== 1 || areas[0] !== 'orders') throw shopifyOrderRecoveryError('ORDERS_ONLY');
+      assertShopifyOrderRecoveryCapability(orderRecovery);
+    }
     if (state?.connectionSettings?.shopify?.disconnected) throw connectionError('Reconnect Shopify before syncing.', 'CONNECTION_DISCONNECTED', 409);
     const orderReadBinding = areas.includes('orders') ? shopifyOrderReadBinding(state, this) : null;
     const recordReadFailure = error => {
@@ -699,13 +755,13 @@ export class IntegrationService {
       try { validateRetainedShopifyOrderState(state); }
       catch (error) { recordReadFailure(error); throw error; }
     }
-    const now = new Date().toISOString();
+    const now = orderRecovery ? getShopifyOrderRecoveryStage(orderRecovery).binding.startedAt : new Date().toISOString();
     if (this.shopifyConfigured(state)) {
       const config = this.shopifyConfig(state);
-      if (config.mode === 'oauth') config.accessToken = (await this.connectorCredentials(state, 'shopify')).accessToken;
+      if (!orderRecovery && config.mode === 'oauth') config.accessToken = (await this.connectorCredentials(state, 'shopify')).accessToken;
       const catalogue = areas.some(area => ['products', 'variants', 'inventory', 'prices'].includes(area));
       try {
-        const [products, orderRead, customers] = await Promise.all([
+        const [products, orderRead, customers] = orderRecovery ? [null, await this.fetchShopifyOrders(config, orderRecovery, state), null] : await Promise.all([
           catalogue ? this.fetchShopifyProducts(config) : null,
           areas.includes('orders') ? this.fetchShopifyOrders(config) : null,
           areas.includes('customers') ? this.fetchShopifyCustomers(config) : null

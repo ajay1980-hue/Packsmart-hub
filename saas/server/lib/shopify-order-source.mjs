@@ -7,8 +7,8 @@ export const SHOPIFY_ORDER_SOURCE_LIMITS = Object.freeze({ pages: 10, pageSize: 
   amountLength: 33, integerDigits: 24, decimalPlaces: 6, cursorBytes: 4096 });
 // Request evidence is versioned independently of the unchanged source-money
 // representation and manifest container. Historical v1 references remain valid.
-const READ_SCHEMA = 'shopify-order-read/v1', WINDOW_SCHEMA = 'shopify-order-read/v2', MAP_SCHEMA = 'shopify-order-reads/v1';
-const REF = /^sor[12]:[a-f0-9]{64}$/;
+const READ_SCHEMA = 'shopify-order-read/v1', WINDOW_SCHEMA = 'shopify-order-read/v2', RECOVERY_SCHEMA = 'shopify-order-read/v3', MAP_SCHEMA = 'shopify-order-reads/v1';
+const REF = /^sor[123]:[a-f0-9]{64}$/;
 const VERSION = /^20\d\d-(01|04|07|10)$/;
 const CURRENCY = /^[A-Z]{3}$/;
 const MONEY_FIELDS = Object.freeze({ total: 'totalPriceSet', currentTotal: 'currentTotalPriceSet', currentTax: 'currentTotalTaxSet', discounts: 'currentTotalDiscountsSet', shippingCharged: 'currentShippingPriceSet' });
@@ -122,11 +122,29 @@ export function shopifyOrderReadWindow(startedAt) {
 function requestPolicyValid(manifest) {
   if (manifest.schema === READ_SCHEMA) return typeof manifest.query === 'string' && /^created_at:>=\d{4}-\d\d-\d\d$/.test(manifest.query) && manifest.requestedUpperBound === null
     && ['requestedLowerBound', 'sortKey', 'reverse'].every(key => !own(manifest, key));
-  if (manifest.schema !== WINDOW_SCHEMA) return false;
+  if (![WINDOW_SCHEMA, RECOVERY_SCHEMA].includes(manifest.schema)) return false;
+  if (manifest.schema === RECOVERY_SCHEMA && !recoveryObservationValid(manifest.recovery, manifest)) return false;
   const window = shopifyOrderReadWindow(manifest.startedAt);
   return Object.entries(window).every(([key, value]) => manifest[key] === value);
 }
-const manifestReference = manifest => `${manifest.schema === WINDOW_SCHEMA ? 'sor2' : 'sor1'}:${digest(manifest)}`;
+function recoveryObservationValid(recovery, manifest) {
+  const required = ['schema', 'stageId', 'continued', 'originalStartedAt', 'lastCapturedAt', 'pageCaptureTimes', 'snapshotConsistency'];
+  if (!object(recovery) || Object.keys(recovery).length !== required.length || !required.every(key => own(recovery, key))
+    || recovery.schema !== 'shopify-order-recovery-observation/v1' || !validId(recovery.stageId) || typeof recovery.continued !== 'boolean'
+    || recovery.originalStartedAt !== manifest.startedAt || recovery.snapshotConsistency !== 'unverified'
+    || !Array.isArray(recovery.pageCaptureTimes) || recovery.pageCaptureTimes.length !== manifest.pages?.length || !recovery.pageCaptureTimes.length
+    || recovery.pageCaptureTimes.length > 10 || recovery.lastCapturedAt !== recovery.pageCaptureTimes.at(-1)) return false;
+  let previous = manifest.startedAt;
+  for (const capturedAt of recovery.pageCaptureTimes) {
+    if (!validDate(capturedAt) || capturedAt < previous || capturedAt > manifest.finishedAt) return false;
+    previous = capturedAt;
+  }
+  return true;
+}
+const manifestReference = manifest => `${manifest.schema === RECOVERY_SCHEMA ? 'sor3' : manifest.schema === WINDOW_SCHEMA ? 'sor2' : 'sor1'}:${digest(manifest)}`;
+export function shopifyOrderReadRecoveryObservation(manifest) {
+  return manifest?.schema === RECOVERY_SCHEMA && recoveryObservationValid(manifest.recovery, manifest) ? structuredClone(manifest.recovery) : null;
+}
 
 function manifestValid(manifest, ref, workspaceId) {
   try {
@@ -151,14 +169,14 @@ function manifestValid(manifest, ref, workspaceId) {
   } catch { return false; }
 }
 const preparedReads = new WeakMap();
-export function prepareShopifyOrderRead(config, orders, pages, { query, startedAt, finishedAt = new Date().toISOString(), legacyBytes, window }) {
-  const manifest = { schema: window === undefined ? READ_SCHEMA : WINDOW_SCHEMA, workspaceId: config.workspaceId, provider: 'shopify', requestDomain: config.domain,
+export function prepareShopifyOrderRead(config, orders, pages, { query, startedAt, finishedAt = new Date().toISOString(), legacyBytes, window, recovery }) {
+  const manifest = { schema: recovery === undefined ? (window === undefined ? READ_SCHEMA : WINDOW_SCHEMA) : RECOVERY_SCHEMA, workspaceId: config.workspaceId, provider: 'shopify', requestDomain: config.domain,
     requestedApiVersion: config.apiVersion || '2026-07', sourceAccountId: null, currentScopes: 'not_observed', query,
     ...(window === undefined ? { requestedUpperBound: null } : { requestedLowerBound: window?.requestedLowerBound,
       requestedUpperBound: window?.requestedUpperBound, sortKey: window?.sortKey, reverse: window?.reverse }),
     startedAt, finishedAt, first: 50, pageLimit: 10, lineLimit: 100, ordersRead: orders.length,
     linesRead: orders.reduce((total, order) => total + order.lineItems.length, 0), recordsDigest: digest(orders.map(sourceRecord)), pages,
-    allReturnedLinePagesExhausted: true, queryExhaustion: 'observed_exhausted', sourcePeriod: 'unverified', moneyBasis: 'shopMoney' };
+    allReturnedLinePagesExhausted: true, queryExhaustion: 'observed_exhausted', sourcePeriod: 'unverified', moneyBasis: 'shopMoney', ...(recovery === undefined ? {} : { recovery }) };
   const ref = manifestReference(manifest);
   if (!manifestValid(manifest, ref, config.workspaceId)) throw shopifyOrderSourceError('MANIFEST_INVALID');
   const result = { orders: orders.map(order => ({ ...order, sourceReadRef: ref })), manifest, ref, legacyBytes };

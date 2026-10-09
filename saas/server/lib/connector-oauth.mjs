@@ -150,13 +150,14 @@ export const connectorMethods = {
       return Boolean(credentials.refreshToken || (provider === 'shopify' && credentials.clientSecret));
     } catch { return false; }
   },
-  async connectorCredentials(state, provider, { forceRefresh = false } = {}) {
+  async connectorCredentials(state, provider, { forceRefresh = false, allowRefresh = true } = {}) {
     const record = (state.connections || []).find(item => item.provider === provider && item.encryptedCredentials);
     if (!record || connectionSettings(state, provider).disconnected) throw connectionError('Connect this channel first.', 'CONNECTION_DISCONNECTED', 409);
     let credentials;
     try { credentials = decryptCredentials(record.encryptedCredentials, this.env.CREDENTIALS_KEY); }
     catch { throw connectionError('Your saved connection needs reconnecting.', 'CONNECTION_CREDENTIALS_INVALID', 422); }
     if (forceRefresh || (credentials.expiresAt && Date.now() + 60000 >= credentials.expiresAt)) {
+      if (!allowRefresh) throw connectionError('Refresh or reconnect Shopify before continuing the retained order read.', 'ORDER_RECOVERY_AUTH_REFRESH_REQUIRED', 409);
       if (!credentials.refreshToken) throw connectionError('Sign in again to renew this connection.', 'CONNECTION_AUTH_REQUIRED', 422);
       if (provider === 'tiktok_shop') {
         credentials = await this.tiktokToken({ refresh_token: credentials.refreshToken, grant_type: 'refresh_token' }, credentials);

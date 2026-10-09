@@ -146,3 +146,9 @@ performed.
 - [Search query syntax](https://shopify.dev/docs/api/usage/search-syntax)
 - [GraphQL cursor pagination](https://shopify.dev/docs/api/usage/pagination-graphql)
 - [Order access scopes](https://shopify.dev/docs/api/usage/access-scopes#orders-permissions)
+
+## Optional recoverable preparation
+
+[Optional order recovery](shopify-order-recovery.md) retains an interrupted fixed
+updated-order window through private bounded staging. It remains a separate,
+explicit opt-in; ordinary fresh imports retain this document's v2 behavior.
