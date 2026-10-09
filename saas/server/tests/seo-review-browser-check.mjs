@@ -39,15 +39,32 @@ async function containment(page, width, state, textScale) {
   return { state, textScale, ...result };
 }
 
-function createSeoCaptureSession(panel) {
+async function createSeoCaptureSession(panel) {
   const document = panel.ownerDocument, view = document.defaultView, ancestors = [];
   for (let node = panel.parentElement; node && node !== document.documentElement; node = node.parentElement) ancestors.push(node);
+  const check = (condition, message) => { if (!condition) throw new Error('SEO capture: ' + message); };
+  const settle = async () => {
+    const chrome = [...document.querySelectorAll('.topbar, .skip-link, .global-message')];
+    const pending = () => [...new Set([panel, ...ancestors, ...chrome].flatMap(node => node.getAnimations({ subtree: node === panel || chrome.includes(node) })))]
+      .filter(animation => animation.effect && animation.playbackRate !== 0 && Number.isFinite(animation.effect.getComputedTiming().endTime) && !['finished', 'idle'].includes(animation.playState));
+    let timeout;
+    try {
+      await Promise.race([(async () => {
+        // The existing view reveal translates its children by up to 4px.
+        // Wait naturally before measuring; the screenshot must not finish that
+        // ancestor animation after the clip was calculated.
+        await document.fonts.ready;
+        await Promise.allSettled(pending().map(animation => animation.finished));
+        await new Promise(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(resolve)));
+        check(pending().length === 0, 'relevant finite animations must settle before measuring');
+      })(), new Promise((_, reject) => { timeout = view.setTimeout(() => reject(new Error('SEO capture: fonts and finite animations did not settle within 5 seconds')), 5000); })]);
+    } finally { view.clearTimeout(timeout); }
+  };
+  await settle();
   const scroll = { x: view.scrollX, y: view.scrollY }, viewport = { width: view.innerWidth, height: view.innerHeight };
   const positions = ancestors.map(node => ({ node, x: node.scrollLeft, y: node.scrollTop }));
   const focused = document.activeElement, markup = panel.innerHTML;
   const details = [...panel.querySelectorAll('details')].map(node => ({ node, open: node.open }));
-  const check = (condition, message) => { if (!condition) throw new Error('SEO capture: ' + message); };
-  const settle = () => new Promise(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(resolve)));
   const rect = node => { const box = node.getBoundingClientRect(); return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height }; };
   const chrome = () => [...document.querySelectorAll('.topbar, .skip-link, .global-message')]
     .filter(node => node.getClientRects().length).map(node => ({ selector: node.className, ...rect(node) }));
@@ -63,7 +80,12 @@ function createSeoCaptureSession(panel) {
       check(summary && summary.parentElement.open, 'history must already be opened by the interaction test');
       // Scroll only; retain real fixed/sticky chrome and the existing open state.
       summary.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); await settle();
+      return this.historyBounds();
+    },
+    historyBounds() {
       unchanged();
+      const summary = panel.querySelector('#seo-retained-history > summary');
+      check(summary && summary.parentElement.open, 'history must remain open during its viewport capture');
       const target = rect(summary), overlays = chrome(), hit = document.elementFromPoint((target.left + target.right) / 2, (target.top + target.bottom) / 2);
       check(target.left >= 0 && target.right <= viewport.width && target.top >= 0 && target.bottom <= viewport.height, 'open-history control must fit in the live viewport');
       check(overlays.every(box => !overlaps(box, target)), 'real page chrome must not obscure the open-history control');
@@ -87,6 +109,7 @@ function createSeoCaptureSession(panel) {
       return { clip, panel: box, chrome: overlays, scroll: { x: view.scrollX, y: view.scrollY }, originalScroll: scroll };
     },
     async restore() {
+      await settle();
       for (const item of positions) item.node.scrollTo({ left: item.x, top: item.y, behavior: 'instant' });
       view.scrollTo({ left: scroll.x, top: scroll.y, behavior: 'instant' });
       if (focused instanceof view.HTMLElement && focused.isConnected && focused !== document.body) focused.focus({ preventScroll: true });
@@ -99,14 +122,16 @@ function createSeoCaptureSession(panel) {
 }
 
 async function capture(page, width, name, manifest, outputDirectory) {
-  const panel = page.locator('#seo-review-panel'), typography = await panel.evaluateHandle(createRestrictionTypographySession);
+  const panel = page.locator('#seo-review-panel'), original = await panel.evaluateHandle(createSeoCaptureSession);
+  let typography;
   const save = async textScale => {
     const position = await panel.evaluateHandle(createSeoCaptureSession);
     try {
       if (name === 'history-open') {
         const geometry = await position.evaluate(session => session.historyViewport());
         const file = `seo-${name}-viewport-${textScale}.png`;
-        const bytes = await page.screenshot({ path: path.join(outputDirectory, file), fullPage: false, animations: 'disabled', scale: 'css' });
+        const bytes = await page.screenshot({ path: path.join(outputDirectory, file), fullPage: false, animations: 'allow', scale: 'css' });
+        assert.deepEqual(await position.evaluate(session => session.historyBounds()), geometry, 'Live viewport screenshot must preserve unobscured target geometry');
         assert.equal(bytes.readUInt32BE(16), width); assert.equal(bytes.readUInt32BE(20), 900);
         manifest.captures.push({ file, state: name, textScale, region: 'partial live viewport; open-history interaction with real page chrome', width, height: 900,
           bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), geometry });
@@ -117,7 +142,7 @@ async function capture(page, width, name, manifest, outputDirectory) {
       // locator.screenshot scrolls into view again, allowing sticky/fixed chrome
       // to paint over an oversized element capture. Capture from document origin
       // without hiding chrome, resizing the viewport, or changing any app style.
-      const bytes = await page.screenshot({ path: target, fullPage: true, clip: geometry.clip, animations: 'disabled', scale: 'css' });
+      const bytes = await page.screenshot({ path: target, fullPage: true, clip: geometry.clip, animations: 'allow', scale: 'css' });
       const after = await position.evaluate(session => session.bounds());
       assert.deepEqual(after, geometry, 'Screenshot must leave capture geometry and state unchanged');
       const height = bytes.readUInt32BE(20), imageWidth = bytes.readUInt32BE(16);
@@ -130,12 +155,18 @@ async function capture(page, width, name, manifest, outputDirectory) {
     }
   };
   try {
+    typography = await panel.evaluateHandle(createRestrictionTypographySession);
     await typography.evaluate(session => session.assertBaseline()); await save(100);
     await typography.evaluate(session => session.begin());
     try { await typography.evaluate(session => session.enlarge()); await save(200); }
     finally { await typography.evaluate(session => session.restore()); }
     await typography.evaluate(session => session.assertBaseline());
-  } finally { await typography.dispose(); }
+  } finally {
+    // Restore the original normal-text scroll after 200% text has shrunk again;
+    // restoring only inside each text-scale capture misses scroll anchoring.
+    try { await original.evaluate(session => session.restore()); }
+    finally { if (typography) await typography.dispose(); await original.dispose(); }
+  }
 }
 
 try {
