@@ -60,6 +60,35 @@ jobs:
         run: node saas/server/tests/activity-browser-check.mjs
       - name: Verify imported order evidence on mobile and desktop
         run: node saas/server/tests/imported-order-evidence-browser-check.mjs
+      - name: Verify retained SEO visibility review
+        run: node saas/server/tests/seo-review-browser-check.mjs
+      - name: Upload SEO review 320px evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-seo-review-320-responsive
+          path: |
+            /tmp/runvara-seo-review-320.tar.gz
+            /tmp/runvara-seo-review-320/manifest.json
+          if-no-files-found: warn
+      - name: Upload SEO review 390px evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-seo-review-390-responsive
+          path: |
+            /tmp/runvara-seo-review-390.tar.gz
+            /tmp/runvara-seo-review-390/manifest.json
+          if-no-files-found: warn
+      - name: Upload SEO review 1200px evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-seo-review-1200-responsive
+          path: |
+            /tmp/runvara-seo-review-1200.tar.gz
+            /tmp/runvara-seo-review-1200/manifest.json
+          if-no-files-found: warn
       - name: Upload responsive verification image
         if: always()
         uses: actions/upload-artifact@v4

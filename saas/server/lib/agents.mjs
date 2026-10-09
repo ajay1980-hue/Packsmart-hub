@@ -99,7 +99,7 @@ export function runSpecialist(agentId, state, options = {}) {
     case 'supplier':
       return result(agentId, metrics.supplierCount ? 'Idle' : 'Warning', metrics.supplierCount ? `${metrics.supplierCount} active supplier${metrics.supplierCount === 1 ? '' : 's'} recorded. Supplier orders remain approval-gated.` : 'No active supplier data is recorded.', { suppliers: state.suppliers || [], stockRisks: metrics.stockRiskItems }, metrics.supplierCount ? 0.75 : 0.3);
     case 'seo':
-      return result(agentId, metrics.seoIssues ? 'Warning' : 'Idle', metrics.seoIssues ? `${metrics.seoIssues} actionable catalogue SEO issue${metrics.seoIssues === 1 ? '' : 's'} detected.` : 'No catalogue SEO hygiene issues detected.', { issues: metrics.seoIssueItems, externalSources: { searchConsole: 'NOT CONNECTED', ahrefs: 'NOT CONNECTED' } }, shopify.status === 'connected' ? 0.72 : 0.45);
+      return result(agentId, metrics.seoIssues ? 'Warning' : 'Idle', metrics.seoIssues ? `${metrics.seoIssues} retained catalogue SEO finding${metrics.seoIssues === 1 ? '' : 's'} detected. Customer visibility is unverified; draft and archived findings remain available in SEO history.` : 'No SEO findings in the retained catalogue. Customer visibility remains unverified.', { issues: metrics.seoIssueItems, externalSources: { searchConsole: 'NOT CONNECTED', ahrefs: 'NOT CONNECTED' } }, shopify.status === 'connected' ? 0.72 : 0.45);
     case 'marketing':
       return result(agentId, 'Idle', 'Campaign preparation is available; publishing and advertising spend require approval.', { brand: ['premium', 'gold', 'black', 'grey', 'clean', 'professional', 'vibrant'], spend30d: metrics.advertising.spend }, 0.7);
     case 'customer_service':

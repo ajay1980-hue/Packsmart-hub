@@ -865,6 +865,9 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
 .line-item-list strong { font-size: .74rem; }
 .order-cost-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; margin-bottom: .7rem; }
 .supplier-list, .issue-list { display: grid; }
+#seo-review-panel { overflow-wrap: anywhere; }
+#seo-review-panel .issue-row > span { min-width: 0; }
+#seo-review-panel .text-button { max-width: 100%; white-space: normal; }
 .supplier-row { display: grid; grid-template-columns: 39px minmax(0, 1fr) auto; align-items: center; gap: .7rem; border-bottom: 1px solid var(--line); padding: .72rem 0; }
 .supplier-row:last-child { border-bottom: 0; }
 .supplier-row b, .supplier-row small { display: block; }

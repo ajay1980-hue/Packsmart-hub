@@ -53,7 +53,7 @@ export const AUTOMATION_DEFINITIONS = Object.freeze([
   { id: 'costCoverageChecks', name: 'Cost coverage checks', detail: 'Keeps unknown costs visible instead of silently treating them as zero.' },
   { id: 'lowStockAlerts', name: 'Low-stock alerts', detail: 'Surfaces stock risks without placing supplier orders.' },
   { id: 'dailyOpsBrief', name: 'Daily operations brief', detail: 'Builds a deterministic daily priority briefing.' },
-  { id: 'seoChecks', name: 'SEO checks', detail: 'Finds missing images, weak titles and unpublished products.' },
+  { id: 'seoChecks', name: 'SEO checks', detail: 'Checks retained product images, titles, descriptions and lifecycle status. Customer visibility may be unknown.' },
   { id: 'priceRecommendations', name: 'Price recommendations', detail: 'Prepares recommendations; major changes require approval.' },
   { id: 'customerReplyDrafts', name: 'Customer-service issue detection', detail: 'Identifies order follow-up from recorded payment and fulfilment states. Inbox messages are not connected.' },
   { id: 'channelMismatchAlerts', name: 'Channel mismatch alerts', detail: 'Compares marketplace and social-channel catalogue health.' },
@@ -171,14 +171,33 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   const stockWithCost = positiveStock.filter(item => deriveLandedCost(economics[item.sku] || {}).complete);
   const stockValue = stockWithCost.reduce((sum, item) => sum + item.inventory * deriveLandedCost(economics[item.sku] || {}).value, 0);
 
-  const seoIssues = products.flatMap(product => {
-    const issues = [];
-    if (!product.image) issues.push({ productId: product.id, product: product.title, issue: 'Missing product image' });
-    if (String(product.title || '').trim().length < 18) issues.push({ productId: product.id, product: product.title, issue: 'Thin product title' });
-    if (String(product.description || '').trim().length < 80) issues.push({ productId: product.id, product: product.title, issue: 'Thin product description' });
-    if (String(product.status || '').toLowerCase() !== 'active') issues.push({ productId: product.id, product: product.title, issue: `Product is ${product.status || 'not active'}` });
+  // A display projection only. Existing importers do not retain per-product
+  // publication evidence: even ACTIVE cannot establish customer visibility.
+  // Keep the original findings/limits below for saved diagnostic workflows.
+  const seoReview = {
+    basis: 'retained_catalogue', publicationStatus: 'unknown', actionableCount: 0, itemLimit: 100,
+    visibilityReview: { count: 0, items: [], omitted: 0 },
+    retainedHistory: { count: 0, items: [], omitted: 0 }
+  };
+  const seoIssues = products.flatMap((product, productIndex) => {
+    const issues = [], codes = [];
+    const finding = (issue, code) => { issues.push({ productId: product.id, product: product.title, issue }); codes.push(code); };
+    if (!product.image) finding('Missing product image', 'image');
+    if (String(product.title || '').trim().length < 18) finding('Thin product title', 'title');
+    if (String(product.description || '').trim().length < 80) finding('Thin product description', 'description');
+    if (String(product.status || '').toLowerCase() !== 'active') finding(`Product is ${product.status || 'not active'}`, 'lifecycle');
+    const status = typeof product.status === 'string' ? product.status.trim().toLowerCase() : '';
+    const recordedStatus = ['active', 'draft', 'archived', 'unlisted'].includes(status) ? status : 'unknown';
+    const history = ['draft', 'archived'].includes(recordedStatus);
+    const group = history ? seoReview.retainedHistory : seoReview.visibilityReview;
+    group.count += issues.length;
+    // These are display references into this same bootstrap's existing products
+    // array, never stored identities or action authority. Do not repeat titles,
+    // descriptions or legacy finding strings in every dashboard response.
+    for (const code of codes) if (group.items.length < seoReview.itemLimit) group.items.push([productIndex, code]);
     return issues;
   });
+  for (const group of [seoReview.visibilityReview, seoReview.retainedHistory]) group.omitted = group.count - group.items.length;
 
   const customerServiceItems = monthInspection.rows.filter(row => {
     const open = row.fulfillmentStatus !== 'UNKNOWN' && !['FULFILLED', 'RESTOCKED'].includes(row.fulfillmentStatus);
@@ -233,7 +252,7 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
     marginCoveredVariants: marginKnown.length,
     marginCoverage: variants.length ? Math.round(marginKnown.length / variants.length * 100) : 0,
     averageMarginBasis: 'unweighted-known-catalogue-contribution-margins',
-    seoIssues: seoIssues.length, seoIssueItems: seoIssues.slice(0, 100),
+    seoIssues: seoIssues.length, seoIssueItems: seoIssues.slice(0, 100), seoReview,
     customerServiceIssues: last30d.orders === null ? null : customerServiceItems.length, customerServiceItems: customerServiceItems.slice(0, 100),
     pendingApprovals: pendingApprovals.length, integrationIssues: integrationIssues.length,
     activeAutomations, automationCount, supplierCount, advertising, channels, readiness,

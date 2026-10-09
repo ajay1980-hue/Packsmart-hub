@@ -13,6 +13,7 @@
   };
   const objectiveUI = { epoch: 0, editor: null, read: null, mutation: null, snapshotContext: null, referenceCache: null, planningBaseline: '', needsReload: false, unknownSave: false };
   const objectiveContent = { editor:null, ticket:null, handoff:null, epoch:0, previous:null };
+  const seoReviewUI = { epoch: 0, context: null };
   let invitationToken = '';
   let ownerActivationToken = '';
   try {
@@ -193,6 +194,7 @@
   }
 
   function showLogin() {
+    resetSeoReview();
     resetObjectiveEditing(true);
     resetBusinessGraph(true);
     resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
@@ -212,6 +214,7 @@
   }
 
   function showPasswordSetup() {
+    resetSeoReview();
     window.RunvaraConnections?.interruptContent('Password replacement required', true);
     resetObjectiveEditing(true);
     resetBusinessGraph(true);
@@ -254,6 +257,8 @@
   }
 
   async function loadBootstrap(options) {
+    resetSeoReview('Refreshing SEO review. Classification is unavailable until the current workspace snapshot loads.');
+    const seoTicket = { epoch: seoReviewUI.epoch, session: state.session, signature: seoSessionSignature() };
     window.RunvaraConnections?.interruptContent('Workspace refresh started');
     objectiveUI.referenceCache = null;
     resetObjectiveEditing();
@@ -264,9 +269,11 @@
       catch (error) { showMessage('Pilot migration needs attention: ' + error.message, 'error'); }
     }
     const data = await request('/api/bootstrap');
+    const currentSeoLoad = seoTicket.epoch === seoReviewUI.epoch && seoTicket.session === state.session && seoTicket.signature === seoSessionSignature();
     resetBusinessGraph();
     if (state.data?.workspace?.id !== data.workspace.id || state.data?.user?.id !== data.user?.id || state.data?.user?.role !== data.user?.role) resetObjectiveEditing(true);
     state.data = data; state.csrf = data.csrf || state.csrf;
+    seoReviewUI.context = currentSeoLoad ? { session: state.session, signature: seoSessionSignature(), data } : null;
     state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
     $('#business-graph-result').replaceChildren();
     $('#business-objectives-list').replaceChildren();
@@ -294,6 +301,7 @@
   }
 
   function setView(view) {
+    if (view === 'issues') renderSeoReview();
     if (view !== state.view) window.RunvaraConnections?.interruptContent('Navigation changed');
     if (view !== state.view) resetObjectiveEditing();
     if (view !== 'overview') resetBusinessGraph(true);
@@ -676,7 +684,7 @@
     $('#control-status').innerHTML = [
       ['Pending approvals', dashboard.pendingApprovals || 0, dashboard.pendingApprovals ? 'warn' : 'good'],
       ['Active automations', String(dashboard.activeAutomations || 0) + '/' + String(dashboard.automationCount || 0), dashboard.activeAutomations ? 'good' : 'warn'],
-      ['SEO issues', dashboard.seoIssues || 0, dashboard.seoIssues ? 'warn' : 'good'],
+      ['Recorded SEO findings', countLabel(dashboard.seoIssues), dashboard.seoIssues == null ? 'neutral' : dashboard.seoIssues ? 'warn' : 'neutral'],
       ['Recorded customer-service issues', countLabel(dashboard.customerServiceIssues), dashboard.customerServiceIssues == null ? 'neutral' : dashboard.customerServiceIssues ? 'warn' : 'good'],
       ['Integration issues', dashboard.integrationIssues || 0, dashboard.integrationIssues ? 'warn' : 'good'],
       ['Ad spend total', 'Unavailable · currency and period unverified', 'neutral']
@@ -1013,9 +1021,93 @@
     return items.length ? items.map(template).join('') : '<div class="empty-state">No issues detected.</div>';
   }
 
+  function seoSessionSignature() {
+    const session = state.session;
+    return JSON.stringify([state.csrf, session?.csrf, session?.user?.id, session?.user?.role, session?.user?.active, session?.user?.passwordChangeRequired, session?.workspace?.id]);
+  }
+
+  function resetSeoReview(message = 'SEO classification unavailable. Refresh the current workspace to review its recorded findings.') {
+    seoReviewUI.epoch++; seoReviewUI.context = null;
+    $('#seo-issue-list').innerHTML = '<p class="signal-note" role="status">' + escapeHtml(message) + '</p>';
+  }
+
+  function seoFindingRows(items, classified = true) {
+    const reasons = { publication_unknown: 'Recorded status: active · Publication unknown',
+      product_status_unknown: 'Product status unknown · Publication unknown',
+      unlisted: 'Recorded status: unlisted · Publication unknown',
+      draft: 'Recorded status: draft', archived: 'Recorded status: archived' };
+    return items.map(item => '<button type="button" class="issue-row" data-view-link="profit" data-target-filter="all"><span><b>' +
+      escapeHtml(typeof item?.product === 'string' && item.product ? item.product : 'Unnamed catalogue product') + '</b><small>' +
+      escapeHtml(typeof item?.issue === 'string' ? item.issue : 'Recorded finding details unavailable') + '</small><small>' +
+      escapeHtml(classified ? reasons[item.reason] : 'Unclassified recorded finding. Publication unverified.') + '</small></span></button>').join('');
+  }
+
+  function resolveSeoReview(review, total, products) {
+    const count = value => Number.isSafeInteger(value) && value >= 0;
+    if (!review || review.basis !== 'retained_catalogue' || review.publicationStatus !== 'unknown' || review.actionableCount !== 0 || review.itemLimit !== 100 || !Array.isArray(products)) return null;
+    const seen = new Set();
+    const resolveGroup = (group, history) => {
+      if (!group || !count(group.count) || !count(group.omitted) || !Array.isArray(group.items) ||
+          group.items.length !== Math.min(group.count, 100) || group.omitted !== group.count - group.items.length) return null;
+      const items = [];
+      for (const ref of group.items) {
+        // These indexes only resolve display text within this exact snapshot;
+        // they are never stored in a control, persisted, or used for a write.
+        if (!Array.isArray(ref) || ref.length !== 2 || !count(ref[0]) || ref[0] >= products.length || !['image', 'title', 'description', 'lifecycle'].includes(ref[1])) return null;
+        const product = products[ref[0]], key = ref[0] + ':' + ref[1];
+        if (!product || typeof product !== 'object' || Array.isArray(product) || seen.has(key) ||
+            (product.title != null && typeof product.title !== 'string') || (product.description != null && typeof product.description !== 'string')) return null;
+        const status = typeof product.status === 'string' ? product.status.trim().toLowerCase() : '';
+        const recordedStatus = ['active', 'draft', 'archived', 'unlisted'].includes(status) ? status : 'unknown';
+        if (['draft', 'archived'].includes(recordedStatus) !== history) return null;
+        let lifecycle;
+        try { lifecycle = String(product.status || '').toLowerCase() !== 'active'; } catch { return null; }
+        const conditions = { image: !product.image, title: String(product.title || '').trim().length < 18,
+          description: String(product.description || '').trim().length < 80, lifecycle };
+        if (!conditions[ref[1]]) return null;
+        const issue = { image: 'Missing product image', title: 'Thin product title', description: 'Thin product description',
+          lifecycle: recordedStatus === 'unknown' ? 'Product status is unknown' : 'Product is ' + recordedStatus }[ref[1]];
+        const reason = history ? recordedStatus : recordedStatus === 'active' ? 'publication_unknown' : recordedStatus === 'unlisted' ? 'unlisted' : 'product_status_unknown';
+        seen.add(key); items.push({ product: product.title, issue, recordedStatus, reason });
+      }
+      return { ...group, items };
+    };
+    const visibilityReview = resolveGroup(review.visibilityReview, false), retainedHistory = resolveGroup(review.retainedHistory, true);
+    return visibilityReview && retainedHistory && count(total) && visibilityReview.count + retainedHistory.count === total ? { visibilityReview, retainedHistory } : null;
+  }
+
+  function renderSeoReview() {
+    const context = seoReviewUI.context, session = state.session, data = state.data;
+    if (!context || context.session !== session || context.data !== data || context.signature !== seoSessionSignature() ||
+        !session?.user?.id || session.user.id !== data?.user?.id || session.user.role !== data?.user?.role ||
+        session.workspace?.id !== data?.workspace?.id || session.user.active === false || data?.user?.active === false ||
+        session.user.passwordChangeRequired || data?.user?.passwordChangeRequired) {
+      $('#seo-issue-list').innerHTML = '<p class="signal-note" role="status">SEO classification unavailable for the current session. Refresh or sign in again to review this workspace.</p>';
+      return;
+    }
+    const dashboard = data.dashboard || {}, review = resolveSeoReview(dashboard.seoReview, dashboard.seoIssues, data.products);
+    if (!review) {
+      const supplied = Array.isArray(dashboard.seoIssueItems) ? dashboard.seoIssueItems : [], items = supplied.slice(0, 100);
+      const knownTotal = Number.isSafeInteger(dashboard.seoIssues) && dashboard.seoIssues >= supplied.length;
+      const coverage = knownTotal && supplied.length ? 'Showing ' + items.length + ' of ' + dashboard.seoIssues + ' recorded findings; ' + (dashboard.seoIssues - items.length) + ' omitted from this list.' :
+        items.length ? 'Showing ' + items.length + ' supplied legacy findings. Total recorded findings unavailable.' : 'No legacy findings were supplied. This does not establish that no SEO findings exist.';
+      $('#seo-issue-list').innerHTML = '<section aria-labelledby="seo-actionable-heading"><h3 id="seo-actionable-heading">Actionable SEO findings</h3><p class="signal-note" role="status">SEO classification unavailable. Customer-facing publication is unverified, so actionable findings cannot be confirmed.</p></section>' +
+        '<section id="seo-unclassified-review" aria-labelledby="seo-unclassified-heading"><h3 id="seo-unclassified-heading">Unclassified recorded findings</h3><p class="signal-note">' + escapeHtml(coverage) + '</p><div class="issue-list">' + seoFindingRows(items, false) + '</div></section>';
+      return;
+    }
+    const coverage = group => '<p class="signal-note">Showing ' + group.items.length + ' of ' + group.count + ' findings; ' + group.omitted + ' omitted from this list. Up to 100 findings are shown per section.</p>';
+    const reviewGroup = review.visibilityReview, history = review.retainedHistory;
+    $('#seo-issue-list').innerHTML = '<section aria-labelledby="seo-actionable-heading"><h3 id="seo-actionable-heading">Actionable SEO findings</h3><p id="seo-actionable-status" class="signal-note">' +
+      (dashboard.seoIssues === 0 ? 'No SEO findings were recorded in the retained catalogue. Customer-facing publication is still unverified.' : 'No actionable SEO findings can be confirmed because customer-facing publication is unverified.') + '</p></section>' +
+      '<section id="seo-visibility-review" aria-labelledby="seo-visibility-heading"><h3 id="seo-visibility-heading">Visibility review · ' + reviewGroup.count + ' findings</h3><p class="signal-note">Check customer visibility before treating these recorded findings as actionable. An active or unlisted status does not verify publication.</p>' + coverage(reviewGroup) +
+      '<div class="issue-list">' + (seoFindingRows(reviewGroup.items) || '<p class="signal-note">No findings awaiting visibility review in this retained snapshot.</p>') + '</div></section>' +
+      '<details id="seo-retained-history" class="evidence"><summary>Retained findings history · ' + history.count + ' findings</summary><p>Draft and archived catalogue findings are retained for reference. Recorded status does not establish customer-facing publication.</p>' + coverage(history) +
+      '<div class="issue-list">' + (seoFindingRows(history.items) || '<p class="signal-note">No draft or archived findings in this retained snapshot.</p>') + '</div></details>';
+  }
+
   function renderIssues() {
     const d = state.data.dashboard || {};
-    $('#seo-issue-list').innerHTML = issueRows(d.seoIssueItems || [], item => '<button class="issue-row" data-view-link="profit" data-target-filter="all"><span><b>' + escapeHtml(item.product) + '</b><small>' + escapeHtml(item.issue) + '</small></span><span class="tag warn">Review</span></button>');
+    renderSeoReview();
     $('#customer-issue-list').innerHTML = issueRows(d.customerServiceItems || [], item => '<button class="issue-row" data-view-link="orders" data-target-filter="open"><span><b>' + escapeHtml(item.name || item.id) + '</b><small>' + escapeHtml(statusLabel(item.financialStatus)) + ' · ' + escapeHtml(statusLabel(item.fulfillmentStatus)) + ' · ' + date(item.createdAt) + '</small></span><span class="tag warn">Review</span></button>');
     $('#stock-issue-list').innerHTML = issueRows(d.stockRiskItems || [], item => {
       const out = item.available === false || (item.inventory !== null && item.inventory <= 0);
@@ -2848,7 +2940,7 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { window.RunvaraConnections?.interruptContent('Signing out', true); resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { resetSeoReview(); window.RunvaraConnections?.interruptContent('Signing out', true); resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
     window.RunvaraConnections?.interruptContent('Password change started');
@@ -2856,7 +2948,7 @@
     resetObjectiveEditing(true, true);
     resetBusinessGraph();
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
-    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); window.RunvaraConnections?.interruptContent('Password changed', true); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
+    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); window.RunvaraConnections?.interruptContent('Password changed', true); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; resetSeoReview(); form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });
