@@ -1509,6 +1509,12 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 #connection-notifications:empty{display:none}#connection-operator[hidden]{display:none!important}
 @media(max-width:680px){.setup-channel-choices,.setup-operator-grid{grid-template-columns:minmax(0,1fr)}.setup-provider{padding:14px}.setup-steps li{grid-template-columns:20px minmax(0,1fr);gap:8px}.setup-steps small{grid-column:2}.setup-section{padding:18px 0}#connection-journey .button-row{display:grid;grid-template-columns:minmax(0,1fr)}#connection-dialog{width:calc(100vw - 16px);max-width:calc(100vw - 16px);max-height:calc(100dvh - 16px);box-sizing:border-box}#connection-dialog .connection-dialog-shell{min-width:0;overflow-wrap:anywhere}.setup-provider dl{grid-template-columns:minmax(0,1fr)} }
 
+/* Give recovery action labels a full line at narrow widths, including 200% text. */
+@media (max-width: 680px) {
+  #connection-order-recovery-form .button-row { display: grid; grid-template-columns: minmax(0, 1fr); }
+  #connection-order-recovery-form .button-row > button { overflow-wrap: normal; word-break: normal; }
+}
+
 /* Keep keyboard focus and channel actions clear of the mobile sticky header. */
 @media(max-width:700px){html{scroll-padding-top:10rem}.connection-card button,#connection-journey button,#connection-journey summary{scroll-margin-block:10rem 1rem}}
 

@@ -20,11 +20,35 @@ const secret='synthetic-order-recovery-browser-secret-more-than-32-characters';
 let browser,providerCalls=0;
 const server=createPacksmartServer({NODE_ENV:'test',SESSION_SECRET:secret,CREDENTIALS_KEY:secret,SAAS_STATE_FILE:path.join(directory,'state.json'),SHOPIFY_PUBLIC_SYNC_ENABLED:'false'},
   {schedulerEnabled:false,agentOpsEnabled:false,fetchImpl:async()=>{providerCalls++;throw new Error('No provider calls are allowed in recovery UI CI.');}});
-const report={schema:'runvara-order-recovery-browser-evidence/v1',status:'running',fixture:'real app with mocked public recovery DTOs',widths:[],providerCalls:0};
+const report={schema:'runvara-order-recovery-browser-evidence/v1',status:'running',fixture:'real app with mocked public recovery DTOs',widths:[],actionLayouts:[],providerCalls:0};
+async function assertRecoveryActionLayout(page,width,state,textScale){
+  const buttons=await page.evaluate(()=>Array.from(document.querySelectorAll('#connection-order-recovery-form .button-row > button')).filter(button=>button.getClientRects().length).map(button=>{
+    const box=button.getBoundingClientRect(),row=button.parentElement.getBoundingClientRect(),words=[];
+    const textNodes=document.createTreeWalker(button,NodeFilter.SHOW_TEXT);
+    while(textNodes.nextNode())for(const match of textNodes.currentNode.textContent.matchAll(/\S+/g)){
+      const range=document.createRange();range.setStart(textNodes.currentNode,match.index);range.setEnd(textNodes.currentNode,match.index+match[0].length);
+      const rects=Array.from(range.getClientRects()).filter(rect=>rect.width>0 && rect.height>0),lines=[];
+      for(const rect of rects)if(!lines.some(top=>Math.abs(top-rect.top)<1))lines.push(rect.top);
+      words.push({word:match[0],lines:lines.length});
+    }
+    return {id:button.id,text:button.textContent,left:box.left,right:box.right,top:box.top,bottom:box.bottom,rowLeft:row.left,rowRight:row.right,scrollWidth:button.scrollWidth,clientWidth:button.clientWidth,words};
+  }));
+  assert.ok(buttons.length>0,`Expected recovery actions at ${width}px/${state}/${textScale}%`);
+  for(const [index,button] of buttons.entries()){
+    assert.ok(button.words.length && button.words.every(word=>word.lines===1),`Recovery action word split at ${width}px/${state}/${textScale}%: ${JSON.stringify(button)}`);
+    assert.ok(button.scrollWidth<=button.clientWidth+2,`Recovery action text overflow: ${JSON.stringify(button)}`);
+    if(width<=680){
+      assert.ok(Math.abs(button.left-button.rowLeft)<=2 && Math.abs(button.right-button.rowRight)<=2,`Narrow recovery actions must use a full row: ${JSON.stringify(button)}`);
+      if(index)assert.ok(button.top>=buttons[index-1].bottom,`Narrow recovery actions must be stacked: ${JSON.stringify(buttons)}`);
+    }
+  }
+  report.actionLayouts.push({width,state,textScale,buttons});
+}
 async function capture(page,width,name,selector='#connection-order-recovery'){
   const panel=page.locator(selector),typography=await panel.evaluateHandle(createRestrictionTypographySession);
   const controlsOnly=!['review','saved'].includes(name);
   const save=async suffix=>{
+    if(selector==='#connection-order-recovery')await assertRecoveryActionLayout(page,width,name,suffix?200:100);
     await page.locator('#connection-close').focus();
     await panel.evaluate((node,controlsOnly)=>{const dialog=document.querySelector('#connection-dialog'),start=controlsOnly?node.querySelector('#order-recovery-status'):node;dialog.scrollTop+=start.getBoundingClientRect().top-dialog.getBoundingClientRect().top-70;},controlsOnly);
     const dimensions=await panel.evaluate(node=>{const box=node.getBoundingClientRect(),dialog=document.querySelector('#connection-dialog');return {width:innerWidth,page:document.documentElement.scrollWidth,left:box.left,right:box.right,scroll:node.scrollWidth,client:node.clientWidth,dialogScroll:dialog.scrollWidth,dialogClient:dialog.clientWidth};});
@@ -113,7 +137,10 @@ try{
       // Real browser Back/Forward events must dismiss and invalidate selection.
       await page.evaluate(()=>history.pushState({syntheticRecovery:true},'',location.pathname+'?recovery-ui-history=1'));await review();await ack.check();await page.goBack();assert.equal(await page.locator('#connection-dialog').evaluate(n=>n.open),false);await open();assert.equal(await ack.isChecked(),false);await review();await ack.check();await page.goForward();assert.equal(await page.locator('#connection-dialog').evaluate(n=>n.open),false);await open();assert.equal(await ack.isChecked(),false);
       // New explicit start succeeds; bootstrap/reload preserves original evidence.
-      previewOptions={status:null};postMode='committed';await review();assert.equal(await ack.isChecked(),false);await ack.check();await page.locator('#order-recovery-start').click();await page.locator('#connection-order-observation').waitFor();assert.equal(posts().length,2);assert.equal(posts()[1].path,recoveryRoute+'/start');
+      previewOptions={status:null};postMode='committed';await review();assert.equal(await ack.isChecked(),false);
+      const startTypography=await page.locator('#connection-order-recovery').evaluateHandle(createRestrictionTypographySession);
+      try{await assertRecoveryActionLayout(page,width,'start',100);await startTypography.evaluate(s=>s.begin());try{await startTypography.evaluate(s=>s.enlarge());await assertRecoveryActionLayout(page,width,'start',200);}finally{await startTypography.evaluate(s=>s.restore());}}finally{await startTypography.dispose();}
+      await ack.check();await page.locator('#order-recovery-start').click();await page.locator('#connection-order-observation').waitFor();assert.equal(posts().length,2);assert.equal(posts()[1].path,recoveryRoute+'/start');
       images.push(...await capture(page,width,'saved','#connection-order-observation'));
       available=false;const readCount=reads().length;await reload();assert.equal(await page.locator('#connection-order-recovery').count(),0);assert.match(await page.locator('#connection-order-observation').textContent(),/earlier observation.*does not make the original observation newer/s);assert.ok((await page.locator('#connection-order-observation').textContent()).includes(originalStartedAt));assert.equal(reads().length,readCount);
       available=true;role='admin';await reload();assert.equal(await page.locator('#connection-order-recovery').count(),1);previewOptions={status:'failed'};await review();assert.equal(await ack.isChecked(),false);assert.equal(await page.locator('#connection-permissions select').isEnabled(),false,'admin recovery never expands owner write controls');
