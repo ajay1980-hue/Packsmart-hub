@@ -330,6 +330,26 @@ begin
 end
 $$;
 
+-- Reapplying the base schema must never reopen the bounded recovery ledger.
+-- This is privilege defense only: schema.sql neither creates nor activates it.
+do $$
+declare t text; f record;
+begin
+  foreach t in array array['runvara_order_recovery_control','runvara_order_recovery_quota','runvara_order_recovery_stages','runvara_order_recovery_pages','runvara_order_recovery_receipts'] loop
+    if to_regclass('public.'||t) is not null then
+      execute format('revoke all on table public.%I from public,anon,authenticated,service_role',t);
+      execute format('alter table public.%I enable row level security',t);
+    end if;
+  end loop;
+  for f in select p.oid::regprocedure as signature,p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+    where n.nspname='public' and (p.proname like 'runvara_recovery_%' or p.proname in ('runvara_reserve_order_recovery','runvara_append_order_recovery','runvara_finalize_order_recovery','runvara_read_order_recovery','runvara_lookup_order_recovery')) loop
+    execute format('revoke all on function %s from public,anon,authenticated,service_role',f.signature);
+    if f.proname in ('runvara_reserve_order_recovery','runvara_append_order_recovery','runvara_finalize_order_recovery','runvara_read_order_recovery','runvara_lookup_order_recovery') then
+      execute format('grant execute on function %s to service_role',f.signature);
+    end if;
+  end loop;
+end $$;
+
 -- Supabase's optional automatic-RLS project setting creates this helper in the
 -- public schema. Keep the event trigger, but prevent browser roles from calling
 -- its SECURITY DEFINER function directly.

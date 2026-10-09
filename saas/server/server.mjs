@@ -42,6 +42,7 @@ import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/stor
 import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, runCommander } from './lib/agents.mjs';
 import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
 import { recordWork } from './lib/events.mjs';
+import { createOrderRecoveryRunner, orderRecoveryActor, publicOrderRecoveryObservation } from './lib/shopify-order-recovery-run.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
@@ -345,6 +346,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const env = { ...customEnv };
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
+  const orderRecovery = createOrderRecoveryRunner({store,integrations,env});
   const aiProvider = options.aiProvider || createAiProvider({ env, store, fetchImpl: options.fetchImpl || fetch });
   const isProduction = env.NODE_ENV === 'production';
   const secureCookies = isProduction || String(env.APP_PUBLIC_URL || '').startsWith('https://');
@@ -603,7 +605,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       approvals: (state.approvals || []).map(publicApproval),
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
-      connectionCentre: intelligentConnections(state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status }),
+      connectionCentre: intelligentConnections(state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status }).map(channel=>channel.id === 'shopify' ? {...channel,orderRecovery:{available:orderRecovery.available()},orderRecoveryObservation:publicOrderRecoveryObservation(state)} : channel),
       connectionNotifications: doctorNotifications(state),
       connectionRecommendations: recommendations(state, connectionCentre(state, integrations)),
       connectionWrites: (state.connectionWrites || []).slice(0, 50).map(publicConnectionWrite),
@@ -2266,8 +2268,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           }, { persist: false });
           send(res, 200, result); return;
         }
+        const orderRecoveryAction = pathname.match(/^\/api\/connections\/shopify\/order-recovery(?:\/(start|resume))?$/);
+        if (orderRecoveryAction && (req.method === 'GET' && !orderRecoveryAction[1] || req.method === 'POST' && orderRecoveryAction[1])) {
+          requireOwner(auth);
+          if ([...url.searchParams.keys()].length) throw connectionError('Review retained orders without query overrides.', 'ORDER_RECOVERY_SELECTION_INVALID');
+          const actor = orderRecoveryActor(auth.session);
+          const body = req.method === 'POST' ? await jsonBody(req,4096) : null;
+          const result = await mutate(auth,state=>req.method === 'GET' ? orderRecovery.preview(state,actor) : orderRecovery.run(state,actor,orderRecoveryAction[1],body),{persist:false});
+          send(res,200,result); return;
+        }
         if (req.method === 'GET' && pathname === '/api/connection-centre') {
-          const channels = intelligentConnections(auth.state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status });
+          const channels = intelligentConnections(auth.state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status }).map(channel=>channel.id === 'shopify' ? {...channel,orderRecovery:{available:orderRecovery.available()},orderRecoveryObservation:publicOrderRecoveryObservation(auth.state)} : channel);
           send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50).map(publicConnectionWrite), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
         }
         if (req.method === 'GET' && pathname === '/api/operator/providers') {
@@ -2328,10 +2339,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 const requestedAreas = body.areas === undefined
                   ? retryFirstSync ? Object.keys(firstSync.areas).filter(area => firstSync.areas[area] !== 'completed') : connectionSettings(state, provider).areas
                   : validateAreas(provider, body.areas);
-                if (!protectedOrderBudget || requestedAreas.includes('orders')) state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
+                const deferOrderReset = provider === 'shopify' && state.integrationStatus?.shopify?.orderRecovery && retryFirstSync && requestedAreas.includes('orders');
+                if (!deferOrderReset && (!protectedOrderBudget || requestedAreas.includes('orders'))) state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
                 else if (requestedAreas.some(area => ['products','variants','inventory','prices'].includes(area))) delete state.connectionDoctor[provider].pendingReadAttempts;
                 if (state.connectionFirstSync?.[provider] && state.connectionFirstSync[provider].status !== 'completed' && !body.areas) {
-                  const firstSync = await runFirstSync(state,provider,{integrations,readSync:monitoredSync,save:()=>store.save(auth.session.workspaceId,state),retryFailedOnly:true});
+                  const firstSync = await runFirstSync(state,provider,{integrations,readSync:monitoredSync,save:()=>store.save(auth.session.workspaceId,state),retryFailedOnly:true,onExplicitOrderAdmission:()=>{ if (deferOrderReset) state.connectionDoctor = {...state.connectionDoctor,shopify:{}}; }});
                   return {status:state.integrationStatus?.[provider],firstSync};
                 }
                 const run = beginConnectionSync(state, provider, { areas: body.areas, actor: auth.user.id });
@@ -2396,7 +2408,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireOwner(auth);
           const outcome = await mutate(auth, async state => {
             try {
-              const result = await monitoredSync(state, integrations, 'shopify');
+              let run;
+              if (state.integrationStatus?.shopify?.orderRecovery && state.integrationStatus.shopify.orderRecovery.status !== 'committed') {
+                run = beginConnectionSync(state,'shopify',{actor:auth.user.id,integrations});
+                await store.save(auth.session.workspaceId,state);
+              }
+              const result = await monitoredSync(state, integrations, 'shopify',{run});
               addAudit(state, { type: 'shopify_read_sync', actor: auth.user.id, detail: { status: result.status, source: result.source } });
               return { status: result, error: null };
             } catch (error) {

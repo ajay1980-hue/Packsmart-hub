@@ -241,6 +241,22 @@ function validateManifestMap(container, workspaceId) {
     || Object.entries(container.manifests).some(([ref, manifest]) => !manifestValid(manifest, ref, workspaceId))) throw shopifyOrderSourceError('RETAINED_METADATA_INVALID');
   return container.manifests;
 }
+// Display-only provenance. Reuse the complete retained source contract and
+// exact content reference; this is never immutable completion or admission
+// authority. Invalid, foreign, missing or oversized evidence stays unknown.
+export function shopifyOrderRecoveryDisplayObservation(state) {
+  try {
+    const workspaceId = state?.workspace?.id, container = state?.channelData?.shopify?.orderReads;
+    if (![state,state?.workspace,state?.channelData,state?.channelData?.shopify].every(value=>scope(value,workspaceId))
+      || container?.workspaceId !== workspaceId || typeof container?.lastSuccess !== 'string' || !/^sor3:[a-f0-9]{64}$/.test(container.lastSuccess)) return null;
+    const manifests = validateManifestMap(container,workspaceId);
+    if (!own(manifests,container.lastSuccess)) return null;
+    const manifest = manifests[container.lastSuccess], observation = shopifyOrderReadRecoveryObservation(manifest);
+    if (!observation || !manifestValid(manifest,container.lastSuccess,workspaceId)) return null;
+    return {originalStartedAt:observation.originalStartedAt,lastCapturedAt:observation.lastCapturedAt,continued:observation.continued,snapshotConsistency:'unverified',
+      window:{requestedLowerBound:manifest.requestedLowerBound,requestedUpperBound:manifest.requestedUpperBound,sortKey:manifest.sortKey,reverse:manifest.reverse}};
+  } catch { return null; }
+}
 function assertReportingAmounts(orders) {
   for (const order of orders) {
     if (validSourceOrder(order) && order.total === null) throw shopifyOrderSourceError('REPORTING_AMOUNT_UNAVAILABLE');

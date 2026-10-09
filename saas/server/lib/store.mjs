@@ -17,6 +17,7 @@ import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
 import { CONTENT_EXECUTION_RECEIPT_CONTRACT, validateContentExecutionCommit,
   recordContentReceiptAcknowledgement } from './content-execution-receipt.mjs';
 import { prepareContentReceiptTransaction, commitContentReceiptTransaction } from './content-execution-receipt-store.mjs';
+import { ORDER_RECOVERY_CONTRACT, validateOrderRecoveryCommit, prepareOrderRecoveryTransaction, commitOrderRecoveryTransaction, readOrderRecovery, lookupOrderRecovery, getOrderRecoveryContext, recordOrderRecoveryAcknowledgement, orderRecoveryError } from './shopify-order-recovery-store.mjs';
 import { orderFinancialMirrorRow, orderReportingCurrency } from './shopify-order-source.mjs';
 import { LEGACY_AI_USAGE_COLUMNS, LEGACY_AI_USAGE_MAX_ROWS, LEGACY_AI_USAGE_MAX_BYTES,
   legacyAiUsageWindow, legacyAiUsageUnknown, legacyAiUsagePage } from './legacy-ai-usage.mjs';
@@ -421,7 +422,8 @@ class FileStore {
     return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery } = {}) {
+    if (protectedOrderRecovery !== undefined) throw orderRecoveryError('UNAVAILABLE', 503);
     if (protectedContentCommit !== undefined) throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
     assertWorkspace(workspaceId, state);
     const assertCurrent = saveGuard(beforeCommit);
@@ -607,6 +609,7 @@ class FileStore {
 
 class SupabaseStore {
   constructor(env, fetchImpl, activityOptions = {}) {
+    Object.defineProperty(this, 'orderRecoveryCapability', { value: env.SHOPIFY_ORDER_RECOVERY_CONTRACT ?? null });
     Object.defineProperty(this, 'contentExecutionReceiptCapability', { value: env.CONTENT_EXECUTION_RECEIPT_CONTRACT ?? null });
     this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: true });
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
@@ -673,6 +676,24 @@ class SupabaseStore {
         { maxResponseBytes: CONNECTION_WRITE_CONTEXT_MAX_BYTES });
       return connectionWriteContextResult(rows, workspaceId, input);
     } catch { throw contextUnavailable(); }
+  }
+
+  async readOrderRecovery(workspaceId, actor, stageId = null, options = {}) {
+    if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT) throw orderRecoveryError('UNAVAILABLE',503);
+    return readOrderRecovery((operation,path,settings)=>this.scopedRequest(workspaceId,operation,path,settings),workspaceId,actor,stageId,options);
+  }
+  async appendOrderRecovery(workspaceId, descriptor) {
+    if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT) throw orderRecoveryError('UNAVAILABLE',503);
+    const transaction = prepareOrderRecoveryTransaction(workspaceId,null,null,{...descriptor,kind:'append'});
+    return commitOrderRecoveryTransaction(transaction,(operation,path,settings)=>this.scopedRequest(workspaceId,operation,path,settings));
+  }
+  async lookupOrderRecovery(workspaceId,actor,identity) {
+    if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT) throw orderRecoveryError('UNAVAILABLE',503);
+    return lookupOrderRecovery((operation,path,settings)=>this.scopedRequest(workspaceId,operation,path,settings),workspaceId,actor,identity);
+  }
+  async getOrderRecoveryContext(workspaceId,input,options) {
+    if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT) throw orderRecoveryError('UNAVAILABLE',503);
+    return getOrderRecoveryContext((operation,path,settings)=>this.scopedRequest(workspaceId,operation,path,settings),workspaceId,input,options);
   }
 
   // Separate from diagnostics(): public health must never expose tenant usage.
@@ -1253,7 +1274,7 @@ class SupabaseStore {
     }, { primary: false });
   }
 
-  async commit(workspaceId, state, expectedRevision, existing, { primary = true, protectedContentCommit } = {}) {
+  async commit(workspaceId, state, expectedRevision, existing, { primary = true, protectedContentCommit, protectedOrderRecovery } = {}) {
     try {
       const stateBytes = Buffer.byteLength(JSON.stringify(state));
       this.telemetry.stateBytes = stateBytes;
@@ -1269,7 +1290,12 @@ class SupabaseStore {
       }
       let protectedResult = null;
       const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
-      if (protectedContentCommit) {
+      if (protectedOrderRecovery) {
+        if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT) throw orderRecoveryError('UNAVAILABLE',503);
+        const transaction = prepareOrderRecoveryTransaction(workspaceId,state,expectedRevision,protectedOrderRecovery);
+        try { protectedResult = await commitOrderRecoveryTransaction(transaction,(operation,path,settings)=>this.scopedRequest(workspaceId,operation,path,settings)); }
+        finally { if (!protectedResult || protectedResult.recovered) { this.invalidateSchedulerCache(workspaceId); this.mirrorRevisions.delete(workspaceId); for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key); } }
+      } else if (protectedContentCommit) {
         if (this.contentExecutionReceiptCapability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) {
           throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
         }
@@ -1386,9 +1412,15 @@ class SupabaseStore {
     state.workRecords = workRecords.slice(0, SUPABASE_WORK_RECORD_LIMIT);
 
     const syncs = state.connectionSyncs || [];
+    const recoveryMarker = state.integrationStatus?.shopify?.orderRecovery;
+    const retainedRunId = recoveryMarker?.status !== 'committed' ? recoveryMarker?.runId : null;
+    const pinned = retainedRunId ? syncs.find(run => run.id === retainedRunId) : null;
     const keptSyncs = [], archivedSyncs = [];
     for (const run of syncs) {
-      if (run.status === 'running' || keptSyncs.length < SUPABASE_CONNECTION_SYNC_LIMIT) keptSyncs.push(run);
+      // A retained admission stays in the exactly-100 hot history. Pinning a
+      // late run reserves one slot rather than increasing the history bound.
+      const room = SUPABASE_CONNECTION_SYNC_LIMIT - (pinned && !keptSyncs.includes(pinned) && run !== pinned ? 1 : 0);
+      if (run === pinned || keptSyncs.length < room) keptSyncs.push(run);
       else archivedSyncs.push(run);
     }
     await this.archiveHistory(workspaceId, 'connectionSyncs', archivedSyncs);
@@ -1419,8 +1451,14 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery } = {}) {
     assertWorkspace(workspaceId, state);
+    if (protectedOrderRecovery !== undefined) {
+      if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT || protectedContentCommit !== undefined) throw orderRecoveryError('UNAVAILABLE',503);
+      protectedOrderRecovery = validateOrderRecoveryCommit(protectedOrderRecovery);
+      if (!['reserve','finalize'].includes(protectedOrderRecovery.kind)) throw orderRecoveryError('INVALID');
+      ownedSnapshot = true;
+    }
     if (protectedContentCommit !== undefined) {
       if (this.contentExecutionReceiptCapability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) {
         throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
@@ -1481,7 +1519,7 @@ class SupabaseStore {
     const retainedAutomationRuns = automationPlan ? applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns : null;
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     assertCurrent(upgraded);
-    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit });
+    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery });
     if (protectedResult?.recovered) {
       // The exact original primary transaction is proven, even if another
       // replica has since advanced the workspace. Never mirror or save this
@@ -1491,7 +1529,8 @@ class SupabaseStore {
       // observed elsewhere; its final fresh check still detects concurrent work.
       state._revision = upgraded._revision;
       const persisted = markPersisted(upgraded);
-      recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
+      if (protectedOrderRecovery) recordOrderRecoveryAcknowledgement(persisted, protectedResult);
+      else recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
       return persisted;
     }
     state._revision = upgraded._revision;
@@ -1534,7 +1573,10 @@ class SupabaseStore {
     }
     if (reportingCommitted) this.rememberSchedulerState(workspaceId, persisted);
     else this.invalidateSchedulerCache(workspaceId);
-    if (protectedResult) recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
+    if (protectedResult) {
+      if (protectedOrderRecovery) recordOrderRecoveryAcknowledgement(persisted, protectedResult);
+      else recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
+    }
     return persisted;
   }
 

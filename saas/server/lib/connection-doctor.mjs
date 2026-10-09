@@ -1,4 +1,4 @@
-import { CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, connectionReadAttempts, pendingConnectionReadExhausted, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
+import { automaticConnectionAreas, CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, connectionReadAttempts, pendingConnectionReadExhausted, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { addAudit } from './events.mjs';
 import { classifyConnectionIssue, recordFor, safeFailureCode } from './connection-intelligence.mjs';
 
@@ -39,7 +39,8 @@ export function queueFirstSync(state, provider, actor) {
   // A new source or an explicit orders import may reset its budget. Reconnecting
   // the same account for products alone cannot erase uncertain order attempts.
   const previousDoctor = state.connectionDoctor?.[provider];
-  const keepOrders = provider === 'shopify' && !settings.areas.includes('orders') && previousDoctor?.orderReadBinding
+  const retainedRecovery = provider === 'shopify' && state.integrationStatus?.shopify?.orderRecovery && state.integrationStatus.shopify.orderRecovery.status !== 'committed';
+  const keepOrders = retainedRecovery || provider === 'shopify' && !settings.areas.includes('orders') && previousDoctor?.orderReadBinding
     && connectionDoctorState(state, provider) === previousDoctor;
   state.connectionDoctor = { ...state.connectionDoctor, [provider]: keepOrders ? previousDoctor : {} };
 }
@@ -86,10 +87,12 @@ function readGroups(provider, areas) {
   return areas.map(area => [area]);
 }
 
-export async function runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly = false, automatic = false, onOrderAttempt = null, onReadAttempt = null }) {
+export async function runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly = false, automatic = false, onOrderAttempt = null, onReadAttempt = null, onExplicitOrderAdmission = null }) {
   const first = state.connectionFirstSync?.[provider];
   if (!first || !first.identityVerifiedAt || connectionSettings(state, provider).disconnected) return;
-  const areas = Object.keys(first.areas).filter(a => !retryFailedOnly || first.areas[a] !== 'completed');
+  const requestedAreas = Object.keys(first.areas).filter(a => !retryFailedOnly || first.areas[a] !== 'completed');
+  const areas = automatic ? automaticConnectionAreas(state,provider,requestedAreas) : requestedAreas;
+  if (!areas.length) return first;
   if (automatic && (orderReadHeld(state, provider, areas, integrations) || pendingConnectionReadExhausted(state, provider, integrations))) return first;
   let readAttemptCharged = false;
   if (automatic && provider === 'shopify' && areas.includes('orders') && (orderBudgetExhausted(connectionDoctorState(state, provider, integrations)) || shopifyOrderReadPolicyBlocked(state, integrations, areas))) return first;
@@ -104,6 +107,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
     }
     if (orderAttempt) { reserveOrderAttempt(state, integrations, readAttemptCharged); onOrderAttempt?.(); }
     for (const area of group) first.areas[area] = 'running';
+    if (!automatic && provider === 'shopify' && group.includes('orders')) onExplicitOrderAdmission?.();
     const run = beginConnectionSync(state, provider, { areas: group, automatic, actor: first.actor || 'connection-doctor', integrations });
     await save(); // durable lease before any read; CAS and the workspace lock protect it
     try {
@@ -131,7 +135,8 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
   first.validation = validateImportedData(state, provider, { areas: Object.keys(first.areas) });
   const successful = Object.keys(first.areas).filter(area => first.areas[area] === 'completed');
   const failed = Object.keys(first.failures);
-  first.status = failed.length || !first.validation.ok ? successful.length ? 'partial' : 'failed' : 'completed';
+  const unfinished = Object.values(first.areas).some(status=>status !== 'completed');
+  first.status = unfinished || failed.length || !first.validation.ok ? successful.length ? 'partial' : 'failed' : 'completed';
   first.completedAt = iso();
   if (automatic && first.status === 'completed') delete state.connectionDoctor?.[provider]?.pendingReadAttempts;
   const previous = state.integrationStatus?.[provider] || {};
@@ -139,7 +144,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
     const priority = Object.values(first.failures).find(f => /AUTH|CREDENTIAL|ACCOUNT_MISMATCH/.test(f.code)) || Object.values(first.failures)[0];
     state.integrationStatus[provider] = { ...previous, status: successful.length ? 'degraded' : 'error', lastError: priority.code, lastFailureAt: first.completedAt,
       failedAreas: failed, transient: priority.transient, upstreamStatus: priority.upstreamStatus, lastSuccessfulSyncAt:first.previousSuccessfulSyncAt };
-  } else if (first.validation.ok) state.integrationStatus[provider] = { ...previous, status: 'connected', lastError: null, failedAreas: [], transient: false, upstreamStatus: null, lastSuccessfulSyncAt: first.completedAt };
+  } else if (first.validation.ok && !unfinished) state.integrationStatus[provider] = { ...previous, status: 'connected', lastError: null, failedAreas: [], transient: false, upstreamStatus: null, lastSuccessfulSyncAt: first.completedAt };
   const message = first.status === 'completed' ? `${CONNECTORS[provider].name} first sync completed. Your business data is ready.` : `${CONNECTORS[provider].name} imported ${successful.length} data areas. ${failed.length ? `Retry needed: ${failed.join(', ')}.` : 'Some imported records need review.'} Successful imports are safe.`;
   addAudit(state, { type: 'connection_first_sync_finished', actor: first.actor, detail: { provider, status: first.status, successfulAreas: successful, failedAreas: failed, counts: first.validation.counts, message, priority: first.status === 'completed' ? 'informational' : 'important', externalWrites: false } });
   await save();
@@ -151,7 +156,8 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
 export async function runConnectionDoctor(state, { integrations, readSync, save, now = new Date() }) {
   let changed = false;
   for (const provider of Object.keys(CONNECTORS)) {
-    const settings = connectionSettings(state, provider), record = recordFor(state, provider);
+    const configured = connectionSettings(state,provider), settings = {...configured,areas:automaticConnectionAreas(state,provider,configured.areas)}, record = recordFor(state, provider);
+    if (!settings.areas.length) continue;
     if (settings.disconnected || !record?.encryptedCredentials || !CONNECTORS[provider].areas.length) continue;
     // The durable source hold is already sufficient evidence. Merely seeing it
     // again must not claim repairs, contact providers, or write another save.

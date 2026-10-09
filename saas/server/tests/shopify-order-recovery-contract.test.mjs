@@ -194,7 +194,7 @@ test('strict retained page schema, cursor chain, evidence, cost placeholders and
 });
 
 test('five-admission ceiling is shared attempt debt and immutable initial first-sync evidence', t => {
-  const f = fixture(t); f.state.connectionFirstSync = { shopify: { startedAt: SOURCE_AT, actor: 'initial-owner', identityVerifiedAt: SOURCE_AT } };
+  const f = fixture(t); f.state.connectionFirstSync = { shopify: { startedAt: SOURCE_AT, actor: 'initial-owner', identityVerifiedAt: SOURCE_AT, areas: { orders: 'failed' } } };
   const binding = createShopifyOrderRecoveryBinding(f.state, f.service, { startedAt: AT });
   let stage = createShopifyOrderRecoveryStage({ id: 'stage', binding, admission: admission(3) });
   stage = resumeShopifyOrderRecoveryStage(stage, admission(4, { actorId: 'new-owner' }));
@@ -249,4 +249,41 @@ test('conservative mutable-control charge cannot grow on supersession or pause a
   }
   const tooMany = recharged({ ...structuredClone(f.stage), revision: 100 });
   assert.throws(() => validateShopifyOrderRecoveryStage(tooMany), recoveryError);
+});
+
+
+for (const status of ['pending', 'running', 'failed']) test(`verified unfinished first-sync orders ${status} retain exact original evidence`, t => {
+  const f = fixture(t), first = { status: 'partial', startedAt: SOURCE_AT, actor: 'initial-owner', identityVerifiedAt: SOURCE_AT,
+    areas: { orders: status, products: 'failed' }, failures: { products: 'synthetic failure' }, completedAt: null };
+  f.state.connectionFirstSync = { shopify: first };
+  const before = structuredClone(first), binding = createShopifyOrderRecoveryBinding(f.state, f.service, { startedAt: AT });
+  assert.deepEqual(binding.firstSync, { startedAt: SOURCE_AT, actor: 'initial-owner', identityVerifiedAt: SOURCE_AT });
+  assert.deepEqual(f.state.connectionFirstSync.shopify, before);
+  binding.firstSync.identityVerifiedAt = null;
+  assert.throws(() => createShopifyOrderRecoveryStage({ id: 'invalid-first-sync', binding, admission: admission() }), recoveryError);
+});
+
+const unboundFirstSync = [
+  ['completed orders', { areas: { orders: 'completed', products: 'failed' } }],
+  ['missing orders', { areas: { products: 'failed' } }],
+  ['unknown orders status', { areas: { orders: 'unknown' } }],
+  ['missing verification', { identityVerifiedAt: undefined }],
+  ['null verification', { identityVerifiedAt: null }],
+  ['invalid verification', { identityVerifiedAt: 'yesterday' }],
+  ['missing start', { startedAt: undefined }],
+  ['invalid start', { startedAt: 'yesterday' }],
+  ['missing actor', { actor: undefined }],
+  ['empty actor', { actor: '' }],
+  ['invalid actor', { actor: ' owner ' }]
+];
+for (const [name, change] of unboundFirstSync) test(`later order recovery excludes and preserves first-sync history with ${name}`, async t => {
+  const f = fixture(t);
+  f.state.connectionFirstSync = { shopify: { status: 'partial', startedAt: SOURCE_AT, actor: 'initial-owner', identityVerifiedAt: SOURCE_AT,
+    areas: { orders: 'failed', products: 'failed' }, failures: { products: 'synthetic failure' }, completedAt: '2026-10-08T01:00:00.000Z', ...change } };
+  const before = structuredClone(f.state.connectionFirstSync.shopify), binding = createShopifyOrderRecoveryBinding(f.state, f.service, { startedAt: AT });
+  assert.equal(binding.firstSync, null);
+  const stage = createShopifyOrderRecoveryStage({ id: 'later-recovery', binding, admission: admission() });
+  const cap = createShopifyOrderRecoveryCapability({ stage, assertCurrent: () => {}, appendPage: () => {}, atomicAppend: true });
+  await f.service.syncShopify(f.state, { areas: ['orders'], orderRecovery: cap });
+  assert.deepEqual(f.state.connectionFirstSync.shopify, before);
 });

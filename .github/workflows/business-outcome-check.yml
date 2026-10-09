@@ -50,3 +50,7 @@ jobs:
         run: node --test --test-concurrency=1 saas/server/tests/content-execution-receipt-postgres.mjs
       - name: Verify receipt-backed outcome review and publication
         run: node --test --test-concurrency=1 saas/server/tests/receipt-outcome-consumer-postgres.mjs
+      - name: Verify bounded Shopify order recovery and cleanup
+        run: node --test --test-concurrency=1 saas/server/tests/shopify-order-recovery-postgres.mjs
+      - name: Verify recovery importer through the real storage adapter
+        run: node --test --test-concurrency=1 saas/server/tests/shopify-order-recovery-transport-postgres.mjs

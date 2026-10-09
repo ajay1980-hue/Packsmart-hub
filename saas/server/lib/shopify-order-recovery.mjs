@@ -50,15 +50,19 @@ function validateBinding(binding) {
   requireThat(keys(binding.window, Object.keys(expectedWindow)) && equal(binding.window, expectedWindow), 'WINDOW_INVALID');
   const first = binding.firstSync;
   requireThat(first === null || keys(first, ['startedAt', 'actor', 'identityVerifiedAt']) && date(first.startedAt)
-    && text(first.actor, 300) && (first.identityVerifiedAt === null || date(first.identityVerifiedAt)), 'FIRST_SYNC_INVALID');
+    && text(first.actor, 300) && date(first.identityVerifiedAt), 'FIRST_SYNC_INVALID');
   return binding;
 }
 export function createShopifyOrderRecoveryBinding(state, integrations, { startedAt = new Date().toISOString() } = {}) {
   const source = shopifyOrderReadBinding(state, integrations), first = state.connectionFirstSync?.shopify;
+  // Only verified, unfinished orders are part of this recovery. Historical
+  // first-sync records remain unrelated state and must survive unchanged.
+  const firstEligible = first && ['pending', 'running', 'failed'].includes(first.areas?.orders)
+    && date(first.startedAt) && text(first.actor, 300) && date(first.identityVerifiedAt);
   const binding = { schema: BINDING, workspaceId: state.workspace?.id, source, parserPolicy: SHOPIFY_ORDER_RECOVERY_PARSER_POLICY,
     queryPolicy: SHOPIFY_ORDER_READ_POLICY, settingsRevision: connectionSettings(state, 'shopify').revision,
     sourceGeneration: state.channelData?.shopify?.orderReads?.lastSuccess ?? null, startedAt, window: shopifyOrderReadWindow(startedAt),
-    firstSync: first ? { startedAt: first.startedAt, actor: first.actor, identityVerifiedAt: first.identityVerifiedAt ?? null } : null };
+    firstSync: firstEligible ? { startedAt: first.startedAt, actor: first.actor, identityVerifiedAt: first.identityVerifiedAt } : null };
   validateBinding(binding); return clone(binding);
 }
 function validateAdmission(admission) {

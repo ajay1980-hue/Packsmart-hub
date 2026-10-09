@@ -81,11 +81,22 @@ export function shopifyOrderReadHold(state, provider, integrations = null) {
   const status = state.integrationStatus?.shopify || {};
   return isShopifyOrderSourceFailure(provider, status.orderReadHold?.code) && isShopifyOrderReadBindingCurrent(state, status.orderReadHold.binding, integrations) ? status.orderReadHold : null;
 }
+// A retained or unrecognized recovery marker blocks automatic orders only.
+// Other areas keep the existing shared Doctor debt and scheduling rules.
+export function automaticConnectionAreas(state, provider, areas = connectionSettings(state,provider).areas) {
+  const present = provider === 'shopify' && Object.hasOwn(state.integrationStatus?.shopify || {},'orderRecovery');
+  const marker = provider === 'shopify' && state.integrationStatus?.shopify?.orderRecovery;
+  const knownReleased = marker && typeof marker === 'object' && !Array.isArray(marker) && Object.keys(marker).length === 5 && ['schema','stageId','runId','status','attempt'].every(key=>Object.hasOwn(marker,key))
+    && marker.schema === 'shopify-order-recovery-marker/v1' && ['committed','superseded'].includes(marker.status) && ['stageId','runId'].every(key=>typeof marker[key] === 'string' && marker[key].length > 0 && marker[key].length <= 256 && marker[key] === marker[key].trim() && !/[\u0000-\u001f\u007f]/.test(marker[key]))
+    && Number.isSafeInteger(marker.attempt) && marker.attempt >= 1 && marker.attempt <= 5;
+  return present && !knownReleased ? areas.filter(area=>area !== 'orders') : areas;
+}
 export function orderReadHeld(state, provider, areas = connectionSettings(state, provider).areas, integrations = null) {
   return Boolean(areas.includes('orders') && shopifyOrderReadHold(state, provider, integrations));
 }
 export function connectionDoctorState(state, provider, integrations = null) {
   const doctor = state.connectionDoctor?.[provider] || {};
+  if (provider === 'shopify' && !automaticConnectionAreas(state,provider,['orders']).length) return doctor;
   // A source replacement gets its own read budget; refresh-token rotation is
   // deliberately outside the stable binding and cannot release consumed work.
   // Losing/enriching an identity field is not proof of a different source.
@@ -209,7 +220,8 @@ export function recoveryFor(provider, status = {}, coverage = {}, orderHold = un
   return null;
 }
 export function beginConnectionSync(state, provider, { areas, automatic = false, actor = 'system', integrations = null } = {}) {
-  const selected = validateAreas(provider, areas || connectionSettings(state, provider).areas);
+  const requested = areas || connectionSettings(state, provider).areas;
+  const selected = validateAreas(provider, automatic ? automaticConnectionAreas(state,provider,requested) : requested);
   if (automatic && orderReadHeld(state, provider, selected, integrations)) throw Object.assign(connectionError('Shopify order source needs review. Existing data is retained.', shopifyOrderReadHold(state, provider, integrations).code, 422), { nonRetryable: true });
   if (automatic && provider === 'shopify' && shopifyOrderReadPolicyBlocked(state, integrations, selected)) throw Object.assign(connectionError('Automatic Shopify order reads need review before another attempt.', 'SHOPIFY_ORDER_RETRY_EXHAUSTED', 409), { nonRetryable: true });
   state.connectionSyncs ||= [];
@@ -220,6 +232,7 @@ export function beginConnectionSync(state, provider, { areas, automatic = false,
   }
   if (connectionSettings(state, provider).disconnected) throw connectionError('Connect this channel before syncing.', 'CONNECTION_DISCONNECTED', 409);
   const run = { id: `sync_${crypto.randomUUID()}`, provider, areas: selected, automatic, actor, status: 'running', stage: 'Reading selected data', startedAt: new Date(now).toISOString(), leaseUntil: new Date(now + 10 * 60000).toISOString() };
+  if (!automatic && provider === 'shopify' && selected.includes('orders') && state.integrationStatus?.shopify?.orderRecovery && state.integrationStatus.shopify.orderRecovery.status !== 'committed') state.integrationStatus.shopify.orderRecovery = {...state.integrationStatus.shopify.orderRecovery,status:'superseded'};
   state.connectionSyncs.unshift(run);
   // Supabase archives before trimming on save; never discard unarchived runs here.
   return run;
@@ -234,7 +247,7 @@ export function finishConnectionSync(state, run, result, error) {
   addAudit(state, { type: 'connection_sync_finished', actor: run.actor, detail: { provider: run.provider, runId: run.id, areas: run.areas, status: run.status, errorCode: run.errorCode } });
 }
 export function connectionDue(state, provider, now = new Date(), integrations = null) {
-  const settings = connectionSettings(state, provider), status = state.integrationStatus?.[provider] || {};
+  const configured = connectionSettings(state, provider), settings = {...configured,areas:automaticConnectionAreas(state,provider,configured.areas)}, status = state.integrationStatus?.[provider] || {};
   if (orderReadHeld(state, provider, settings.areas, integrations)) return false;
   if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;
   const doctor = connectionDoctorState(state, provider, integrations);
@@ -253,7 +266,7 @@ export function connectionCentre(state, integrations) {
     const configured = !settings.disconnected && (id === 'shopify' ? integrations.shopifyConfigured?.(state) : id === 'ebay' ? integrations.ebayConfigured?.(state) : Boolean(record?.encryptedCredentials));
     const recovery = recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {}, id === 'shopify' ? shopifyOrderReadHold(state, id, integrations) : undefined);
     const status = settings.disconnected ? 'disconnected' : !configured ? 'not_configured' : recovery?.action === 'reconnect' ? 'action_required' : recovery ? 'degraded' : ['connected', 'configured'].includes(health.status || record?.status) ? (health.status === 'connected' ? 'connected' : 'action_required') : 'action_required';
-    const history = (state.connectionSyncs || []).filter(run => run.provider === id).slice(0, 30).map(run => ({ ...run, ...(run.status === 'running' && Date.parse(run.leaseUntil) <= Date.now() ? { status: 'failed', stage: 'Interrupted — retry sync', errorCode: 'WORKER_INTERRUPTED' } : {}) }));
+    const history = (state.connectionSyncs || []).filter(run => run.provider === id).slice(0, 30).map(({orderRecoveryStageId, ...run}) => ({ ...run, ...(run.status === 'running' && Date.parse(run.leaseUntil) <= Date.now() ? { status: 'failed', stage: 'Interrupted — retry sync', errorCode: 'WORKER_INTERRUPTED' } : {}) }));
     const products = id === 'shopify' ? (state.products || []).filter(product => product.provider === 'shopify') : id === 'ebay' ? state.ebay?.listings || [] : [];
     const readData = state.channelData?.[id] || {};
     const counts = { ...(id === 'shopify' || id === 'ebay' ? { products: products.length, orders: null } : {}), ...(id === 'shopify' ? { variants: products.reduce((sum, product) => sum + (product.variants?.length || 0), 0), customers: state.channelData?.shopify?.customers?.length || 0 } : {}), ...Object.fromEntries(Object.entries(readData).filter(([,value]) => Array.isArray(value)).map(([key,value]) => [key,value.length])) };

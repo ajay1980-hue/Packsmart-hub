@@ -18,6 +18,164 @@
   const freezeContent = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freezeContent); Object.freeze(value); } return value; };
   const contentId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
   const sameKeys = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).sort().join(',') === keys.slice().sort().join(',');
+  // Selection is an opaque, one-use server capability. Keep it in this closure,
+  // never in DOM attributes, history, storage, notifications or display copy.
+  const orderRecovery = { epoch:0, ticket:null, review:null, display:null, identity:null, source:null, acknowledged:false, phase:'idle', message:'' };
+  const recoveryPath = '/api/connections/shopify/order-recovery';
+  const recoveryCodes = Object.freeze({
+    ORDER_RECOVERY_AUTH_REFRESH_REQUIRED:'Access needs attention. Use the existing Refresh access or Reconnect control, then review again. A changed connection identity can make retained pages ineligible.',
+    ORDER_RECOVERY_CAPACITY_EXHAUSTED:'Recovery is on hold because retained recovery storage is full. Paused, failed, uncertain and superseded pages still use capacity; saved completion records also count. An ordinary fresh orders sync remains available.',
+    ORDER_RECOVERY_GLOBAL_CAPACITY_EXHAUSTED:'Recovery is on hold because shared retained recovery storage is full. Saved completion records also count. An ordinary fresh orders sync remains available.',
+    ORDER_RECOVERY_UNKNOWN:'The recovery outcome is unknown. Retained pages remain on hold. Review the saved status explicitly before taking another recovery action.',
+    ORDER_RECOVERY_PAUSED:'Recovery is paused. Retained pages still use capacity and cannot be resumed. An ordinary fresh orders sync remains available.',
+    ORDER_RECOVERY_SUPERSEDED:'An ordinary fresh orders sync replaced this recovery attempt. Its retained pages still use capacity and cannot be resumed.',
+    ORDER_RECOVERY_SELECTION_INVALID:'This review is no longer valid. Review the current saved status again before continuing.',
+    ORDER_RECOVERY_SELECTION_EXPIRED:'This review expired. Review the current saved status again before continuing.',
+    ORDER_RECOVERY_SOURCE_UNAVAILABLE:'The saved connection cannot currently be verified for recovery. Review the existing connection controls, then review recovery again.',
+    ORDER_RECOVERY_SOURCE_HELD:'The saved order source is on hold. Recovery cannot continue until the source checks pass; retained pages still use capacity.',
+    ORDER_RECOVERY_SOURCE_CHANGED:'The connection or saved source changed. These retained pages may no longer be eligible. Review the current connection before another recovery action.',
+    ORDER_RECOVERY_BUDGET_EXHAUSTED:'The existing read retry limit has been reached. Recovery is on hold and cannot reset that limit.',
+    ORDER_RECOVERY_LEASE_ACTIVE:'An admitted read is still active. Recovery is on hold; review its saved status after that read has settled.',
+    ORDER_RECOVERY_READ_FAILED:'This read was interrupted. Validated earlier pages may be retained. Review the saved status and original window explicitly before another attempt.',
+    SHOPIFY_ORDER_RECOVERY_PAGE_LIMIT:'This read reached its bounded page limit. Recovery is paused; retained pages still use capacity and are not a complete source-period history.',
+    SHOPIFY_ORDER_RECOVERY_STAGE_LIMIT:'This read reached its bounded retained-data limit. Recovery is paused; retained pages still use capacity.',
+    ORDER_RECOVERY_UNAVAILABLE:'Optional recovery is unavailable. The ordinary sync controls remain available.'
+  });
+  const recoveryDate = value => typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  function recoveryAuthority(context = contentContext()) {
+    return Boolean(context?.session && context.csrf && context.userId && context.workspaceId && ['owner','admin'].includes(context.role) &&
+      context.role === context.dataRole && context.role === context.session.user?.role && context.userId === context.dataUserId && context.userId === context.session.user?.id &&
+      context.workspaceId === context.dataWorkspaceId && context.workspaceId === context.session.workspace?.id &&
+      !context.passwordChangeRequired && !context.dataPasswordChangeRequired && !context.session.user?.passwordChangeRequired &&
+      context.active !== false && context.dataActive !== false && context.session.user?.active !== false);
+  }
+  function sameRecoveryIdentity(original, current = contentContext()) {
+    return recoveryAuthority(current) && original?.session === current.session && original.userId === current.userId && original.workspaceId === current.workspaceId &&
+      original.role === current.role && original.csrf === current.csrf && original.sessionCsrf === current.sessionCsrf;
+  }
+  function recoveryChannel() { const rows = channels.filter(row=>row?.id==='shopify'); return rows.length===1 ? rows[0] : null; }
+  function recoveryAvailable() { return recoveryChannel()?.orderRecovery?.available === true; }
+  function recoverySource() { const c=recoveryChannel(); return JSON.stringify(c ? [c.identity,c.configured,c.status,c.settings,c.accessExpiresAt,c.orderRecovery,c.orderRecoveryObservation] : null); }
+  function recoveryVisible() { return selected==='shopify' && $('#connection-dialog').open && !document.hidden && contentContext()?.view==='channels'; }
+  function validRecoveryWindow(value, startedAt) {
+    return sameKeys(value,['requestedLowerBound','requestedUpperBound','sortKey','reverse']) && recoveryDate(startedAt) && recoveryDate(value.requestedLowerBound) &&
+      value.requestedUpperBound===startedAt && value.requestedLowerBound<startedAt && value.sortKey==='UPDATED_AT' && value.reverse===false;
+  }
+  function validRecoveryObservation(value) {
+    return sameKeys(value,['originalStartedAt','lastCapturedAt','continued','snapshotConsistency','window']) && validRecoveryWindow(value.window,value.originalStartedAt) &&
+      (value.lastCapturedAt===null || recoveryDate(value.lastCapturedAt) && value.lastCapturedAt>=value.originalStartedAt) && typeof value.continued==='boolean' && value.snapshotConsistency==='unverified';
+  }
+  function validRecoveryPreview(value, workspaceId) {
+    if (!sameKeys(value,['schema','workspaceId','available','selection','expiresAt','stage','canStart','canResume','reason','originalStartedAt','window']) ||
+      value.schema!=='runvara-order-recovery-preview/v1' || value.workspaceId!==workspaceId || typeof value.available!=='boolean' ||
+      typeof value.canStart!=='boolean' || typeof value.canResume!=='boolean' || value.canStart && value.canResume ||
+      !(value.reason===null || typeof value.reason==='string' && /^[A-Z_]{1,100}$/.test(value.reason)) ||
+      !(value.selection===null || typeof value.selection==='string' && /^[A-Za-z0-9_.:-]{16,512}$/.test(value.selection)) ||
+      !(value.expiresAt===null || recoveryDate(value.expiresAt)) ||
+      !(value.originalStartedAt===null && value.window===null && !value.available || validRecoveryWindow(value.window,value.originalStartedAt))) return false;
+    if ((value.canStart || value.canResume) && (!value.available || !value.selection || !value.expiresAt || Date.parse(value.expiresAt)<=Date.now())) return false;
+    if (value.stage!==null) {
+      const s=value.stage;
+      if (!sameKeys(s,['status','pageCount','orderCount','originalStartedAt','lastCapturedAt','continued','snapshotConsistency','window']) ||
+        !['reading','complete','failed','paused','unknown','committed','superseded'].includes(s.status) || !Number.isSafeInteger(s.pageCount) || s.pageCount<0 || s.pageCount>10 ||
+        !Number.isSafeInteger(s.orderCount) || s.orderCount<0 || s.orderCount>s.pageCount*50 || !validRecoveryObservation(Object.fromEntries(['originalStartedAt','lastCapturedAt','continued','snapshotConsistency','window'].map(k=>[k,s[k]]))) ||
+        s.originalStartedAt!==value.originalStartedAt || JSON.stringify(s.window)!==JSON.stringify(value.window) || value.canStart ||
+        value.canResume && !['reading','complete','failed'].includes(s.status)) return false;
+    } else if (value.canResume) return false;
+    return true;
+  }
+  function recoveryReason(code) { return recoveryCodes[code] || 'Recovery is on hold. Review the saved connection and current status before continuing. Ordinary sync controls remain available.'; }
+  function recoveryAge(value) {
+    if (!value) return 'No page captured';
+    const minutes=Math.max(0,Math.floor((Date.now()-Date.parse(value))/60000));
+    return minutes<1 ? 'less than a minute old' : minutes<60 ? `${minutes} minute${minutes===1?'':'s'} old` : minutes<1440 ? `${Math.floor(minutes/60)} hour${Math.floor(minutes/60)===1?'':'s'} old` : `${Math.floor(minutes/1440)} day${Math.floor(minutes/1440)===1?'':'s'} old`;
+  }
+  function recoveryObservationText(observation) {
+    return `<p>Original observation started: <span>${esc(when(observation.originalStartedAt))}</span>.</p><p>Fixed updated-order window: <span>${esc(observation.window.requestedLowerBound)}</span> (inclusive) to <span>${esc(observation.window.requestedUpperBound)}</span> (exclusive). Orders are read by updated time, oldest first.</p><p>Last retained page: ${esc(observation.lastCapturedAt ? when(observation.lastCapturedAt) : 'None')} · ${esc(recoveryAge(observation.lastCapturedAt))}.</p>`;
+  }
+  function recoveryProvenance(channel) {
+    const o=channel.orderRecoveryObservation;
+    if (!o) return '';
+    if (!validRecoveryObservation(o)) return '<section id="connection-order-observation" class="connection-section"><h3>Saved order observation</h3><p>Original order observation details are unavailable. Freshness, snapshot consistency and source-period coverage remain unverified.</p></section>';
+    return `<section id="connection-order-observation" class="connection-section connection-exact-text"><h3>Saved order observation</h3>${recoveryObservationText(o)}<p>${o.continued?'Saved orders include pages retained from an earlier observation.':'These orders were saved through optional recovery.'} Completing or saving the read does not make the original observation newer. Snapshot consistency and source-period coverage remain unverified.</p></section>`;
+  }
+  function recoveryPanel() {
+    if (!recoveryAvailable() || !recoveryAuthority()) return '';
+    return `<section id="connection-order-recovery" class="connection-section connection-exact-text" aria-labelledby="order-recovery-heading"><h3 id="order-recovery-heading">Optional order recovery</h3><p>Review a bounded saved orders read before starting or continuing it. Only orders are included; customer records remain optional under the existing sync controls.</p><p>Pages can reflect different observation times. Shopify snapshot consistency, cursor lifetime and complete source-period coverage are unverified. This does not establish current sales, profit or financial approval.</p><div id="order-recovery-details"></div><p id="order-recovery-status" role="status" aria-live="polite"></p><form id="connection-order-recovery-form" class="connection-manage-form" aria-busy="false"><label class="check-label"><input id="order-recovery-ack" type="checkbox" disabled> I reviewed the fixed window, original observation time and page age. Continue only this orders read using my current owner or admin session.</label><div class="button-row"><button id="order-recovery-review" type="button" class="secondary">Review order recovery</button><button id="order-recovery-start" type="submit" class="primary hidden" disabled>Start reviewed orders read</button><button id="order-recovery-resume" type="submit" class="primary hidden" disabled>Resume reviewed orders read</button><button id="order-recovery-cancel" type="button" class="secondary hidden">Cancel review</button></div></form><p>Recovery has bounded capacity. Retained attempts and saved completion records count toward its limits. Ordinary fresh orders sync remains available through Sync selected now; it supersedes a retained recovery attempt before reading and does not free that attempt’s capacity.</p></section>`;
+  }
+  function renderRecoveryState() {
+    const panel=$('#connection-order-recovery'); if (!panel) return;
+    if (!recoveryAuthority() || !recoveryAvailable()) { panel.remove(); return; }
+    const review=orderRecovery.review, display=review || orderRecovery.display, working=Boolean(orderRecovery.ticket), ready=review && (review.canStart || review.canResume) && Date.parse(review.expiresAt)>Date.now();
+    const s=display?.stage;
+    $('#order-recovery-details').innerHTML=display?.window ? recoveryObservationText({originalStartedAt:display.originalStartedAt,window:display.window,lastCapturedAt:s?.lastCapturedAt||null}) +
+      (s?`<p>Saved status: ${esc(s.status)}. ${s.pageCount} retained page${s.pageCount===1?'':'s'} · ${s.orderCount} retained order${s.orderCount===1?'':'s'}.</p>`:'<p>No retained pages will be used for this new read.</p>') : '';
+    $('#order-recovery-status').textContent=orderRecovery.message || (working?'Reviewing saved recovery status…':review?.reason?recoveryReason(review.reason):s?.status==='superseded'?recoveryReason('ORDER_RECOVERY_SUPERSEDED'):s?.status==='paused'?recoveryReason('ORDER_RECOVERY_PAUSED'):s?.status==='unknown'?recoveryReason('ORDER_RECOVERY_UNKNOWN'):review?'Review the original window and observation above, then choose whether to continue.':'Recovery status is read only when you choose Review order recovery.');
+    $('#connection-order-recovery-form').setAttribute('aria-busy',String(working));
+    $('#order-recovery-review').disabled=working || busy.has('shopify');
+    $('#order-recovery-ack').disabled=working || !ready;
+    $('#order-recovery-ack').checked=Boolean(orderRecovery.acknowledged && ready);
+    for (const action of ['start','resume']) { const node=$('#order-recovery-'+action); node.classList.toggle('hidden',!review?.[action==='start'?'canStart':'canResume']); node.disabled=working || !ready || !orderRecovery.acknowledged; }
+    $('#order-recovery-cancel').classList.toggle('hidden',!review && !working);
+    $('#order-recovery-cancel').textContent=orderRecovery.ticket?.kind==='action'?'Dismiss review':'Cancel review';
+  }
+  function interruptRecovery(reason='Review interrupted',clear=false) {
+    const ticket=orderRecovery.ticket; orderRecovery.epoch++; orderRecovery.ticket=null; ticket?.controller.abort();
+    const unknown=ticket?.kind==='action' && ticket.sent;
+    orderRecovery.review=null; orderRecovery.acknowledged=false;
+    if (clear || orderRecovery.identity && !sameRecoveryIdentity(orderRecovery.identity)) { orderRecovery.identity=null; orderRecovery.source=null; orderRecovery.display=null; orderRecovery.phase='idle'; orderRecovery.message=''; $('#connection-order-recovery')?.remove(); }
+    else if (unknown) { orderRecovery.phase='unknown'; orderRecovery.message='The recovery outcome is unknown. Leaving cannot cancel a server save. Review saved status explicitly before another recovery action.'; }
+    else if (orderRecovery.phase!=='unknown' && orderRecovery.phase!=='saved') { orderRecovery.display=null; orderRecovery.phase='idle'; orderRecovery.message=reason+'. Review again before continuing.'; }
+    renderRecoveryState();
+  }
+  function observeRecoverySource() {
+    if (!orderRecovery.identity) return;
+    const current=contentContext();
+    if (!sameRecoveryIdentity(orderRecovery.identity)) { interruptRecovery('Current session changed',true); return; }
+    if (orderRecovery.source!==recoverySource() || orderRecovery.identity.generation!==current.generation || orderRecovery.identity.bootstrap!==current.bootstrap) interruptRecovery('The saved connection or workspace changed');
+  }
+  function currentRecoveryTicket(ticket) {
+    const context=contentContext();
+    return orderRecovery.ticket===ticket && ticket.epoch===orderRecovery.epoch && recoveryVisible() && recoveryAvailable() && sameRecoveryIdentity(ticket.context) &&
+      ticket.context.generation===context.generation && ticket.context.bootstrap===context.bootstrap && ticket.source===recoverySource();
+  }
+  async function reviewRecovery() {
+    observeRecoverySource();
+    if (!recoveryAuthority() || !recoveryAvailable() || !recoveryVisible() || orderRecovery.ticket || busy.has('shopify') || content.ticket) return;
+    orderRecovery.review=null; orderRecovery.display=null; orderRecovery.acknowledged=false; orderRecovery.message=''; orderRecovery.phase='reviewing';
+    const ticket={kind:'review',context:{...contentContext()},source:recoverySource(),epoch:orderRecovery.epoch,controller:new AbortController()};
+    orderRecovery.ticket=ticket; orderRecovery.identity=ticket.context; orderRecovery.source=ticket.source; renderRecoveryState();
+    try {
+      const result=await api.request(recoveryPath,{signal:ticket.controller.signal,isCurrent:()=>currentRecoveryTicket(ticket)});
+      if (!currentRecoveryTicket(ticket)) return;
+      if (!validRecoveryPreview(result,ticket.context.workspaceId)) throw new Error('Invalid public recovery preview');
+      orderRecovery.review=cloneContent(result); orderRecovery.display=cloneContent({stage:result.stage,originalStartedAt:result.originalStartedAt,window:result.window}); orderRecovery.phase='reviewed';
+    } catch(error) { if (currentRecoveryTicket(ticket)) { orderRecovery.phase='held'; orderRecovery.message=contentIdentityError(error)?'Your current owner or admin session could not be verified. Sign in again and review the saved status.':recoveryReason(error.code); } }
+    finally { if (orderRecovery.ticket===ticket) { orderRecovery.ticket=null; renderRecoveryState(); } }
+  }
+  async function submitRecovery() {
+    observeRecoverySource();
+    const review=orderRecovery.review;
+    if (!recoveryAuthority() || !recoveryAvailable() || !recoveryVisible() || orderRecovery.ticket || busy.has('shopify') || content.ticket || !review || !orderRecovery.acknowledged || !$('#order-recovery-ack')?.checked) return;
+    if (!sameRecoveryIdentity(orderRecovery.identity) || !validRecoveryPreview(review,contentContext().workspaceId) || Date.parse(review.expiresAt)<=Date.now()) { interruptRecovery('This review expired or changed'); return; }
+    const action=review.canResume?'resume':review.canStart?'start':null; if (!action) return;
+    const ticket={kind:'action',sent:true,context:{...contentContext()},source:recoverySource(),epoch:orderRecovery.epoch,controller:new AbortController()};
+    const selection=review.selection; orderRecovery.review=null; orderRecovery.acknowledged=false; orderRecovery.ticket=ticket; orderRecovery.phase='sending';
+    orderRecovery.message='Reading the reviewed orders window. Leaving cannot cancel a server save.'; renderRecoveryState();
+    try {
+      const result=await api.request(recoveryPath+'/'+action,{method:'POST',body:JSON.stringify({selection}),signal:ticket.controller.signal,isCurrent:()=>currentRecoveryTicket(ticket)});
+      if (!currentRecoveryTicket(ticket)) return;
+      if (!sameKeys(result,['schema','workspaceId','status','originalStartedAt','lastCapturedAt','continued','snapshotConsistency','code']) || result.schema!=='runvara-order-recovery-result/v1' || result.workspaceId!==ticket.context.workspaceId ||
+        !['committed','interrupted','unknown'].includes(result.status) || result.originalStartedAt!==review.originalStartedAt || !(result.lastCapturedAt===null || recoveryDate(result.lastCapturedAt) && result.lastCapturedAt>=result.originalStartedAt) ||
+        typeof result.continued!=='boolean' || result.snapshotConsistency!=='unverified' || !(result.code===null || typeof result.code==='string' && /^[A-Z_]{1,100}$/.test(result.code))) throw new Error('Recovery outcome unconfirmed');
+      ticket.sent=false; orderRecovery.phase=result.status==='committed'?'saved':result.status==='unknown'?'unknown':'held';
+      orderRecovery.message=result.status==='committed'?'Orders saved with the original observation time. Retained earlier pages do not become a fresh snapshot; snapshot consistency and source-period coverage remain unverified.':recoveryReason(result.code || (result.status==='unknown'?'ORDER_RECOVERY_UNKNOWN':null));
+      if (result.status==='committed') { orderRecovery.display=null; orderRecovery.ticket=null; renderRecoveryState(); await api.reload({migrate:false}); }
+    } catch(error) {
+      if (!currentRecoveryTicket(ticket)) return;
+      orderRecovery.phase='unknown'; orderRecovery.message=error.code==='ORDER_RECOVERY_AUTH_REFRESH_REQUIRED'?recoveryReason(error.code):contentIdentityError(error)?'Your current owner or admin session could not be verified. The outcome needs a fresh saved-status review after signing in.':error.status && error.status<500 && error.code!=='STATE_CONFLICT'?recoveryReason(error.code):recoveryReason('ORDER_RECOVERY_UNKNOWN');
+    } finally { if (orderRecovery.ticket===ticket) { orderRecovery.ticket=null; renderRecoveryState(); } }
+  }
   function contentContext() { return api.getContentContext?.() || null; }
   function contentOwner(context = contentContext()) {
     return Boolean(context?.session && context.userId && context.workspaceId && context.csrf && context.userId === context.session.user?.id &&
@@ -412,6 +570,9 @@
   function renderPanel() {
     const channel = channels.find(item => item.id === selected); if (!channel) return;
     observeContentSource();
+    observeRecoverySource();
+    const preservedRecovery = selected==='shopify' && $('#connection-dialog').open && recoveryAuthority() && recoveryAvailable() ? $('#connection-order-recovery') : null;
+    const recoveryFocus = preservedRecovery?.contains(document.activeElement) ? document.activeElement : null;
     const preservedContent = selected === 'shopify' && $('#connection-dialog').open && content.editor && currentContentIdentity() ? $('#connection-content-editor') : null;
     const contentFocus = preservedContent?.contains(document.activeElement) ? document.activeElement : null;
     const writes = (data.connectionWrites || []).filter(item => item.provider === channel.id);
@@ -434,11 +595,14 @@
       <p class="muted">${channel.id === 'shopify' ? `Supported writes: internal product notes and approval-gated product content. ${channel.writeAccessGranted ? 'Shopify product write access is granted.' : 'Shopify product write access is not granted. Request it when reconnecting, then test the connection.'} Automatic mode can bypass approval only for private Runvara product notes.` : channel.id === 'meta' ? 'Catalogue products, stock, product visibility, Facebook posts and Instagram JPEG posts support approval-gated changes. Automatic mode never bypasses approval for Meta. Reconnect to request any missing catalogue or publishing permissions.' : 'This channel currently has no supported write action in Runvara. A write policy never grants channel permissions or enables an unavailable action.'}</p>
       ${channel.id === 'shopify' && owner() ? `<form id="connection-tag-preview" class="connection-manage-form"><h3>Safe write acceptance preview</h3><p>Read the current product tags and prepare one reversible test for owner review. This does not change Shopify or your write permissions.</p><label>Product<select name="productId" required>${(data.products || []).filter(item => item.provider === 'shopify').map(item => `<option value="${esc(item.id)}">${esc(item.title)}</option>`).join('')}</select></label><button class="secondary">Prepare exact tag test</button><div id="tag-preview-result" class="connection-exact-text" role="status"></div></form>` : ''}
       ${channel.id === 'shopify' && channel.settings.permissionMode !== 'read_only' && channel.writeAccessGranted && owner() ? writeForm() : channel.id === 'meta' && channel.settings.permissionMode !== 'read_only' && channel.writeAccessGranted && owner() ? metaWriteForm(channel) : ''}</section>` : ''}
+      ${channel.id === 'shopify' ? recoveryProvenance(channel)+recoveryPanel() : ''}
       ${channel.id === 'shopify' && owner() ? contentForm() : ''}
       ${writes.length ? `<section class="connection-section"><h3>Proposed changes</h3>${writes.slice(0,15).map(write => `<article class="connection-write"><b>${esc(typeof write.input?.operation === 'string' ? write.input.operation.replaceAll('_',' ') : 'Unsupported change')}</b><p>${esc(typeof write.status === 'string' ? write.status.replaceAll('_',' ') : 'Status unavailable')}</p><details><summary>Review exact change</summary><dl>${objectiveContentWriteDetails(write)}${!reviewableWriteInput(write) ? '<dt>Change review unavailable</dt><dd>The saved change is unsupported or incomplete. Exact fields must be available before applying.</dd>' : ''}${write.provider === 'shopify' && write.input?.operation === 'product_content' ? `<dt>Saved Shopify account</dt><dd class="connection-exact-text">${esc(write.account || 'Unavailable saved target')}</dd><dt>Saved connection reference</dt><dd class="connection-exact-text">${esc(write.connectionId || 'Unavailable saved reference')}</dd>` : ''}${Object.entries(write.input || {}).map(([key,value]) => `<dt>${esc(key.replace(/([A-Z])/g,' $1'))}</dt><dd class="connection-exact-text">${esc(value)}</dd>`).join('')}</dl></details><div class="button-row">${write.approvalId ? button('approvals', 'Open Approval Centre', channel) : ''}${owner() && contentId(write.id) && reviewableWriteInput(write) && ['ready','processing'].includes(write.status) ? `<button class="secondary" type="button" data-connection-action="execute" data-provider="${channel.id}" data-write="${esc(write.id)}">${write.status === 'processing' ? 'Check publishing progress' : write.requiresApproval ? 'Apply approved change' : 'Apply change'}</button>` : ''}</div>${write.status === 'processing' ? `<p>${write.observationErrorCode ? 'Instagram status could not be verified. The saved container is retained; check its status again after a minute.' : 'Instagram is preparing your image. Check again after a minute; the same approved request will be continued.'}</p>` : ''}${write.status === 'uncertain' ? '<p class="warn">Check the channel before making another request. Runvara will not repeat an uncertain write.</p>' : ''}${write.status === 'failed' ? `<p class="warn">${esc(contentReceiptFailureMessage(write, write.errorCode, write.dispatchBlocked) || (write.dispatchBlocked ? 'Runvara stopped this request before a new channel submission. Review the current permissions and prepare a new exact change.' : 'The channel declined this request. Test the connection, check the selected asset and fields, then prepare a new change.'))}</p>` : ''}${write.result?.externalId ? `<p>Confirmed channel reference: ${esc(write.result.externalId)}</p>` : ''}</article>`).join('')}</section>` : ''}
       <section class="connection-section"><h3>Sync history</h3><p class="muted tiny">Latest 30 syncs. Completed sync summaries remain in the workspace audit log.</p><div class="connection-history">${channel.history.length ? channel.history.map(run => `<article><div><b>${esc({completed:'Completed',partial:'Partially completed',failed:'Needs attention',running:'In progress'}[run.status])}</b><small>${esc(when(run.startedAt))} · ${run.automatic ? 'Automatic' : 'Requested'}</small></div><p>${esc(run.areas.map(label).join(', '))}</p>${run.status === 'failed' || run.status === 'partial' ? '<p class="warn">Some data could not be refreshed. Your previous data is retained. Use Sync now to retry.</p>' : ''}</article>`).join('') : '<p class="muted">No sync history recorded yet. Your earlier imported data is retained.</p>'}</div></section>
       ${channel.configured ? `<section class="connection-section"><h3>Disconnect</h3><p>Stop Runvara from accessing this channel. Imported data stays in this workspace. ${channel.id === 'ebay' ? 'Your separate eBay Manager stays intact.' : 'This does not delete or close your channel account.'}</p>${button('disconnect', `Disconnect ${channel.name}`, channel, 'secondary danger')}<form id="connection-disconnect" class="connection-confirm hidden"><p>Are you sure? Syncing will stop and Runvara’s write permission will be removed.</p><label class="check-label"><input name="confirm" type="checkbox" required> I confirm I want to disconnect this channel from Runvara.</label><div class="button-row"><button class="primary danger" type="submit">Confirm disconnect</button>${button('cancel-disconnect','Keep connected',channel)}</div></form></section>` : ''}`;
     if (preservedContent) $('#connection-content-editor')?.replaceWith(preservedContent);
+    if (preservedRecovery) $('#connection-order-recovery')?.replaceWith(preservedRecovery);
+    renderRecoveryState(); recoveryFocus?.focus({preventScroll:true});
     renderContentState(); contentFocus?.focus({preventScroll:true});
     metaWriteFields();
   }
@@ -508,15 +672,16 @@
       if(!$('#connection-journey')?.contains(document.activeElement))journey();notifications();
       data.autopilot = { ...data.autopilot, enabled: payload.autopilotEnabled }; cards();
       observeContentSource();
+      observeRecoverySource();
       if (selected && panel) renderPanel();
       else if (selected) $('#connection-progress').innerHTML = progress(channels.find(item => item.id === selected));
     } finally {
       if (refreshTicket === ticket) { refreshPending = null; refreshController = null; refreshTicket = null; }
     }
   }
-  function close() { interruptContent('Connection editor closed'); $('#connection-dialog').close(); selected = null; clearInterval(pollTimer); returnFocus?.focus(); }
+  function close() { interruptContent('Connection editor closed'); interruptRecovery('Connection review closed'); $('#connection-dialog').close(); selected = null; clearInterval(pollTimer); returnFocus?.focus(); }
   function open(provider, setup = false) {
-    if (selected && selected !== provider) interruptContent('Connection changed');
+    if (selected && selected !== provider) { interruptContent('Connection changed'); interruptRecovery('Connection changed'); }
     selected = provider; returnFocus = document.activeElement; renderPanel();
     const dialog = $('#connection-dialog'); if (!dialog.open) dialog.showModal();
     if (setup) $('#connection-setup').classList.remove('hidden');
@@ -524,8 +689,8 @@
     pollTimer = setInterval(() => { if (selected && !document.hidden && !refreshPending && !busy.size) refresh({ panel: false }).catch(() => {}); }, 15000);
   }
   async function perform(provider, action, body = {}) {
-    if (busy.has(provider) || (provider === 'shopify' && content.ticket)) return;
-    if (provider === 'shopify') interruptContent('Connection activity changed');
+    if (busy.has(provider) || (provider === 'shopify' && (content.ticket || orderRecovery.ticket?.kind==='action'))) return;
+    if (provider === 'shopify') { interruptContent('Connection activity changed'); interruptRecovery('Connection activity changed'); }
     if (!selected) open(provider);
     busy.add(provider); cards();
     const dialog = $('#connection-dialog'); dialog.setAttribute('aria-busy', 'true');
@@ -592,6 +757,7 @@
     if (form.id === 'connection-permissions') return perform(channel.id, 'settings', { revision:channel.settings.revision, permissionMode:values.get('permissionMode'), confirmPermission:values.has('confirmPermission') ? `${channel.id}:${values.get('permissionMode')}` : '' });
     if (form.id === 'connection-disconnect') { if(values.has('confirm')) return perform(channel.id, 'disconnect', {confirm:channel.id,revision:channel.settings.revision}); return; }
     if (form.id === 'connection-content-form') return prepareContent();
+    if (form.id === 'connection-order-recovery-form') return submitRecovery();
     if (form.id === 'connection-write-form') { if (values.get('operation') === 'product_content') return; return perform(channel.id,'writes',{...Object.fromEntries(values),requestId:crypto.randomUUID()}); }
     if (form.id === 'connection-onboarding') {
       const button = form.querySelector('button[type="submit"]'); button.disabled=true; button.textContent='Opening secure sign-in…';
@@ -612,22 +778,33 @@
       api=config;
       $('#connection-dialog').addEventListener('input',contentFieldChanged);
       $('#connection-dialog').addEventListener('change',contentFieldChanged);
+      $('#connection-dialog').addEventListener('change',event=>{
+        if(event.target.id!=='order-recovery-ack')return;
+        observeRecoverySource();
+        orderRecovery.acknowledged=Boolean(event.target.checked && recoveryAuthority() && recoveryVisible() && orderRecovery.review && !orderRecovery.ticket && Date.parse(orderRecovery.review.expiresAt)>Date.now());
+        renderRecoveryState();
+      });
+      $('#connection-dialog').addEventListener('click',event=>{
+        const id=event.target.closest('button')?.id;
+        if(id==='order-recovery-review')reviewRecovery();
+        if(id==='order-recovery-cancel'){interruptRecovery('Review cancelled');$('#order-recovery-review')?.focus();}
+      });
       $('#connection-dialog').addEventListener('click',event=>{ const id=event.target.closest('button')?.id; if(id==='content-check')checkContentAttempt(); else if(id==='content-retry')prepareContent(true); else if(id==='content-reload'||id==='content-new')reloadContentDraft(); });
-      $('#connection-dialog').addEventListener('close',()=>interruptContent('Connection dialog closed'));
-      document.addEventListener('visibilitychange',()=>{if(document.hidden)interruptContent('Tab hidden');});
-      window.addEventListener('pagehide',()=>interruptContent('Page hidden'));
-      window.addEventListener('popstate',()=>interruptContent('Navigation changed'));
+      $('#connection-dialog').addEventListener('close',()=>{interruptContent('Connection dialog closed');interruptRecovery('Connection dialog closed');});
+      document.addEventListener('visibilitychange',()=>{if(document.hidden){interruptContent('Tab hidden');interruptRecovery('Tab hidden');}});
+      window.addEventListener('pagehide',()=>{interruptContent('Page hidden');interruptRecovery('Page hidden');});
+      window.addEventListener('popstate',()=>{interruptContent('Navigation changed');interruptRecovery('Navigation changed');if(selected==='shopify')close();});
       $('#connection-journey')?.addEventListener('submit',event=>{if(event.target.id==='journey-business'){event.preventDefault();saveJourney({businessName:new FormData(event.target).get('businessName')});}else if(event.target.id==='journey-preferences'){event.preventDefault();const values=new FormData(event.target);saveJourney({preferences:{goal:values.get('goal'),automation:values.get('automation'),approval:'always',stockThreshold:Number(values.get('stockThreshold')),customerRecords:values.has('customerRecords'),marketing:values.has('marketing')}});}else if(event.target.id==='journey-platforms'){event.preventDefault();saveJourney({platforms:new FormData(event.target).getAll('platforms')});}});
       $('#connection-journey')?.addEventListener('click',event=>{const target=event.target.closest('button');if(!target)return;if(target.dataset.journeyReview)saveJourney({reviewPermissions:target.dataset.journeyReview});else if(target.dataset.journeySkip)saveJourney({platforms:(data.onboarding?.journey?.platforms||[]).filter(item=>item.provider!==target.dataset.journeySkip).map(item=>item.provider)});else if(target.id==='journey-recommended')saveJourney({useRecommended:true});else if(target.id==='journey-finish')saveJourney({finish:true,reviewControls:true});else if(target.id==='journey-controls')api.setView('automations');else if(target.id==='journey-dashboard')api.setView('overview');else if(target.dataset.connectionAction)handleAction(event);});
       $('#connection-dialog').addEventListener('change',event=>{ if(event.target.matches('#connection-meta-write-form select[name=operation]')) metaWriteFields(); }); $('#connection-grid').addEventListener('click',handleAction); $('#connection-dialog').addEventListener('click',handleAction); $('#connection-dialog').addEventListener('submit',submit);
       $('#connection-close').addEventListener('click',close); $('#connection-dialog').addEventListener('cancel',event=>{event.preventDefault();close();});
       $('#connection-refresh').addEventListener('click',async event=>{event.target.disabled=true;try{await refresh();api.notify('Connection status refreshed.');}catch(error){api.notify(error.message,'error');}finally{event.target.disabled=false;}});
     },
-    render(next) { data=next;channels=next.connectionCentre || [];observeContentSource();cards();journey();notifications();operatorStatus();if(selected)renderPanel();
+    render(next) { data=next;channels=next.connectionCentre || [];observeContentSource();observeRecoverySource();cards();journey();notifications();operatorStatus();if(selected)renderPanel();
       clearInterval(journeyTimer);journeyTimer=setInterval(()=>{if(!document.hidden&&!refreshPending&&!busy.size&&channels.some(c=>['queued','running'].includes(c.firstSync?.status)))refresh({panel:false}).catch(()=>{});},3000);
     },
-    interruptContent(reason, clear = false) { interruptContent(reason,clear); if(reason==='Navigation changed'&&selected==='shopify')close(); },
-    endSession() { interruptContent('Session ended',true); clearInterval(journeyTimer);sessionGeneration++; refreshController?.abort(); refreshPending = null; refreshTicket = null; refreshController = null; if (selected) close(); busy.clear(); channels = []; data = {}; },
+    interruptContent(reason, clear = false) { interruptContent(reason,clear); interruptRecovery(reason,clear); if(reason==='Navigation changed'&&selected==='shopify')close(); },
+    endSession() { interruptContent('Session ended',true); interruptRecovery('Session ended',true); clearInterval(journeyTimer);sessionGeneration++; refreshController?.abort(); refreshPending = null; refreshTicket = null; refreshController = null; if (selected) close(); busy.clear(); channels = []; data = {}; },
     open,
     objectiveContentDisplay
   };

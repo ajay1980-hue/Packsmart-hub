@@ -54,6 +54,8 @@ jobs:
         run: node saas/server/tests/business-outcomes-browser-check.mjs
       - name: Verify protected content sources in outcome review
         run: node saas/server/tests/business-outcomes-receipt-browser-check.mjs
+      - name: Verify optional Shopify order recovery
+        run: node saas/server/tests/order-recovery-browser-check.mjs
       - name: Verify workspace activity on mobile and desktop
         run: node saas/server/tests/activity-browser-check.mjs
       - name: Verify imported order evidence on mobile and desktop
@@ -242,3 +244,26 @@ jobs:
           done
           docker logs packsmart-ops-test
           exit 1
+      - name: Upload Shopify recovery 320px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-order-recovery-320-responsive
+          path: |
+            /tmp/runvara-order-recovery-320-*.png
+            /tmp/runvara-order-recovery-report.json
+          if-no-files-found: warn
+      - name: Upload Shopify recovery 390px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-order-recovery-390-responsive
+          path: /tmp/runvara-order-recovery-390-*.png
+          if-no-files-found: warn
+      - name: Upload Shopify recovery 1200px verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-order-recovery-1200-responsive
+          path: /tmp/runvara-order-recovery-1200-*.png
+          if-no-files-found: warn
