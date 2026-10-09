@@ -5,6 +5,7 @@ import { automaticConnectionAreas, beginConnectionSync, finishConnectionSync, co
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
+import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, ebayReadDeferred, mergeEbayReadCooldown } from './ebay-read-cooldown.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
@@ -47,13 +48,15 @@ function summarizeCycleEffects(runs) {
 }
 
 export async function monitoredSync(state, integrations, provider, { automatic = false, retry = true, areas, run } = {}) {
+  const automaticEbay = provider === 'ebay' && (automatic || run?.automatic);
+  assertEbayReadAdmission(state, provider, { automatic: automaticEbay });
   const previous = state.integrationStatus?.[provider] || {};
   const previousOrderHold = shopifyOrderReadHold(state, provider, integrations);
   const orderBinding = provider === 'shopify' ? shopifyOrderReadBinding(state, integrations) : null;
   const now = new Date().toISOString();
   if (automatic && orderReadHeld(state, provider, run?.areas || areas || connectionSettings(state, provider).areas, integrations)) throw Object.assign(new Error('Shopify order source needs review. Existing data is retained.'), { code: previousOrderHold.code, status: 422, nonRetryable: true });
   if ((automatic || run?.automatic) && provider === 'shopify' && shopifyOrderReadPolicyBlocked(state, integrations, run?.areas || areas || connectionSettings(state, provider).areas)) throw Object.assign(new Error('Automatic Shopify order reads need review before another attempt.'), { code: 'SHOPIFY_ORDER_RETRY_EXHAUSTED', status: 409, nonRetryable: true });
-  if (automatic && authFailure(previous.lastError)) throw Object.assign(new Error('Owner must repair authentication'), { code: 'AUTH_REPAIR_REQUIRED' });
+  if ((automatic || automaticEbay) && authFailure(previous.lastError)) throw Object.assign(new Error('Owner must repair authentication'), { code: 'AUTH_REPAIR_REQUIRED' });
   if (automatic && !connectionSettings(state, provider).autoSync) return previous;
   run ||= beginConnectionSync(state, provider, { automatic, areas, integrations });
   areas = run.areas;
@@ -61,35 +64,41 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   while (true) {
     attempts++;
     try {
-      const result = integrations.syncProvider ? await integrations.syncProvider(state, provider, { automatic, areas }) : await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic, areas });
+      assertEbayReadAdmission(state, provider, { automatic: automaticEbay });
+      const result = integrations.syncProvider ? await integrations.syncProvider(state, provider, { automatic: automatic || automaticEbay, areas }) : await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic: automatic || automaticEbay, areas });
       const status = { ...previous, ...result, failedAreas:result.failedAreas || [], transient: Boolean(result.transient), upstreamStatus: result.upstreamStatus || null, retryAt: null, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
+      if (provider === 'ebay') Object.assign(status, mergeEbayReadCooldown([previous, result, ebayReadCooldown(state)]));
       // Only a successful explicit orders read may clear an order-source hold.
       if (provider === 'shopify' && !areas.includes('orders') && previousOrderHold && isShopifyOrderReadBindingCurrent(state, previousOrderHold.binding, integrations)) status.orderReadHold = previousOrderHold;
       state.integrationStatus = { ...state.integrationStatus, [provider]: status };
       finishConnectionSync(state, run, status);
       return status;
     } catch (error) {
+      if (provider === 'ebay' && error.cooldownDeferred) throw error;
       const sourceFailure = isShopifyOrderSourceFailure(provider, error.code);
       const nonRetryable = sourceFailure;
       const transient = !nonRetryable && (error.upstreamStatus === 429 || error.upstreamStatus >= 500 || ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name));
       // Rate limits are durable scheduled retries, never a tight retry loop.
       const rateLimited = !nonRetryable && (error.upstreamStatus === 429 || /RATE_LIMIT/.test(error.code || ''));
-      if (retry && attempts < 2 && transient && !rateLimited && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
+      const errorCooldown = provider === 'ebay' ? ebayErrorCooldown(error) : null;
+      if (retry && attempts < 2 && transient && !rateLimited && !errorCooldown?.retryAt && !errorCooldown?.retryReviewRequired && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
       const code = safeCode(error);
       const failedBinding = error.orderReadBinding === undefined ? orderBinding : error.orderReadBinding;
       if (sourceFailure && !isShopifyOrderReadAdmissionCurrent(state, failedBinding, integrations)) {
         finishConnectionSync(state, run, null, { code });
         throw Object.assign(new Error('Shopify configuration changed during the failed read; no hold was installed.'), { code, status: 422, nonRetryable: true, holdDisposition: 'configuration_changed' });
       }
+      const ebayCooldown = provider === 'ebay' ? mergeEbayReadCooldown([previous, ebayReadCooldown(state), errorCooldown]) : null;
       state.integrationStatus = { ...state.integrationStatus, [provider]: { ...previous, status: authFailure(error) ? 'auth_expired' : 'error',
         detail: 'Read sync failed; last known data was retained.', lastSyncAt: previous.lastSyncAt || null, lastFailureAt: now, lastAttemptAt: now, lastError: code, attempts,
         ...(sourceFailure ? { orderReadHold: { code, at: now, binding: failedBinding }, orderReadAttempt: { status: 'incomplete', code, at: now, retryable: false } } : {}),
         transient: transient || rateLimited, upstreamStatus: error.upstreamStatus || null,
-        retryAt: rateLimited ? new Date(Date.now() + Math.max(60000, Math.min(86400000, Number(error.retryAfterMs) || 60000))).toISOString() : null } };
+        retryAt: provider === 'ebay' ? ebayCooldown.retryAt : rateLimited ? new Date(Date.now() + Math.max(60000, Math.min(86400000, Number(error.retryAfterMs) || 60000))).toISOString() : null } };
+      if (provider === 'ebay') Object.assign(state.integrationStatus.ebay, ebayCooldown);
       const connection = provider === 'shopify' ? integrations.shopifyConnection?.(state) : provider === 'ebay' ? integrations.ebayConnection?.(state) : state.connections?.find(c => c.provider === provider);
       if (connection) { connection.status = state.integrationStatus[provider].status; connection.lastError = code; }
       finishConnectionSync(state, run, null, { code });
-      throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus, retryAfterMs: error.retryAfterMs, name: error.name, ...(sourceFailure ? { status: 422, orderReadBinding: failedBinding } : {}), ...(nonRetryable ? { nonRetryable: true } : {}) });
+      throw Object.assign(new Error('Read sync failed'), { code, upstreamStatus: error.upstreamStatus, retryAfterMs: error.retryAfterMs, name: error.name, ...(provider === 'ebay' ? ebayReadCooldown(state) : {}), ...(sourceFailure ? { status: 422, orderReadBinding: failedBinding } : {}), ...(nonRetryable ? { nonRetryable: true } : {}) });
     }
   }
 }
@@ -116,12 +125,12 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(integrations.syncProvider && state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
           const legacyFirstRun = !state.connectionSettings?.[provider] && !state.connectionSyncs?.some(item => item.provider === provider);
           const exhaustedOrderBudget = provider === 'shopify' && shopifyOrderReadBudgetExhausted(state, integrations);
-          if (configured && automaticConnectionAreas(state,provider).length && !pendingConnectionReadExhausted(state, provider, integrations) && !orderReadHeld(state, provider, automaticConnectionAreas(state,provider), integrations) && !exhaustedOrderBudget && (legacyFirstRun || connectionDue(state, provider, now, integrations))) providers.push(provider);
+          if (configured && !(provider === 'ebay' && ebayReadDeferred(state, now.getTime(), true)) && automaticConnectionAreas(state,provider).length && !pendingConnectionReadExhausted(state, provider, integrations) && !orderReadHeld(state, provider, automaticConnectionAreas(state,provider), integrations) && !exhaustedOrderBudget && (legacyFirstRun || connectionDue(state, provider, now, integrations))) providers.push(provider);
         }
       }
       // A legacy workspace can have no saved per-channel settings. Do not claim
       // and save a recurring no-op cycle solely because held orders are due.
-      if (!providers.length && (Object.keys(CONNECTORS).some(provider => pendingConnectionReadExhausted(state, provider, integrations)) || orderReadHeld(state, 'shopify', undefined, integrations) || !automaticConnectionAreas(state,'shopify').length || shopifyOrderReadBudgetExhausted(state, integrations))) rules = rules.filter(rule => rule.id !== 'channelSync');
+      if (!providers.length && (ebayReadDeferred(state, now.getTime(), true) || Object.keys(CONNECTORS).some(provider => pendingConnectionReadExhausted(state, provider, integrations)) || orderReadHeld(state, 'shopify', undefined, integrations) || !automaticConnectionAreas(state,'shopify').length || shopifyOrderReadBudgetExhausted(state, integrations))) rules = rules.filter(rule => rule.id !== 'channelSync');
       if (!rules.length) {
         if (expired.length) await store.save(workspaceId, state);
         return { skipped: true, reason: state.autopilot.enabled ? 'FREQUENCY_OR_PERMISSION_LIMIT' : 'AUTOPILOT_OFF' };

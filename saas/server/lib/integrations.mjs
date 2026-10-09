@@ -10,6 +10,7 @@ import { assertShopifySourceScope, captureShopifyOrderMoney, inspectShopifyOrder
   recordShopifyOrderReadFailure, shopifyOrderSourceError, shopifyOrderReadWindow, sourceResponseVersion, stageShopifyOrderRead, validateRetainedShopifyOrderState } from './shopify-order-source.mjs';
 import { assertShopifyOrderRecoveryCapability, authorizeShopifyOrderRecovery, claimShopifyOrderRecoveryCapability,
   checkpointShopifyOrderRecoveryPage, getShopifyOrderRecoveryStage, shopifyOrderRecoveryObservation, shopifyOrderRecoveryError } from './shopify-order-recovery.mjs';
+import { assertEbayReadAdmission, createEbayReadContext, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown, parseEbayRetryAfter } from './ebay-read-cooldown.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -394,21 +395,28 @@ async function orderSourceResponseJson(response) {
   try { return JSON.parse(encoded); }
   catch { if (!response.ok) return {}; throw shopifyOrderSourceError('RESPONSE_INVALID'); }
 }
-async function responseJson(response, label, sourceRead = false) {
+async function responseJson(response, label, sourceRead = false, ebayRead = null) {
+  // Read status/headers at receipt: neither body parsing nor sibling completion
+  // may erase or reanchor eBay's deadline. Other provider decoding is unchanged.
+  const ebayCooldown = ebayRead && !response.ok ? parseEbayRetryAfter(response.headers?.get?.('retry-after'), Date.now(), { fallback: response.status === 429 }) : null;
+  if (ebayCooldown) ebayRead.observe?.({ upstreamStatus: response.status, ...ebayCooldown });
   let data;
   try { data = sourceRead ? await orderSourceResponseJson(response) : await response.json(); }
   catch (error) {
+    if (ebayRead && !response.ok) data = {};
+    else {
     if (sourceRead) { if (error.nonRetryable) throw error; throw shopifyOrderSourceError('RESPONSE_INVALID'); }
     throw integrationError(`${label} returned an invalid response`);
+    }
   }
   if (!response.ok) {
     const message = response.status === 401 || response.status === 403
       ? `${label} authentication failed`
       : `${label} request failed (${response.status})`;
     const upstreamErrorIds = (Array.isArray(data?.errors) ? data.errors : []).map(item => String(item.errorId || '')).filter(id => /^\d{1,12}$/.test(id)).slice(0, 10);
-    const retry = response.headers.get('retry-after');
+    const retry = ebayRead ? null : response.headers.get('retry-after');
     const retryAfterMs = /^\d+$/.test(retry || '') ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
-    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : response.status === 429 ? 'CONNECTION_RATE_LIMITED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status, upstreamErrorIds, retryAfterMs:Number.isFinite(retryAfterMs) ? Math.min(86400000,Math.max(60000,retryAfterMs)) : null });
+    throw Object.assign(integrationError(message, 502, response.status === 401 || response.status === 403 ? 'UPSTREAM_AUTH_FAILED' : ebayCooldown?.retryReviewRequired ? 'EBAY_RETRY_REVIEW_REQUIRED' : response.status === 429 ? 'CONNECTION_RATE_LIMITED' : 'UPSTREAM_REQUEST_FAILED'), { upstreamStatus: response.status, upstreamErrorIds, ...(ebayRead ? ebayCooldown : { retryAfterMs:Number.isFinite(retryAfterMs) ? Math.min(86400000,Math.max(60000,retryAfterMs)) : null }) });
   }
   return data;
 }
@@ -945,9 +953,10 @@ export class IntegrationService {
       redirect: 'error',
       signal: AbortSignal.timeout(20000)
     });
+    const cooldown = !response.ok ? parseEbayRetryAfter(response.headers?.get?.('retry-after'), Date.now(), { fallback: response.status === 429 }) : {};
     let payload;
     try { payload = await response.json(); } catch { payload = {}; }
-    if (!response.ok) throw Object.assign(integrationError('eBay OAuth token request failed', 502, response.status === 400 || response.status === 401 || response.status === 403 ? 'EBAY_AUTH_EXPIRED' : code), { upstreamStatus: response.status });
+    if (!response.ok) throw Object.assign(integrationError('eBay OAuth token request failed', 502, response.status === 400 || response.status === 401 || response.status === 403 ? 'EBAY_AUTH_EXPIRED' : cooldown.retryReviewRequired ? 'EBAY_RETRY_REVIEW_REQUIRED' : response.status === 429 ? 'CONNECTION_RATE_LIMITED' : code), { upstreamStatus: response.status, ...cooldown });
     const accessToken = String(payload.access_token || '');
     const expiresIn = Number(payload.expires_in || 0);
     if (!accessToken || !Number.isFinite(expiresIn) || expiresIn < 60) {
@@ -997,7 +1006,8 @@ export class IntegrationService {
     }
   }
 
-  async ebayApiGet(url, accessToken, { marketplaceId } = {}) {
+  async ebayApiGet(url, accessToken, { marketplaceId, readContext } = {}) {
+    readContext?.assertAllowed();
     const headers = {
       Accept: 'application/json',
       // Node fetch otherwise sends '*', which Inventory rejects as a locale.
@@ -1012,7 +1022,7 @@ export class IntegrationService {
       redirect: 'error',
       signal: AbortSignal.timeout(20000)
     });
-    return responseJson(response, 'eBay read API');
+    return responseJson(response, 'eBay read API', false, readContext || {});
   }
 
   async ebayIdentity(accessToken) {
@@ -1092,9 +1102,10 @@ export class IntegrationService {
     return headers;
   }
 
-  async ebayGet(config, paths) {
+  async ebayGet(config, paths, readContext) {
     let lastStatus = 0;
     for (const path of paths) {
+      readContext?.assertAllowed();
       const response = await this.fetch(`${config.base}${path}`, {
         method: 'GET',
         headers: this.ebayHeaders(config),
@@ -1103,17 +1114,18 @@ export class IntegrationService {
       });
       lastStatus = response.status;
       if (response.status === 404 || response.status === 405) continue;
-      return responseJson(response, 'eBay Manager');
+      return responseJson(response, 'eBay Manager', false, readContext || {});
     }
     throw integrationError(`eBay Manager read route was not found (${lastStatus || 'network error'})`, 502, 'EBAY_ROUTE_NOT_FOUND');
   }
 
-  async fetchEbayOrders(accessToken) {
+  async fetchEbayOrders(accessToken, readContext = createEbayReadContext()) {
     const orders = [];
     for (let page = 0; page < 3; page += 1) {
       const offset = page * 200;
       const url = `${EBAY_PRODUCTION.fulfillment}/order?limit=200&offset=${offset}`;
-      const payload = await this.ebayApiGet(url, accessToken);
+      readContext.assertAllowed();
+      const payload = await this.ebayApiGet(url, accessToken, { readContext });
       const batch = payloadItems(payload, ['orders']);
       orders.push(...batch);
       const total = Number(payload?.total);
@@ -1123,13 +1135,14 @@ export class IntegrationService {
     return orders;
   }
 
-  async fetchEbayInventoryItems(accessToken) {
+  async fetchEbayInventoryItems(accessToken, readContext = createEbayReadContext()) {
     const items = [];
     for (let page = 0; page < 3; page += 1) {
       // Inventory uses a page number; Fulfilment uses a record offset.
       const offset = page;
       const url = `${EBAY_PRODUCTION.inventory}/inventory_item?limit=200&offset=${offset}`;
-      const payload = await this.ebayApiGet(url, accessToken);
+      readContext.assertAllowed();
+      const payload = await this.ebayApiGet(url, accessToken, { readContext });
       const batch = payloadItems(payload, ['inventoryItems']);
       items.push(...batch);
       const total = Number(payload?.total);
@@ -1139,25 +1152,36 @@ export class IntegrationService {
     return items;
   }
 
-  async fetchEbayOffers(accessToken, inventoryItems, marketplaceId) {
+  async fetchEbayOffers(accessToken, inventoryItems, marketplaceId, readContext = createEbayReadContext()) {
     const offers = [];
     for (let index = 0; index < inventoryItems.length; index += 10) {
+      readContext.assertAllowed();
       const batch = inventoryItems.slice(index, index + 10);
-      const results = await Promise.all(batch.map(async item => {
+      const results = await Promise.allSettled(batch.map(async item => {
+        try {
+        readContext.assertAllowed();
         const params = new URLSearchParams({ sku: String(item.sku || ''), limit: '25', marketplace_id: marketplaceId });
-        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.inventory}/offer?${params}`, accessToken, { marketplaceId });
+        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.inventory}/offer?${params}`, accessToken, { marketplaceId, readContext });
         return payloadItems(payload, ['offers']).map(offer => ({ item, offer }));
+        } catch (error) { readContext.observe(error); throw error; }
       }));
-      offers.push(...results.flat());
+      const failed = results.filter(result => result.status === 'rejected');
+      if (failed.length) {
+        const errors = failed.map(result => result.reason);
+        const primary = errors.find(error => [401,403].includes(error.upstreamStatus)) || errors.find(error => error.upstreamStatus === 429) || errors[0];
+        throw Object.assign(primary, mergeEbayReadCooldown([readContext.cooldown, ...errors.map(error => ebayErrorCooldown(error))]));
+      }
+      offers.push(...results.flatMap(result => result.value));
     }
     return offers.slice(0, 1000);
   }
 
-  async fetchEbayMarketing(accessToken, marketplaceId) {
+  async fetchEbayMarketing(accessToken, marketplaceId, readContext = createEbayReadContext()) {
     const list = async (path, key, max) => {
       const rows = [];
       for (let offset = 0; offset < max; offset += 100) {
-        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}${path}?limit=100&offset=${offset}`, accessToken, { marketplaceId });
+        readContext.assertAllowed();
+        const payload = await this.ebayApiGet(`${EBAY_PRODUCTION.marketing}${path}?limit=100&offset=${offset}`, accessToken, { marketplaceId, readContext });
         const batch = payloadItems(payload, [key]); rows.push(...batch);
         const more = Boolean(payload.next) || Number(payload.total) > offset + batch.length;
         if (!more) return rows;
@@ -1171,18 +1195,22 @@ export class IntegrationService {
         const campaignId = String(campaign.campaignId || ''); if (!campaignId) return [];
         try { return (await list(`/ad_campaign/${encodeURIComponent(campaignId)}/ad`, 'ads', 2000)).map(ad => ({ ...ad, campaignId })); }
         catch (error) {
-          adFailures.push({ campaignId, status: /^[A-Z_]{1,40}$/.test(campaign.campaignStatus || '') ? campaign.campaignStatus : null, httpStatus:error.upstreamStatus || null, errorIds:error.upstreamErrorIds || [], code:error.code || 'EBAY_MARKETING_READ_UNAVAILABLE' });
+          readContext.observe(error);
+          adFailures.push({ campaignId, status: /^[A-Z_]{1,40}$/.test(campaign.campaignStatus || '') ? campaign.campaignStatus : null, httpStatus:error.upstreamStatus || null, errorIds:error.upstreamErrorIds || [], code:error.code || 'EBAY_MARKETING_READ_UNAVAILABLE', ...ebayErrorCooldown(error), ...(error.cooldownDeferred ? { deferred: true } : {}) });
           return [];
         }
       }));
       ads.push(...results.flat());
       if (ads.length > 5000) throw integrationError('eBay advertising coverage limit reached', 422, 'EBAY_MARKETING_COVERAGE_LIMIT');
+      if (readContext.stopped) break;
     }
-    return { campaigns, ads, adFailures, campaignsRead:true };
+    return { campaigns, ads, adFailures, campaignsRead:true, ...readContext.cooldown };
   }
 
   async syncEbayOAuth(state, config, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
+    assertEbayReadAdmission(state, 'ebay', { automatic });
     const now = new Date().toISOString();
+    const readContext = createEbayReadContext();
     const accessToken = await this.ebayAccessToken(config);
     const identity = await this.ebayIdentity(accessToken);
     const account = String(identity.username || identity.userId || '');
@@ -1201,31 +1229,33 @@ export class IntegrationService {
     const optionalRead = async (surface, operation, fallback) => {
       if (!selected(surface)) return fallback;
       const previous = state.ebay?.coverage?.readDiagnostics?.[surface];
-      if (automatic && ([401, 403].includes(previous?.httpStatus) || (surface === 'marketing' && previous?.errorIds?.map(String).includes('35077')))) {
+      if (automatic && (previous?.automaticRetryBlocked || [401, 403].includes(previous?.httpStatus) || (surface === 'marketing' && previous?.errorIds?.map(String).includes('35077')))) {
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
         readDiagnostics[surface] = { ...previous, automaticRetryBlocked: true };
         return fallback;
       }
       try {
+        readContext.assertAllowed();
         return await operation();
       } catch (error) {
+        readContext.observe(error);
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
-        readDiagnostics[surface] = { code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401, 403].includes(error.upstreamStatus) || (surface === 'marketing' && error.upstreamErrorIds?.map(String).includes('35077')) };
+        readDiagnostics[surface] = { code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401, 403].includes(error.upstreamStatus) || (surface === 'marketing' && error.upstreamErrorIds?.map(String).includes('35077')), ...ebayErrorCooldown(error), ...(error.cooldownDeferred ? { deferred: true } : {}) };
         return fallback;
       }
     };
     const [rawOrders, inventoryItems, marketing] = await Promise.all([
-      optionalRead('orders', () => this.fetchEbayOrders(accessToken), []),
-      optionalRead('inventory', () => this.fetchEbayInventoryItems(accessToken), []),
-      optionalRead('marketing', () => this.fetchEbayMarketing(accessToken, config.marketplaceId), { campaigns: [], ads: [] })
+      optionalRead('orders', () => this.fetchEbayOrders(accessToken, readContext), []),
+      optionalRead('inventory', () => this.fetchEbayInventoryItems(accessToken, readContext), []),
+      optionalRead('marketing', () => this.fetchEbayMarketing(accessToken, config.marketplaceId, readContext), { campaigns: [], ads: [] })
     ]);
     if (marketing.adFailures?.length) {
       readErrors.marketing = 'EBAY_MARKETING_ADS_PARTIAL';
-      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus) || item.errorIds?.map(String).includes('35077')) };
+      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures.some(item=>item.httpStatus === 429) ? 429 : marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus) || item.errorIds?.map(String).includes('35077')), ...mergeEbayReadCooldown([marketing, ...marketing.adFailures]) };
     }
     const offerPairs = readErrors.inventory
       ? []
-      : await optionalRead('offers', () => this.fetchEbayOffers(accessToken, inventoryItems, config.marketplaceId), []);
+      : await optionalRead('offers', () => this.fetchEbayOffers(accessToken, inventoryItems, config.marketplaceId, readContext), []);
     const adByListingId = new Map(marketing.ads.map(ad => [String(ad.listingId || ''), ad]));
     const listings = offerPairs.map(({ item, offer }) => mapEbayOAuthListing(item, offer, adByListingId)).filter(item => item.id);
     const drafts = listings.filter(item => !item.listingId || item.status.toUpperCase() !== 'PUBLISHED');
@@ -1296,7 +1326,11 @@ export class IntegrationService {
       lastSyncAt: now,
       lastError: readWarning,
       lastFailureAt: readWarning ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
-      degradedSurfaces: unavailable
+      degradedSurfaces: unavailable,
+      failedAreas: areas.filter(area => unavailable.includes(area === 'orders' ? 'orders' : area === 'promotions' ? 'marketing' : 'inventory') || ['products','inventory','prices'].includes(area) && unavailable.includes('offers')),
+      ...mergeEbayReadCooldown([ebayReadCooldown(state), readContext.cooldown, ...Object.values(readDiagnostics)]),
+      upstreamStatus: Object.values(readDiagnostics).find(item => item.httpStatus === 429)?.httpStatus || Object.values(readDiagnostics).find(item => item.httpStatus >= 500)?.httpStatus || null,
+      transient: Object.values(readDiagnostics).some(item => item.httpStatus === 429 || item.httpStatus >= 500)
     };
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;
@@ -1304,6 +1338,7 @@ export class IntegrationService {
 
   async syncEbay(state, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
     if (state?.connectionSettings?.ebay?.disconnected) throw connectionError('Reconnect eBay before syncing.', 'CONNECTION_DISCONNECTED', 409);
+    assertEbayReadAdmission(state, 'ebay', { automatic });
     const now = new Date().toISOString();
     if (!this.ebayConfigured(state)) {
       const status = {
@@ -1324,11 +1359,18 @@ export class IntegrationService {
     if (!connected || !account) throw integrationError('eBay Manager did not confirm its connected account', 502, 'EBAY_ACCOUNT_UNCONFIRMED');
     if (account.toLowerCase() !== expected) throw integrationError('eBay Manager reported the wrong seller account', 502, 'EBAY_ACCOUNT_MISMATCH');
 
-    const readErrors = [];
+    const readErrors = [], readDiagnostics = {}, readContext = createEbayReadContext();
+    const selected = surface => ['orders','fees'].includes(surface) ? areas.includes('orders') : surface === 'promotions' ? areas.includes('promotions') : areas.some(area => ['products','inventory','prices'].includes(area));
     const optional = async (surface, paths, fallback) => {
-      if (surface === 'orders' || surface === 'fees' ? !areas.includes('orders') : surface === 'promotions' ? !areas.includes('promotions') : !areas.some(area => ['products', 'inventory', 'prices'].includes(area))) return fallback;
-      try { return await this.ebayGet(config, paths); }
-      catch { readErrors.push(surface); return fallback; }
+      if (!selected(surface)) return fallback;
+      const previous = state.ebay?.coverage?.readDiagnostics?.[surface];
+      if (automatic && previous?.automaticRetryBlocked) { readErrors.push(surface); readDiagnostics[surface] = previous; return fallback; }
+      try { readContext.assertAllowed(); return await this.ebayGet(config, paths, readContext); }
+      catch (error) {
+        readContext.observe(error); readErrors.push(surface);
+        readDiagnostics[surface] = { code: error.code || 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401,403].includes(error.upstreamStatus) || surface === 'promotions' && error.upstreamErrorIds?.map(String).includes('35077'), ...ebayErrorCooldown(error), ...(error.cooldownDeferred ? { deferred: true } : {}) };
+        return fallback;
+      }
     };
     const [listingPayload, draftPayload, orderPayload, feePayload, promotionPayload] = await Promise.all([
       optional('listings', ['/api/ebay/listings', '/api/listings'], { listings: state.ebay?.listings || [] }),
@@ -1342,7 +1384,7 @@ export class IntegrationService {
     const orders = payloadItems(orderPayload, ['orders', 'items']).map(mapEbayOrder).filter(order => order.id);
     const fees = payloadItems(feePayload, ['fees', 'items']);
     const promotions = payloadItems(promotionPayload, ['promotions', 'campaigns', 'items']);
-    state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
+    if (selected('orders') && !readErrors.includes('orders')) state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
     const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
     const listingSkus = new Set(listings.map(item => item.sku).filter(Boolean));
     const missingOnEbay = [...shopifySkus].filter(sku => !listingSkus.has(sku));
@@ -1350,7 +1392,7 @@ export class IntegrationService {
     state.ebay = {
       account,
       marketplaceId: statusPayload.marketplaceId || 'EBAY_GB',
-      listings: mergeSelectedEbay(state.ebay?.listings || [], listings.slice(0, 500).map(item => ({
+      listings: !selected('listings') || readErrors.includes('listings') ? state.ebay?.listings || [] : mergeSelectedEbay(state.ebay?.listings || [], listings.slice(0, 500).map(item => ({
         id: String(item.id || item.itemId || ''),
         title: String(item.title || ''),
         sku: String(item.sku || ''),
@@ -1361,11 +1403,15 @@ export class IntegrationService {
         buyerShippingCharge: nullableNumber(item.buyerShippingCharge ?? item.shippingCost),
         listingUrl: item.listingUrl || item.url || null
       })), areas),
-      drafts: drafts.slice(0, 500).map(item => ({ id: String(item.id || ''), title: String(item.title || ''), sku: String(item.sku || ''), updatedAt: item.updatedAt || null })),
-      fees: fees.slice(0, 1000),
-      promotions: promotions.slice(0, 500),
-      health: readErrors.includes('listings') ? (state.ebay?.health || null) : { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
-      coverage: { unavailableSurfaces: readErrors, ordersAvailable: !readErrors.includes('orders'), offersAvailable: !readErrors.includes('listings') },
+      drafts: !selected('drafts') || readErrors.includes('drafts') ? state.ebay?.drafts || [] : drafts.slice(0, 500).map(item => ({ id: String(item.id || ''), title: String(item.title || ''), sku: String(item.sku || ''), updatedAt: item.updatedAt || null })),
+      fees: !selected('fees') || readErrors.includes('fees') ? state.ebay?.fees || [] : fees.slice(0, 1000),
+      promotions: !selected('promotions') || readErrors.includes('promotions') ? state.ebay?.promotions || [] : promotions.slice(0, 500),
+      health: !selected('listings') || readErrors.includes('listings') ? (state.ebay?.health || null) : { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
+      coverage: { ...state.ebay?.coverage,
+        unavailableSurfaces: [...new Set([...(state.ebay?.coverage?.unavailableSurfaces || []).filter(surface => !selected(surface)), ...readErrors])],
+        ordersAvailable: selected('orders') ? !readErrors.includes('orders') : state.ebay?.coverage?.ordersAvailable ?? false,
+        offersAvailable: selected('listings') ? !readErrors.includes('listings') : state.ebay?.coverage?.offersAvailable ?? false,
+        readDiagnostics: { ...Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).filter(([surface]) => !selected(surface))), ...readDiagnostics } },
       syncedAt: now
     };
     if (config.connection) {
@@ -1393,7 +1439,11 @@ export class IntegrationService {
       lastSyncAt: now,
       lastError: readErrors.length ? 'EBAY_PARTIAL_READ' : null,
       lastFailureAt: readErrors.length ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
-      degradedSurfaces: readErrors
+      degradedSurfaces: readErrors,
+      failedAreas: areas.filter(area => area === 'orders' ? readErrors.some(surface => ['orders','fees'].includes(surface)) : area === 'promotions' ? readErrors.includes('promotions') : readErrors.some(surface => ['listings','drafts'].includes(surface))),
+      ...mergeEbayReadCooldown([ebayReadCooldown(state), readContext.cooldown, ...Object.values(readDiagnostics)]),
+      upstreamStatus: Object.values(readDiagnostics).find(item => item.httpStatus === 429)?.httpStatus || Object.values(readDiagnostics).find(item => item.httpStatus >= 500)?.httpStatus || null,
+      transient: Object.values(readDiagnostics).some(item => item.httpStatus === 429 || item.httpStatus >= 500)
     };
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;

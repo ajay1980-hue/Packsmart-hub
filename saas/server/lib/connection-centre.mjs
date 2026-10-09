@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { addAudit } from './events.mjs';
 import { META_WRITES, META_ORDER_RESTRICTION } from './meta-capabilities.mjs';
 import { resolveManualContentTarget } from './manual-content-target.mjs';
+import { assertEbayReadAdmission, ebayReadDeferred } from './ebay-read-cooldown.mjs';
 
 // One capability registry for the existing IntegrationService, UI and scheduler.
 // Areas describe implemented reads, not the provider's theoretical API features.
@@ -220,6 +221,7 @@ export function recoveryFor(provider, status = {}, coverage = {}, orderHold = un
   return null;
 }
 export function beginConnectionSync(state, provider, { areas, automatic = false, actor = 'system', integrations = null } = {}) {
+  assertEbayReadAdmission(state, provider, { automatic });
   const requested = areas || connectionSettings(state, provider).areas;
   const selected = validateAreas(provider, automatic ? automaticConnectionAreas(state,provider,requested) : requested);
   if (automatic && orderReadHeld(state, provider, selected, integrations)) throw Object.assign(connectionError('Shopify order source needs review. Existing data is retained.', shopifyOrderReadHold(state, provider, integrations).code, 422), { nonRetryable: true });
@@ -247,6 +249,7 @@ export function finishConnectionSync(state, run, result, error) {
   addAudit(state, { type: 'connection_sync_finished', actor: run.actor, detail: { provider: run.provider, runId: run.id, areas: run.areas, status: run.status, errorCode: run.errorCode } });
 }
 export function connectionDue(state, provider, now = new Date(), integrations = null) {
+  if (provider === 'ebay' && ebayReadDeferred(state, now.getTime(), true)) return false;
   const configured = connectionSettings(state, provider), settings = {...configured,areas:automaticConnectionAreas(state,provider,configured.areas)}, status = state.integrationStatus?.[provider] || {};
   if (orderReadHeld(state, provider, settings.areas, integrations)) return false;
   if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;

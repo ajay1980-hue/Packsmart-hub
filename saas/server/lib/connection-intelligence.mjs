@@ -1,5 +1,6 @@
 import { CONNECTORS, pendingConnectionReadExhausted, connectionCentre, connectionSettings, isShopifyOrderSourceFailure, shopifyOrderReadHold, recoveryFor } from './connection-centre.mjs';
 import { META_READ_SCOPES, META_CATALOG_SCOPES } from './meta-capabilities.mjs';
+import { ebayReadCooldown, validEbayRetryAt } from './ebay-read-cooldown.mjs';
 
 export const customerChannels = ['shopify', 'ebay', 'meta', 'tiktok_shop', 'google_youtube', 'pinterest'];
 export const recordFor = (state, provider) => state.connections?.find(item => item.provider === (provider === 'ebay' ? 'ebay_oauth' : provider));
@@ -60,6 +61,7 @@ export function classifyConnectionIssue(state, provider, now = new Date(), recor
   if (/ASSET_REQUIRED/.test(combined)) return issue('missing_asset', 'important', 'Choose an authorised Page or catalogue before reading this data.', { action: 'open', label: 'Choose your account assets' });
   if (first?.validation?.problemAreas?.includes('channels')) return issue('missing_asset','important','Google sign-in succeeded, but no authorised YouTube channel was returned.',{action:'reconnect',label:'Connect the account with your YouTube channel'});
   if (first?.validation?.problemAreas?.includes('accounts')) return issue('missing_asset','important','Facebook sign-in succeeded, but no business Page was returned. Existing data is safe.',{action:'reconnect',label:'Reconnect and select your Facebook Page'});
+  if (provider === 'ebay' && ebayReadCooldown(state, now.getTime()).retryReviewRequired) return issue('retry_review_required', 'important', 'eBay’s reported retry deadline could not be represented safely and needs manual review. Automatic reads are paused; your existing data is safe.', { action: 'open', label: 'Review retry timing' });
   if (pendingConnectionReadExhausted(state, provider, integrations)) return issue('read_retry_exhausted', 'important', 'Automatic read retries are paused because earlier results could not be confirmed. Your existing data is safe. Retry this connection manually when ready.', { action: 'sync', label: 'Retry this connection' });
   const runs = (state.connectionSyncs || []).filter(r => r.provider === provider);
   if (runs.some(r => r.status === 'running' && Date.parse(r.leaseUntil) <= now.getTime()) || code === 'WORKER_INTERRUPTED') return issue('interrupted', 'important', 'A previous read was interrupted. Your imported data is safe; Runvara can resume it.', null, 'read');
@@ -111,15 +113,23 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
   const accessExpiry = !expiry.at ? 'unknown' : Date.parse(expiry.at) <= now.getTime() ? 'expired'
     : Date.parse(expiry.at) - now.getTime() < 24 * 3600000 ? 'expiring' : 'not_expiring';
   const expiresSoon = accessExpiry === 'expiring';
+  const cooldown = channel.id === 'ebay' ? ebayReadCooldown(state, now.getTime()) : null;
   const issue = classifyConnectionIssue(state, channel.id, now, record, integrations);
   const authIssue = issue && ['reconnect_required', 'account_mismatch', 'missing_scope'].includes(issue.kind);
   // Read failures must not hide a separate saved authorization failure. Keep
   // this precedence local to the projection; the recovery classifier is shared.
   const authCodes = [state.connectionAuthAttention?.[channel.id]?.code, state.integrationStatus?.[channel.id]?.lastError, record?.lastError].join(' ');
   const authFailure = record?.status === 'auth_expired' || /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED|ACCESS_DENIED|ACCOUNT_MISMATCH|ACCOUNT_UNCONFIRMED|PERMISSION|SCOPE/.test(authCodes);
+  const ebayStatus = state.integrationStatus?.ebay;
+  // monitoredSync marks fatal read failures as record errors as well. An exact
+  // saved provider-requested wait is read evidence, not an authorization failure.
+  const ebayCooldownFailure = cooldown && record?.status === 'error' && (cooldown.retryAt || cooldown.retryReviewRequired)
+    && record.lastError === ebayStatus?.lastError && ![401,403].includes(ebayStatus?.upstreamStatus)
+    && (ebayStatus?.upstreamStatus === 429 || Number.isInteger(ebayStatus?.upstreamStatus) && ebayStatus.upstreamStatus >= 500 && ebayStatus.upstreamStatus <= 599 || /RATE_LIMIT|EBAY_RETRY_REVIEW_REQUIRED/.test(ebayStatus?.lastError || ''))
+    && !authFailure && !authIssue;
   const authentication = channel.configured && !settings.disconnected && (accessExpiry === 'expired'
     || Boolean(state.connectionAuthAttention?.[channel.id]) || missing.length > 0 || authFailure
-    || ['auth_expired', 'error', 'disconnected'].includes(record?.status)
+    || ['auth_expired', 'disconnected'].includes(record?.status) || record?.status === 'error' && !ebayCooldownFailure
     || authIssue) ? 'attention' : 'not_verified';
   let status = 'Healthy', message = 'Recorded reads are within the saved sync freshness window. Current access has not been checked by this view.', action = null;
   if (settings.disconnected) { status = 'Disconnected'; message = 'This channel is disconnected. Previously imported data is retained.'; action = {action:'connect',label:`Connect ${channel.name}`}; }
@@ -130,7 +140,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
   else if ((expiresSoon || accessExpiry === 'expired') && !readiness.refreshSupported) { status = 'Reconnect required'; message = accessExpiry === 'expired' ? 'Your saved access has expired. Sign in again to check access.' : 'Your saved access is expiring. Sign in again to keep data up to date.'; action = {action:'reconnect',label:`Reconnect ${channel.name}`}; }
   else if (accessExpiry === 'expired' || expiresSoon) { status = 'Attention needed'; message = accessExpiry === 'expired' ? 'Your saved access has expired. Refresh access to check whether it can be renewed.' : 'Saved access expires within 24 hours. Refresh access to check renewal.'; action = {action:'refresh',label:'Refresh access'}; }
   else if (issue) {
-    status = issue.kind === 'provider_unavailable' ? 'Provider unavailable' : 'Degraded'; message = issue.message; action = issue.action;
+    status = issue.kind === 'provider_unavailable' ? 'Provider unavailable' : issue.kind === 'retry_review_required' ? 'Attention needed' : 'Degraded'; message = issue.message; action = issue.action;
     if (!settings.autoSync && issue.repair === 'read') {
       const reason = { interrupted: 'A previous read was interrupted.', rate_limit: 'The provider is limiting requests.', provider_unavailable: 'The provider returned a temporary service error.', temporary_read_failure: 'A read was temporarily interrupted.' };
       message = `${reason[issue.kind]} Automatic syncing is off. Previous data is retained; retry manually when ready.`;
@@ -145,6 +155,42 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
   else if (dataFreshness === 'not_measured') { status = 'Attention needed'; message = channel.progress ? 'Runvara is reading selected data. Freshness is not yet confirmed for every selected area.' : 'Freshness is unknown for some selected data. A saved sync time does not confirm that every selected area was read.'; action = channel.progress ? null : {action:'sync',label:'Refresh selected data'}; }
   const doctor = state.connectionDoctor?.[channel.id];
   if ((doctor?.exhausted && issue?.repair || issue?.kind === 'read_retry_exhausted') && authentication !== 'attention' && !expiresSoon) { status = 'Attention needed'; message = issue.kind === 'read_retry_exhausted' ? issue.message : 'Repeated safe retries could not restore this read. Your existing data is safe.'; action = {action:'sync',label:'Retry this connection'}; }
+  const commerceOnly = channel.id === 'ebay' && issue?.kind === 'provider_restriction'
+    && state.ebay?.coverage?.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')
+    && settings.areas.some(area => area !== 'promotions');
+  const automaticRetryAvailable = cooldown ? Boolean(channel.configured && settings.autoSync === true && !settings.disconnected
+    && freshnessEvidence.mode === 'scheduled' && settings.areas.length && !cooldown.retryReviewRequired
+    && !doctor?.exhausted && !pendingConnectionReadExhausted(state, channel.id, integrations)
+    && authentication !== 'attention' && !expiresSoon && persistence.primaryPersistence !== false && !scheduler.lastError
+    && (!issue || issue.repair === 'read' || commerceOnly)) : null;
+  const doctorRetryAt = cooldown ? validEbayRetryAt(doctor?.nextRetryAt) : timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at;
+  const nextRetryAt = cooldown ? automaticRetryAvailable
+    ? [cooldown.retryAt, doctorRetryAt].filter(at => at && Date.parse(at) > now.getTime()).sort((a, b) => Date.parse(b) - Date.parse(a))[0] || null : null
+    : settings.autoSync === true && !settings.disconnected && !pendingConnectionReadExhausted(state, channel.id, integrations) && issue?.kind !== 'order_source_review' ? doctorRetryAt : null;
+  if (cooldown && channel.configured && !settings.disconnected && authentication !== 'attention' && !expiresSoon) {
+    if (cooldown.retryReviewRequired && issue?.kind === 'provider_restriction') {
+      // Keep the restriction as the primary issue, without suggesting that its
+      // otherwise available commerce reads can bypass an unverified deadline.
+      message = message.replace('Available commerce reads can continue;', 'Commerce reads are paused;');
+      message += ' The reported retry deadline could not be represented safely and needs manual review; automatic reads are paused.';
+    } else if (!cooldown.retryReviewRequired && cooldown.retryAt && (!issue || issue.repair === 'read' || commerceOnly || issue.kind === 'read_retry_exhausted')) {
+      const waitUntil = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }).format(new Date(nextRetryAt || cooldown.retryAt)) + ' UTC';
+      const wait = `eBay reads must wait until ${waitUntil}.`;
+      if (commerceOnly) {
+        message = message.replace('Available commerce reads can continue;', `Commerce reads must wait until ${waitUntil};`);
+        if (!message.includes(waitUntil)) message += ` ${wait}`;
+        if (!settings.autoSync) message += ' Automatic syncing is off; retry manually after that time.';
+      }
+      else if (!settings.autoSync) { status = 'Attention needed'; message = `${wait} Automatic syncing is off. Retry manually after that time; your existing data is safe.`; action = { action: 'sync', label: 'Retry selected data' }; }
+      else if (!automaticRetryAvailable) {
+        status = 'Attention needed';
+        const exhausted = doctor?.exhausted || pendingConnectionReadExhausted(state, channel.id, integrations);
+        message = exhausted ? `${wait} Automatic reads are paused because earlier results could not be confirmed. Retry this connection manually after that time; your existing data is safe.` : `${wait} Automatic reads are paused. Review this connection; your existing data is safe.`;
+        action = exhausted ? { action: 'sync', label: 'Retry this connection' } : { action: 'open', label: 'Review this connection' };
+      }
+      else { status = 'Attention needed'; message = `${wait} Automatic reads remain subject to the saved retry timing and sync schedule. Your existing data is safe.`; action = null; }
+    }
+  }
   if (persistence.primaryPersistence === false) { status = 'Degraded'; message = 'Runvara cannot confirm that recent changes are saved. Existing saved data is retained; support needs to restore storage.'; action = {action:'open',label:'Check again shortly'}; }
   else if (channel.configured && scheduler.lastError && status === 'Healthy') { status = 'Attention needed'; message = 'Automatic checks need attention. Your saved data is safe; you can refresh it manually while Runvara recovers.'; action = {action:'sync',label:'Refresh your data'}; }
   return { status, message, action, severity: status === 'Healthy' ? 'informational' : issue?.severity || 'important',
@@ -156,7 +202,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
     lastFailedSyncAt: timestampEvidence(channel.lastFailedSyncAt, now).at, dataFreshness, freshnessEvidence,
     activeReads: channel.history.filter(r => r.status === 'running').length,
     failedAreas: Object.keys(state.connectionFirstSync?.[channel.id]?.failures || {}),
-    nextRetryAt: settings.autoSync === true && !settings.disconnected && !pendingConnectionReadExhausted(state, channel.id, integrations) && issue?.kind !== 'order_source_review' ? timestampEvidence(doctor?.nextRetryAt, now, { allowFuture: true }).at : null, webhookHealth: 'not_monitored',
+    nextRetryAt, ...(cooldown ? { retryReviewRequired: cooldown.retryReviewRequired, automaticRetryAvailable } : {}), webhookHealth: 'not_monitored',
     persistenceHealth: persistence.primaryPersistence === false ? 'degraded' : persistence.primaryPersistence ? 'healthy' : 'not_measured',
     schedulerHealth: scheduler.lastError ? 'attention' : scheduler.lastTickAt ? 'running' : 'not_measured', schedulerLastTickAt: scheduler.lastTickAt || null };
 }

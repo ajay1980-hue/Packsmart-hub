@@ -17,10 +17,25 @@ const service = new IntegrationService({});
 state.onboardingJourney={platforms:['shopify','tiktok_shop'],permissionReviews:{shopify:0}};
 state.connectionFirstSync={shopify:{status:'partial',identityVerifiedAt:'2026-09-21T10:00:00Z',startedAt:'2026-09-21T10:00:00Z',completedAt:'2026-09-21T10:00:03Z',areas:{products:'completed',variants:'completed',inventory:'completed',orders:'failed'},failures:{orders:{code:'UPSTREAM_REQUEST_FAILED'}},validation:{ok:true,counts:{products:4,variants:4,orders:0}}}};
 const payload = {workspace:state.workspace,launchAdmin:false,user:state.users[0],products:state.products,onboarding:{journey:onboardingJourney(state)},autopilot:{enabled:true},connectionWrites:[],connectionCentre:intelligentConnections(state,service)};
+// Saved synthetic evidence exercises the real health and presentation projection.
+// No provider read, credential use or database is needed to build these fixtures.
+const observedAt = new Date(), retryAt = new Date(observedAt.getTime() + 3 * 86400000).toISOString();
+const cooldownFixtures = Object.fromEntries(['deadline','manual','review','exhausted'].map(mode => {
+  const saved = structuredClone(state);
+  saved.connectionSettings ||= {};
+  saved.connectionSettings.ebay = { autoSync: mode !== 'manual', frequencyMinutes: 30, areas: ['orders'], managedReadSchedule: true };
+  saved.integrationStatus.ebay = { status: 'degraded', lastError: 'CONNECTION_RATE_LIMITED', upstreamStatus: 429,
+    lastSuccessfulSyncAt: observedAt.toISOString(), areaSuccessAt: { orders: observedAt.toISOString() },
+    retryAt: mode === 'review' ? null : retryAt, retryReviewRequired: mode === 'review' };
+  if (mode === 'exhausted') saved.connectionDoctor = { ebay: { pendingReadAttempts: 5, exhausted: true } };
+  return [mode, intelligentConnections(saved, service, { now: observedAt }).find(channel => channel.id === 'ebay')];
+}));
 const html = await fs.readFile(new URL('../../index.html',import.meta.url),'utf8');
 const css = await fs.readFile(new URL('../../styles.css',import.meta.url),'utf8');
 const js = await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8') + '\n' + await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8');
 const setup = `const fixture=${JSON.stringify(payload)};
+const cooldownFixtures=${JSON.stringify(cooldownFixtures)};
+window.showEbayCooldownFixture=mode=>{if(!Object.hasOwn(cooldownFixtures,mode))throw new Error('Unknown cooldown fixture');fixture.connectionCentre=fixture.connectionCentre.map(channel=>channel.id==='ebay'?cooldownFixtures[mode]:channel);RunvaraConnections.render(fixture);};
 document.getElementById('login-screen').classList.add('hidden');document.getElementById('app-shell').classList.remove('hidden');
 document.querySelectorAll('.view').forEach(el=>el.classList.toggle('active',el.id==='view-channels'));
 document.getElementById('page-title').textContent='Connection Centre';document.getElementById('advanced-channel-connections').classList.add('hidden');

@@ -31,6 +31,7 @@
   }
   function connectionMessage(channel) {
     if (!channel) return '';
+    if (channel.id === 'ebay' && channel.health?.message) return channel.health.message;
     const code = channel.history?.find(run => run.errorCode)?.errorCode;
     if (channel.id === 'ebay' && channel.readDiagnostics?.marketing?.errorIds?.map(String).includes('35077')) return 'Orders remain connected. eBay has restricted Promoted Listings for this seller; review eligibility in Seller Hub.';
     return channel.recovery?.action === 'reconnect' ? `${issueCopy(code || 'AUTH_REQUIRED',channel.name)}. Reconnect to review and renew access.` : channel.recovery?.message || (channel.configured ? 'Selected data is connected. Review coverage and sync history below.' : 'Connect an account to start importing data.');
@@ -39,11 +40,16 @@
     if (!channel.configured) return 'Connect first';
     if (channel.progress) return 'Sync in progress';
     if (!channel.settings?.autoSync || (!channel.settings?.managedReadSchedule && (!data.autopilot?.enabled || data.automations?.channelSync === false || data.autopilot?.rules?.channelSync?.permitted === false))) return 'Automatic sync paused';
-    if (channel.recovery?.action === 'reconnect') return 'Access needs review';
+    if (channel.recovery?.action === 'reconnect' || channel.id === 'ebay' && (channel.health?.authentication === 'attention' || ['reconnect','refresh'].includes(channel.health?.action?.action))) return 'Access needs review';
+    if (channel.id === 'ebay' && channel.health?.retryReviewRequired) return 'Retry timing needs review';
+    if (channel.id === 'ebay' && (channel.settings?.disconnected || channel.health?.automaticRetryAvailable === false || channel.health?.cause === 'read_retry_exhausted')) return 'Automatic reads paused';
     const latest = channel.history?.[0]?.startedAt || channel.lastSuccessfulSyncAt;
-    const next = Date.parse(latest) + Number(channel.settings?.frequencyMinutes || 30) * 60000;
+    let next = Date.parse(latest) + Number(channel.settings?.frequencyMinutes || 30) * 60000;
+    const retry = channel.id === 'ebay' ? Date.parse(channel.health?.nextRetryAt) : NaN;
+    if (retry > now) next = Math.max(Number.isFinite(next) ? next : 0, retry);
     if (!Number.isFinite(next) || next <= now) return 'Eligible at next check';
-    return `Eligible after ${new Intl.DateTimeFormat('en-GB',{hour:'2-digit',minute:'2-digit'}).format(new Date(next))}`;
+    const crossesDay = channel.id === 'ebay' && new Date(next).toDateString() !== new Date(now).toDateString();
+    return `Eligible after ${new Intl.DateTimeFormat('en-GB',{...(crossesDay ? {day:'numeric',month:'short',year:'numeric'} : {}),hour:'2-digit',minute:'2-digit'}).format(new Date(next))}`;
   }
   const active = item => item.present && ['open','acknowledged'].includes(item.status);
   function incidents(data, activeOnly = true) {

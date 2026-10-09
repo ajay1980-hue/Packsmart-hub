@@ -67,6 +67,8 @@ jobs:
           name: runvara-mobile-onboarding
           path: |
             /tmp/runvara-onboarding-mobile.png
+            /tmp/runvara-ebay-cooldown-*.png
+            /tmp/runvara-ebay-cooldown-report.json
             /tmp/runvara-provider-usage-*.png
             /tmp/runvara-objective-review-*.png
             /tmp/runvara-automation-history-*.png

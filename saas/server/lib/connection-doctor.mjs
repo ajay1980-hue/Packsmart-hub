@@ -1,6 +1,7 @@
 import { automaticConnectionAreas, CONNECTORS, beginConnectionSync, connectionSettings, connectionDue, connectionError, connectionDoctorState, connectionReadAttempts, pendingConnectionReadExhausted, isShopifyOrderSourceFailure, shopifyOrderReadBinding, shopifyOrderReadHold, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { addAudit } from './events.mjs';
 import { classifyConnectionIssue, recordFor, safeFailureCode } from './connection-intelligence.mjs';
+import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, ebayReadDeferred, mergeEbayReadCooldown } from './ebay-read-cooldown.mjs';
 
 const iso = () => new Date().toISOString();
 const transient = (error, provider) => !isShopifyOrderSourceFailure(provider, error?.code) && (error?.upstreamStatus === 429 || error?.upstreamStatus >= 500 || /RATE_LIMIT|TIMEOUT|ETIMEDOUT|ECONNRESET/.test(error?.code || '') || ['AbortError','TimeoutError','TypeError'].includes(error?.name));
@@ -90,6 +91,7 @@ function readGroups(provider, areas) {
 export async function runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly = false, automatic = false, onOrderAttempt = null, onReadAttempt = null, onExplicitOrderAdmission = null }) {
   const first = state.connectionFirstSync?.[provider];
   if (!first || !first.identityVerifiedAt || connectionSettings(state, provider).disconnected) return;
+  assertEbayReadAdmission(state, provider, { automatic });
   const requestedAreas = Object.keys(first.areas).filter(a => !retryFailedOnly || first.areas[a] !== 'completed');
   const areas = automatic ? automaticConnectionAreas(state,provider,requestedAreas) : requestedAreas;
   if (!areas.length) return first;
@@ -159,6 +161,7 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     const configured = connectionSettings(state,provider), settings = {...configured,areas:automaticConnectionAreas(state,provider,configured.areas)}, record = recordFor(state, provider);
     if (!settings.areas.length) continue;
     if (settings.disconnected || !record?.encryptedCredentials || !CONNECTORS[provider].areas.length) continue;
+    if (provider === 'ebay' && ebayReadDeferred(state, now.getTime(), true)) continue;
     // The durable source hold is already sufficient evidence. Merely seeing it
     // again must not claim repairs, contact providers, or write another save.
     if (orderReadHeld(state, provider, settings.areas, integrations) || pendingConnectionReadExhausted(state, provider, integrations)) continue;
@@ -222,7 +225,7 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
           await save();
           await readSync(state, integrations, provider, { automatic:true, run, retry:false });
         }
-        if (state.integrationStatus?.[provider]?.lastError) throw Object.assign(new Error('Read still needs attention'), { code: 'PARTIAL_READ' });
+        if (state.integrationStatus?.[provider]?.lastError) throw Object.assign(new Error('Read still needs attention'), { code: 'PARTIAL_READ', ...(provider === 'ebay' ? ebayReadCooldown(state) : {}) });
       }
       const recoveredOutage = doctor.issue === 'provider_unavailable';
       const protectedOrderBudget = provider === 'shopify' && doctor.orderReadBinding;
@@ -231,7 +234,9 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
       event(state, provider, 'repair_success', { action, message: (issue && !commerceOnly && !unaffectedRead) || refresh ? `Runvara detected and repaired your ${CONNECTORS[provider].name} connection. No action required.` : null });
       if (recoveredOutage && !refresh) event(state, provider, 'provider_recovery', { message:`${CONNECTORS[provider].name} reads recovered. No action required.` });
     } catch (error) {
+      if (provider === 'ebay' && error.cooldownDeferred) continue;
       if (error.code === 'STATE_CONFLICT' || /PERSISTENCE|SUPABASE/.test(error.code || '')) throw error;
+      if (provider === 'ebay') state.integrationStatus = { ...state.integrationStatus, ebay: { ...state.integrationStatus?.ebay, ...mergeEbayReadCooldown([ebayReadCooldown(state), ebayErrorCooldown(error)]) } };
       if (error.holdDisposition === 'configuration_changed') {
         doctor.nextRetryAt = null;
         doctor.issue = null;
@@ -251,7 +256,11 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
       } else if (!orderAttemptCharged || !doctor.orderReadBinding) doctor.attempts = (doctor.attempts || 0) + 1;
       if (!readAttemptCharged || !doctor.orderReadBinding || orderAttemptCharged) doctor.exhausted = doctor.attempts >= 5;
       const backoff = Math.min(3600000, 60000 * 2 ** (connectionReadAttempts(doctor) - 1));
-      doctor.nextRetryAt = new Date(now.getTime() + Math.max(backoff, Math.min(86400000, Number(error.retryAfterMs) || 0), Date.parse(state.integrationStatus?.[provider]?.retryAt) - now.getTime() || 0)).toISOString();
+      if (provider === 'ebay') {
+        const failureNow = Date.now();
+        const cooldown = mergeEbayReadCooldown([ebayReadCooldown(state), error, { retryAt: new Date(failureNow + backoff).toISOString() }], failureNow);
+        doctor.nextRetryAt = cooldown.retryReviewRequired ? null : cooldown.retryAt;
+      } else doctor.nextRetryAt = new Date(now.getTime() + Math.max(backoff, Math.min(86400000, Number(error.retryAfterMs) || 0), Date.parse(state.integrationStatus?.[provider]?.retryAt) - now.getTime() || 0)).toISOString();
       event(state, provider, 'repair_failure', { action, code:safeFailureCode(error), nextRetryAt:doctor.nextRetryAt });
       if (refresh) state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], lastError:safeFailureCode(error), upstreamStatus:error.upstreamStatus || null, transient:transient(error, provider) } };
       if (doctor.exhausted) event(state, provider, 'user_action_required', { priority:'critical', message:`Repeated ${CONNECTORS[provider].name} read retries failed. Existing data is safe. Retry this connection from the Connection Centre.` });

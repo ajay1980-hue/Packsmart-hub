@@ -1,6 +1,84 @@
 import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+
+const cooldownReport = { schema: 'runvara-ebay-cooldown-browser-evidence/v1', status: 'running',
+  fixture: 'release connection UI with synthetic saved cooldown evidence', captures: [], widths: [] };
+async function captureCooldown(page, width, mode, surface) {
+  const management = surface === 'management';
+  const panel = page.locator(management ? '#connection-detail' : '[data-channel-card="ebay"]');
+  const typography = await panel.evaluateHandle((root, management) => {
+    // Enlarge exactly the affected cooldown copy and schedule, preserving the
+    // unrelated card badges, controls and management form typography.
+    const nodes = [...root.querySelectorAll(management ? '.connection-notice p, .connection-notice button' : '.connection-health, .connection-facts dt, .connection-facts dd')];
+    if (!nodes.length) throw new Error('Cooldown typography must own visible text');
+    const records = nodes.map(node => { const computed = getComputedStyle(node); return { node, size: computed.fontSize, line: computed.lineHeight,
+      inline: node.getAttribute('style'), declarations: ['font-size','line-height'].map(name => ({ name, value: node.style.getPropertyValue(name), priority: node.style.getPropertyPriority(name) })) }; });
+    const assertBaseline = () => records.forEach(record => {
+      if (!root.contains(record.node) || getComputedStyle(record.node).fontSize !== record.size || getComputedStyle(record.node).lineHeight !== record.line) throw new Error('Cooldown typography changed its saved baseline');
+    });
+    return { assertBaseline,
+      enlarge() {
+        assertBaseline();
+        for (const record of records) { record.node.style.fontSize = `${parseFloat(record.size) * 2}px`; if (Number.isFinite(parseFloat(record.line))) record.node.style.lineHeight = `${parseFloat(record.line) * 2}px`; }
+        for (const record of records) if (Math.abs(parseFloat(getComputedStyle(record.node).fontSize) - parseFloat(record.size) * 2) > .05) throw new Error('Cooldown text must be exactly 200%');
+      },
+      restore() {
+        for (const record of records) {
+          for (const declaration of record.declarations) { if (declaration.value) record.node.style.setProperty(declaration.name, declaration.value, declaration.priority); else record.node.style.removeProperty(declaration.name); }
+          if (record.inline === null && record.node.getAttribute('style') === '') record.node.removeAttribute('style');
+        }
+        assertBaseline();
+      }
+    };
+  }, management);
+  const save = async textScale => {
+    await panel.evaluate((node, management) => {
+      const scroller = management ? document.querySelector('#connection-dialog') : document.scrollingElement;
+      const topbar = document.querySelector('.topbar');
+      const top = management ? scroller.getBoundingClientRect().top + 70
+        : getComputedStyle(topbar).position === 'sticky' ? topbar.getBoundingClientRect().height + 12 : 12;
+      scroller.scrollTop += node.getBoundingClientRect().top - top;
+    }, management);
+    for (let frame = 1; frame <= 12; frame++) {
+      const geometry = await panel.evaluate((node, management) => {
+        const scroller = management ? document.querySelector('#connection-dialog') : document.scrollingElement;
+        const box = node.getBoundingClientRect(), topbar = document.querySelector('.topbar');
+        const top = management ? scroller.getBoundingClientRect().top + 70
+          : getComputedStyle(topbar).position === 'sticky' ? topbar.getBoundingClientRect().bottom + 8 : 0;
+        const regionBottom = management ? node.querySelector('.connection-toolbar').getBoundingClientRect().bottom : box.bottom;
+        const bottom = Math.min(regionBottom, management ? scroller.getBoundingClientRect().bottom - 4 : innerHeight);
+        const y = Math.max(box.top, top);
+        return { x: box.left, y, width: box.width, height: bottom - y, remaining: regionBottom - bottom,
+          pageWidth: document.documentElement.scrollWidth, scroll: node.scrollWidth, client: node.clientWidth,
+          containerScroll: scroller.scrollWidth, containerWidth: scroller.clientWidth, scrollTop: scroller.scrollTop };
+      }, management);
+      assert.ok(geometry.pageWidth <= width + 2 && geometry.x >= 0 && geometry.x + geometry.width <= width + 2
+        && geometry.scroll <= geometry.client + 2 && geometry.containerScroll <= geometry.containerWidth + 2,
+      `eBay cooldown overflow at ${width}px/${mode}/${surface}/${textScale}%: ${JSON.stringify(geometry)}`);
+      assert.ok(geometry.height > 0, 'Cooldown capture must contain visible content');
+      const filename = `/tmp/runvara-ebay-cooldown-${width}-${mode}-${surface}-${textScale}-${String(frame).padStart(2, '0')}.png`;
+      const clip = { x: geometry.x, y: geometry.y, width: geometry.width, height: geometry.height };
+      await page.screenshot({ path: filename, clip, caret: 'initial' });
+      cooldownReport.captures.push({ width, mode, surface, textScale, frame, filename, clip, scrollTop: geometry.scrollTop });
+      if (geometry.remaining <= 1) return;
+      const advanced = await panel.evaluate((node, { management, amount }) => {
+        const scroller = management ? document.querySelector('#connection-dialog') : document.scrollingElement;
+        const before = scroller.scrollTop; scroller.scrollTop += amount; return scroller.scrollTop > before;
+      }, { management, amount: Math.max(100, geometry.height - 32) });
+      assert.ok(advanced, 'Cooldown screenshot traversal must advance without clipping saved text');
+    }
+    assert.fail('Cooldown screenshot traversal exceeded twelve viewport slices');
+  };
+  try {
+    await typography.evaluate(session => session.assertBaseline());
+    await save(100);
+    try { await typography.evaluate(session => session.enlarge()); await save(200); }
+    finally { await typography.evaluate(session => session.restore()); }
+    await typography.evaluate(session => session.assertBaseline());
+  } finally { await typography.dispose(); }
+}
 
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
 let page;
@@ -43,13 +121,50 @@ try {
       await page.locator('#connection-journey').scrollIntoViewIfNeeded();
       await page.screenshot({ path: '/tmp/runvara-onboarding-mobile.png', fullPage: true });
     }
+    if ([320, 390, 1200].includes(width)) {
+      for (const mode of ['deadline', 'manual', 'review', 'exhausted']) {
+        await page.evaluate(mode => window.showEbayCooldownFixture(mode), mode);
+        const card = page.locator('[data-channel-card="ebay"]');
+        const message = await card.locator('.connection-health').textContent();
+        const next = await card.locator('.connection-facts div').filter({ has: page.locator('dt', { hasText: 'Next automatic read' }) }).locator('dd').textContent();
+        if (mode === 'deadline') {
+          assert.match(message, /eBay reads must wait until/);
+          assert.match(next, /^Eligible after \d{1,2} [A-Za-z]+ \d{4}/, 'Cooldown card must show the day as well as the time');
+        } else {
+          assert.doesNotMatch(next, /Eligible/);
+          assert.match(next, mode === 'review' ? /Retry timing needs review/ : /paused/);
+        }
+        if (mode === 'review') {
+          assert.match(message, /deadline could not be represented safely and needs manual review/);
+          assert.doesNotMatch(message, /reconnect|will retry/i);
+        }
+        await captureCooldown(page, width, mode, 'card');
+        await card.locator('.connection-title').click();
+        assert.ok(await page.locator('#connection-dialog').isVisible());
+        assert.equal(await page.locator('#connection-detail > .connection-notice > p').textContent(), message);
+        await captureCooldown(page, width, mode, 'management');
+        await page.locator('#connection-close').click();
+        assert.equal(await page.locator('#connection-dialog').isVisible(), false);
+        // Repeated opening must preserve the same saved wait or hold copy.
+        await card.locator('.connection-title').click();
+        assert.equal(await page.locator('#connection-detail > .connection-notice > p').textContent(), message);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#connection-dialog').isVisible(), false);
+      }
+      cooldownReport.widths.push(width);
+      assert.deepEqual(errors, [], 'Cooldown management must not throw browser errors');
+    }
     console.log(JSON.stringify({ viewport: width, page: layout, dialog }));
     await page.close();
     page = undefined;
   }
+  cooldownReport.status = 'passed';
+  cooldownReport.note = 'Real viewport slices of the card and management notice/toolbar at normal and exact 200% affected text. Synthetic saved evidence only; no provider reads. Downloaded images still require pixel review.';
 } catch (error) {
+  cooldownReport.status = 'failed';
   if (page) await page.screenshot({ path: '/tmp/runvara-onboarding-mobile.png', fullPage: true }).catch(() => {});
   throw error;
 } finally {
+  await fs.writeFile('/tmp/runvara-ebay-cooldown-report.json', JSON.stringify(cooldownReport, null, 2));
   await browser.close();
 }

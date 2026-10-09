@@ -44,6 +44,7 @@ import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunit
 import { recordWork } from './lib/events.mjs';
 import { createOrderRecoveryRunner, orderRecoveryActor, publicOrderRecoveryObservation } from './lib/shopify-order-recovery-run.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
+import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown } from './lib/ebay-read-cooldown.mjs';
 import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
@@ -857,7 +858,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           connection.lastError = syncError.code || 'EBAY_SYNC_FAILED';
           state.integrationStatus = {
             ...(state.integrationStatus || {}),
-            ebay: { status: 'error', detail: 'eBay authorization was saved, but its first read sync needs retrying.', lastSyncAt: null, lastError: connection.lastError }
+            ebay: { ...state.integrationStatus?.ebay, ...mergeEbayReadCooldown([ebayReadCooldown(state), ebayErrorCooldown(syncError)]), status: 'error', detail: 'eBay authorization was saved, but its first read sync needs retrying.', lastSyncAt: state.integrationStatus?.ebay?.lastSyncAt || null, lastError: connection.lastError, upstreamStatus: syncError.upstreamStatus || state.integrationStatus?.ebay?.upstreamStatus || null }
           };
           addAudit(state, { type: 'ebay_read_sync_failed', actor: user.id, detail: { code: connection.lastError } });
         }
@@ -2331,6 +2332,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             }
             try {
               if (action === 'sync') {
+                assertEbayReadAdmission(state, provider);
                 // A products-only retry cannot erase the budget of an uncertain
                 // automatic orders read. Validate explicit scope before reset.
                 const protectedOrderBudget = provider === 'shopify' && state.connectionDoctor?.shopify?.orderReadBinding;
@@ -2356,8 +2358,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               return checked;
             } catch (error) {
               const code = /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'CONNECTION_READ_FAILED';
+              if (provider === 'ebay' && error.cooldownDeferred) throw error;
               if (['SYNC_IN_PROGRESS', 'CONNECTION_DISCONNECTED', 'REFRESH_UNSUPPORTED', 'SYNC_AREAS_INVALID'].includes(code)) return { failure: { error: error.message, code, status: error.status || 400 } };
-              state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], status: /AUTH|CREDENTIAL|TOKEN|PERMISSION/.test(code) ? 'auth_expired' : 'degraded', lastError: code, lastFailureAt: new Date().toISOString() } };
+              state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], ...(provider === 'ebay' ? mergeEbayReadCooldown([ebayReadCooldown(state), ebayErrorCooldown(error)]) : {}), status: /AUTH|CREDENTIAL|TOKEN|PERMISSION/.test(code) ? 'auth_expired' : 'degraded', lastError: code, lastFailureAt: new Date().toISOString() } };
               addAudit(state, { type: 'connection_action_failed', actor: auth.user.id, detail: { provider, action, code } });
               return { failure: { error: recoveryFor(provider, state.integrationStatus[provider]).message, code, status: 422 } };
             }
@@ -2387,9 +2390,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireOwner(auth);
           const results = await mutate(auth, async state => {
             const output = {};
-            for (const provider of Object.keys(CONNECTORS)) {
+            const providers = Object.keys(CONNECTORS).filter(provider => {
               const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
-              if (!configured || connectionSettings(state, provider).disconnected) continue;
+              return configured && !connectionSettings(state, provider).disconnected;
+            });
+            // A wholly deferred eBay request has nothing to commit. Other
+            // selected providers may still complete and save their own reads.
+            if (providers.length === 1 && providers[0] === 'ebay') assertEbayReadAdmission(state);
+            for (const provider of providers) {
               try {
                 const run = beginConnectionSync(state, provider, { actor: auth.user.id });
                 await store.save(auth.session.workspaceId, state);
@@ -2447,7 +2455,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               addAudit(state, { type: 'ebay_read_sync', actor: auth.user.id, detail: { status: result.status, account: result.account || null } });
               return { status: result, error: null };
             } catch (error) {
+              if (error.cooldownDeferred) throw error;
               const failedStatus = {
+                ...state.integrationStatus?.ebay,
+                ...mergeEbayReadCooldown([ebayReadCooldown(state), ebayErrorCooldown(error)]),
                 status: 'error',
                 detail: 'The eBay read connection could not be verified; the existing Manager was not changed.',
                 lastSyncAt: state.integrationStatus?.ebay?.lastSyncAt || null,
