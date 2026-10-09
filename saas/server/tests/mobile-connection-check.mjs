@@ -4,7 +4,39 @@ import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
 const cooldownReport = { schema: 'runvara-ebay-cooldown-browser-evidence/v1', status: 'running',
-  fixture: 'release connection UI with synthetic saved cooldown evidence', captures: [], widths: [] };
+  fixture: 'release connection UI with synthetic saved cooldown evidence', captures: [], widths: [], factLayouts: [] };
+async function assertCooldownFacts(panel, width, mode, textScale) {
+  const facts = await panel.locator('.connection-facts').evaluate(list => {
+    const box = list.getBoundingClientRect();
+    return { width: box.width, rows: [...list.children].map(row => {
+      const rowBox = row.getBoundingClientRect();
+      return { left: rowBox.left - box.left, right: rowBox.right - box.left, top: rowBox.top - box.top, bottom: rowBox.bottom - box.top,
+        fields: [...row.querySelectorAll('dt,dd')].map(field => {
+          const fieldBox = field.getBoundingClientRect(), words = [], style = getComputedStyle(field);
+          const walker = document.createTreeWalker(field, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) for (const match of walker.currentNode.textContent.matchAll(/\S+/g)) {
+            const range = document.createRange(); range.setStart(walker.currentNode, match.index); range.setEnd(walker.currentNode, match.index + match[0].length);
+            const rects = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0), lines = [];
+            for (const rect of rects) if (!lines.some(top => Math.abs(top - rect.top) < 1)) lines.push(rect.top);
+            words.push({ text: match[0], lines: lines.length, inside: rects.every(rect => rect.left >= fieldBox.left - 1 && rect.right <= fieldBox.right + 1) });
+          }
+          return { text: field.textContent, scroll: field.scrollWidth, client: field.clientWidth, overflow: style.overflowX, ellipsis: style.textOverflow, words };
+        }) };
+    }) };
+  });
+  const label = `${width}px/${mode}/${textScale}%`;
+  assert.equal(facts.rows.length, 4, `Every saved fact remains visible at ${label}`);
+  for (const [index, row] of facts.rows.entries()) {
+    assert.equal(row.fields.length, 2, `Every fact retains its label and value at ${label}`);
+    assert.ok(row.left >= -1 && row.right <= facts.width + 1, `Fact row exceeds its own card at ${label}: ${JSON.stringify(row)}`);
+    for (const field of row.fields) {
+      assert.ok(field.words.length && field.words.every(word => word.lines === 1 && word.inside), `Fact word splits or clips at ${label}: ${JSON.stringify(field)}`);
+      assert.ok(field.scroll <= field.client + 2 && !['hidden','clip'].includes(field.overflow) && field.ellipsis !== 'ellipsis', `Fact text must remain fully readable at ${label}: ${JSON.stringify(field)}`);
+    }
+    for (const previous of facts.rows.slice(0, index)) assert.ok(row.left >= previous.right - 1 || row.right <= previous.left + 1 || row.top >= previous.bottom - 1 || row.bottom <= previous.top + 1, `Fact rows overlap at ${label}`);
+  }
+  cooldownReport.factLayouts.push({ width, mode, textScale, factsWidth: facts.width, rows: facts.rows });
+}
 async function captureCooldown(page, width, mode, surface) {
   const management = surface === 'management';
   const panel = page.locator(management ? '#connection-detail' : '[data-channel-card="ebay"]');
@@ -34,6 +66,7 @@ async function captureCooldown(page, width, mode, surface) {
     };
   }, management);
   const save = async textScale => {
+    if (!management) await assertCooldownFacts(panel, width, mode, textScale);
     await panel.evaluate((node, management) => {
       const scroller = management ? document.querySelector('#connection-dialog') : document.scrollingElement;
       const topbar = document.querySelector('.topbar');

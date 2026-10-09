@@ -1439,9 +1439,11 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 .connection-brand { color: var(--blue); background: var(--surface-inset); border: 1px solid var(--rule-observation); border-radius: var(--radius-sm); }
 .connection-health { padding-left: .8rem; border-left: 2px solid var(--rule-observation); }
 .connection-health.warn { border-color: var(--rule-judgement); }
-.connection-facts { display: grid; grid-template-columns: 1fr 1fr; gap: .85rem .8rem; padding: 1rem 0; margin: .4rem 0; border-block: 1px solid var(--line); }
+.connection-facts { display: flex; flex-wrap: wrap; gap: .85rem .8rem; padding: 1rem 0; margin: .4rem 0; border-block: 1px solid var(--line); }
+/* Facts wrap when their own text outgrows a column, including narrow desktop cards. */
+.connection-facts > div { flex: 1 1 calc(50% - .4rem); min-width: min-content; }
 .connection-facts dt { color: var(--muted); font-size: .68rem; }
-.connection-facts dd { margin: .25rem 0 0; font-size: .76rem; overflow-wrap: anywhere; }
+.connection-facts dd { margin: .25rem 0 0; font-size: .76rem; overflow-wrap: normal; }
 .connection-coverage { margin: .6rem 0; }
 .connection-coverage .capabilities { margin: .5rem 0; flex-wrap: wrap; }
 .connection-coverage small { display: block; font-size: .74rem; color: var(--silver); }
@@ -1487,7 +1489,7 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 @media (max-width: 1200px) { .overview-intro,.operating-grid { grid-template-columns: 1fr; } .overview-intro .hero { grid-template-columns: minmax(0,1fr) 116px; } .overview-intro .hero h2 { max-width: 32ch; } .operation-timeline { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1.25rem; } .operation-timeline > li::before { display: none; } .approval-list { grid-template-columns: 1fr; } }
 @media (max-width: 900px) { .incident-brief { grid-template-columns: 1fr; gap: .9rem; } }
 @media (max-width: 700px) { .decision-summary { flex-wrap: wrap; } .connection-facts { gap: .8rem; } .approval-create .approval-form { grid-template-columns: 1fr; } .overview-intro .hero { grid-template-columns: minmax(0,1fr) 88px; gap: .8rem; } .overview-intro .hero-score { width: 88px; height: 88px; margin-top: 2rem; } .overview-intro .hero-score strong { font-size: 1.4rem; } .overview-intro .hero-score span { font-size: .52rem; } .overview-intro .hero h2 { font-size: 1.4rem; } .operation-timeline { display: block; } .operation-timeline > li::before { display: block; } .trajectory-reading { gap: .5rem; } .attention-item { grid-template-columns: auto minmax(0,1fr); } .attention-item > span:last-child { grid-column: 2; } }
-@media (max-width: 430px) { .overview-intro .hero { display: flex; flex-direction: column-reverse; align-items: stretch; } .overview-intro .hero-score { align-self: flex-end; margin-top: .4rem; margin-bottom: -.3rem; } .overview-intro .hero h2 { max-width: none; } .connection-facts { grid-template-columns: 1fr; } .operation-timeline .section-head { flex-wrap: wrap; } .decision-summary h2 { font-size: 1.4rem; } }
+@media (max-width: 430px) { .overview-intro .hero { display: flex; flex-direction: column-reverse; align-items: stretch; } .overview-intro .hero-score { align-self: flex-end; margin-top: .4rem; margin-bottom: -.3rem; } .overview-intro .hero h2 { max-width: none; } .connection-facts > div { flex-basis: 100%; } .operation-timeline .section-head { flex-wrap: wrap; } .decision-summary h2 { font-size: 1.4rem; } }
 
 .connection-coverage .capabilities span { font-size: .7rem; padding: .25rem .4rem; }
 
