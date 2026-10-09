@@ -39,20 +39,95 @@ async function containment(page, width, state, textScale) {
   return { state, textScale, ...result };
 }
 
+function createSeoCaptureSession(panel) {
+  const document = panel.ownerDocument, view = document.defaultView, ancestors = [];
+  for (let node = panel.parentElement; node && node !== document.documentElement; node = node.parentElement) ancestors.push(node);
+  const scroll = { x: view.scrollX, y: view.scrollY }, viewport = { width: view.innerWidth, height: view.innerHeight };
+  const positions = ancestors.map(node => ({ node, x: node.scrollLeft, y: node.scrollTop }));
+  const focused = document.activeElement, markup = panel.innerHTML;
+  const details = [...panel.querySelectorAll('details')].map(node => ({ node, open: node.open }));
+  const check = (condition, message) => { if (!condition) throw new Error('SEO capture: ' + message); };
+  const settle = () => new Promise(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(resolve)));
+  const rect = node => { const box = node.getBoundingClientRect(); return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height }; };
+  const chrome = () => [...document.querySelectorAll('.topbar, .skip-link, .global-message')]
+    .filter(node => node.getClientRects().length).map(node => ({ selector: node.className, ...rect(node) }));
+  const overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  const unchanged = () => {
+    check(panel.isConnected && panel.innerHTML === markup, 'capture must not change or replace SEO content');
+    check(details.every(item => item.node.isConnected && item.node.open === item.open), 'capture must preserve history state');
+    check(view.innerWidth === viewport.width && view.innerHeight === viewport.height, 'capture must preserve the real viewport');
+  };
+  return {
+    async historyViewport() {
+      const summary = panel.querySelector('#seo-retained-history > summary');
+      check(summary && summary.parentElement.open, 'history must already be opened by the interaction test');
+      // Scroll only; retain real fixed/sticky chrome and the existing open state.
+      summary.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); await settle();
+      unchanged();
+      const target = rect(summary), overlays = chrome(), hit = document.elementFromPoint((target.left + target.right) / 2, (target.top + target.bottom) / 2);
+      check(target.left >= 0 && target.right <= viewport.width && target.top >= 0 && target.bottom <= viewport.height, 'open-history control must fit in the live viewport');
+      check(overlays.every(box => !overlaps(box, target)), 'real page chrome must not obscure the open-history control');
+      check(hit === summary || summary.contains(hit), 'open-history control must remain an unobscured interaction target');
+      return { scroll: { x: view.scrollX, y: view.scrollY }, target, chrome: overlays, targetHitTest: true };
+    },
+    async prepare() {
+      if (document.activeElement instanceof view.HTMLElement) document.activeElement.blur();
+      for (const { node } of positions) node.scrollTo({ left: 0, top: 0, behavior: 'instant' });
+      view.scrollTo({ left: 0, top: 0, behavior: 'instant' }); await settle();
+      return this.bounds();
+    },
+    bounds() {
+      unchanged();
+      check(view.scrollX === 0 && view.scrollY === 0 && positions.every(({ node }) => node.scrollLeft === 0 && node.scrollTop === 0), 'complete-panel capture requires zero scroll');
+      const box = rect(panel), overlays = chrome(), skip = document.querySelector('.skip-link');
+      check(skip && !skip.matches(':focus') && rect(skip).bottom <= 0, 'the unfocused skip link must stay above the viewport');
+      check(overlays.every(item => !overlaps(item, box)), 'page chrome must not overlap the document-coordinate panel capture');
+      const clip = { x: Math.floor(box.left), y: Math.floor(box.top), width: Math.ceil(box.right) - Math.floor(box.left), height: Math.ceil(box.bottom) - Math.floor(box.top) };
+      check(clip.x >= 0 && clip.y >= 0 && clip.width > 0 && clip.height > 0, 'complete panel needs a valid document rectangle');
+      return { clip, panel: box, chrome: overlays, scroll: { x: view.scrollX, y: view.scrollY }, originalScroll: scroll };
+    },
+    async restore() {
+      for (const item of positions) item.node.scrollTo({ left: item.x, top: item.y, behavior: 'instant' });
+      view.scrollTo({ left: scroll.x, top: scroll.y, behavior: 'instant' });
+      if (focused instanceof view.HTMLElement && focused.isConnected && focused !== document.body) focused.focus({ preventScroll: true });
+      await settle(); unchanged();
+      check(Math.abs(view.scrollX - scroll.x) <= 1 && Math.abs(view.scrollY - scroll.y) <= 1 &&
+        positions.every(item => Math.abs(item.node.scrollLeft - item.x) <= 1 && Math.abs(item.node.scrollTop - item.y) <= 1), 'capture must restore interaction scroll positions');
+      check(focused === document.body || document.activeElement === focused, 'capture must restore the focused control');
+    }
+  };
+}
+
 async function capture(page, width, name, manifest, outputDirectory) {
   const panel = page.locator('#seo-review-panel'), typography = await panel.evaluateHandle(createRestrictionTypographySession);
   const save = async textScale => {
-    await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
-    const layout = await containment(page, width, name, textScale);
-    const file = `seo-${name}-${textScale}.png`, target = path.join(outputDirectory, file);
-    await panel.screenshot({ path: target, animations: 'disabled', scale: 'css' });
-    const bytes = await fs.readFile(target);
-    // Element screenshots include the complete panel, including its expanded history.
-    const height = bytes.readUInt32BE(20), imageWidth = bytes.readUInt32BE(16);
-    const box = await panel.boundingBox();
-    assert.ok(Math.abs(height - box.height) <= 2 && Math.abs(imageWidth - box.width) <= 2, 'Screenshot must cover the full SEO panel without clipping');
-    manifest.captures.push({ file, state: name, textScale, region: 'complete SEO review panel', width: imageWidth, height,
-      bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), layout });
+    const position = await panel.evaluateHandle(createSeoCaptureSession);
+    try {
+      if (name === 'history-open') {
+        const geometry = await position.evaluate(session => session.historyViewport());
+        const file = `seo-${name}-viewport-${textScale}.png`;
+        const bytes = await page.screenshot({ path: path.join(outputDirectory, file), fullPage: false, animations: 'disabled', scale: 'css' });
+        assert.equal(bytes.readUInt32BE(16), width); assert.equal(bytes.readUInt32BE(20), 900);
+        manifest.captures.push({ file, state: name, textScale, region: 'partial live viewport; open-history interaction with real page chrome', width, height: 900,
+          bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), geometry });
+      }
+      const geometry = await position.evaluate(session => session.prepare());
+      const layout = await containment(page, width, name, textScale);
+      const file = `seo-${name}-${textScale}.png`, target = path.join(outputDirectory, file);
+      // locator.screenshot scrolls into view again, allowing sticky/fixed chrome
+      // to paint over an oversized element capture. Capture from document origin
+      // without hiding chrome, resizing the viewport, or changing any app style.
+      const bytes = await page.screenshot({ path: target, fullPage: true, clip: geometry.clip, animations: 'disabled', scale: 'css' });
+      const after = await position.evaluate(session => session.bounds());
+      assert.deepEqual(after, geometry, 'Screenshot must leave capture geometry and state unchanged');
+      const height = bytes.readUInt32BE(20), imageWidth = bytes.readUInt32BE(16);
+      assert.equal(height, geometry.clip.height); assert.equal(imageWidth, geometry.clip.width);
+      assert.ok(Math.abs(height - geometry.panel.height) <= 2 && Math.abs(imageWidth - geometry.panel.width) <= 2, 'Screenshot must cover the full SEO panel without clipping');
+      manifest.captures.push({ file, state: name, textScale, region: 'complete SEO review panel', width: imageWidth, height,
+        bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), layout, geometry });
+    } finally {
+      try { await position.evaluate(session => session.restore()); } finally { await position.dispose(); }
+    }
   };
   try {
     await typography.evaluate(session => session.assertBaseline()); await save(100);
@@ -76,7 +151,9 @@ try {
     await fs.rm(path.join('/tmp', `runvara-seo-review-${width}.tar.gz`), { force: true });
     await fs.rm(outputDirectory, { recursive: true, force: true }); await fs.mkdir(outputDirectory);
     const manifest = { schema: 'runvara-seo-review-browser-evidence/v1', status: 'running', viewport: { width, height: 900 },
-      fixture: 'fresh synthetic retained catalogue; no provider calls', textScales: [100, 200], captures: [], checks: [], providerCalls: 0, maxArchiveBytes };
+      fixture: 'fresh synthetic retained catalogue; no provider calls', textScales: [100, 200], captures: [], checks: [], providerCalls: 0, maxArchiveBytes,
+      captureMethod: 'Complete panels use a document-origin page clip with nonoverlapping real chrome; separate open-history viewport images retain real chrome and an unobscured interaction target. Scroll, focus, content, history state and viewport are preserved.',
+      sourceDiagnosis: 'Element screenshots automatically scroll the target into view; this previously painted sticky/fixed page chrome inside oversized mobile panel captures. No app styles or elements are hidden or changed for capture.' };
     const context = await browser.newContext({ viewport: { width, height: 900 }, deviceScaleFactor: 1 });
     await context.addCookies([{ name: 'packsmart_session', value: token, url: base, httpOnly: true, sameSite: 'Strict' }]);
     const page = await context.newPage(), errors = [], external = [], writes = [], calls = [];
