@@ -36,6 +36,19 @@ function conflict() { return Object.assign(new Error('Workspace changed; refresh
 function assertWorkspace(workspaceId, state) {
   if (!workspaceId || state?.workspace?.id !== workspaceId) throw Object.assign(new Error('Workspace identity mismatch'), { status: 403, code: 'WORKSPACE_MISMATCH' });
 }
+function saveGuard(beforeCommit) {
+  if (beforeCommit === undefined) return () => {};
+  if (typeof beforeCommit !== 'function') throw new TypeError('Save guard must be a synchronous function');
+  return snapshot => {
+    const result = beforeCommit(snapshot);
+    if (result && typeof result.then === 'function') {
+      // A guard must finish before serialization, not create another unchecked
+      // asynchronous boundary. Consume rejection without hiding the error here.
+      Promise.resolve(result).catch(() => {});
+      throw new TypeError('Save guard must be synchronous');
+    }
+  };
+}
 const fileQueues = new Map();
 async function boundedResponseText(response, maxBytes) {
   if (maxBytes === undefined) return response.text();
@@ -397,22 +410,28 @@ class FileStore {
     return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
   }
 
-  async save(workspaceId, state) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit } = {}) {
     assertWorkspace(workspaceId, state);
+    const assertCurrent = saveGuard(beforeCommit);
+    assertCurrent(state);
+    const source = ownedSnapshot ? structuredClone(state) : state;
+    const wasPersisted = Boolean(state[PERSISTED]);
     const previous = fileQueues.get(this.filePath) || Promise.resolve();
     const write = previous.catch(() => {}).then(async () => {
       const all = await this.readAll();
       const existing = all[workspaceId];
-      if (existing && (!(state[PERSISTED] || state._revision) || (existing._revision || null) !== (state._revision || null))) throw conflict();
-      for (const other of Object.values(all)) if (other.workspace.id !== workspaceId && (other.users || []).some(user => (state.users || []).some(next => normalizeEmail(next.email) === normalizeEmail(user.email)))) {
+      if (existing && (!(wasPersisted || source._revision) || (existing._revision || null) !== (source._revision || null))) throw conflict();
+      for (const other of Object.values(all)) if (other.workspace.id !== workspaceId && (other.users || []).some(user => (source.users || []).some(next => normalizeEmail(next.email) === normalizeEmail(user.email)))) {
         throw Object.assign(new Error('An account already exists for this email'), { status: 409, code: 'ACCOUNT_EXISTS' });
       }
-      const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: false };
+      const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: false };
       all[workspaceId] = upgraded;
+      assertCurrent(upgraded);
+      const serialized = JSON.stringify(all);
       await fs.mkdir(path.dirname(this.filePath), { recursive: true });
       const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
       const handle = await fs.open(temp, 'wx', 0o600);
-      try { await handle.writeFile(JSON.stringify(all)); await handle.sync(); } finally { await handle.close(); }
+      try { await handle.writeFile(serialized); await handle.sync(); } finally { await handle.close(); }
       await fs.rename(temp, this.filePath);
       state._revision = upgraded._revision;
       markPersisted(state);
@@ -1399,8 +1418,11 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit } = {}) {
     assertWorkspace(workspaceId, state);
+    const assertCurrent = saveGuard(beforeCommit);
+    assertCurrent(state);
+    const source = ownedSnapshot ? structuredClone(state) : state;
     // Digests only describe rows mirrored by this process at its last saved
     // revision. A different replica may have changed them since then.
     if (this.mirrorRevisions.get(workspaceId) !== state._revision) {
@@ -1411,7 +1433,7 @@ class SupabaseStore {
     // Plan against the predecessor and original run references, not the new
     // revision or a deep clone. Scheduler claim handles survive save/finish.
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(state) : null;
-    const upgraded = { ...upgradeState(state), _revision: crypto.randomUUID(), storageReady: true };
+    const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: true };
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
     let acknowledgedArchives = [];
@@ -1441,10 +1463,16 @@ class SupabaseStore {
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
     // Revalidate the source after every archive await, just before serializing
     // the CAS write. Caller state is changed only after that commit succeeds.
-    if (automationPlan) upgraded.automationRuns = applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns;
+    const retainedAutomationRuns = automationPlan ? applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns : null;
+    if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
+    assertCurrent(upgraded);
     await this.commit(workspaceId, upgraded, expectedRevision, existing);
     state._revision = upgraded._revision;
-    for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) state[key] = upgraded[key];
+    for (const key of ['audit', 'workRecords', 'automationRuns', 'connectionSyncs', 'agentRuns', 'dailyBriefs']) {
+      // Preserve scheduler completion handles without sharing the owned snapshot.
+      if (key === 'automationRuns' && (retainedAutomationRuns || ownedSnapshot && state.automationRuns)) state[key] = retainedAutomationRuns || state.automationRuns;
+      else state[key] = ownedSnapshot ? structuredClone(upgraded[key]) : upgraded[key];
+    }
     markPersisted(state);
     const failures = await this.mirrorNormalized(workspaceId, upgraded);
     this.telemetry.reportingFailures = failures.length;
