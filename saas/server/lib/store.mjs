@@ -672,7 +672,7 @@ class SupabaseStore {
         `approver:state->users->${input.approverIndex}`, `connection:state->connections->${input.connectionIndex}`,
         ...(input.approvalId === null ? [] : [`approval:state->approvals->${input.approvalIndex}`]),
         `write:state->connectionWrites->${input.writeIndex}`].join(',');
-      const rows = await this.request(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=eq.${encodeURIComponent(input.revision)}&select=${select}&limit=2`,
+      const rows = await this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=eq.${encodeURIComponent(input.revision)}&select=${select}&limit=2`,
         { maxResponseBytes: CONNECTION_WRITE_CONTEXT_MAX_BYTES });
       return connectionWriteContextResult(rows, workspaceId, input);
     } catch { throw contextUnavailable(); }
@@ -723,18 +723,19 @@ class SupabaseStore {
           leaseUntil: row.lease_until, createdAt: row.created_at, provider: row.ai_provider, model: row.ai_model } };
     } catch { throw providerUsageError('AI_USAGE_CONTEXT_UNAVAILABLE'); }
   }
-  businessOutcomePersistence() {
-    return createBusinessOutcomePersistence({ request: (pathname, options) => this.request(pathname, options),
+  businessOutcomePersistence(workspaceId) {
+    // Each call captures its trusted workspace, including compatibility reads.
+    return createBusinessOutcomePersistence({ request: (pathname, options) => this.scopedRequest(workspaceId, 'other', pathname, options),
       invalidate: workspaceId => {
         this.schedulerCache.delete(workspaceId);
         this.mirrorRevisions.delete(workspaceId);
       } });
   }
-  async businessOutcomeSummary(workspaceId) { return this.businessOutcomePersistence().current(workspaceId); }
-  async getBusinessOutcome(workspaceId, experimentId) { return this.businessOutcomePersistence().one(workspaceId, experimentId); }
-  async getBusinessOutcomeReview(workspaceId, experimentId, actor, options) { return this.businessOutcomePersistence().review(workspaceId, experimentId, actor, options); }
-  async getBusinessOutcomeEvidence(workspaceId, versionId) { return this.businessOutcomePersistence().evidence(workspaceId, versionId); }
-  async publishBusinessOutcome(workspaceId, actor, input) { return this.businessOutcomePersistence().publish(workspaceId, actor, input); }
+  async businessOutcomeSummary(workspaceId) { return this.businessOutcomePersistence(workspaceId).current(workspaceId); }
+  async getBusinessOutcome(workspaceId, experimentId) { return this.businessOutcomePersistence(workspaceId).one(workspaceId, experimentId); }
+  async getBusinessOutcomeReview(workspaceId, experimentId, actor, options) { return this.businessOutcomePersistence(workspaceId).review(workspaceId, experimentId, actor, options); }
+  async getBusinessOutcomeEvidence(workspaceId, versionId) { return this.businessOutcomePersistence(workspaceId).evidence(workspaceId, versionId); }
+  async publishBusinessOutcome(workspaceId, actor, input) { return this.businessOutcomePersistence(workspaceId).publish(workspaceId, actor, input); }
 
   // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
   // DTO validation rejects client overrides, prices, raw bodies and credentials.

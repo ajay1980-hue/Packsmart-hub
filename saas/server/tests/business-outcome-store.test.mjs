@@ -410,9 +410,10 @@ test('strict shared transport preserves outcome cardinality and withholds read s
   assert.equal(store.telemetry.lastSuccessfulReadAt,'2026-01-01T00:00:00.000Z');
   assert.equal(store.telemetry.lastFailureCode,'SUPABASE_RESPONSE_INVALID');
   assert.equal(calls,3);assert.doesNotMatch(JSON.stringify(store.diagnostics()),/private invalid outcome evidence/);
-  assert.equal(store.activitySnapshot(WS).db.attempted,null,'tenant filters do not create trusted activity attribution');
-  const observed=store.activityMeter.instanceSnapshot().unattributed;
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted,0);
+  const observed=store.activitySnapshot(WS);
   assert.equal(observed.db.attempted,3);assert.equal(observed.db.succeeded,2);assert.equal(observed.db.outcomes.invalid_response,1);
+  assert.equal(observed.db.operations.other,3);
 });
 
 test('metered outcome RPC preserves safe rejection codes and never repeats an uncertain mutation', async () => {
@@ -429,13 +430,230 @@ test('metered outcome RPC preserves safe rejection codes and never repeats an un
     await assert.rejects(store.publishBusinessOutcome(WS, actor, fixture().input), error => error.code === expected && !error.message.includes('private'));
     assert.equal(calls, 1);
     assert.equal(store.telemetry.lastSuccessfulWriteAt, null);
-    assert.equal(store.activitySnapshot(WS).db.attempted, null, 'RPC payload does not assign tenant activity');
-    const internal = store.activityMeter.instanceSnapshot().unattributed;
+    assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+    const internal = store.activitySnapshot(WS);
     assert.equal(internal.db.attempted, 1);
+    assert.equal(internal.db.operations.other, 1);
     assert.equal(internal.db.failed, 1);
     assert.equal(internal.db.outcomes[databaseCode === null ? 'invalid_response' : 'http_error'], 1);
     assert.equal(Object.values(internal.db.retries).reduce((sum, value) => sum + value, 0), 0);
   }
+});
+
+test('every outcome wrapper attributes its actual transport and exact UTF-8 bodies to the explicit workspace', async t => {
+  const f = fixture();
+  const source = prepareExperimentOutcomeMeasurement({ expectedRevision: 0, amount: '10', currency: 'GBP',
+    window: f.version.window, coverage: { status: 'complete', observedCount: 10, expectedCount: 10 },
+    method: { kind: 'reconciled_manual' }, observedAt: '2026-10-06T12:00:00.000Z',
+    report: { description: 'Réconcilié après tous les coûts 🌍', costsComplete: true }
+  }, { workspaceId: WS, experimentId: 'experiment_1', actorId: actor.id, now: '2026-10-06T13:00:00.000Z', previousMeasurement: null });
+  const version = createBusinessOutcomeCandidate({
+    source: { type: 'experiment_measurement', experimentId: source.experimentId, measurementRevision: source.revision, measurementDigest: source.digest },
+    ...Object.fromEntries(['metric', 'amount', 'currency', 'window', 'coverage', 'method', 'provenance', 'links'].map(key => [key, source[key]])),
+    verification: { kind: 'owner_attestation', actorId: actor.id, verifiedAt: '2026-10-06T14:00:00.000Z', measurementDigest: source.digest }
+  }, { workspaceId: WS, now: NOW });
+  const evidenceRow = { ...f.row, outcome_id: version.outcomeId, version_id: version.versionId, digest: version.digest, payload: version, source_measurement: source };
+  const unicodeWorkspace = 'Équipe du café 🌍';
+  const unicodeReview = { ...reviewResult(null, null), workspaceId: unicodeWorkspace };
+  unicodeReview.experiment.title = 'Résultat vérifié 🌍';
+  const cases = [
+    ['summary', WS, store => store.businessOutcomeSummary(WS), [f.joined], 'GET', 'runvara_business_outcome_heads'],
+    ['one', WS, store => store.getBusinessOutcome(WS, 'experiment_1'), [f.joined], 'GET', 'runvara_business_outcome_heads'],
+    ['review', unicodeWorkspace, store => store.getBusinessOutcomeReview(unicodeWorkspace, 'experiment_1'), unicodeReview, 'POST', 'rpc/runvara_read_business_outcome_review'],
+    ['authenticated review', WS, store => store.getBusinessOutcomeReview(WS, 'experiment_1', actor), {
+      schema: 'runvara-outcome-content-source-reader/v1', review: reviewResult(null, null),
+      receiptChoices: [], nextCursor: null, hasMore: false, selectedEvidence: null
+    }, 'POST', 'rpc/runvara_read_outcome_content_sources'],
+    ['evidence', WS, store => store.getBusinessOutcomeEvidence(WS, version.versionId), [evidenceRow], 'GET', 'runvara_business_outcome_versions'],
+    ['publication', WS, store => store.publishBusinessOutcome(WS, actor, f.input), f.receipt, 'POST', 'rpc/runvara_publish_business_outcome']
+  ];
+  for (const [name, workspaceId, invoke, response, method, path] of cases) await t.test(name, async () => {
+    const calls = [], responseText = JSON.stringify(response);
+    const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'private-transport-key' }, {
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return new Response(responseText, { headers: { 'content-range': '0-0/1' } });
+      }
+    });
+    const result = await invoke(store);
+    assert.ok(result); assert.equal(calls.length, 1);
+    assert.equal(new URL(calls[0].url).pathname, `/rest/v1/${path}`);
+    assert.equal(calls[0].options.method || 'GET', method);
+    assert.equal(Object.hasOwn(calls[0].options, 'maxResponseBytes'), false);
+    const observed = store.activitySnapshot(workspaceId);
+    assert.equal(observed.db.attempted, 1); assert.equal(observed.db.completed, 1); assert.equal(observed.db.succeeded, 1);
+    assert.equal(observed.db.operations.other, 1); assert.equal(observed.db.methods[method], 1);
+    assert.equal(observed.db.requestBody.bytes, Buffer.byteLength(calls[0].options.body || ''));
+    assert.equal(observed.db.responseBody.bytes, Buffer.byteLength(responseText));
+    assert.equal(observed.db.responseBody.unknownObservations, 0);
+    assert.equal(Object.values(observed.db.retries).reduce((a, b) => a + b, 0), 0);
+    assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+    assert.equal(store.activitySnapshot('unrelated-tenant').db.attempted, null);
+    assert.equal(observed.hotState.confirmed.bytes, null);
+    assert.doesNotMatch(JSON.stringify(observed), /private-transport-key|Réconcilié|Résultat|experiment_1|state_reviewed|publication_1/);
+    if (name === 'review') assert.ok(Buffer.byteLength(calls[0].options.body) > calls[0].options.body.length);
+  });
+});
+
+test('interleaved outcome calls keep their caller tenant through foreign and malformed responses', async () => {
+  const other = 'tenant-b', f = fixture(), pending = [];
+  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+    fetchImpl: (url, options) => new Promise(resolve => pending.push({ url, options, resolve }))
+  });
+  const summary = assert.rejects(store.businessOutcomeSummary(WS), { code: 'OUTCOME_PUBLICATION_INVALID' });
+  const publish = assert.rejects(store.publishBusinessOutcome(other, actor, f.input), { code: 'OUTCOME_PUBLICATION_UNCERTAIN' });
+  const review = assert.rejects(store.getBusinessOutcomeReview(WS, 'experiment_1'), { code: 'OUTCOME_READ_UNAVAILABLE' });
+  assert.equal(pending.length, 3);
+  assert.equal(store.activitySnapshot(WS).db.inflight, 2); assert.equal(store.activitySnapshot(other).db.inflight, 1);
+  const malformedText = 'private incomplete JSON é🌍';
+  pending[2].resolve(new Response(malformedText)); await review;
+  pending[1].resolve(Response.json(f.receipt)); await publish;
+  pending[0].resolve(Response.json([{ ...f.joined, workspace_id: other }], { headers: { 'content-range': '0-0/1' } })); await summary;
+  const first = store.activitySnapshot(WS), second = store.activitySnapshot(other);
+  assert.equal(pending.length, 3, 'invalid outcomes do not cause replays or extra reads');
+  assert.equal(first.db.attempted, 2); assert.equal(first.db.completed, 2); assert.equal(first.db.succeeded, 1);
+  assert.equal(first.db.outcomes.invalid_response, 1); assert.equal(first.db.inflight, 0);
+  assert.equal(second.db.attempted, 1); assert.equal(second.db.completed, 1); assert.equal(second.db.succeeded, 1);
+  assert.equal(second.db.failed, 0, 'decoded transport success is distinct from a rejected publication receipt');
+  assert.equal(second.db.inflight, 0);
+  assert.equal(first.db.responseBody.bytes, Buffer.byteLength(malformedText) + Buffer.byteLength(JSON.stringify([{ ...f.joined, workspace_id: other }])));
+  assert.equal(second.db.responseBody.bytes, Buffer.byteLength(JSON.stringify(f.receipt)));
+  assert.equal(first.db.requestBody.bytes, Buffer.byteLength(pending[2].options.body));
+  assert.equal(second.db.requestBody.bytes, Buffer.byteLength(pending[1].options.body));
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+  assert.equal(store.activityMeter.instanceSnapshot().totals.db.attempted, 3);
+});
+
+test('schema compatibility reads stay in their call workspace without retry labels or extra requests', { timeout: 5000 }, async t => {
+  for (const kind of ['evidence', 'review']) await t.test(kind, async () => {
+    const pending = [], other = 'tenant-b', fallbackStarted = Promise.withResolvers();
+    const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+      fetchImpl: (url, options) => new Promise(resolve => {
+        pending.push({ url, options, resolve });
+        if (pending.length === 3) fallbackStarted.resolve();
+      })
+    });
+    const original = kind === 'evidence'
+      ? assert.rejects(store.getBusinessOutcomeEvidence(WS, fixture().version.versionId), { code: 'OUTCOME_VERSION_NOT_FOUND' })
+      : store.getBusinessOutcomeReview(WS, 'experiment_1', actor);
+    const concurrent = store.getBusinessOutcome(other, 'experiment_other');
+    pending[0].resolve(Response.json({ code: kind === 'evidence' ? '42703' : 'PGRST202', message: 'private schema detail' }, { status: 400 }));
+    // Wait for the existing compatibility request, leaving the other tenant pending.
+    await fallbackStarted.promise;
+    assert.equal(pending.length, 3);
+    if (kind === 'evidence') {
+      assert.match(pending[0].url, /source_action/); assert.doesNotMatch(pending[2].url, /source_action/);
+      pending[2].resolve(Response.json([]));
+    } else {
+      assert.match(pending[0].url, /rpc\/runvara_read_outcome_content_sources$/);
+      assert.match(pending[2].url, /rpc\/runvara_read_business_outcome_review$/);
+      pending[2].resolve(Response.json(reviewResult(null, null)));
+    }
+    await original;
+    pending[1].resolve(Response.json([])); assert.equal(await concurrent, null);
+    const observed = store.activitySnapshot(WS);
+    assert.equal(pending.length, 3); assert.equal(observed.db.attempted, 2); assert.equal(observed.db.completed, 2);
+    assert.equal(observed.db.outcomes.http_error, 1); assert.equal(observed.db.succeeded, 1); assert.equal(observed.db.operations.other, 2);
+    assert.equal(observed.db.requestBody.bytes, [pending[0], pending[2]].reduce((n, call) => n + Buffer.byteLength(call.options.body || ''), 0));
+    assert.equal(Object.values(observed.db.retries).reduce((a, b) => a + b, 0), 0);
+    assert.equal(store.activitySnapshot(other).db.attempted, 1);
+    assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+  });
+});
+
+test('uncertain publications invalidate only their workspace and retain known versus unknown response bytes without replay', async t => {
+  for (const mode of ['network', 'stream', 'oversized', 'malformed', 'foreign']) await t.test(mode, async () => {
+    const calls = [], f = fixture(), other = 'tenant-b', malformed = 'private incomplete acknowledgement é🌍';
+    const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        if (mode === 'network') throw new Error('private lost acknowledgement');
+        if (mode === 'stream') return new Response(new ReadableStream({ start(controller) { controller.error(new Error('private stream interruption')); } }));
+        if (mode === 'oversized') return new Response('x'.repeat(128 * 1024 + 1));
+        if (mode === 'malformed') return new Response(malformed);
+        return Response.json({ ...f.receipt, publication: { ...f.receipt.publication, head: { ...f.head, workspaceId: other } } });
+      }
+    });
+    for (const cache of [store.schedulerCache, store.mirrorRevisions]) { cache.set(WS, 'own-cache'); cache.set(other, 'other-cache'); }
+    await assert.rejects(store.publishBusinessOutcome(WS, actor, f.input), { code: 'OUTCOME_PUBLICATION_UNCERTAIN' });
+    for (const cache of [store.schedulerCache, store.mirrorRevisions]) { assert.equal(cache.has(WS), false); assert.equal(cache.get(other), 'other-cache'); }
+    const observed = store.activitySnapshot(WS), known = ['malformed', 'foreign'].includes(mode);
+    assert.equal(calls.length, 1); assert.equal(observed.db.attempted, 1); assert.equal(observed.db.completed, 1);
+    assert.equal(observed.db.succeeded, mode === 'foreign' ? 1 : 0);
+    assert.equal(observed.db.outcomes[mode === 'network' ? 'network_error' : mode === 'oversized' ? 'oversized_response' : mode === 'foreign' ? 'succeeded' : 'invalid_response'], 1);
+    assert.equal(observed.db.requestBody.bytes, Buffer.byteLength(calls[0].options.body));
+    assert.equal(observed.db.responseBody.unknownObservations, known ? 0 : 1);
+    assert.equal(observed.db.responseBody.knownObservations, known ? 1 : 0);
+    if (!known) assert.equal(observed.db.responseBody.bytes, null);
+    if (mode === 'malformed') assert.equal(observed.db.responseBody.bytes, Buffer.byteLength(malformed));
+    assert.equal(Object.values(observed.db.retries).reduce((a, b) => a + b, 0), 0);
+    assert.equal(store.activitySnapshot(other).db.attempted, null);
+    assert.doesNotMatch(JSON.stringify(observed), /private|own-cache|publication_1|experiment_1/);
+  });
+});
+
+test('meter capacity and rejected observation identities do not alter outcome operations or compatibility reads', async () => {
+  const calls = [];
+  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+    activityOptions: { maxTenants: 1 },
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url.endsWith('/rpc/runvara_read_outcome_content_sources')) return Response.json({ code: 'PGRST202' }, { status: 404 });
+      if (url.endsWith('/rpc/runvara_read_business_outcome_review')) return Response.json({ ...reviewResult(null, null), workspaceId: 'tenant-b' });
+      return Response.json([], { headers: { 'content-range': '*/0' } });
+    }
+  });
+  await store.businessOutcomeSummary(WS);
+  const fallback = await store.getBusinessOutcomeReview('tenant-b', 'experiment_1', actor);
+  assert.equal(fallback.workspaceId, 'tenant-b'); assert.equal(calls.length, 3);
+  assert.equal(store.activitySnapshot(WS).db.attempted, 1);
+  assert.equal(store.activitySnapshot('tenant-b').db.attempted, null);
+  // The adapter accepts C1 characters; the stricter meter may omit them, never the operation.
+  const invalidObservationWorkspace = 'tenant-\u0085';
+  const invalidBefore = store.activityMeter.instanceSnapshot().totals.coverage.invalidObservations;
+  assert.equal((await store.businessOutcomeSummary(invalidObservationWorkspace)).summary.coverage.complete, true);
+  assert.equal(calls.length, 4);
+  assert.ok(store.activityMeter.instanceSnapshot().totals.coverage.invalidObservations > invalidBefore);
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+});
+
+test('outcome attribution never spills into later raw, unbound or global requests', async () => {
+  let calls = 0;
+  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+    fetchImpl: async url => {
+      calls++;
+      return Response.json(url.endsWith('/rpc/runvara_claim_agent_jobs') ? [{ workspace_id: WS }] : [], { headers: { 'content-range': '*/0' } });
+    }
+  });
+  await store.businessOutcomeSummary(WS);
+  await store.businessOutcomePersistence().current('tenant-b');
+  await store.request(`runvara_business_outcome_heads?workspace_id=eq.${WS}`, {
+    method: 'POST', headers: { 'X-Workspace-Id': WS }, body: JSON.stringify({ workspaceId: WS })
+  });
+  await store.claimAgentJobs('worker-observation', 1, 300);
+  assert.equal(calls, 4); assert.equal(store.activitySnapshot(WS).db.attempted, 1);
+  assert.equal(store.activitySnapshot('tenant-b').db.attempted, null);
+  const internal = store.activityMeter.instanceSnapshot();
+  assert.equal(internal.unattributed.db.attempted, 3); assert.equal(internal.unattributed.db.operations.job_claim, 1);
+  assert.equal(internal.totals.db.attempted, 4);
+});
+
+test('inflight meter overflow never cancels, replays or invents outcome reads', async () => {
+  const pending = [];
+  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+    fetchImpl: () => new Promise(resolve => pending.push(resolve))
+  });
+  const reads = Array.from({ length: 129 }, () => store.businessOutcomeSummary(WS));
+  assert.equal(pending.length, 129);
+  for (const resolve of pending) resolve(Response.json([], { headers: { 'content-range': '*/0' } }));
+  const results = await Promise.all(reads);
+  assert.ok(results.every(result => result.summary.coverage.complete));
+  assert.equal(pending.length, 129);
+  const observed = store.activitySnapshot(WS);
+  assert.equal(observed.db.attempted, 129); assert.equal(observed.db.completed, 128);
+  assert.equal(observed.coverage.status, 'partial'); assert.equal(observed.db.inflight, null);
+  assert.equal(observed.coverage.inflightReason, 'inflight_token_overflow');
+  assert.equal(Object.values(observed.db.retries).reduce((a, b) => a + b, 0), 0);
 });
 
 test('old-schema evidence fallback is one bounded read and only permits unlinked v1 data', async () => {

@@ -67,8 +67,9 @@ for (const provider of ['shopify', 'meta']) test(`${provider}: one bounded index
   assert.ok(Buffer.byteLength(JSON.stringify(context)) < 2048);
   assert.equal(JSON.stringify(context).includes('must-not-load'), false);
   assert.equal(database.calls.length, 1);
-  assert.equal(store.activitySnapshot(WORKSPACE).db.attempted, null, 'a tenant filter is not an explicit activity observation context');
-  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 1);
+  assert.equal(store.activitySnapshot(WORKSPACE).db.attempted, 1);
+  assert.equal(store.activitySnapshot(WORKSPACE).db.operations.state_read, 1);
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
   const { url, method, body } = database.calls[0];
   assert.equal(method, 'GET');
   assert.equal(body, '');
@@ -81,6 +82,57 @@ for (const provider of ['shopify', 'meta']) test(`${provider}: one bounded index
     'actor:state->users->1', 'approver:state->users->2', 'connection:state->connections->1',
     'approval:state->approvals->1', 'write:state->connectionWrites->1'].join(','));
   assert.deepEqual([...url.searchParams.keys()].sort(), ['limit', 'select', 'state->>_revision', 'workspace_id']);
+});
+
+test('interleaved dispatch reads attribute foreign and malformed replies to the requesting workspace', async () => {
+  const other = 'dispatch-context-other', secondState = stateFor(); secondState.workspace.id = other;
+  const database = fakeSupabase({ initialStates: [stateFor(), secondState] }), pending = [];
+  const store = createStore({ SUPABASE_URL: 'https://context-test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-service-key' }, {
+    fetchImpl: (url, options) => {
+      const response = database.fetchImpl(url, options);
+      return new Promise(resolve => pending.push({ response, resolve }));
+    }
+  });
+  const first = unavailable(() => store.getConnectionWriteContext(WORKSPACE, input()));
+  const second = unavailable(() => store.getConnectionWriteContext(other, input()));
+  assert.equal(pending.length, 2);
+  assert.equal(store.activitySnapshot(WORKSPACE).db.inflight, 1); assert.equal(store.activitySnapshot(other).db.inflight, 1);
+  const malformed = 'private truncated dispatch response é🌍';
+  pending[1].resolve(new Response(malformed)); await second;
+  const foreignRows = await (await pending[0].response).json(); foreignRows[0].workspace_id = other;
+  const foreignText = JSON.stringify(foreignRows);
+  pending[0].resolve(new Response(foreignText)); await first;
+  assert.equal(database.calls.length, 2);
+  const own = store.activitySnapshot(WORKSPACE), another = store.activitySnapshot(other);
+  for (const observed of [own, another]) {
+    assert.equal(observed.db.attempted, 1); assert.equal(observed.db.completed, 1); assert.equal(observed.db.inflight, 0);
+    assert.equal(observed.db.operations.state_read, 1); assert.equal(observed.db.requestBody.bytes, 0);
+    assert.equal(Object.values(observed.db.retries).reduce((a, b) => a + b, 0), 0);
+    assert.doesNotMatch(JSON.stringify(observed), /private|synthetic-encrypted-marker|context.myshopify.com/);
+  }
+  assert.equal(own.db.succeeded, 1, 'decoded transport success does not establish valid dispatch authority');
+  assert.equal(own.db.responseBody.bytes, Buffer.byteLength(foreignText));
+  assert.equal(another.db.outcomes.invalid_response, 1); assert.equal(another.db.responseBody.bytes, Buffer.byteLength(malformed));
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
+});
+
+test('dispatch observations count exact UTF-8 projection bytes and remain optional at meter capacity', async () => {
+  const other = 'dispatch-context-other', firstState = stateFor(), secondState = stateFor();
+  firstState.workspace.name = 'Révision vérifiée 🌍'; secondState.workspace.id = other;
+  const database = fakeSupabase({ initialStates: [firstState, secondState] }), texts = [];
+  const store = createStore({ SUPABASE_URL: 'https://context-test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-service-key' }, {
+    activityOptions: { maxTenants: 1 }, fetchImpl: async (url, options) => {
+      const response = await database.fetchImpl(url, options), text = await response.text(); texts.push(text);
+      return new Response(text, { status: response.status });
+    }
+  });
+  assert.equal((await store.getConnectionWriteContext(WORKSPACE, input())).workspace.name, firstState.workspace.name);
+  assert.equal((await store.getConnectionWriteContext(other, input())).workspace.id, other);
+  assert.equal(database.calls.length, 2);
+  assert.equal(store.activitySnapshot(WORKSPACE).db.responseBody.bytes, Buffer.byteLength(texts[0]));
+  assert.ok(Buffer.byteLength(texts[0]) > texts[0].length);
+  assert.equal(store.activitySnapshot(other).db.attempted, null);
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted, 0);
 });
 
 test('the same actor and approver is deduplicated, with identical projected records required', async () => {
@@ -243,6 +295,9 @@ test('oversized chunked responses are cancelled at the streamed 32 KiB bound', a
   assert.equal(pulled, 5);
   assert.equal(cancelled, true);
   assert.equal(database.calls.length, 1);
+  const observed = store.activitySnapshot(WORKSPACE);
+  assert.equal(observed.db.attempted, 1); assert.equal(observed.db.outcomes.oversized_response, 1);
+  assert.equal(observed.db.responseBody.bytes, null); assert.equal(observed.db.responseBody.unknownObservations, 1);
 });
 
 test('oversized declared responses are rejected before body consumption', async () => {
@@ -261,11 +316,14 @@ test('the byte bound counts UTF-8 bytes and rejects even otherwise valid oversiz
 });
 
 test('transport failures, invalid JSON, and unavailable persistence return only the safe blocker', async () => {
-  for (const response of [() => new Response('private upstream detail', { status: 503 }),
-    () => new Response('private non-json response'), () => { throw new Error('private upstream failure'); }]) {
+  for (const [outcome, response] of [['http_error', () => new Response('private upstream detail', { status: 503 })],
+    ['invalid_response', () => new Response('private non-json response')], ['network_error', () => { throw new Error('private upstream failure'); }]]) {
     const { store, database } = fixture({ response });
     await unavailable(() => store.getConnectionWriteContext(WORKSPACE, input()));
     assert.equal(database.calls.length, 1);
+    const observed = store.activitySnapshot(WORKSPACE);
+    assert.equal(observed.db.attempted, 1); assert.equal(observed.db.outcomes[outcome], 1);
+    assert.equal(observed.db.responseBody.unknownObservations, outcome === 'network_error' ? 1 : 0);
   }
   const file = createStore({ SAAS_STATE_FILE: '/not-read-by-context-helper.json' });
   file.readAll = async () => { throw new Error('FileStore must not read or confer durable authority'); };

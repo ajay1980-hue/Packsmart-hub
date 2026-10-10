@@ -89,11 +89,13 @@ Content-Range metadata, primary-health flags, exact CAS acknowledgements and
 cache invalidation retain their established behavior. Metering introduces no
 additional request or retry.
 
-Outcome persistence and dispatch-context methods retain their prior direct
-request calls and are explicitly unattributed in tenant activity. Tests require
-this behavior: neither URL filters, RPC bodies nor returned tenant fields can
-assign activity scope. These omissions remain part of the process-local coverage
-limits and are not presented as complete tenant totals.
+Outcome persistence and dispatch-context requests use the workspace supplied by
+the existing trusted server call: a fresh per-call outcome transport uses the
+existing `other` operation, and the bounded dispatch-context read uses
+`state_read`. URL filters, RPC bodies and returned tenant fields never assign
+activity scope. Raw or unbound requests remain unattributed. Attribution adds no
+requests or persistence; counters still describe partial process-local transport
+observations, not validated business outcomes, complete tenant totals or billing.
 
 App conflicts preserve both lifecycle modules across login, password setup,
 bootstrap, logout and navigation, plus both script/style and no-cache allowlist
