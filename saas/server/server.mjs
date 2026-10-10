@@ -46,6 +46,9 @@ import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
+import { publicConnectionWrite, publicApproval } from './lib/action-display.mjs';
+import { assertLegacyReadAdmission, legacyReadDeferral, isLegacyReadDeferred, preserveEbayRetryFields } from './lib/legacy-read-safety.mjs';
+import { assertLegacyObjectiveEnvelope } from './lib/legacy-objective-policy.mjs';
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
@@ -471,6 +474,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   }
 
+  function assertLegacyFailureCompatibility(state, provider) {
+    const deferred = legacyReadDeferral(state, provider);
+    // A newly observed debt/source fence must not be recast as a provider
+    // failure. Provider retry deadlines produced by monitoredSync still need
+    // their existing failure path to commit them durably.
+    if (deferred?.code === 'READ_COMPATIBILITY_DEFERRED') throw Object.assign(new Error(deferred.message), deferred);
+  }
+
+  function assertLegacyApprovalAction(state, approval) {
+    assertLegacyObjectiveEnvelope(undefined, approval);
+    for (const write of state.connectionWrites || []) {
+      if (write.id === approval.payload?.connectionWriteId || write.approvalId === approval.id) assertLegacyObjectiveEnvelope(write, approval);
+    }
+  }
+
   async function mutate(auth, callback, { persist = true } = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
       const state = await store.get(auth.session.workspaceId);
@@ -555,13 +573,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       automationDefinitions: AUTOMATION_DEFINITIONS,
       marketing: marketingSnapshot(state, env),
       webIntelligence: webIntelligenceSnapshot(state, env),
-      approvals: state.approvals || [],
+      approvals: (state.approvals || []).map(publicApproval),
       subscription: state.subscription || null,
       connections: (state.connections || []).map(publicConnection),
       connectionCentre: intelligentConnections(state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status }),
       connectionNotifications: doctorNotifications(state),
       connectionRecommendations: recommendations(state, connectionCentre(state, integrations)),
-      connectionWrites: (state.connectionWrites || []).slice(0, 50),
+      connectionWrites: (state.connectionWrites || []).slice(0, 50).map(publicConnectionWrite),
       integrations: integrationMatrix(state, env),
       ebayOAuth: integrations.ebayOAuthStatus(state),
       ebay: state.ebay || null,
@@ -759,6 +777,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
 
+      assertLegacyReadAdmission(state, 'ebay');
       state.oauthChallenges = (state.oauthChallenges || []).filter(item => item.nonce !== oauthState.nonce);
       if (url.searchParams.get('error')) {
         addAudit(state, { type: 'ebay_oauth_declined', actor: user.id, detail: { readOnly: true } });
@@ -777,7 +796,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
       try {
         const authorization = await integrations.exchangeEbayAuthorizationCode(code);
+        assertLegacyReadAdmission(state, 'ebay');
         const identity = await integrations.ebayIdentity(authorization.accessToken);
+        assertLegacyReadAdmission(state, 'ebay');
         const account = String(identity.username || '');
         const expectedAccount = String(env.EBAY_EXPECTED_ACCOUNT || 'packsmartsolutions20');
         if (!account || account.toLowerCase() !== expectedAccount.toLowerCase()) {
@@ -809,17 +830,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const status = await integrations.syncEbay(state);
           addAudit(state, { type: 'ebay_read_sync', actor: user.id, detail: { status: status.status, source: status.source || 'manager' } });
         } catch (syncError) {
+          if (isLegacyReadDeferred(syncError)) throw syncError;
+          assertLegacyFailureCompatibility(state, 'ebay');
           connection.status = 'error';
           connection.lastError = syncError.code || 'EBAY_SYNC_FAILED';
           state.integrationStatus = {
             ...(state.integrationStatus || {}),
-            ebay: { status: 'error', detail: 'eBay authorization was saved, but its first read sync needs retrying.', lastSyncAt: null, lastError: connection.lastError }
+            ebay: preserveEbayRetryFields({ status: 'error', detail: 'eBay authorization was saved, but its first read sync needs retrying.', lastSyncAt: null, lastError: connection.lastError }, state.integrationStatus?.ebay)
           };
           addAudit(state, { type: 'ebay_read_sync_failed', actor: user.id, detail: { code: connection.lastError } });
         }
         await store.save(oauthState.workspaceId, state);
         redirectHome(res, 'connected');
       } catch (error) {
+        if (isLegacyReadDeferred(error)) throw error;
+        assertLegacyFailureCompatibility(state, 'ebay');
         addAudit(state, { type: 'ebay_oauth_failed', actor: user.id, detail: { code: error.code || 'EBAY_OAUTH_FAILED' } });
         await store.save(oauthState.workspaceId, state);
         redirectHome(res, error.code === 'EBAY_ACCOUNT_MISMATCH' ? 'account-mismatch' : 'error');
@@ -887,6 +912,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
   async function startConnectorOAuth(provider, auth, body, res) {
     connector(provider);
+    assertLegacyReadAdmission(auth.state, provider);
     if (!integrations.oauthReady(provider, auth.state)) throw connectionError('Secure sign-in for this channel is not available yet. Request access or skip this channel for now.', 'OAUTH_NOT_CONFIGURED', 409);
     if (provider === 'meta' && body.catalogAccess && body.confirmCatalogAccess !== 'meta') throw connectionError('Confirm Meta catalogue access, which includes provider-side read and write permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
     if (provider === 'meta' && body.businessInstagramAccess && (!body.writeAccess || body.confirmBusinessInstagramAccess !== 'meta')) throw connectionError('Confirm the additional Meta business permissions.', 'PERMISSION_CONFIRMATION_REQUIRED');
@@ -901,6 +927,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     const stateToken = createConnectorOAuthState({ workspaceId: auth.session.workspaceId, userId: auth.user.id, provider, nonce }, env.SESSION_SECRET);
     const authorizationUrl = integrations.authorizationUrl(provider, stateToken, auth.state, challenge);
     await mutate(auth, async state => {
+      assertLegacyReadAdmission(state, provider);
       state.oauthChallenges = [challenge, ...(state.oauthChallenges || []).filter(item => item.provider !== provider && Date.parse(item.expiresAt) > Date.now())].slice(0, 10);
       addAudit(state, { type: 'connection_authorisation_started', actor: auth.user.id, detail: { provider, writeAccessRequested: challenge.writeAccess, catalogAccessRequested: challenge.catalogAccess, businessInstagramAccessRequested: challenge.businessInstagramAccess, allowAccountChange: challenge.allowAccountChange } });
     });
@@ -917,6 +944,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const user = state?.users?.find(item => item.id === token.userId && item.active !== false);
       if (!challenge || Date.parse(challenge.expiresAt) <= Date.now() || !user || !['owner', 'admin'].includes(user.role) || Number(user.sessionVersion || 1) !== Number(challenge.sessionVersion) || !browserNonce || !safeEqual(challenge.cookieHash, crypto.createHash('sha256').update(browserNonce).digest('hex'))) throw connectionError('This sign-in could not be verified. Return to Runvara and reconnect from the same browser.', 'OAUTH_STATE_INVALID');
       if ((challenge.writeAccess || challenge.catalogAccess || challenge.businessInstagramAccess || challenge.allowAccountChange) && user.role !== 'owner') throw connectionError('The workspace owner must authorise this access.', 'OWNER_APPROVAL_REQUIRED', 403);
+      assertLegacyReadAdmission(state, provider);
       state.oauthChallenges = state.oauthChallenges.filter(item => item.nonce !== token.nonce);
       // Persist single-use consumption before contacting a provider. CAS prevents
       // a second process from exchanging the same code or overwriting a new grant.
@@ -924,8 +952,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       let result = 'connected';
       try {
         if (url.searchParams.get('error')) throw connectionError('Connection was cancelled.', 'OAUTH_DECLINED');
+        assertLegacyReadAdmission(state, provider);
         const credentials = await integrations.exchangeConnectorCode(provider, url, challenge);
+        assertLegacyReadAdmission(state, provider);
         const identity = await integrations.connectorIdentity(provider, credentials);
+        assertLegacyReadAdmission(state, provider);
         if (!identity.accountId && !identity.account) throw connectionError('The channel did not confirm an account.', 'ACCOUNT_UNCONFIRMED');
         const key = provider === 'ebay' ? 'ebay_oauth' : provider;
         const existing = (state.connections || []).find(item => item.provider === key);
@@ -959,11 +990,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           await runFirstSync(state, provider, { integrations, readSync:monitoredSync, save:() => store.save(token.workspaceId, state) });
           addAudit(state, { type:provider === 'ebay' ? 'ebay_read_sync' : existing ? 'connection_reconnect_read_sync' : 'connection_initial_read_sync', actor:user.id, detail:{provider, readOnly:true} });
         } catch (error) {
+          if (isLegacyReadDeferred(error)) throw error;
           if (/PERSISTENCE|SUPABASE|STATE_CONFLICT/.test(error.code || '')) throw error;
           // A saved connection is retained if its first read is interrupted.
           addAudit(state, { type:'connection_first_sync_interrupted', actor:user.id, detail:{provider} });
         }
       } catch (error) {
+        if (isLegacyReadDeferred(error)) throw error;
+        assertLegacyFailureCompatibility(state, provider);
         if (res.headersSent) throw error;
         result = error.code === 'OAUTH_DECLINED' ? 'cancelled' : error.code === 'ACCOUNT_MISMATCH' ? 'account-mismatch' : 'failed';
         if (error.code === 'ACCOUNT_MISMATCH' || error.code === 'ACCOUNT_UNCONFIRMED') state.connectionAuthAttention = {...state.connectionAuthAttention,[provider]:{code:error.code,at:new Date().toISOString()}};
@@ -1745,7 +1779,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             addAudit(state, { type: 'marketing_publish_approval_requested', actor: auth.user.id, detail: { campaignId: campaign.id, approvalId: next.id } });
             return next;
           });
-          send(res, 202, { approvalRequired: true, approval, executedExternally: false });
+          send(res, 202, { approvalRequired: true, approval: publicApproval(approval), executedExternally: false });
           return;
         }
 
@@ -1770,7 +1804,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             state.approvals = [approval, ...(state.approvals || [])];
             addAudit(state, { type: 'approval_requested', actor: auth.user.id, detail: { approvalId: approval.id, actionType: approval.type, financialImpact: approval.financialImpact } });
           });
-          send(res, 202, { approvalRequired: true, approval, executedExternally: false });
+          send(res, 202, { approvalRequired: true, approval: publicApproval(approval), executedExternally: false });
           return;
         }
 
@@ -1783,6 +1817,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const result = await mutate(auth, async state => {
             const approval = (state.approvals || []).find(item => item.id === approvalMatch[1]);
             if (!approval) throw Object.assign(new Error('Approval request not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
+            assertLegacyApprovalAction(state, approval);
             if (approval.status !== 'pending') throw Object.assign(new Error('Approval already decided'), { status: 409, code: 'APPROVAL_ALREADY_DECIDED' });
             if ((body.revision ?? 1) !== (approval.revision || 1)) throw Object.assign(new Error('Approval changed; review its current revision'), { status: 409, code: 'APPROVAL_CONFLICT' });
             approval.status = decision;
@@ -1800,12 +1835,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             addAudit(state, { type: 'approval_decided', actor: auth.user.id, detail: { approvalId: approval.id, decision, executedExternally: false } });
             return approval;
           });
-          send(res, 200, { approval: result, executedExternally: false });
+          send(res, 200, { approval: publicApproval(result), executedExternally: false });
           return;
         }
 
         if (req.method === 'GET' && pathname === '/api/approvals') {
-          send(res, 200, { approvals: auth.state.approvals || [] });
+          send(res, 200, { approvals: (auth.state.approvals || []).map(publicApproval) });
           return;
         }
 
@@ -1969,7 +2004,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const opportunityMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/approval$/);
         if (req.method === 'POST' && opportunityMatch) {
           const approval = await mutate(auth, async state => requestOpportunityApproval(state, opportunityMatch[1], auth.user.id));
-          send(res, 202, { approval, executedExternally: false }); return;
+          send(res, 202, { approval: publicApproval(approval), executedExternally: false }); return;
         }
         const opportunityExperimentMatch = pathname.match(/^\/api\/opportunities\/([^/]+)\/experiment$/);
         if (req.method === 'POST' && opportunityExperimentMatch) {
@@ -1990,8 +2025,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'PATCH' && modifyMatch) {
           requireApprover(auth);
           const body = await jsonBody(req, 32768);
-          const approval = await mutate(auth, async state => modifyApproval(state, modifyMatch[1], body, auth.user.id));
-          send(res, 200, { approval, executedExternally: false }); return;
+          const approval = await mutate(auth, async state => {
+            const approval = state.approvals?.find(item => item.id === modifyMatch[1]);
+            if (approval) assertLegacyApprovalAction(state, approval);
+            return modifyApproval(state, modifyMatch[1], body, auth.user.id);
+          });
+          send(res, 200, { approval: publicApproval(approval), executedExternally: false }); return;
         }
 
         const agentSettingMatch = pathname.match(/^\/api\/agents\/([^/]+)\/settings$/);
@@ -2129,7 +2168,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
         if (req.method === 'GET' && pathname === '/api/connection-centre') {
           const channels = intelligentConnections(auth.state, integrations, { persistence:store.diagnostics?.() || {}, scheduler:scheduler.status });
-          send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
+          send(res, 200, { channels, writes:(auth.state.connectionWrites || []).slice(0,50).map(publicConnectionWrite), autopilotEnabled:Boolean(auth.state.autopilot?.enabled), journey:onboardingJourney(auth.state), notifications:doctorNotifications(auth.state), recommendations:recommendations(auth.state,channels) }); return;
         }
         if (req.method === 'GET' && pathname === '/api/operator/providers') {
           requireLaunchAdmin(auth, env);
@@ -2176,6 +2215,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               return { ok:true, message:'Access requested. Your data is safe. You can continue with another channel while access is being prepared.' };
             }
             if (action === 'writes') return { write: proposeConnectionWrite(state, provider, body, auth.user.id) };
+            assertLegacyReadAdmission(state, provider);
             try {
               if (action === 'sync') {
                 state.connectionDoctor = {...state.connectionDoctor,[provider]:{}};
@@ -2192,6 +2232,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               addAudit(state, { type: action === 'refresh' ? 'connection_credentials_refreshed' : 'connection_tested', actor: auth.user.id, detail: { provider, ok: true } });
               return checked;
             } catch (error) {
+              if (isLegacyReadDeferred(error)) throw error;
+              assertLegacyFailureCompatibility(state, provider);
               const code = /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'CONNECTION_READ_FAILED';
               if (['SYNC_IN_PROGRESS', 'CONNECTION_DISCONNECTED', 'REFRESH_UNSUPPORTED', 'SYNC_AREAS_INVALID'].includes(code)) return { failure: { error: error.message, code, status: error.status || 400 } };
               state.integrationStatus = { ...state.integrationStatus, [provider]: { ...state.integrationStatus?.[provider], status: /AUTH|CREDENTIAL|TOKEN|PERMISSION/.test(code) ? 'auth_expired' : 'degraded', lastError: code, lastFailureAt: new Date().toISOString() } };
@@ -2200,7 +2242,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             }
           });
           if (result.failure) send(res, result.failure.status, result.failure);
-          else send(res, 200, result);
+          else send(res, 200, action === 'writes' ? { write: publicConnectionWrite(result.write) } : result);
           return;
         }
         const executeWrite = pathname.match(/^\/api\/connection-writes\/([a-z0-9_-]+)\/execute$/i);
@@ -2209,9 +2251,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const executionRate = connectionWriteLimiter.check(auth.session.workspaceId);
           if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
           connectionWriteLimiter.fail(auth.session.workspaceId);
-          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, () => store.save(auth.session.workspaceId, state), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), durableStore: store.provider === 'supabase',
+          const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, options => store.save(auth.session.workspaceId, state, options), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), durableStore: store.provider === 'supabase',
             actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
-          send(res, 200, { write, executedExternally: write.status === 'completed' }); return;
+          send(res, 200, { write: publicConnectionWrite(write), executedExternally: write.status === 'completed' }); return;
         }
 
         if (req.method === 'GET' && pathname === '/api/integrations') {
@@ -2222,17 +2264,23 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'POST' && pathname === '/api/integrations/sync') {
           requireOwner(auth);
           const results = await mutate(auth, async state => {
-            const output = {};
+            const output = {}, statusUpdates = {};
             for (const provider of Object.keys(CONNECTORS)) {
               const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
               if (!configured || connectionSettings(state, provider).disconnected) continue;
+              const deferred = legacyReadDeferral(state, provider);
+              if (deferred) { output[provider] = { ...state.integrationStatus?.[provider], ...deferred }; continue; }
               try {
                 const run = beginConnectionSync(state, provider, { actor: auth.user.id });
                 await store.save(auth.session.workspaceId, state);
                 output[provider] = await monitoredSync(state, integrations, provider, { run });
-              } catch { output[provider] = state.integrationStatus?.[provider] || { status: 'error' }; }
+              } catch (error) {
+                if (isLegacyReadDeferred(error)) { output[provider] = { ...state.integrationStatus?.[provider], ...legacyReadDeferral(state, provider) }; continue; }
+                output[provider] = state.integrationStatus?.[provider] || { status: 'error' };
+              }
+              statusUpdates[provider] = output[provider];
             }
-            state.integrationStatus = { ...(state.integrationStatus || {}), ...output };
+            state.integrationStatus = { ...(state.integrationStatus || {}), ...statusUpdates };
             addAudit(state, { type: 'commerce_read_sync', actor: auth.user.id, detail: { providers: Object.keys(output), statuses: Object.fromEntries(Object.entries(output).map(([id, value]) => [id, value.status])) } });
             return output;
           });
@@ -2243,11 +2291,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'POST' && pathname === '/api/integrations/shopify/sync') {
           requireOwner(auth);
           const outcome = await mutate(auth, async state => {
+            assertLegacyReadAdmission(state, 'shopify');
             try {
               const result = await monitoredSync(state, integrations, 'shopify');
               addAudit(state, { type: 'shopify_read_sync', actor: auth.user.id, detail: { status: result.status, source: result.source } });
               return { status: result, error: null };
             } catch (error) {
+              if (isLegacyReadDeferred(error)) throw error;
+              assertLegacyFailureCompatibility(state, 'shopify');
               const failedStatus = {
                 status: state.products?.length ? 'degraded' : 'error',
                 detail: 'The live Shopify read connection could not be verified; last known catalogue data was retained.',
@@ -2272,11 +2323,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'POST' && pathname === '/api/integrations/ebay/sync') {
           requireOwner(auth);
           const outcome = await mutate(auth, async state => {
+            assertLegacyReadAdmission(state, 'ebay');
             try {
               const result = await monitoredSync(state, integrations, 'ebay');
               addAudit(state, { type: 'ebay_read_sync', actor: auth.user.id, detail: { status: result.status, account: result.account || null } });
               return { status: result, error: null };
             } catch (error) {
+              if (isLegacyReadDeferred(error)) throw error;
+              assertLegacyFailureCompatibility(state, 'ebay');
               const failedStatus = {
                 status: 'error',
                 detail: 'The eBay read connection could not be verified; the existing Manager was not changed.',
@@ -2286,7 +2340,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               };
               state.integrationStatus = {
                 ...(state.integrationStatus || {}),
-                ebay: failedStatus
+                ebay: preserveEbayRetryFields(failedStatus, state.integrationStatus?.ebay)
               };
               const connection = integrations.ebayConnection(state);
               if (connection) { connection.status = 'error'; connection.lastError = failedStatus.lastError; }
@@ -2316,6 +2370,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           }
           const credentials = provider === 'shopify' ? cleanShopifyCredentials(body.credentials) : cleanEbayCredentials(body.credentials);
           const connection = await mutate(auth, async state => {
+            assertLegacyReadAdmission(state, provider);
             const now = new Date().toISOString();
             const existing = (state.connections || []).find(item => item.provider === provider);
             const next = existing || { id: `conn_${crypto.randomUUID()}`, provider, createdAt: now };

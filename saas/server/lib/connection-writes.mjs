@@ -4,15 +4,20 @@ import { normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
 import { createConnectionDispatch, connectionDispatchCount } from './connection-dispatch.mjs';
 import { META_WRITES, prepareMetaWrite, requireMetaScopes, metaWriteScopes } from './meta-commerce.mjs';
+import { assertLegacyObjectiveEnvelope, captureLegacyObjectivePolicy, assertLegacyObjectiveSource } from './legacy-objective-policy.mjs';
+import { assertLegacyReadAdmission } from './legacy-read-safety.mjs';
 
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 export async function previewShopifyTagTest(state, productId, integrations) {
+  assertLegacyReadAdmission(state, 'shopify');
   const product = state.products?.find(item => item.id === productId && item.provider === 'shopify');
   if (!product || !/^gid:\/\/shopify\/Product\/\d+$/.test(product.id)) throw connectionError('Choose a product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
   if (connectionSettings(state, 'shopify').disconnected) throw connectionError('Reconnect Shopify first.', 'CONNECTION_DISCONNECTED', 409);
   const config = integrations.shopifyConfig(state);
   if (config.mode === 'oauth') config.accessToken = (await integrations.connectorCredentials(state, 'shopify')).accessToken;
+  assertLegacyReadAdmission(state, 'shopify');
   const result = await integrations.shopifyGraphql('query RunvaraTagAcceptancePreview($id: ID!) { product(id: $id) { id title tags } }', { id: product.id }, config);
+  assertLegacyReadAdmission(state, 'shopify');
   if (result?.product?.id !== product.id || !Array.isArray(result.product.tags)) throw connectionError('Shopify could not confirm current tags.', 'WRITE_BASELINE_UNAVAILABLE', 422);
   const tag = `runvara-beta-check-${crypto.randomBytes(6).toString('hex')}`;
   const connection = state.connections?.find(item => item.provider === 'shopify');
@@ -29,9 +34,9 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   const settings = connectionSettings(state, provider);
   if (settings.disconnected || settings.permissionMode === 'read_only') throw connectionError('This connection is read-only. The owner must authorise write access first.', 'WRITE_NOT_AUTHORISED', 403);
   if (!((provider === 'shopify' && ['product_content', 'internal_note', 'product_tags_add', 'product_tags_remove'].includes(body.operation)) || (provider === 'meta' && META_WRITES.includes(body.operation)))) throw connectionError('Runvara does not support this write action. No change was made.', 'WRITE_UNSUPPORTED', 422);
+  assertLegacyObjectiveEnvelope({ ...body, provider, input: body });
   if (!/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId || '')) throw connectionError('A unique request reference is required.', 'WRITE_REQUEST_ID_REQUIRED');
-  state.connectionWrites ||= [];
-  const existing = state.connectionWrites.find(item => item.requestId === body.requestId);
+  const existing = (state.connectionWrites || []).find(item => item.requestId === body.requestId);
   const product = (state.products || []).find(item => item.id === body.productId && item.provider === 'shopify');
   if (provider === 'shopify' && (!product || !/^gid:\/\/shopify\/Product\/\d+$/.test(product.id))) throw connectionError('Choose a Shopify product in this workspace.', 'PRODUCT_NOT_FOUND', 404);
   const input = provider === 'meta' ? prepareMetaWrite(state, body) : { productId: product.id, operation: body.operation };
@@ -51,6 +56,8 @@ export function proposeConnectionWrite(state, provider, body, actor) {
     input.title = body.title.trim(); input.description = body.description;
   }
   if (existing) {
+    assertLegacyObjectiveEnvelope(existing, state.approvals?.find(row => row.id === existing.approvalId));
+    captureLegacyObjectivePolicy(state, existing);
     if (existing.provider !== provider || existing.digest !== digest(input)) throw connectionError('This request reference was already used for a different change.', 'WRITE_CONFLICT', 409);
     return existing;
   }
@@ -61,6 +68,7 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   if (settings.permissionMode === 'automatic' && (!settings.consent || settings.consent.mode !== 'automatic')) throw connectionError('The owner must explicitly authorise automatic writes.', 'OWNER_APPROVAL_REQUIRED', 403);
   const write = { id: `write_${crypto.randomUUID()}`, requestId: body.requestId, provider, input, digest: digest(input), connectionId: connection.id, account: provider === 'meta' ? connection.metadata.accountId : connection.metadata.shopDomain, requestedBy: actor,
     requiresApproval, status: requiresApproval ? 'pending_approval' : 'ready', createdAt: new Date().toISOString() };
+  captureLegacyObjectivePolicy(state, write);
   if (requiresApproval) {
     const approval = normalizeApprovalRequest({ type: provider === 'meta' ? 'risky_marketplace_action' : body.operation !== 'internal_note' ? 'customer_facing_publish' : 'integration_change',
       action: body.operation.startsWith('product_tags_') ? `${body.operation === 'product_tags_add' ? 'Add' : 'Remove'} Shopify tags: ${product.title}` : provider === 'meta' ? `Meta: ${input.operation.replaceAll('_', ' ')}` : body.operation === 'product_content' ? `Update Shopify content: ${product.title}` : `Save internal Shopify note: ${product.title}`,
@@ -70,7 +78,7 @@ export function proposeConnectionWrite(state, provider, body, actor) {
       payload: { connectionWriteId: write.id, digest: write.digest } }, actor);
     state.approvals.unshift(approval); write.approvalId = approval.id;
   }
-  state.connectionWrites.unshift(write);
+  (state.connectionWrites ||= []).unshift(write);
   addAudit(state, { type: 'connection_write_requested', actor, detail: { provider, writeId: write.id, operation: input.operation, requiresApproval, digest: write.digest } });
   return write;
 }
@@ -101,7 +109,9 @@ function metaMutationRequest(input, phase, containerId) {
 function writeIdentity(write) {
   return { id: write.id, requestId: write.requestId, provider: write.provider, input: write.input, digest: write.digest,
     connectionId: write.connectionId, account: write.account, requestedBy: write.requestedBy,
-    requiresApproval: write.requiresApproval, approvalId: write.approvalId || null };
+    requiresApproval: write.requiresApproval, approvalId: write.approvalId || null,
+    ...Object.fromEntries(['origin', 'objectiveRef', 'objectivePolicyProposal', 'objectivePolicyBinding', 'policyBinding', 'executionPolicy', 'financialEvidence', 'schema', 'version']
+      .filter(key => Object.hasOwn(write, key)).map(key => [key, write[key]])) };
 }
 const configBinding = config => ({ domain: config.domain, workspaceId: config.workspaceId, mode: config.mode, apiVersion: config.apiVersion,
   accessToken: config.accessToken, clientId: config.clientId, clientSecret: config.clientSecret });
@@ -138,6 +148,7 @@ function admitExecution(state, commit = false) {
   if (commit) state.connectionDispatchAdmissions = Object.freeze([...recent, now]);
 }
 function authority(state, write, actor, actorSession) {
+  assertLegacyObjectiveEnvelope(write, state.approvals?.find(row => row.id === write.approvalId));
   const actors = state.users?.filter(row => row.id === actor) || [];
   const user = actors[0];
   if (actors.length !== 1 || !user || user.active === false || user.role !== 'owner' || user.passwordChangeRequired
@@ -195,6 +206,8 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   if (actorSession.workspaceId !== state.workspace?.id || actorSession.userId !== actor
     || !Number.isSafeInteger(actorSession.sessionVersion) || actorSession.sessionVersion < 1) throw blocked('WRITE_ACTOR_CHANGED');
   const authorityDigest = authority(state, write, actor, actorSession);
+  const objectivePolicy = captureLegacyObjectivePolicy(state, write);
+  let policyRevision = state._revision;
   admitExecution(state);
   let admissionDigest = digest(state.connectionDispatchAdmissions ?? []);
   const settings = connectionSettings(state, write.provider);
@@ -216,26 +229,40 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const preparedInput = immutable(structuredClone(write.input));
   const identity = digest(writeIdentity(write));
   const workspaceId = state.workspace?.id;
+  let dispatch;
+  const notSubmitted = () => connectionDispatchCount(dispatch) === 0;
+  const compatibilityCheck = (snapshot = state, candidate = write) => {
+    if (snapshot === state && state._revision !== policyRevision) throw blocked('WRITE_POLICY_SOURCE_CHANGED');
+    if (digest(writeIdentity(candidate)) !== identity) throw blocked('WRITE_CLAIM_CHANGED');
+    assertLegacyObjectiveEnvelope(candidate, snapshot.approvals?.find(row => row.id === candidate.approvalId));
+    assertLegacyObjectiveSource(snapshot, objectivePolicy);
+  };
   const config = write.provider === 'shopify' ? { ...integrations.shopifyConfig(state), connection: undefined } : {};
+  if (preparedInput.expectedTags) assertLegacyReadAdmission(state, 'shopify');
   const metaCredentials = write.provider === 'meta' ? immutable(structuredClone(await integrations.connectorCredentials(state, 'meta'))) : null;
   if (config.mode === 'oauth') config.accessToken = (await integrations.connectorCredentials(state, 'shopify')).accessToken;
+  compatibilityCheck();
   Object.freeze(config);
   if (write.input.expectedTags) {
+    assertLegacyReadAdmission(state, 'shopify');
     const current = await integrations.shopifyGraphql('query RunvaraTagAcceptancePreview($id: ID!) { product(id: $id) { id tags } }', { id: write.input.productId }, config);
+    assertLegacyReadAdmission(state, 'shopify');
     if (current?.product?.id !== write.input.productId || !Array.isArray(current.product.tags) || JSON.stringify([...current.product.tags].sort()) !== JSON.stringify(write.input.expectedTags)) throw connectionError('Product tags changed since review. Prepare a fresh approval.', 'WRITE_BASELINE_CHANGED', 409);
   }
+  compatibilityCheck();
   if (write.status !== initialStatus) throw blocked('WRITE_ALREADY_ATTEMPTED');
   if (digest(connection.encryptedCredentials) !== credentialIdentity) throw blocked('WRITE_CONNECTION_CHANGED', 'The connection credentials changed during preparation. Refresh the connection before reviewing this write.');
   if (write.provider === 'shopify' && config.domain !== write.account) throw blocked('WRITE_CONNECTION_CHANGED');
   const configDigest = write.provider === 'shopify' ? digest(configBinding(config)) : null;
   const retainedCheck = () => {
-    if (digest(state.connectionDispatchAdmissions ?? []) !== admissionDigest
+    if (state._revision !== policyRevision || digest(state.connectionDispatchAdmissions ?? []) !== admissionDigest
       || state.workspace?.id !== workspaceId || !state.connectionWrites?.includes(write)
       || state.connectionWrites.filter(row => row.id === writeId).length !== 1
       || digest(writeIdentity(write)) !== identity) throw blocked('WRITE_CLAIM_CHANGED');
   };
   const localCheck = () => {
     retainedCheck();
+    if (notSubmitted()) compatibilityCheck();
     if ((write.providerState?.containerId || null) !== containerId) throw blocked('WRITE_REQUEST_CHANGED');
     if (state.workspace?.id !== workspaceId || state.connectionWrites?.filter(row => row.id === writeId).length !== 1
       || !state.connectionWrites.includes(write) || digest(writeIdentity(write)) !== identity
@@ -248,16 +275,35 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const saveExact = async () => {
     localCheck();
     const previous = state._revision, expected = digest(write);
-    const saved = await persistClaim();
-    localCheck();
+    const saved = await persistClaim({ ownedSnapshot: true, beforeCommit: snapshot => {
+      localCheck();
+      if (state._revision !== previous) throw blocked('WRITE_CLAIM_CHANGED');
+      if (snapshot) {
+        const rows = snapshot.connectionWrites?.filter(row => row.id === writeId) || [];
+        if (snapshot.workspace?.id !== workspaceId || rows.length !== 1 || digest(rows[0]) !== expected
+          || digest(snapshot.connectionDispatchAdmissions ?? []) !== admissionDigest
+          || authority(snapshot, rows[0], actor, actorSession) !== authorityDigest) throw blocked('WRITE_CLAIM_CHANGED');
+        if (notSubmitted()) compatibilityCheck(snapshot, rows[0]);
+      }
+    } });
     const rows = saved?.connectionWrites?.filter(row => row.id === writeId) || [];
+    // The store advances caller revision only after its CAS. Keep that revision
+    // for held terminal-result bookkeeping even if the returned claim is bad.
+    // The complete acknowledgement below is still mandatory before dispatch.
+    if (typeof state._revision === 'string' && state._revision !== previous && saved?.workspace?.id === workspaceId) {
+      if (notSubmitted()) assertLegacyObjectiveSource(saved, objectivePolicy);
+      policyRevision = state._revision;
+    }
+    localCheck();
     if (typeof state._revision !== 'string' || state._revision === previous || saved?.workspace?.id !== workspaceId
       || saved?._revision !== state._revision || rows.length !== 1 || digest(rows[0]) !== expected
       || digest(write) !== expected || digest(saved.connectionDispatchAdmissions ?? []) !== admissionDigest
       || authority(saved, rows[0], actor, actorSession) !== authorityDigest) throw blocked('WRITE_CLAIM_ACK_INVALID');
+    if (notSubmitted()) compatibilityCheck(saved, rows[0]);
   };
   const freshCheck = async () => {
     localCheck();
+    compatibilityCheck();
     const expected = digest(write), revision = state._revision;
     const needsApproval = write.requiresApproval || settings.permissionMode !== 'automatic' || write.input.operation !== 'internal_note';
     const approverId = needsApproval ? approval.decidedBy : settings.consent.actor;
@@ -271,6 +317,11 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     if (fresh?.workspace?.id !== workspaceId || fresh?._revision !== revision || state._revision !== revision
       || rows.length !== 1 || digest(rows[0]) !== expected || digest(write) !== expected
       || digest(writeIdentity(rows[0])) !== identity || authority(fresh, rows[0], actor, actorSession) !== authorityDigest) throw blocked('WRITE_AUTHORITY_CHANGED');
+    // The full initial policy source (including absence) is pinned through each
+    // isolated save. Its unchanged workspace revision attests this narrow read;
+    // omitted businessObjectives here must never become an empty policy set.
+    if (Object.hasOwn(fresh, 'businessObjectives')) assertLegacyObjectiveSource(fresh, objectivePolicy);
+    compatibilityCheck();
     if (write.provider === 'shopify' && digest(configBinding(integrations.shopifyConfig(fresh))) !== configDigest) throw blocked('WRITE_CONNECTION_CHANGED');
   };
   localCheck();
@@ -286,7 +337,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const phases = write.input.operation === 'instagram_publish' ? ['instagram_container', 'instagram_publish']
     : [write.provider === 'shopify' ? 'shopify_mutation' : 'meta_mutation'];
   let expectedShopifyRequest;
-  const dispatch = createConnectionDispatch(async request => {
+  dispatch = createConnectionDispatch(async request => {
     if (request.provider !== write.provider || !phases.includes(request.phase)
       || write.dispatchClaim.phases[request.phase]) throw blocked('WRITE_ALREADY_ATTEMPTED');
     const expected = write.provider === 'shopify' ? expectedShopifyRequest : metaMutationRequest(preparedInput, request.phase, write.providerState?.containerId);

@@ -6,6 +6,7 @@ import { connectorMethods } from './connector-oauth.mjs';
 import { dispatchConnectionMutation } from './connection-dispatch.mjs';
 import { metaMethods } from './meta-commerce.mjs';
 import { connectionSettings, connectionError } from './connection-centre.mjs';
+import { assertLegacyReadAdmission, isLegacyReadDeferred, preserveEbayRetryFields, preserveEbayReadDiagnostics } from './legacy-read-safety.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -618,17 +619,20 @@ export class IntegrationService {
   }
 
   async syncShopify(state, { areas = connectionSettings(state, 'shopify').areas } = {}) {
+    assertLegacyReadAdmission(state, 'shopify');
     if (state?.connectionSettings?.shopify?.disconnected) throw connectionError('Reconnect Shopify before syncing.', 'CONNECTION_DISCONNECTED', 409);
     const now = new Date().toISOString();
     if (this.shopifyConfigured(state)) {
       const config = this.shopifyConfig(state);
       if (config.mode === 'oauth') config.accessToken = (await this.connectorCredentials(state, 'shopify')).accessToken;
+      assertLegacyReadAdmission(state, 'shopify');
       const catalogue = areas.some(area => ['products', 'variants', 'inventory', 'prices'].includes(area));
       const [products, orders, customers] = await Promise.all([
         catalogue ? this.fetchShopifyProducts(config) : null,
         areas.includes('orders') ? this.fetchShopifyOrders(config) : null,
         areas.includes('customers') ? this.fetchShopifyCustomers(config) : null
       ]);
+      assertLegacyReadAdmission(state, 'shopify');
       if (products) state.products = mergeSelectedShopify(state.products || [], products, areas);
       if (orders) state.orders = mergeProviderRecords(state.orders, 'shopify', orders);
       if (customers) state.channelData = { ...state.channelData, shopify: { ...state.channelData?.shopify, customers } };
@@ -660,6 +664,7 @@ export class IntegrationService {
     if (publicCatalogueUrl) {
       try {
         const products = await this.fetchPublicShopifyProducts(state);
+        assertLegacyReadAdmission(state, 'shopify');
         state.products = products;
         state.integrationStatus = {
           ...(state.integrationStatus || {}),
@@ -677,7 +682,10 @@ export class IntegrationService {
         };
         return state.integrationStatus.shopify;
       } catch (error) {
+        if (isLegacyReadDeferred(error)) throw error;
+        assertLegacyReadAdmission(state, 'shopify');
         const snapshot = await this.loadShopifySnapshot();
+        assertLegacyReadAdmission(state, 'shopify');
         const retained = Boolean(state.products?.length);
         if (!retained) state.products = snapshot.products;
         state.integrationStatus = {
@@ -717,6 +725,7 @@ export class IntegrationService {
     }
 
     const snapshot = await this.loadShopifySnapshot();
+    assertLegacyReadAdmission(state, 'shopify');
     state.products = snapshot.products;
     state.integrationStatus = {
       ...(state.integrationStatus || {}),
@@ -1026,9 +1035,12 @@ export class IntegrationService {
   }
 
   async syncEbayOAuth(state, config, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
+    assertLegacyReadAdmission(state, 'ebay', { automatic });
     const now = new Date().toISOString();
     const accessToken = await this.ebayAccessToken(config);
+    assertLegacyReadAdmission(state, 'ebay');
     const identity = await this.ebayIdentity(accessToken);
+    assertLegacyReadAdmission(state, 'ebay');
     const account = String(identity.username || identity.userId || '');
     if (!account) throw integrationError('eBay did not confirm the connected seller account', 502, 'EBAY_ACCOUNT_UNCONFIRMED');
     if (account.toLowerCase() !== config.expectedAccount.toLowerCase()) {
@@ -1044,6 +1056,7 @@ export class IntegrationService {
     const selected = surface => surface === 'orders' ? areas.includes('orders') : surface === 'marketing' ? areas.includes('promotions') : areas.some(area => ['products', 'inventory', 'prices'].includes(area));
     const optionalRead = async (surface, operation, fallback) => {
       if (!selected(surface)) return fallback;
+      assertLegacyReadAdmission(state, 'ebay');
       const previous = state.ebay?.coverage?.readDiagnostics?.[surface];
       if (automatic && ([401, 403].includes(previous?.httpStatus) || (surface === 'marketing' && previous?.errorIds?.map(String).includes('35077')))) {
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
@@ -1053,6 +1066,7 @@ export class IntegrationService {
       try {
         return await operation();
       } catch (error) {
+        if (isLegacyReadDeferred(error)) throw error;
         readErrors[surface] = `EBAY_${surface.toUpperCase()}_READ_UNAVAILABLE`;
         readDiagnostics[surface] = { code: /^[A-Z0-9_]{1,80}$/.test(error.code || '') ? error.code : 'READ_FAILED', httpStatus: error.upstreamStatus || null, errorIds: error.upstreamErrorIds || [], at: now, automaticRetryBlocked: [401, 403].includes(error.upstreamStatus) || (surface === 'marketing' && error.upstreamErrorIds?.map(String).includes('35077')) };
         return fallback;
@@ -1080,6 +1094,7 @@ export class IntegrationService {
       amount: nullableNumber(order.totalMarketplaceFee),
       currency: String(order.totalMarketplaceFee?.currency || order.pricingSummary?.total?.currency || 'GBP')
     })).filter(record => record.orderId && record.amount !== null);
+    assertLegacyReadAdmission(state, 'ebay');
     if (selected('orders') && !readErrors.orders) state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
 
     const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
@@ -1106,7 +1121,7 @@ export class IntegrationService {
         marketingCampaignsAvailable: selected('marketing') ? Boolean(marketing.campaignsRead) : state.ebay?.coverage?.marketingCampaignsAvailable ?? false,
         marketingAvailable: selected('marketing') ? !readErrors.marketing : state.ebay?.coverage?.marketingAvailable ?? false,
         unavailableSurfaces: [...new Set([...(state.ebay?.coverage?.unavailableSurfaces || []).filter(surface => !selected(surface)), ...Object.keys(readErrors)])],
-        readDiagnostics: { ...Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).filter(([surface]) => !selected(surface))), ...readDiagnostics },
+        readDiagnostics: preserveEbayReadDiagnostics({ ...Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).filter(([surface]) => !selected(surface))), ...readDiagnostics }, state.ebay?.coverage?.readDiagnostics),
         standardManagerPreserved: true
       },
       syncedAt: now
@@ -1126,7 +1141,7 @@ export class IntegrationService {
       draftCount: !selected('inventory') ? config.connection.metadata?.draftCount ?? null : readErrors.inventory || readErrors.offers ? null : drafts.length,
       channel: 'direct_oauth'
     };
-    const status = {
+    const status = preserveEbayRetryFields({
       status: 'connected',
       detail: `${readErrors.inventory || readErrors.offers ? 'Inventory API listings and drafts unavailable' : `${published.length} Inventory API listings and ${drafts.length} drafts`}; ${readErrors.orders ? 'order read unavailable' : `${orders.length} recent orders synced`} directly from eBay read-only.${readWarning ? ` ${readWarning}` : ''} The existing Manager remains unchanged.`,
       source: 'ebay-oauth-readonly',
@@ -1141,27 +1156,29 @@ export class IntegrationService {
       lastError: readWarning,
       lastFailureAt: readWarning ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
       degradedSurfaces: unavailable
-    };
+    }, state.integrationStatus?.ebay);
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;
   }
 
   async syncEbay(state, { automatic = false, areas = connectionSettings(state, 'ebay').areas } = {}) {
+    assertLegacyReadAdmission(state, 'ebay', { automatic });
     if (state?.connectionSettings?.ebay?.disconnected) throw connectionError('Reconnect eBay before syncing.', 'CONNECTION_DISCONNECTED', 409);
     const now = new Date().toISOString();
     if (!this.ebayConfigured(state)) {
-      const status = {
+      const status = preserveEbayRetryFields({
         status: 'not_configured',
         detail: 'Existing eBay Manager backend URL is required; no duplicate OAuth connection has been created.',
         lastSyncAt: null,
         lastError: null
-      };
+      }, state.integrationStatus?.ebay);
       state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
       return status;
     }
     const config = this.ebayConfig(state);
     if (config.mode === 'direct_oauth') return this.syncEbayOAuth(state, config, { automatic, areas });
     const statusPayload = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
+    assertLegacyReadAdmission(state, 'ebay');
     const account = String(statusPayload.account || statusPayload.username || statusPayload.ebayUser || '');
     const connected = statusPayload.connected === true || statusPayload.authenticated === true || statusPayload.ebayConnected === true;
     const expected = config.expectedAccount.toLowerCase();
@@ -1171,8 +1188,9 @@ export class IntegrationService {
     const readErrors = [];
     const optional = async (surface, paths, fallback) => {
       if (surface === 'orders' || surface === 'fees' ? !areas.includes('orders') : surface === 'promotions' ? !areas.includes('promotions') : !areas.some(area => ['products', 'inventory', 'prices'].includes(area))) return fallback;
+      assertLegacyReadAdmission(state, 'ebay');
       try { return await this.ebayGet(config, paths); }
-      catch { readErrors.push(surface); return fallback; }
+      catch (error) { if (isLegacyReadDeferred(error)) throw error; readErrors.push(surface); return fallback; }
     };
     const [listingPayload, draftPayload, orderPayload, feePayload, promotionPayload] = await Promise.all([
       optional('listings', ['/api/ebay/listings', '/api/listings'], { listings: state.ebay?.listings || [] }),
@@ -1186,6 +1204,7 @@ export class IntegrationService {
     const orders = payloadItems(orderPayload, ['orders', 'items']).map(mapEbayOrder).filter(order => order.id);
     const fees = payloadItems(feePayload, ['fees', 'items']);
     const promotions = payloadItems(promotionPayload, ['promotions', 'campaigns', 'items']);
+    assertLegacyReadAdmission(state, 'ebay');
     state.orders = mergeProviderRecords(state.orders, 'ebay', orders);
     const shopifySkus = new Set((state.products || []).flatMap(product => (product.variants || []).map(variant => variant.sku).filter(Boolean)));
     const listingSkus = new Set(listings.map(item => item.sku).filter(Boolean));
@@ -1209,7 +1228,8 @@ export class IntegrationService {
       fees: fees.slice(0, 1000),
       promotions: promotions.slice(0, 500),
       health: readErrors.includes('listings') ? (state.ebay?.health || null) : { missingOnEbay: missingOnEbay.slice(0, 100), staleOnEbay: staleOnEbay.slice(0, 100) },
-      coverage: { unavailableSurfaces: readErrors, ordersAvailable: !readErrors.includes('orders'), offersAvailable: !readErrors.includes('listings') },
+      coverage: { unavailableSurfaces: readErrors, ordersAvailable: !readErrors.includes('orders'), offersAvailable: !readErrors.includes('listings'),
+        ...(state.ebay?.coverage?.readDiagnostics ? { readDiagnostics: preserveEbayReadDiagnostics({}, state.ebay.coverage.readDiagnostics) } : {}) },
       syncedAt: now
     };
     if (config.connection) {
@@ -1224,7 +1244,7 @@ export class IntegrationService {
         draftCount: drafts.length
       };
     }
-    const status = {
+    const status = preserveEbayRetryFields({
       status: 'connected',
       detail: `${listings.length} listings, ${drafts.length} drafts and ${orders.length} orders read from the existing ${account} backend. Writes remain disabled.`,
       account,
@@ -1238,7 +1258,7 @@ export class IntegrationService {
       lastError: readErrors.length ? 'EBAY_PARTIAL_READ' : null,
       lastFailureAt: readErrors.length ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
       degradedSurfaces: readErrors
-    };
+    }, state.integrationStatus?.ebay);
     state.integrationStatus = { ...(state.integrationStatus || {}), ebay: status };
     return status;
   }

@@ -5,6 +5,7 @@ import { beginConnectionSync, finishConnectionSync, connectionSettings, connecti
 import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
+import { assertLegacyReadAdmission, isLegacyReadDeferred, legacyReadDeferral, preserveEbayRetryFields } from './legacy-read-safety.mjs';
 
 const authFailure = error => /AUTH|CREDENTIAL|TOKEN_EXPIRED|REFRESH_FAILED/.test(String(error?.code || error || ''));
 const safeCode = error => /^[A-Z0-9_]{1,80}$/.test(String(error?.code || '')) ? error.code : 'READ_FAILED';
@@ -47,6 +48,7 @@ function summarizeCycleEffects(runs) {
 }
 
 export async function monitoredSync(state, integrations, provider, { automatic = false, retry = true, areas, run } = {}) {
+  assertLegacyReadAdmission(state, provider, { automatic });
   const previous = state.integrationStatus?.[provider] || {};
   const now = new Date().toISOString();
   if (automatic && authFailure(previous.lastError)) throw Object.assign(new Error('Owner must repair authentication'), { code: 'AUTH_REPAIR_REQUIRED' });
@@ -57,21 +59,33 @@ export async function monitoredSync(state, integrations, provider, { automatic =
   while (true) {
     attempts++;
     try {
+      assertLegacyReadAdmission(state, provider, { automatic });
       const result = integrations.syncProvider ? await integrations.syncProvider(state, provider, { automatic, areas }) : await integrations[provider === 'shopify' ? 'syncShopify' : 'syncEbay'](state, { automatic, areas });
-      const status = { ...previous, ...result, failedAreas:result.failedAreas || [], transient: Boolean(result.transient), upstreamStatus: result.upstreamStatus || null, retryAt: null, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
+      assertLegacyReadAdmission(state, provider, { automatic });
+      let status = { ...previous, ...result, failedAreas:result.failedAreas || [], transient: Boolean(result.transient), upstreamStatus: result.upstreamStatus || null, retryAt: null, lastAttemptAt: now, lastFailureAt: result.lastFailureAt || previous.lastFailureAt || null, attempts };
+      if (provider === 'ebay') status = preserveEbayRetryFields(status, previous, state.integrationStatus?.ebay, result);
       state.integrationStatus = { ...state.integrationStatus, [provider]: status };
       finishConnectionSync(state, run, status);
       return status;
     } catch (error) {
+      if (error.code === 'STATE_CONFLICT' || /PERSISTENCE|SUPABASE/.test(error.code || '')) throw error;
+      const deferred = isLegacyReadDeferred(error) ? error : legacyReadDeferral(state, provider, { automatic });
+      if (deferred) {
+        finishConnectionSync(state, run, null, deferred);
+        throw Object.assign(new Error(deferred.message), deferred);
+      }
       const transient = error.upstreamStatus === 429 || error.upstreamStatus >= 500 || ['AbortError', 'TimeoutError', 'TypeError'].includes(error.name);
       // Rate limits are durable scheduled retries, never a tight retry loop.
       const rateLimited = error.upstreamStatus === 429 || /RATE_LIMIT/.test(error.code || '');
-      if (retry && attempts < 2 && transient && !rateLimited && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
+      const retainedRetry = provider === 'ebay' && legacyReadDeferral({ integrationStatus: { ebay: error } }, provider);
+      if (retry && attempts < 2 && transient && !rateLimited && !retainedRetry && !authFailure(error)) { await new Promise(resolve => setTimeout(resolve, 300)); continue; }
       const code = safeCode(error);
-      state.integrationStatus = { ...state.integrationStatus, [provider]: { ...previous, status: authFailure(error) ? 'auth_expired' : 'error',
+      let status = { ...previous, status: authFailure(error) ? 'auth_expired' : 'error',
         detail: 'Read sync failed; last known data was retained.', lastSyncAt: previous.lastSyncAt || null, lastFailureAt: now, lastAttemptAt: now, lastError: code, attempts,
         transient: transient || rateLimited, upstreamStatus: error.upstreamStatus || null,
-        retryAt: rateLimited ? new Date(Date.now() + Math.max(60000, Math.min(86400000, Number(error.retryAfterMs) || 60000))).toISOString() : null } };
+        retryAt: rateLimited ? new Date(Date.now() + Math.max(60000, Math.min(86400000, Number(error.retryAfterMs) || 60000))).toISOString() : null };
+      if (provider === 'ebay') status = preserveEbayRetryFields(status, previous, state.integrationStatus?.ebay, error);
+      state.integrationStatus = { ...state.integrationStatus, [provider]: status };
       const connection = provider === 'shopify' ? integrations.shopifyConnection?.(state) : provider === 'ebay' ? integrations.ebayConnection?.(state) : state.connections?.find(c => c.provider === provider);
       if (connection) { connection.status = state.integrationStatus[provider].status; connection.lastError = code; }
       finishConnectionSync(state, run, null, { code });
@@ -105,6 +119,7 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
       const providers = [];
       if (runs.some(run => run.ruleId === 'channelSync')) {
         for (const provider of Object.keys(CONNECTORS)) {
+          if (legacyReadDeferral(state, provider, { automatic: true, now: now.getTime() })) continue;
           const configured = provider === 'shopify' ? integrations.shopifyRefreshAvailable(state) : provider === 'ebay' ? integrations.ebayConfigured(state) : Boolean(integrations.syncProvider && state.connections?.some(item => item.provider === provider && item.encryptedCredentials));
           const legacyFirstRun = !state.connectionSettings?.[provider] && !state.connectionSyncs?.some(item => item.provider === provider);
           if (configured && (legacyFirstRun || connectionDue(state, provider, now))) providers.push(provider);

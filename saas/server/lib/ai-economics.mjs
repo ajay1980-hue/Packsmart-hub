@@ -25,6 +25,29 @@ export function ensureAiEconomics(state) {
   return state.aiEconomics;
 }
 
+// Browser responses are a separate contract from lossless server configuration.
+// Never spread settings here: governance and future fields remain server-only.
+export function publicAiSettings(settings) {
+  const read = key => settings && typeof settings === 'object' && !Array.isArray(settings)
+    ? Object.getOwnPropertyDescriptor(settings, key)?.value : undefined;
+  const routingMode = read('routingMode'), monthlyCostLimitUsd = read('monthlyCostLimitUsd');
+  const pricingUpdatedAt = read('pricingUpdatedAt'), updatedAt = read('updatedAt'), updatedBy = read('updatedBy');
+  const validDate = typeof pricingUpdatedAt === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(pricingUpdatedAt)
+    && Number.isFinite(Date.parse(pricingUpdatedAt)) && new Date(pricingUpdatedAt).toISOString().slice(0, 10) === pricingUpdatedAt;
+  const result = {
+    routingMode: ['economy', 'balanced', 'quality'].includes(routingMode) ? routingMode : 'balanced',
+    monthlyCostLimitUsd: Number.isFinite(monthlyCostLimitUsd) && monthlyCostLimitUsd >= 0 && monthlyCostLimitUsd <= 1000000 ? monthlyCostLimitUsd : null,
+    pricingUpdatedAt: validDate ? pricingUpdatedAt : AI_PRICING_UPDATED_AT
+  };
+  // Match the existing writers' UTC timestamp and 120-character actor bound.
+  const validTimestamp = typeof updatedAt === 'string' && /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3})?Z$/.test(updatedAt)
+    && Number.isFinite(Date.parse(updatedAt)) && new Date(updatedAt).toISOString() === (updatedAt.includes('.') ? updatedAt : updatedAt.replace('Z', '.000Z'));
+  if (updatedAt === null || validTimestamp) result.updatedAt = updatedAt;
+  if (updatedBy === null || typeof updatedBy === 'string' && updatedBy.length <= 120 && updatedBy.trim()
+    && !/[\u0000-\u001f\u007f]/.test(updatedBy)) result.updatedBy = updatedBy;
+  return result;
+}
+
 export function configureAiEconomics(state, input, actor='system') {
   const settings=ensureAiEconomics(state);
   if (input.routingMode !== undefined) {

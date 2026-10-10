@@ -1,3 +1,4 @@
+import { legacyReadDeferral } from './legacy-read-safety.mjs';
 import { CONNECTORS, connectionCentre, connectionSettings } from './connection-centre.mjs';
 import { META_READ_SCOPES, META_CATALOG_SCOPES } from './meta-capabilities.mjs';
 
@@ -35,6 +36,8 @@ export function expectedReadScopes(provider, areas) {
 }
 
 export function classifyConnectionIssue(state, provider, now = new Date()) {
+  const deferred = legacyReadDeferral(state, provider, { now: now.getTime() });
+  if (deferred) return { kind: 'saved_read_hold', severity: 'important', message: deferred.message, action: { action: 'open', label: 'Review' }, repair: null };
   const status = state.integrationStatus?.[provider] || {}, record = recordFor(state, provider);
   const code = String(state.connectionAuthAttention?.[provider]?.code || status.lastError || record?.lastError || '');
   const first = state.connectionFirstSync?.[provider];
@@ -94,7 +97,7 @@ export function connectionHealth(state, channel, readiness, { now = new Date(), 
     lastSuccessfulSyncAt: channel.lastSuccessfulSyncAt, lastFailedSyncAt: channel.lastFailedSyncAt, dataFreshness: stale ? 'stale' : Number.isFinite(last) ? 'current' : 'not_measured',
     activeReads: channel.history.filter(r => r.status === 'running').length,
     failedAreas: Object.keys(state.connectionFirstSync?.[channel.id]?.failures || {}),
-    nextRetryAt: doctor?.nextRetryAt || null, webhookHealth: 'not_monitored',
+    nextRetryAt: legacyReadDeferral(state, channel.id, { now: now.getTime() })?.retryAt || doctor?.nextRetryAt || null, webhookHealth: 'not_monitored',
     persistenceHealth: persistence.primaryPersistence === false ? 'degraded' : persistence.primaryPersistence ? 'healthy' : 'not_measured',
     schedulerHealth: scheduler.lastError ? 'attention' : scheduler.lastTickAt ? 'running' : 'not_measured', schedulerLastTickAt: scheduler.lastTickAt || null };
 }

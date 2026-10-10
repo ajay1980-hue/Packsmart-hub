@@ -1,6 +1,7 @@
-import { CONNECTORS, beginConnectionSync, connectionSettings, connectionDue } from './connection-centre.mjs';
+import { CONNECTORS, beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue } from './connection-centre.mjs';
 import { addAudit } from './events.mjs';
 import { classifyConnectionIssue, recordFor, safeFailureCode } from './connection-intelligence.mjs';
+import { assertLegacyReadAdmission, isLegacyReadDeferred, legacyReadDeferral } from './legacy-read-safety.mjs';
 
 const iso = () => new Date().toISOString();
 const transient = error => error?.upstreamStatus === 429 || error?.upstreamStatus >= 500 || /RATE_LIMIT|TIMEOUT|ETIMEDOUT|ECONNRESET/.test(error?.code || '') || ['AbortError','TimeoutError','TypeError'].includes(error?.name);
@@ -9,6 +10,7 @@ function event(state, provider, type, detail = {}) {
 }
 
 export function queueFirstSync(state, provider, actor) {
+  assertLegacyReadAdmission(state, provider);
   const settings = connectionSettings(state, provider);
   state.connectionFirstSync = { ...state.connectionFirstSync, [provider]: {
     status: 'queued', actor, identityVerifiedAt: recordFor(state, provider)?.lastCheckedAt || null,
@@ -57,18 +59,24 @@ function readGroups(provider, areas) {
 }
 
 export async function runFirstSync(state, provider, { integrations, readSync, save, retryFailedOnly = false }) {
+  assertLegacyReadAdmission(state, provider);
   const first = state.connectionFirstSync?.[provider];
   if (!first || !first.identityVerifiedAt || connectionSettings(state, provider).disconnected) return;
   const areas = Object.keys(first.areas).filter(a => !retryFailedOnly || first.areas[a] !== 'completed');
+  const previousStatus = first.status;
   first.status = 'running';
   await save();
   for (const group of readGroups(provider, areas)) {
     if (!group.length) continue;
+    assertLegacyReadAdmission(state, provider);
+    const previousAreas = { ...first.areas };
     for (const area of group) first.areas[area] = 'running';
     const run = beginConnectionSync(state, provider, { areas: group, actor: first.actor || 'connection-doctor' });
     await save(); // durable lease before any read; CAS and the workspace lock protect it
     try {
+      assertLegacyReadAdmission(state, provider);
       const result = await readSync(state, integrations, provider, { run, retry: false });
+      assertLegacyReadAdmission(state, provider);
       const failed = result.failedAreas || (result.degradedSurfaces || []).flatMap(surface => surface === 'marketing' ? ['promotions'] : ['inventory','offers'].includes(surface) ? ['products','inventory','prices'] : [surface]);
       for (const area of group) {
         const bad = failed.includes(area) || (result.lastError && !failed.length);
@@ -77,6 +85,15 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
         else delete first.failures[area];
       }
     } catch (error) {
+      if (error.code === 'STATE_CONFLICT' || /PERSISTENCE|SUPABASE/.test(error.code || '')) throw error;
+      const deferred = isLegacyReadDeferred(error) ? error : legacyReadDeferral(state, provider);
+      if (deferred) {
+        first.areas = previousAreas;
+        first.status = previousStatus;
+        finishConnectionSync(state, run, null, deferred);
+        await save();
+        throw Object.assign(new Error(deferred.message), deferred);
+      }
       for (const area of group) { first.areas[area] = 'failed'; first.failures[area] = { code: safeFailureCode(error), upstreamStatus: error.upstreamStatus || null, transient: transient(error) }; }
       // A rejected credential/identity or rate limit must stop further provider calls.
       if (/AUTH|CREDENTIAL|ACCOUNT_MISMATCH|RATE_LIMIT/.test(error.code || '') || error.upstreamStatus === 429) {
@@ -108,6 +125,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
 export async function runConnectionDoctor(state, { integrations, readSync, save, now = new Date() }) {
   let changed = false;
   for (const provider of Object.keys(CONNECTORS)) {
+    if (legacyReadDeferral(state, provider, { automatic: true, now: now.getTime() })) continue;
     const settings = connectionSettings(state, provider), record = recordFor(state, provider);
     if (settings.disconnected || !record?.encryptedCredentials || !CONNECTORS[provider].areas.length) continue;
     const first = state.connectionFirstSync?.[provider];
@@ -142,9 +160,11 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     await save();
     changed = true;
     try {
+      assertLegacyReadAdmission(state, provider, { automatic: true });
       if (refresh) {
         const oldStatus = structuredClone(state.integrationStatus?.[provider] || {});
         await integrations.testConnection(state, provider, { refresh: true });
+        assertLegacyReadAdmission(state, provider, { automatic: true });
         // A token check cannot erase an outstanding read failure.
         if (oldStatus.lastError) state.integrationStatus[provider] = oldStatus;
       } else {
@@ -159,12 +179,14 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
         }
         if (state.integrationStatus?.[provider]?.lastError) throw Object.assign(new Error('Read still needs attention'), { code: 'PARTIAL_READ' });
       }
+      assertLegacyReadAdmission(state, provider, { automatic: true });
       const recoveredOutage = doctor.issue === 'provider_unavailable';
       Object.assign(doctor, { attempts:0, nextRetryAt:null, exhausted:false, lastSuccessAt:iso(), issue: refresh || commerceOnly ? doctor.issue : null });
       event(state, provider, 'repair_success', { action, message: (issue && !commerceOnly) || refresh ? `Runvara detected and repaired your ${CONNECTORS[provider].name} connection. No action required.` : null });
       if (recoveredOutage && !refresh) event(state, provider, 'provider_recovery', { message:`${CONNECTORS[provider].name} reads recovered. No action required.` });
     } catch (error) {
       if (error.code === 'STATE_CONFLICT' || /PERSISTENCE|SUPABASE/.test(error.code || '')) throw error;
+      if (isLegacyReadDeferred(error) || legacyReadDeferral(state, provider)?.code === 'READ_COMPATIBILITY_DEFERRED') continue;
       doctor.attempts = (doctor.attempts || 0) + 1;
       doctor.exhausted = doctor.attempts >= 5;
       const backoff = Math.min(3600000, 60000 * 2 ** (doctor.attempts - 1));

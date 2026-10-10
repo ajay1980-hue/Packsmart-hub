@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { decryptCredentials, encryptCredentials, safeEqual } from './security.mjs';
 import { connectionError, connectionSettings, validateAreas } from './connection-centre.mjs';
+import { assertLegacyReadAdmission } from './legacy-read-safety.mjs';
 
 import { META_VERSION, META_READ_SCOPES, META_CATALOG_SCOPES, META_PUBLISH_SCOPES } from './meta-capabilities.mjs';
 
@@ -175,45 +176,60 @@ export const connectorMethods = {
     return credentials;
   },
   async testConnection(state, provider, { refresh = false } = {}) {
+    assertLegacyReadAdmission(state, provider);
     if (connectionSettings(state, provider).disconnected) throw connectionError('Reconnect this channel first.', 'CONNECTION_DISCONNECTED', 409);
     let identity, record;
-    if (provider === 'shopify') {
-      const config = this.shopifyConfig(state); record = config.connection;
-      if (config.mode === 'oauth') {
+    try {
+      if (provider === 'shopify') {
+        const config = this.shopifyConfig(state); record = config.connection;
+        if (config.mode === 'oauth') {
+          const credentials = await this.connectorCredentials(state, provider, { forceRefresh: refresh });
+          assertLegacyReadAdmission(state, provider);
+          identity = await this.connectorIdentity(provider, credentials);
+        } else {
+          if (refresh) this.shopifyTokenCache.delete(config.cacheKey);
+          const accessToken = await this.shopifyAccessToken(config);
+          assertLegacyReadAdmission(state, provider);
+          identity = await this.connectorIdentity(provider, { ...config, accessToken, storeDomain: config.domain });
+        }
+      } else if (provider === 'ebay') {
+        const config = this.ebayConfig(state); record = config.connection;
+        if (config.mode === 'direct_oauth') {
+          if (refresh) this.ebayTokenCache.delete(config.cacheKey);
+          const accessToken = await this.ebayAccessToken(config);
+          assertLegacyReadAdmission(state, provider);
+          identity = await this.connectorIdentity(provider, { accessToken });
+        } else {
+          const value = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
+          if (!(value.connected || value.authenticated || value.ebayConnected)) throw connectionError('Your eBay Manager connection needs attention.', 'CONNECTION_AUTH_REQUIRED', 422);
+          identity = { account: value.account || value.username || value.ebayUser };
+        }
+        if (!identity.account || identity.account.toLowerCase() !== config.expectedAccount.toLowerCase()) throw connectionError('This is a different eBay seller. Reconnect the expected account.', 'ACCOUNT_MISMATCH', 422);
+      } else {
         const credentials = await this.connectorCredentials(state, provider, { forceRefresh: refresh });
+        assertLegacyReadAdmission(state, provider);
         identity = await this.connectorIdentity(provider, credentials);
-      } else {
-        if (refresh) this.shopifyTokenCache.delete(config.cacheKey);
-        identity = await this.connectorIdentity(provider, { ...config, accessToken: await this.shopifyAccessToken(config), storeDomain: config.domain });
+        record = state.connections.find(item => item.provider === provider);
+        if (record.metadata?.accountId && record.metadata.accountId !== identity.accountId) throw connectionError('This is a different account. Reconnect to confirm the change.', 'ACCOUNT_MISMATCH', 422);
       }
-    } else if (provider === 'ebay') {
-      const config = this.ebayConfig(state); record = config.connection;
-      if (config.mode === 'direct_oauth') {
-        if (refresh) this.ebayTokenCache.delete(config.cacheKey);
-        identity = await this.connectorIdentity(provider, { accessToken: await this.ebayAccessToken(config) });
-      } else {
-        const value = await this.ebayGet(config, ['/api/ebay/status', '/api/status', '/api/health']);
-        if (!(value.connected || value.authenticated || value.ebayConnected)) throw connectionError('Your eBay Manager connection needs attention.', 'CONNECTION_AUTH_REQUIRED', 422);
-        identity = { account: value.account || value.username || value.ebayUser };
-      }
-      if (!identity.account || identity.account.toLowerCase() !== config.expectedAccount.toLowerCase()) throw connectionError('This is a different eBay seller. Reconnect the expected account.', 'ACCOUNT_MISMATCH', 422);
-    } else {
-      const credentials = await this.connectorCredentials(state, provider, { forceRefresh: refresh });
-      identity = await this.connectorIdentity(provider, credentials);
-      record = state.connections.find(item => item.provider === provider);
-      if (record.metadata?.accountId && record.metadata.accountId !== identity.accountId) throw connectionError('This is a different account. Reconnect to confirm the change.', 'ACCOUNT_MISMATCH', 422);
+    } catch (error) {
+      assertLegacyReadAdmission(state, provider);
+      throw error;
     }
+    assertLegacyReadAdmission(state, provider);
     if (record) { record.lastCheckedAt = new Date().toISOString(); record.metadata = { ...record.metadata, ...identity }; record.status = 'connected'; record.lastError = null; }
     const previous = state.integrationStatus?.[provider] || {};
     state.integrationStatus = { ...state.integrationStatus, [provider]: { ...previous, status: 'connected', lastError: null, detail: 'Connection tested successfully. Sync now to refresh your data.' } };
     return { ok: true, identity, checkedAt: record?.lastCheckedAt || new Date().toISOString() };
   },
   async syncProvider(state, provider, options = {}) {
+    assertLegacyReadAdmission(state, provider, { automatic: options.automatic });
     if (provider === 'shopify') return this.syncShopify(state, options);
     if (provider === 'ebay') return this.syncEbay(state, options);
     if (provider === 'meta') return this.syncMeta(state, options);
     const selected = validateAreas(provider, options.areas || connectionSettings(state, provider).areas);
     const credentials = await this.connectorCredentials(state, provider);
+    assertLegacyReadAdmission(state, provider);
     const data = { ...state.channelData?.[provider] };
     const readAreas = provider === 'tiktok_shop' ? [...new Set(selected.map(area => ['variants','inventory','prices'].includes(area) ? 'products' : area))] : selected;
     let tiktokShops;
@@ -260,6 +276,7 @@ export const connectorMethods = {
       }
       const items = []; let cursor = null;
       for (let page = 0; page < 20; page++) {
+        assertLegacyReadAdmission(state, provider);
         const path = `/${area}`;
         const payload = await this.connectorGet(provider, path, credentials, provider === 'google_youtube' ? { part: 'id,snippet,statistics', mine: 'true', maxResults: '50', ...(cursor ? { pageToken: cursor } : {}) } : { page_size: '100', ...(cursor ? { bookmark: cursor } : {}) });
         const rows = payload.items || payload.data || [];
@@ -270,6 +287,7 @@ export const connectorMethods = {
       }
       data[area] = items;
     }
+    assertLegacyReadAdmission(state, provider);
     state.channelData = { ...state.channelData, [provider]: data };
     const record = state.connections.find(item => item.provider === provider), now = new Date().toISOString();
     record.status = 'connected'; record.lastSyncAt = now; record.lastError = null;

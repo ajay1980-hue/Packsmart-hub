@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { addAudit } from './events.mjs';
 import { META_WRITES, META_ORDER_RESTRICTION } from './meta-capabilities.mjs';
+import { assertLegacyReadAdmission, isLegacyReadDeferred, legacyReadDeferral } from './legacy-read-safety.mjs';
 
 // One capability registry for the existing IntegrationService, UI and scheduler.
 // Areas describe implemented reads, not the provider's theoretical API features.
@@ -67,6 +68,7 @@ export function saveConnectionSettings(state, provider, body, user) {
   return next;
 }
 export function activateConnection(state, provider, actor) {
+  assertLegacyReadAdmission(state, provider);
   const previous = connectionSettings(state, provider);
   state.connectionSettings = { ...state.connectionSettings, [provider]: { ...previous, disconnected: false, permissionMode: 'read_only', consent: null, revision: previous.revision + 1 } };
   if (previous.permissionMode !== 'read_only') addAudit(state, { type: 'connection_permissions_reset', actor, detail: { provider, reason: 'Connection replaced; owner consent must be renewed.' } });
@@ -102,6 +104,7 @@ export function recoveryFor(provider, status = {}, coverage = {}) {
   return null;
 }
 export function beginConnectionSync(state, provider, { areas, automatic = false, actor = 'system' } = {}) {
+  assertLegacyReadAdmission(state, provider, { automatic });
   const selected = validateAreas(provider, areas || connectionSettings(state, provider).areas);
   state.connectionSyncs ||= [];
   const now = Date.now();
@@ -116,6 +119,10 @@ export function beginConnectionSync(state, provider, { areas, automatic = false,
   return run;
 }
 export function finishConnectionSync(state, run, result, error) {
+  if (isLegacyReadDeferred(error)) {
+    Object.assign(run, { status: 'deferred', stage: 'Read deferred', completedAt: new Date().toISOString(), errorCode: null, deferredReason: error.code });
+    return;
+  }
   const partial = Boolean(result?.lastError || result?.status === 'degraded');
   Object.assign(run, { status: error ? 'failed' : partial ? 'partial' : 'completed', stage: error ? 'Needs attention' : partial ? 'Some data needs attention' : 'Finished', completedAt: new Date().toISOString(), errorCode: error?.code || null });
   if (!error && !partial) {
@@ -125,6 +132,7 @@ export function finishConnectionSync(state, run, result, error) {
   addAudit(state, { type: 'connection_sync_finished', actor: run.actor, detail: { provider: run.provider, runId: run.id, areas: run.areas, status: run.status, errorCode: run.errorCode } });
 }
 export function connectionDue(state, provider, now = new Date()) {
+  if (legacyReadDeferral(state, provider, { automatic: true, now: now.getTime() })) return false;
   const settings = connectionSettings(state, provider), status = state.integrationStatus?.[provider] || {};
   if (settings.disconnected || !settings.autoSync || !settings.areas.length || /AUTH|CREDENTIAL|TOKEN|ACCESS_DENIED|PERMISSION|ACCOUNT_MISMATCH/.test(String(status.lastError || ''))) return false;
   const doctor = state.connectionDoctor?.[provider];
@@ -135,12 +143,28 @@ export function connectionDue(state, provider, now = new Date()) {
   const at = Date.parse(recent?.startedAt || status.lastAttemptAt || status.lastSyncAt || '');
   return !Number.isFinite(at) || now.getTime() - at >= settings.frequencyMinutes * 60000;
 }
+function publicEbayReadDiagnostics(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== 'object' || Array.isArray(diagnostics)) return {};
+  const entries = [];
+  let inspected = 0;
+  for (const surface in diagnostics) {
+    if (!Object.hasOwn(diagnostics, surface)) continue;
+    if (++inspected > 100) break;
+    const entry = diagnostics[surface];
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    entries.push([surface, { code: entry.code, httpStatus: entry.httpStatus, stage: entry.stage === 'ads' ? 'ads' : 'campaigns',
+      failedCampaigns: (Array.isArray(entry.failedCampaigns) ? entry.failedCampaigns : []).slice(0, 100).filter(item => item && typeof item === 'object').map(item => ({ campaignId: String(item.campaignId), status: item.status, httpStatus: item.httpStatus })),
+      errorIds: (Array.isArray(entry.errorIds) ? entry.errorIds : []).slice(0, 100).map(String).filter(id => /^\d{1,12}$/.test(id)), at: entry.at }]);
+  }
+  return Object.fromEntries(entries);
+}
 export function connectionCentre(state, integrations) {
   return Object.entries(CONNECTORS).map(([id, definition]) => {
     const settings = connectionSettings(state, id), health = state.integrationStatus?.[id] || {};
     const record = id === 'ebay' ? integrations.ebayConnection?.(state) : (state.connections || []).find(item => item.provider === id);
     const configured = !settings.disconnected && (id === 'shopify' ? integrations.shopifyConfigured?.(state) : id === 'ebay' ? integrations.ebayConfigured?.(state) : Boolean(record?.encryptedCredentials));
-    const recovery = recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {});
+    const deferred = legacyReadDeferral(state, id);
+    const recovery = deferred ? { message: deferred.message, action: 'open', label: 'Review' } : recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {});
     const status = settings.disconnected ? 'disconnected' : !configured ? 'not_configured' : recovery?.action === 'reconnect' ? 'action_required' : recovery ? 'degraded' : ['connected', 'configured'].includes(health.status || record?.status) ? (health.status === 'connected' ? 'connected' : 'action_required') : 'action_required';
     const history = (state.connectionSyncs || []).filter(run => run.provider === id).slice(0, 30).map(run => ({ ...run, ...(run.status === 'running' && Date.parse(run.leaseUntil) <= Date.now() ? { status: 'failed', stage: 'Interrupted — retry sync', errorCode: 'WORKER_INTERRUPTED' } : {}) }));
     const products = id === 'shopify' ? (state.products || []).filter(product => product.provider === 'shopify') : id === 'ebay' ? state.ebay?.listings || [] : [];
@@ -148,7 +172,7 @@ export function connectionCentre(state, integrations) {
     const counts = { ...(id === 'shopify' || id === 'ebay' ? { products: products.length, orders: (state.orders || []).filter(order => order.provider === id).length } : {}), ...(id === 'shopify' ? { variants: products.reduce((sum, product) => sum + (product.variants?.length || 0), 0), customers: state.channelData?.shopify?.customers?.length || 0 } : {}), ...Object.fromEntries(Object.entries(readData).filter(([,value]) => Array.isArray(value)).map(([key,value]) => [key,value.length])) };
     const granted = record?.metadata?.grantedScopes || [];
     return { id, name: definition.name, status, configured, settings, identity: record?.metadata?.shopDomain || record?.metadata?.account || health.account || null,
-      readDiagnostics: id === 'ebay' ? Object.fromEntries(Object.entries(state.ebay?.coverage?.readDiagnostics || {}).map(([surface, entry]) => [surface, { code: entry.code, httpStatus: entry.httpStatus, stage: entry.stage === 'ads' ? 'ads' : 'campaigns', failedCampaigns: (entry.failedCampaigns || []).map(item => ({campaignId: String(item.campaignId), status: item.status, httpStatus:item.httpStatus})), errorIds: (entry.errorIds || []).map(String).filter(id => /^\d{1,12}$/.test(id)), at: entry.at }])) : {},
+      readDiagnostics: id === 'ebay' ? publicEbayReadDiagnostics(state.ebay?.coverage?.readDiagnostics) : {},
       grantedScopes: granted, accessExpiresAt: integrations.connectionAccessExpiry?.(record) || null,
       lastFailedSyncAt: history.find(run => ['failed', 'partial'].includes(run.status))?.completedAt || history.find(run => ['failed', 'partial'].includes(run.status))?.startedAt || null,
       audit: (state.audit || []).filter(event => event.detail?.provider === id).slice(0, 30).map(({ id, type, createdAt }) => ({ id, type, createdAt })),

@@ -117,18 +117,22 @@ function definition(input, workspaceId) {
   return { workspaceId, title: text(input.title, 'Objective title', 160), metric, baseline, target, direction, startsAt, endsAt,
     status: enumValue(own(input, 'status') ? input.status : 'active', OBJECTIVE_STATUSES, 'objective status'), limits: normalizedLimits };
 }
-function storedObjectives(state, workspaceId) {
+function storedObjectives(state, workspaceId, { readOnly = false } = {}) {
   const rows = state.businessObjectives === undefined ? [] : state.businessObjectives;
   if (!Array.isArray(rows) || rows.length > MAX_BUSINESS_OBJECTIVES) throw fail('Stored objective collection is invalid', 'OBJECTIVES_INVALID', 409);
   const ids = new Set();
   return rows.map(row => {
     assertScope(workspaceId, row);
     if (!object(row)) throw fail('Stored objective is invalid', 'OBJECTIVES_INVALID', 409);
-    record(row, 'stored objective', [...OBJECTIVE_FIELDS, 'createdAt', 'updatedAt']);
-    const { createdAt, updatedAt, ...input } = row;
+    record(row, 'stored objective', [...OBJECTIVE_FIELDS, 'createdAt', 'updatedAt', ...(readOnly ? ['executionPolicy'] : [])]);
+    const { createdAt, updatedAt, executionPolicy: _executionPolicy, ...input } = row;
     if (!ID_PATTERN.test(input.id) || ids.has(input.id)) throw fail('Stored objective identity is invalid', 'OBJECTIVES_INVALID', 409);
     ids.add(input.id);
-    return { id: input.id, ...definition(input, workspaceId), revision: numeric(input.revision, 'Revision', { min: 1, integer: true }), createdAt: date(createdAt, 'createdAt'), updatedAt: date(updatedAt, 'updatedAt') };
+    return { id: input.id, ...definition(input, workspaceId), revision: numeric(input.revision, 'Revision', { min: 1, integer: true }), createdAt: date(createdAt, 'createdAt'), updatedAt: date(updatedAt, 'updatedAt'),
+      // An opaque policy may contain private future authority fields. Display
+      // only an unsupported marker, retaining every original byte in state.
+      // Editing and evaluation keep their strict legacy validation.
+      ...(readOnly && own(row, 'executionPolicy') ? { executionPolicySupported: false } : {}) };
   });
 }
 function temporalStatus(row, now) {
@@ -167,7 +171,7 @@ export function upsertBusinessObjective(state, input, options = {}) {
 /** Pure detached projection: never initialize state or return nested references. */
 export function businessObjectivesSnapshot(state, options = {}) {
   const workspaceId = workspace(state, options), now = currentTime(options.now);
-  const objectives = storedObjectives(state, workspaceId).map(row => ({ ...row, effectiveStatus: temporalStatus(row, now) }));
+  const objectives = storedObjectives(state, workspaceId, { readOnly: true }).map(row => ({ ...row, effectiveStatus: temporalStatus(row, now) }));
   return { schema: 'runvara-business-objectives/v1', workspaceId, generatedAt: now, objectives,
     summary: { total: objectives.length, active: objectives.filter(row => row.effectiveStatus === 'active').length, limit: MAX_BUSINESS_OBJECTIVES },
     supportedMetrics: Object.keys(OBJECTIVE_METRICS), supportedKinds: [...KINDS],

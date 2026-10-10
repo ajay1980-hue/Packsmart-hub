@@ -48,6 +48,15 @@ jobs:
         run: node saas/server/tests/business-outcomes-browser-check.mjs
       - name: Verify workspace activity on mobile and desktop
         run: node saas/server/tests/activity-browser-check.mjs
+      - name: Verify production compatibility bridge on mobile and desktop
+        run: node saas/server/tests/compatibility-bridge-browser-check.mjs
+      - name: Upload compatibility bridge verification images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-compatibility-bridge
+          path: /tmp/runvara-compatibility-bridge
+          if-no-files-found: ignore
       - name: Upload responsive verification image
         if: always()
         uses: actions/upload-artifact@v4
@@ -69,14 +78,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test_env_file="$(mktemp "$RUNNER_TEMP/runvara-container-env.XXXXXX")"
+          trap 'docker rm -f packsmart-ops-test >/dev/null 2>&1 || true; rm -f "$test_env_file"' EXIT
+          node --input-type=module - "$test_env_file" <<'NODE'
+          import { randomBytes } from 'node:crypto';
+          import { writeFileSync } from 'node:fs';
+          const ephemeral = () => randomBytes(32).toString('base64url');
+          writeFileSync(process.argv[2], [
+            'NODE_ENV=test',
+            'PACKSMART_ADMIN_EMAIL=container-smoke@example.test',
+            `PACKSMART_ADMIN_PASSWORD=Ci1!${ephemeral()}`,
+            `SESSION_SECRET=${ephemeral()}`,
+            `CREDENTIALS_KEY=${ephemeral()}`
+          ].join('\n') + '\n', { mode: 0o600 });
+          NODE
           docker run -d --name packsmart-ops-test -p 8787:8787 \
-            -e NODE_ENV=test \
-            -e PACKSMART_ADMIN_EMAIL=sales@packsmartsolutions.com \
-            -e PACKSMART_ADMIN_PASSWORD='Packsmart-Test-Only!2026' \
-            -e SESSION_SECRET='test-session-secret-with-more-than-thirty-two-characters' \
-            -e CREDENTIALS_KEY='test-credential-key-with-more-than-thirty-two-characters' \
-            packsmart-ops:test
-          trap 'docker rm -f packsmart-ops-test >/dev/null 2>&1 || true' EXIT
+            --env-file "$test_env_file" packsmart-ops:test
           for attempt in {1..20}; do
             if curl --fail --silent http://127.0.0.1:8787/api/health | grep -q '"authentication":true'; then
               exit 0
