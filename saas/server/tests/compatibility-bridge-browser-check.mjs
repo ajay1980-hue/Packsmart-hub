@@ -37,12 +37,12 @@ async function settle(page) {
   });
 }
 
-async function enlargeText(page, scale) {
+async function enlargeText(page, scale, probeSelector = '.connection-write > b') {
   // Text-only enlargement, including fixed-pixel text. Snapshot all computed
   // sizes before applying them so nested inheritance does not compound to 400%.
   // Keep the root size, widths, spacing and normal motion rules unchanged.
-  return page.evaluate(scale => {
-    const title = document.querySelector('.connection-write > b');
+  return page.evaluate(({ scale, probeSelector }) => {
+    const title = document.querySelector(probeSelector);
     const before = parseFloat(getComputedStyle(title).fontSize);
     if (scale !== 1) {
       const values = [...document.body.querySelectorAll('*'), document.body]
@@ -54,7 +54,74 @@ async function enlargeText(page, scale) {
       }
     }
     return { before, after: parseFloat(getComputedStyle(title).fontSize), scale };
-  }, scale);
+  }, { scale, probeSelector });
+}
+
+async function overflowDiagnostics(page) {
+  return page.evaluate(() => {
+    const round = value => Math.round(value * 100) / 100;
+    const describe = element => {
+      const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+      return { tag: element.tagName.toLowerCase(), id: element.id, classes: element.className,
+        parent: element.parentElement?.id || element.parentElement?.className || '',
+        text: (element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 90),
+        rect: { left: round(rect.left), right: round(rect.right), top: round(rect.top), bottom: round(rect.bottom) },
+        clientWidth: element.clientWidth, scrollWidth: element.scrollWidth, inDialog: Boolean(element.closest('#connection-dialog')),
+        intersectsViewport: rect.bottom > 0 && rect.top < innerHeight, fontSize: style.fontSize, lineHeight: style.lineHeight,
+        display: style.display, position: style.position, flexShrink: style.flexShrink, whiteSpace: style.whiteSpace, overflowX: style.overflowX };
+    };
+    const overflowing = [...document.body.querySelectorAll('*')].filter(element => {
+      if (!(element instanceof HTMLElement) || element.matches('script,style')) return false;
+      const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden'
+        && (rect.left < -1 || rect.right > innerWidth + 1 || element.scrollWidth > element.clientWidth + 1);
+    }).map(describe).sort((a, b) => Number(b.intersectsViewport) - Number(a.intersectsViewport) || b.rect.right - a.rect.right);
+    return { viewport: { width: innerWidth, height: innerHeight }, pageScroll: document.documentElement.scrollWidth,
+      bodyScroll: document.body.scrollWidth, dialogOpen: document.querySelector('#connection-dialog').open,
+      overflowCount: overflowing.length, overflow: overflowing.slice(0, 24),
+      commandBar: [...document.querySelectorAll('.command-bar,.top-actions,#mobile-menu,#refresh-all,#open-workspace-search,.account-shortcut')].map(describe) };
+  });
+}
+
+async function diagnoseFailure(page, browser, { width, scenario, scale, error }) {
+  // Preserve the failing normal-height state before running isolated controls.
+  // Diagnostics do not change the assertion, fix styles, hide the background,
+  // or enlarge the evidence viewport.
+  assert.deepEqual(page.viewportSize(), { width, height: 900 });
+  const stem = `${scenario}-${scale * 100}pct-failure`;
+  const file = `${width}/${stem}.png`;
+  await page.screenshot({ path: path.join(output, file) });
+  const bytes = await fs.readFile(path.join(output, file));
+  const failure = { schema: 'runvara-compatibility-browser-failure/v1', error: error.message, scenario, scale,
+    sourceHashes, fixtureSha256: sha256(document), screenshot: { file, sha256: sha256(bytes) },
+    actual: await overflowDiagnostics(page), controls: [] };
+  for (const compatibility of [false, true]) {
+    const context = await browser.newContext({ viewport: { width, height: 900 }, timezoneId: 'UTC', locale: 'en-GB', reducedMotion: 'no-preference' });
+    const probe = await context.newPage(), requests = [], errors = [];
+    probe.on('pageerror', error => errors.push(error.message));
+    await probe.route('**/*', route => { requests.push(route.request().url()); return route.abort(); });
+    try {
+      const fixture = compatibility ? document : await renderConnectionPreview();
+      await probe.setContent(fixture);
+      await settle(probe);
+      const normal = await overflowDiagnostics(probe);
+      const font = await enlargeText(probe, scale, '#page-title');
+      await settle(probe);
+      const enlarged = await overflowDiagnostics(probe);
+      const controlFile = `${width}/${stem}-${compatibility ? 'compatibility' : 'ordinary'}-before-modal.png`;
+      await probe.screenshot({ path: path.join(output, controlFile) });
+      failure.controls.push({ compatibility, fixtureSha256: sha256(fixture), normal, font, enlarged, errors, requests,
+        screenshot: { file: controlFile, sha256: sha256(await fs.readFile(path.join(output, controlFile))) } });
+    } finally {
+      await context.close();
+    }
+  }
+  const evidenceFile = `${width}/${stem}.json`;
+  await fs.writeFile(path.join(output, evidenceFile), JSON.stringify(failure, null, 2) + '\n');
+  console.error(JSON.stringify({ failureEvidence: evidenceFile, actual: failure.actual,
+    controls: failure.controls.map(control => ({ compatibility: control.compatibility, normalPageScroll: control.normal.pageScroll,
+      enlargedPageScroll: control.enlarged.pageScroll, dialogOpen: control.enlarged.dialogOpen, font: control.font,
+      overflow: control.enlarged.overflow.slice(0, 8), screenshot: control.screenshot })) }));
 }
 
 async function checkLayout(page, width) {
@@ -210,6 +277,9 @@ try {
         assert.equal(await page.evaluate(() => window.fixtureRequests.every(request => request.method === 'GET')), true, 'review never attempts a write or retry');
         manifest.screenshots.push({ scenario, textScale: scale, font, validatedLayout: layout, ...screenshot });
         console.log(JSON.stringify({ scenario, width, textScale: scale, sha256: screenshot.sha256, file: screenshot.file }));
+      } catch (error) {
+        await diagnoseFailure(page, browser, { width, scenario, scale, error }).catch(diagnosticError => console.error(`Failure diagnostics could not complete: ${diagnosticError.message}`));
+        throw error;
       } finally {
         await context.close();
       }
