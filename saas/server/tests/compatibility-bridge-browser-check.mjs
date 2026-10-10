@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { chromium } from 'playwright';
-import { renderConnectionPreview } from './render-connection-preview.mjs';
+import { connectionPreviewFixture, renderConnectionPreview } from './render-connection-preview.mjs';
 
 const output = '/tmp/runvara-compatibility-bridge';
 const widths = [320, 390, 1200];
@@ -15,19 +15,57 @@ const scales = [1, 2];
 const scenarios = ['compatibility-held', 'legacy-exact-change'];
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 const document = await renderConnectionPreview({ compatibility: true });
+const bridgeUI = await fs.readFile(new URL('../../connections-ui.js', import.meta.url), 'utf8');
+const productionCommit = 'd32da62d0e7935597638266d44d88ae5e066d51f';
+const bridgeUIHash = '709fdea888665674f99cbb0b10b71c4a027900c36c6ec6609ec6cf8d0e6bfae0';
+const productionUIHash = '38130b168f8656a85c204f6843581410520dbff5870d580f01e7b13dbb25e01e';
+const ordinaryPayloadHash = '7c55a5b8685a58721e97db68599b42a53459977f561db7100df55dca02bb7561';
+const sharedProductionHashes = {
+  '../../index.html': '126402f9402fd7376820a86b137f8a05a72b7a5ed8e49a143b677f3ecbbec994',
+  '../../styles.css': '7bbc1357117ece3f26712d07ca8d63b6e7f7bb606dacb9020c854a8815205dbb',
+  '../../presentation.js': '0dab35ef8e42f23660b3c461f95fde1988597385a75b405fc554399d43b6e20b',
+  '../../favicon.svg': 'b3463c0684a3fa60eb788b71242dba3f300e76e061ae94c3d0c6e1be0d2f99c2'
+};
+function requireHash(value, expected, name) {
+  assert.equal(sha256(value), expected, `${name} changed; the production control must be reviewed again`);
+}
+// Literal original lines from d32da62. Both complete source hashes are pinned;
+// this is an exact reverse patch, never a fallback to the current ordinary UI.
+const originalProductionLines = [[112, "      ${writes.length ? `<section class=\"connection-section\"><h3>Proposed changes</h3>${writes.slice(0,15).map(write => `<article class=\"connection-write\"><b>${esc(write.input.operation.replaceAll('_',' '))}</b><p>${esc(write.status.replaceAll('_',' '))}</p><details><summary>Review exact change</summary><dl>${Object.entries(write.input).map(([key,value]) => `<dt>${esc(key.replace(/([A-Z])/g,' $1'))}</dt><dd class=\"connection-exact-text\">${esc(value)}</dd>`).join('')}</dl></details><div class=\"button-row\">${write.approvalId ? button('approvals', 'Open Approval Centre', channel) : ''}${owner() && ['ready','processing'].includes(write.status) ? `<button class=\"secondary\" type=\"button\" data-connection-action=\"execute\" data-provider=\"${channel.id}\" data-write=\"${esc(write.id)}\">${write.status === 'processing' ? 'Check publishing progress' : write.requiresApproval ? 'Apply approved change' : 'Apply change'}</button>` : ''}</div>${write.status === 'processing' ? `<p>${write.observationErrorCode ? 'Instagram status could not be verified. The saved container is retained; check its status again after a minute.' : 'Instagram is preparing your image. Check again after a minute; the same approved request will be continued.'}</p>` : ''}${write.status === 'uncertain' ? '<p class=\"warn\">Check the channel before making another request. Runvara will not repeat an uncertain write.</p>' : ''}${write.status === 'failed' ? `<p class=\"warn\">${write.dispatchBlocked ? 'Runvara stopped this request before a new channel submission. Review the current permissions and prepare a new exact change.' : 'The channel declined this request. Test the connection, check the selected asset and fields, then prepare a new change.'}</p>` : ''}${write.result?.externalId ? `<p>Confirmed channel reference: ${esc(write.result.externalId)}</p>` : ''}</article>`).join('')}</section>` : ''}"], [113, "      <section class=\"connection-section\"><h3>Sync history</h3><p class=\"muted tiny\">Latest 30 syncs. Completed sync summaries remain in the workspace audit log.</p><div class=\"connection-history\">${channel.history.length ? channel.history.map(run => `<article><div><b>${esc({completed:'Completed',partial:'Partially completed',failed:'Needs attention',running:'In progress'}[run.status])}</b><small>${esc(when(run.startedAt))} · ${run.automatic ? 'Automatic' : 'Requested'}</small></div><p>${esc(run.areas.map(label).join(', '))}</p>${run.status === 'failed' || run.status === 'partial' ? '<p class=\"warn\">Some data could not be refreshed. Your previous data is retained. Use Sync now to retry.</p>' : ''}</article>`).join('') : '<p class=\"muted\">No sync history recorded yet. Your earlier imported data is retained.</p>'}</div></section>"], [154, "      if (operation === 'facebook_update') html += select('postId','Post published by Runvara',(data.connectionWrites || []).filter(item=>item.provider === 'meta' && item.status === 'completed' && item.input.operation === 'facebook_publish').map(item=>({id:item.result.externalId,name:item.input.message})));"]];
+function reconstructProductionUI(source) {
+  requireHash(source, bridgeUIHash, 'Bridge UI');
+  const lines = source.split('\n');
+  for (const [index, line] of originalProductionLines) lines[index] = line;
+  const reconstructed = lines.join('\n');
+  requireHash(reconstructed, productionUIHash, 'Reconstructed production UI');
+  return reconstructed;
+}
+const productionUI = reconstructProductionUI(bridgeUI);
+const ordinaryDocument = await renderConnectionPreview();
+requireHash(ordinaryDocument, 'a001ffb4d30eb1f8a71fb55233ceea2c71ec20177517d90517fc1c1ca58a73ac', 'Ordinary fixture HTML');
+requireHash(JSON.stringify(connectionPreviewFixture().payload), ordinaryPayloadHash, 'Ordinary fixture payload');
+const escapedBridgeUI = bridgeUI.replaceAll('</script', '<\\/script');
+assert.equal(ordinaryDocument.split(escapedBridgeUI).length, 2, 'exactly one embedded UI script is replaced');
+const productionDocument = ordinaryDocument.replace(escapedBridgeUI, productionUI.replaceAll('</script', '<\\/script'));
+requireHash(productionDocument, '6ef0a201cd6539d2ec98a83cf29507391343427c7a35ce76da9cfa461e0e232e', 'Reconstructed production fixture');
+
 const sourceHashes = Object.fromEntries(await Promise.all([
   '../../index.html', '../../favicon.svg', '../../styles.css', '../../presentation.js', '../../connections-ui.js',
   './render-connection-preview.mjs', './compatibility-bridge-browser-check.mjs', '../lib/action-display.mjs'
 ].map(async file => [file, sha256(await fs.readFile(new URL(file, import.meta.url)))])));
-const manifest = { schema: 'runvara-compatibility-browser-evidence/v1', syntheticOnly: true,
+for (const [file, expected] of Object.entries(sharedProductionHashes)) assert.equal(sourceHashes[file], expected, `Production layout source changed: ${file}`);
+const manifest = { verificationBoundary: 'Compatibility nonregression against production; existing enlarged-text page defects are retained', productionCommit, productionUIHash, ordinaryPayloadHash, productionFixtureSha256: sha256(productionDocument), productionControls: [], schema: 'runvara-compatibility-browser-evidence/v1', syntheticOnly: true,
   fixtureSha256: sha256(document), sourceHashes, screenshots: [] };
-for (const width of widths) {
+if (!process.argv.includes('--self-test')) for (const width of widths) {
   await fs.mkdir(path.join(output, String(width)), { recursive: true });
-  for (const name of [...scenarios.flatMap(scenario => scales.map(scale => `${scenario}-${scale * 100}pct.png`)), 'manifest.json']) {
+  for (const name of [...scenarios.flatMap(scenario => scales.flatMap(scale => {
+    const stem = `${scenario}-${scale * 100}pct`;
+    return [`${stem}.png`, `${stem}-failure.png`, `${stem}-failure.json`, `${stem}-failure-ordinary-before-modal.png`, `${stem}-failure-compatibility-before-modal.png`];
+  })), ...scales.map(scale => `production-ordinary-${scale * 100}pct.png`), 'production-controls.json', 'manifest.json']) {
     await fs.rm(path.join(output, String(width), name), { force: true });
   }
 }
-await fs.rm(path.join(output, 'manifest.json'), { force: true });
+if (!process.argv.includes('--self-test')) await fs.rm(path.join(output, 'manifest.json'), { force: true });
 
 async function settle(page) {
   await page.evaluate(async () => {
@@ -44,17 +82,234 @@ async function enlargeText(page, scale, probeSelector = '.connection-write > b')
   return page.evaluate(({ scale, probeSelector }) => {
     const title = document.querySelector(probeSelector);
     const before = parseFloat(getComputedStyle(title).fontSize);
-    if (scale !== 1) {
-      const values = [...document.body.querySelectorAll('*'), document.body]
+    const values = [...document.body.querySelectorAll('*'), document.body]
         .filter(element => element instanceof HTMLElement && !element.matches('script,style'))
         .map(element => { const style = getComputedStyle(element); return { element, fontSize: parseFloat(style.fontSize), lineHeight: parseFloat(style.lineHeight) }; });
+    if (scale !== 1) {
       for (const { element, fontSize, lineHeight } of values) {
         element.style.fontSize = `${fontSize * scale}px`;
         if (Number.isFinite(lineHeight)) element.style.lineHeight = `${lineHeight * scale}px`;
       }
     }
+    window.fixtureTextScale = { scale, values };
     return { before, after: parseFloat(getComputedStyle(title).fontSize), scale };
   }, { scale, probeSelector });
+}
+
+async function assertTextScaleStable(page) {
+  const errors = await page.evaluate(() => {
+    const snapshot = window.fixtureTextScale;
+    if (!snapshot) return ['Text enlargement was not recorded'];
+    const elements = [...document.body.querySelectorAll('*'), document.body].filter(element => element instanceof HTMLElement && !element.matches('script,style'));
+    const errors = [];
+    if (elements.length !== snapshot.values.length) errors.push('The document changed after enlargement');
+    for (const { element, fontSize, lineHeight } of snapshot.values) {
+      if (!element.isConnected) { errors.push('A scaled node was replaced'); break; }
+      const style = getComputedStyle(element);
+      if (Math.abs(parseFloat(style.fontSize) - fontSize * snapshot.scale) > .03
+        || Number.isFinite(lineHeight) && Math.abs(parseFloat(style.lineHeight) - lineHeight * snapshot.scale) > .03) {
+        errors.push(`Text size changed on ${element.id || element.tagName}`); break;
+      }
+    }
+    if (document.getAnimations().some(animation => animation.playState === 'running' && Number.isFinite(animation.effect?.getComputedTiming().endTime))) errors.push('A finite animation is still running');
+    return errors;
+  });
+  assert.deepEqual(errors, [], 'the tested text scale and nodes must survive until capture');
+}
+
+const maximumFixtureNodes = 5000;
+async function horizontalEvidence(page) {
+  return page.evaluate(maximumNodes => {
+    const nodes = [...document.querySelectorAll('*')];
+    if (nodes.length > maximumNodes) throw new Error('Fixture exceeds the complete-inspection node limit');
+    const ids = new Set();
+    for (const element of nodes) if (element.id) {
+      if (ids.has(element.id)) throw new Error(`Duplicate DOM id: ${element.id}`);
+      ids.add(element.id);
+    }
+    const path = element => {
+      const parts = [];
+      while (element) {
+        if (element.id) { parts.unshift(`#${CSS.escape(element.id)}`); break; }
+        if (element.hasAttribute('data-channel-card')) { parts.unshift(`[data-channel-card="${CSS.escape(element.getAttribute('data-channel-card'))}"]`); break; }
+        const index = element.parentElement ? [...element.parentElement.children].indexOf(element) + 1 : 1;
+        parts.unshift(`${element.localName}:nth-child(${index})`);
+        element = element.parentElement;
+      }
+      return parts.join(' > ');
+    };
+    const rows = [], identities = new Set();
+    for (const element of nodes) {
+      // Hidden/inert/off-screen/clipped nodes still count when they have a box.
+      // Native editable value scrolling is intentional; its outer box counts.
+      if (!element.getClientRects().length || element.matches('script,style,link,meta')) continue;
+      const identity = path(element);
+      if (identities.has(identity)) throw new Error(`Duplicate layout identity: ${identity}`);
+      identities.add(identity);
+      const rect = element.getBoundingClientRect();
+      const editable = element.matches('input,textarea,select');
+      const internalOverflow = !editable && element.scrollWidth > element.clientWidth + 1;
+      if (rect.left >= -1 && rect.right <= innerWidth + 1 && !internalOverflow) continue;
+      rows.push({ identity, tag: element.localName, classes: element.getAttribute('class') || '',
+        directText: [...element.childNodes].filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').replace(/\s+/g, ' ').trim(),
+        left: rect.left, right: rect.right, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth,
+        internalOverflow: internalOverflow ? element.scrollWidth - element.clientWidth : 0,
+        inDialog: Boolean(element.closest('#connection-dialog')) });
+    }
+    const skip = document.querySelector('.skip-link').getBoundingClientRect();
+    return { viewport: { width: innerWidth, height: innerHeight }, nodeCount: nodes.length,
+      pageScroll: document.documentElement.scrollWidth, rows, textScale: window.fixtureTextScale?.scale,
+      unfocusedSkipLinkVisible: document.activeElement !== document.querySelector('.skip-link') && skip.bottom > 0 };
+  }, maximumFixtureNodes);
+}
+
+function assertOverflowNonRegression(candidate, baseline) {
+  assert.deepEqual(candidate.viewport, baseline.viewport, 'baseline and candidate use the same viewport');
+  assert.equal(candidate.textScale, baseline.textScale, 'baseline and candidate use the same text enlargement');
+  for (const evidence of [candidate, baseline]) {
+    assert.ok(evidence.nodeCount <= maximumFixtureNodes, 'all fixture nodes are inspected');
+    assert.equal(new Set(evidence.rows.map(row => row.identity)).size, evidence.rows.length, 'overflow identities must be unique');
+  }
+  const background = new Map(baseline.rows.filter(row => !row.inDialog).map(row => [row.identity, row]));
+  if (candidate.textScale === 1) {
+    assert.ok(baseline.pageScroll <= baseline.viewport.width + 1, 'normal production page has no horizontal overflow');
+    assert.ok(candidate.pageScroll <= candidate.viewport.width + 1, 'normal candidate page has no horizontal overflow');
+    assert.equal(background.size, 0, 'normal production background has no overflow contributors');
+    assert.equal(candidate.rows.filter(row => !row.inDialog).length, 0, 'normal candidate background has no overflow contributors');
+  } else {
+    assert.ok(candidate.pageScroll <= baseline.pageScroll + 1, 'candidate page overflow cannot exceed production');
+  }
+  for (const row of candidate.rows.filter(row => !row.inDialog)) {
+    const prior = background.get(row.identity);
+    assert.ok(prior, `new background overflow contributor: ${row.identity}`);
+    assert.equal(row.tag, prior.tag, `overflow identity changed: ${row.identity}`);
+    assert.equal(row.classes, prior.classes, `overflow identity changed: ${row.identity}`);
+    assert.equal(row.directText, prior.directText, `overflowing text changed: ${row.identity}`);
+    assert.ok(row.left >= prior.left - 1 && row.right <= prior.right + 1
+      && Math.abs(row.clientWidth - prior.clientWidth) <= 1
+      && row.scrollWidth <= prior.scrollWidth + 1 && row.internalOverflow <= prior.internalOverflow + 1,
+    `background overflow worsened: ${row.identity}`);
+  }
+}
+
+async function captureProductionControl(browser, width, scale) {
+  const context = await browser.newContext({ viewport: { width, height: 900 }, timezoneId: 'UTC', locale: 'en-GB', reducedMotion: 'no-preference' });
+  const page = await context.newPage(), errors = [], requests = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/*', route => { requests.push(route.request().url()); return route.abort(); });
+  try {
+    await page.setContent(productionDocument);
+    await settle(page);
+    assert.equal(await page.locator('.connection-write').count(), 0, 'ordinary production fixture has no future write');
+    assert.equal(await page.locator('[data-channel-card="shopify"] .connection-title').textContent(), 'Shopify');
+    assert.equal(await page.locator('[data-channel-card="ebay"] .connection-title').textContent(), 'eBay');
+    const font = await enlargeText(page, scale, '#page-title');
+    await settle(page);
+    await assertTextScaleStable(page);
+    const horizontal = await horizontalEvidence(page);
+    assertOverflowNonRegression(horizontal, horizontal);
+    const file = `${width}/production-ordinary-${scale * 100}pct.png`;
+    await page.screenshot({ path: path.join(output, file) });
+    await assertTextScaleStable(page);
+    assert.deepEqual(await horizontalEvidence(page), horizontal, 'production layout cannot change during capture');
+    assert.deepEqual(errors, []); assert.deepEqual(requests, []);
+    const bytes = await fs.readFile(path.join(output, file));
+    const result = { width, textScale: scale, font, horizontal, file, sha256: sha256(bytes), bytes: bytes.length,
+      dimensions: { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) },
+      knownLimitations: [...(horizontal.pageScroll > width + 1 ? ['Existing production page horizontal overflow under text enlargement'] : []),
+        ...(horizontal.unfocusedSkipLinkVisible ? ['Existing production unfocused skip link is partly visible under text enlargement'] : [])] };
+    assert.deepEqual(result.dimensions, { width, height: 900 });
+    return result;
+  } finally { await context.close(); }
+}
+
+function checkComparatorRejections() {
+  const row = { identity: '#shared > span:nth-child(1)', tag: 'span', classes: 'tag', directText: 'Existing label', left: 10, right: 419, clientWidth: 300, scrollWidth: 409, internalOverflow: 109, inDialog: false };
+  const baseline = { viewport: { width: 320, height: 900 }, nodeCount: 100, textScale: 2, pageScroll: 419, rows: [row] };
+  assertOverflowNonRegression(structuredClone(baseline), baseline);
+  assertOverflowNonRegression({ ...baseline, rows: [] }, baseline);
+  let attackCases = 0;
+  const rejected = (check, message) => { assert.throws(check, message); attackCases++; };
+  const rejection = mutate => { const candidate = structuredClone(baseline); mutate(candidate); rejected(() => assertOverflowNonRegression(candidate, baseline)); };
+  rejection(value => { value.pageScroll = 421; });
+  rejection(value => { value.rows.push({ ...row, identity: '#new', right: 350 }); });
+  rejection(value => { value.rows[0].right += 2; });
+  rejection(value => { value.rows[0].left -= 2; });
+  rejection(value => { value.rows[0].internalOverflow += 2; value.rows[0].clientWidth -= 2; });
+  rejection(value => { value.rows[0].scrollWidth += 2; });
+  rejection(value => { value.rows[0].directText = 'Different item at a reordered path'; });
+  rejection(value => { value.rows[0].classes = 'reordered-other-item'; });
+  rejection(value => { value.rows.push({ ...row }); });
+  rejection(value => { value.nodeCount = maximumFixtureNodes + 1; });
+  rejection(value => { value.textScale = 1; });
+  for (const condition of ['below-fold', 'behind-modal', 'inert', 'aria-hidden', 'visibility-hidden', 'opacity-zero', 'clipped-child']) {
+    rejection(value => { value.rows.push({ ...row, identity: `#new-${condition}`, right: 350, internalOverflow: 20 }); });
+  }
+  const many = { ...baseline, rows: Array.from({ length: 30 }, (_, index) => ({ ...row, identity: `#item-${index}` })) };
+  const changed = structuredClone(many); changed.rows[24].right += 2;
+  rejected(() => assertOverflowNonRegression(changed, many), 'the 25th contributor is not truncated');
+  rejected(() => reconstructProductionUI(bridgeUI + '\n'), 'source mismatch cannot fall back');
+  rejected(() => requireHash('changed', ordinaryPayloadHash, 'Synthetic fixture'), 'fixture mismatch cannot fall back');
+  rejected(() => assertOverflowNonRegression({ ...baseline, textScale: 1 }, { ...baseline, textScale: 1 }), 'normal text cannot inherit enlarged overflow');
+  return { passed: true, syntheticRejectionCases: attackCases, productionUIHash: sha256(productionUI) };
+}
+
+async function verifyCollectorInBrowser(browser) {
+  const results = [];
+  for (const condition of ['new-350px', 'below-fold', 'visibility-hidden', 'opacity-zero', 'inert', 'aria-hidden', 'behind-modal', 'clipped-child', 'duplicate-id', 'reordered-shared-class', 'replaced-scaled-node', 'reset-scaled-font']) {
+    const context = await browser.newContext({ viewport: { width: 320, height: 900 }, timezoneId: 'UTC', locale: 'en-GB', reducedMotion: 'no-preference' });
+    const page = await context.newPage(), errors = [], requests = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', route => { requests.push(route.request().url()); return route.abort(); });
+    try {
+      await page.setContent(productionDocument); await settle(page);
+      await enlargeText(page, 2, '#page-title'); await settle(page);
+      const baseline = await horizontalEvidence(page);
+      await page.evaluate(condition => {
+        if (condition === 'replaced-scaled-node') {
+          const title = document.querySelector('#page-title'); title.replaceWith(title.cloneNode(true)); return;
+        }
+        if (condition === 'reset-scaled-font') { document.querySelector('#page-title').style.fontSize = '16px'; return; }
+        const probe = document.createElement('div'); probe.id = 'collector-probe'; probe.textContent = 'Synthetic collector probe';
+        probe.style.cssText = `position:absolute;left:0;top:${condition === 'new-350px' ? 0 : 10000}px;width:350px;height:24px`;
+        if (condition === 'visibility-hidden') probe.style.visibility = 'hidden';
+        if (condition === 'opacity-zero') probe.style.opacity = '0';
+        if (condition === 'inert') probe.inert = true;
+        if (condition === 'aria-hidden') probe.setAttribute('aria-hidden', 'true');
+        if (condition === 'behind-modal') window.RunvaraConnections.open('shopify');
+        if (condition === 'duplicate-id') probe.id = 'page-title';
+        if (condition === 'clipped-child') {
+          probe.style.width = '100px'; probe.style.overflow = 'hidden'; probe.textContent = '';
+          const child = document.createElement('div'); child.style.cssText = 'width:350px;height:20px'; child.textContent = 'Clipped synthetic child'; probe.append(child);
+        }
+        if (condition === 'reordered-shared-class') {
+          probe.textContent = ''; probe.style.height = 'auto';
+          for (const text of ['First synthetic overflow', 'Second synthetic overflow']) {
+            const child = document.createElement('div'); child.className = 'shared-class'; child.textContent = text;
+            child.style.cssText = 'width:350px;height:24px'; probe.append(child);
+          }
+        }
+        document.body.append(probe);
+      }, condition);
+      if (condition === 'duplicate-id') {
+        await assert.rejects(() => horizontalEvidence(page), /Duplicate DOM id/);
+      } else if (condition === 'replaced-scaled-node' || condition === 'reset-scaled-font') {
+        await assert.rejects(() => assertTextScaleStable(page), /tested text scale and nodes/);
+      } else if (condition === 'reordered-shared-class') {
+        const before = await horizontalEvidence(page);
+        await page.evaluate(() => { const probe = document.querySelector('#collector-probe'); probe.prepend(probe.lastElementChild); });
+        const after = await horizontalEvidence(page);
+        assert.throws(() => assertOverflowNonRegression(after, before), /overflowing text changed/);
+      } else {
+        const candidate = await horizontalEvidence(page);
+        assert.ok(candidate.rows.some(row => row.identity.includes('#collector-probe')), `actual DOM collector must retain ${condition}`);
+        assert.throws(() => assertOverflowNonRegression(candidate, baseline), /new background overflow contributor/);
+      }
+      assert.deepEqual(errors, []); assert.deepEqual(requests, []);
+      results.push({ condition, rejected: true });
+    } finally { await context.close(); }
+  }
+  return { passed: true, isolatedSyntheticBrowserProbes: results };
 }
 
 async function overflowDiagnostics(page) {
@@ -101,7 +356,7 @@ async function diagnoseFailure(page, browser, { width, scenario, scale, error })
     probe.on('pageerror', error => errors.push(error.message));
     await probe.route('**/*', route => { requests.push(route.request().url()); return route.abort(); });
     try {
-      const fixture = compatibility ? document : await renderConnectionPreview();
+      const fixture = compatibility ? document : productionDocument;
       await probe.setContent(fixture);
       await settle(probe);
       const normal = await overflowDiagnostics(probe);
@@ -124,11 +379,18 @@ async function diagnoseFailure(page, browser, { width, scenario, scale, error })
       overflow: control.enlarged.overflow.slice(0, 8), screenshot: control.screenshot })) }));
 }
 
-async function checkLayout(page, width) {
+async function checkLayout(page, width, productionControl) {
+  await assertTextScaleStable(page);
   const layout = await page.evaluate(() => {
     const dialog = document.querySelector('#connection-dialog');
     const rect = dialog.getBoundingClientRect();
-    const targets = [...dialog.querySelectorAll('.connection-write, .connection-history, .connection-exact-text')]
+    const affected = [...document.querySelectorAll('#connection-dialog .connection-write, #connection-dialog .connection-history, #connection-dialog .connection-exact-text, #connection-dialog .connection-notice, .connection-health')];
+    for (const element of affected.filter(element => element.matches('.connection-write,.connection-history,.connection-health,#connection-detail > .connection-notice'))) {
+      const rect = element.getBoundingClientRect();
+      if (!rect.width || !rect.height || getComputedStyle(element).visibility !== 'visible') throw new Error('Affected connection content is hidden');
+      for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) if (Number(getComputedStyle(ancestor).opacity) === 0) throw new Error('Affected connection content is transparent');
+    }
+    const targets = affected
       .filter(element => element.getBoundingClientRect().height > 0)
       .map(element => ({ kind: element.className, width: element.clientWidth, scroll: element.scrollWidth, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right }));
     return { viewport: { width: innerWidth, height: innerHeight }, pageScroll: document.documentElement.scrollWidth,
@@ -137,7 +399,8 @@ async function checkLayout(page, width) {
   });
   assert.deepEqual(layout.viewport, { width, height: 900 }, 'validation uses the normal customer viewport');
   assert.equal(layout.reducedMotion, false, 'production animations stay enabled');
-  assert.ok(layout.pageScroll <= width + 1, `page overflows: ${JSON.stringify(layout)}`);
+  const horizontal = await horizontalEvidence(page);
+  assertOverflowNonRegression(horizontal, productionControl.horizontal);
   assert.ok(layout.dialog.scroll <= layout.dialog.width + 1 && layout.dialog.left >= 0 && layout.dialog.right <= width + 1, `dialog overflows: ${JSON.stringify(layout)}`);
   for (const target of layout.targets) assert.ok(target.scroll <= target.width + 1 && target.left >= 0 && target.right <= width + 1, `target overflows: ${JSON.stringify(target)}`);
   const scrollTargets = [];
@@ -164,7 +427,8 @@ async function checkLayout(page, width) {
     assert.equal(position.withinSection, true, 'saved-change/history heading is visible to the user');
     scrollTargets.push({ selector, ...position });
   }
-  return { ...layout, scrollTargets };
+  await assertTextScaleStable(page);
+  return { ...layout, scrollTargets, horizontal, productionControl: productionControl.file };
 }
 
 async function captureEvidence(page, width, scenario, scale) {
@@ -201,7 +465,11 @@ async function captureEvidence(page, width, scenario, scale) {
   }, selectors);
   const file = `${scenario}-${scale * 100}pct.png`;
   const destination = path.join(output, String(width), file);
+  await assertTextScaleStable(page);
+  const beforeCapture = await horizontalEvidence(page);
   await page.screenshot({ path: destination, clip });
+  await assertTextScaleStable(page);
+  assert.deepEqual(await horizontalEvidence(page), beforeCapture, 'tested layout cannot change during capture');
   const bytes = await fs.readFile(destination);
   assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'evidence is an actual PNG');
   const dimensions = { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
@@ -212,10 +480,22 @@ async function captureEvidence(page, width, scenario, scale) {
   return { file: `${width}/${file}`, sha256: sha256(bytes), bytes: bytes.length, dimensions, captureViewport, clip };
 }
 
+const comparatorChecks = checkComparatorRejections();
+if (process.argv.includes('--self-test')) {
+  console.log(JSON.stringify({ ...comparatorChecks, productionFixtureSha256: sha256(productionDocument), ordinaryPayloadHash }));
+} else {
 let browser;
 try {
   browser = await chromium.launch({ headless: true });
+  manifest.domCollectorProbes = await verifyCollectorInBrowser(browser);
   for (const width of widths) {
+    const productionControls = new Map();
+    for (const scale of scales) {
+      const control = await captureProductionControl(browser, width, scale);
+      productionControls.set(scale, control); manifest.productionControls.push(control);
+      console.log(JSON.stringify({ productionControl: control.file, width, textScale: scale, pageScroll: control.horizontal.pageScroll, contributors: control.horizontal.rows.length, knownLimitations: control.knownLimitations }));
+    }
+    await fs.writeFile(path.join(output, String(width), 'production-controls.json'), JSON.stringify({ productionCommit, productionUIHash, ordinaryPayloadHash, productionFixtureSha256: sha256(productionDocument), sourceHashes, expectedImageCount: 2, controls: [...productionControls.values()] }, null, 2) + '\n');
     for (const scale of scales) for (const scenario of scenarios) {
       const context = await browser.newContext({ viewport: { width, height: 900 }, timezoneId: 'UTC', locale: 'en-GB', reducedMotion: 'no-preference' });
       const page = await context.newPage();
@@ -235,11 +515,13 @@ try {
         assert.equal(font.after, font.before * scale, 'saved-change text is enlarged by exactly 200%');
         await settle(page);
         const write = page.locator('.connection-write');
+        assert.equal(await write.isVisible(), true, 'saved change remains visible');
         if (scenario === 'compatibility-held') {
           assert.match(await write.textContent(), /Unsupported saved change/);
           assert.match(await write.textContent(), /requires a newer compatible release/);
           assert.equal(await write.locator('[data-connection-action="execute"],details').count(), 0);
           const history = page.locator('.connection-history');
+          assert.equal(await history.isVisible(), true, 'deferred history remains visible');
           assert.equal(await history.locator('b').textContent(), 'Deferred');
           assert.match(await history.textContent(), /Saved read safety state requires a newer compatible reader/);
           assert.doesNotMatch(await history.textContent(), /Use Sync now|In progress|Completed|Partially completed|reset/i);
@@ -247,6 +529,7 @@ try {
           assert.equal(await page.locator('#connection-progress progress').count(), 0);
           const hold = dialog.locator('.connection-notice').filter({ hasText: 'Saved read safety state requires a newer compatible reader' });
           assert.equal(await hold.count(), 1);
+          assert.equal(await hold.isVisible(), true, 'saved compatibility notice remains visible');
           assert.equal(await hold.locator('[data-connection-action="open"]').count(), 1);
           assert.equal(await hold.locator('[data-connection-action="sync"],[data-connection-action="reconnect"]').count(), 0);
         } else {
@@ -259,7 +542,7 @@ try {
           assert.equal(await write.locator('[data-write="write_legacy"]').isEnabled(), true);
           assert.equal(await write.locator('[data-connection-action="approvals"]').isEnabled(), true);
         }
-        const layout = await checkLayout(page, width);
+        const layout = await checkLayout(page, width, productionControls.get(scale));
         const screenshot = await captureEvidence(page, width, scenario, scale);
         if (scenario === 'legacy-exact-change') {
           await write.locator('[data-connection-action="approvals"]').click();
@@ -286,11 +569,18 @@ try {
     }
     const screenshots = manifest.screenshots.filter(item => item.validatedLayout.viewport.width === width);
     assert.equal(screenshots.length, 4);
-    await fs.writeFile(path.join(output, String(width), 'manifest.json'), JSON.stringify({ ...manifest, screenshots }, null, 2) + '\n');
+    const controls = manifest.productionControls.filter(item => item.width === width);
+    await fs.writeFile(path.join(output, String(width), 'manifest.json'), JSON.stringify({ ...manifest, expectedImageCount: 6, productionControls: controls, screenshots }, null, 2) + '\n');
   }
   assert.equal(manifest.screenshots.length, 12);
+  assert.equal(manifest.productionControls.length, 6);
+  manifest.expectedImageCount = 18;
+  manifest.comparatorChecks = comparatorChecks;
+  manifest.totalImageBytes = [...manifest.screenshots, ...manifest.productionControls].reduce((sum, item) => sum + item.bytes, 0);
+  assert.ok(manifest.totalImageBytes < 28 * 1024 * 1024, 'combined evidence remains comfortably below the 32 MiB artifact limit');
   await fs.writeFile(path.join(output, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
-  console.log(`Compatibility bridge browser checks passed: 12 screenshots at 320, 390 and 1200 pixels, normal and 200% text. Manifest: ${output}/manifest.json`);
+  console.log(`Compatibility bridge nonregression checks passed against production: 12 bridge screenshots and 6 production controls at 320, 390 and 1200 pixels, normal and 200% text. Existing enlarged-text page accessibility limitations remain; this is not a general accessibility pass. Manifest: ${output}/manifest.json`);
 } finally {
   await browser?.close();
+}
 }
