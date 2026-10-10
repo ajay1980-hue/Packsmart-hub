@@ -67,12 +67,65 @@ if (!process.argv.includes('--self-test')) for (const width of widths) {
 }
 if (!process.argv.includes('--self-test')) await fs.rm(path.join(output, 'manifest.json'), { force: true });
 
-async function settle(page) {
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    await Promise.all(document.getAnimations().filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation => animation.finished.catch(() => {})));
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-  });
+async function waitForSettledMotion({ timeoutMs = 3000, runtime } = {}) {
+  // Serialized into the browser; the injected runtime only serves local tests.
+  const clock = runtime || {
+    now: () => performance.now(), fontsReady: () => document.fonts.ready,
+    frame: () => new Promise(resolve => requestAnimationFrame(resolve)),
+    sample: () => {
+      // Flush layout and hover-dependent styles before discovering newly
+      // scheduled transitions. Never rely on one snapshot of .finished.
+      document.documentElement.getBoundingClientRect();
+      for (const element of document.querySelectorAll(':hover')) getComputedStyle(element).transform;
+      return document.getAnimations().filter(animation => Number.isFinite(animation.effect?.getComputedTiming().endTime)
+        && (animation.pending || ['running', 'paused'].includes(animation.playState))).map(animation => {
+        const target = animation.effect?.target, timing = animation.effect?.getComputedTiming();
+        return { type: animation.constructor.name, target: target?.id || `${target?.localName || ''}.${target?.getAttribute?.('class') || ''}`,
+          property: animation.transitionProperty || animation.animationName || null, playState: animation.playState, pending: animation.pending,
+          currentTime: animation.currentTime, endTime: timing?.endTime, delay: timing?.delay, duration: timing?.duration };
+      });
+    }
+  };
+  const started = clock.now();
+  let stopped = false, timeout, phase = 'fonts', lastMotion = [], samples = 0, busySamples = 0, firstBusySample = null;
+  const timedOut = () => new Error(`Animation settling exceeded ${timeoutMs}ms during ${phase}: ${JSON.stringify(lastMotion.slice(0, 8))}`);
+  try {
+    return await Promise.race([
+      (async () => {
+        await clock.fontsReady();
+        phase = 'frames';
+        let quietSince = null, quietFrames = 0;
+        while (!stopped) {
+          await clock.frame();
+          if (stopped) return;
+          const now = clock.now();
+          if (now - started >= timeoutMs) throw timedOut();
+          lastMotion = clock.sample(); samples++;
+          if (lastMotion.length) { quietSince = null; quietFrames = 0; busySamples++; firstBusySample ??= samples; }
+          else {
+            quietSince ??= now; quietFrames++;
+            // Consecutive post-layout frames catch transitions that start after
+            // scroll, hit testing, focus or a preceding transition finishes.
+            if (quietFrames >= 3 && now - quietSince >= 80) return { samples, busySamples, firstBusySample, quietFrames, elapsedMs: now - started };
+          }
+        }
+      })(),
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(timedOut()), timeoutMs); })
+    ]);
+  } finally { stopped = true; clearTimeout(timeout); }
+}
+
+async function settle(page, { timeoutMs = 3000 } = {}) {
+  // Preserve the current hover/focus state while production motion completes.
+  return page.evaluate(waitForSettledMotion, { timeoutMs });
+}
+
+async function prepareCapture(page) {
+  // Normal interaction and hit-test checks precede this explicit evidence state.
+  // (0,0) stays outside controls when the evidence viewport is later restored.
+  await page.mouse.move(0, 0);
+  await settle(page);
+  await assertTextScaleStable(page);
 }
 
 async function enlargeText(page, scale, probeSelector = '.connection-write > b') {
@@ -97,6 +150,8 @@ async function enlargeText(page, scale, probeSelector = '.connection-write > b')
 }
 
 async function assertTextScaleStable(page) {
+  // Intentionally immediate: after screenshot capture, waiting could hide a
+  // transient invalid capture or allow a rerender to replace the tested state.
   const errors = await page.evaluate(() => {
     const snapshot = window.fixtureTextScale;
     if (!snapshot) return ['Text enlargement was not recorded'];
@@ -111,10 +166,48 @@ async function assertTextScaleStable(page) {
         errors.push(`Text size changed on ${element.id || element.tagName}`); break;
       }
     }
-    if (document.getAnimations().some(animation => animation.playState === 'running' && Number.isFinite(animation.effect?.getComputedTiming().endTime))) errors.push('A finite animation is still running');
+    const motion = document.getAnimations().filter(animation => (animation.pending || ['running', 'paused'].includes(animation.playState)) && Number.isFinite(animation.effect?.getComputedTiming().endTime));
+    if (motion.length) errors.push(`Finite motion remains: ${JSON.stringify(motion.map(animation => ({ target: animation.effect?.target?.id || animation.effect?.target?.className, property: animation.transitionProperty || animation.animationName || null, playState: animation.playState, pending: animation.pending, currentTime: animation.currentTime, timing: animation.effect?.getComputedTiming() })))}`);
     return errors;
   });
   assert.deepEqual(errors, [], 'the tested text scale and nodes must survive until capture');
+}
+
+async function geometryEvidence(page, selectors) {
+  return page.evaluate(selectors => selectors.map(selector => {
+    const element = document.querySelector(selector);
+    if (!element) throw new Error(`Capture target is missing: ${selector}`);
+    const rect = element.getBoundingClientRect();
+    return { selector, left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height };
+  }), selectors);
+}
+
+async function checkedScreenshot(page, options, selectors) {
+  // Callers finish settling before computing the clip. There is no settling or
+  // pointer/focus mutation between these snapshots and the post-capture guards.
+  await page.evaluate(() => {
+    window.fixtureCaptureMotion = [];
+    window.fixtureCaptureMotionListener = event => window.fixtureCaptureMotion.push({ type: event.type, target: event.target.id || event.target.className, property: event.propertyName || event.animationName });
+    document.addEventListener('transitionrun', window.fixtureCaptureMotionListener, true);
+    document.addEventListener('animationstart', window.fixtureCaptureMotionListener, true);
+  });
+  try {
+    await assertTextScaleStable(page);
+    const geometry = await geometryEvidence(page, selectors);
+    const horizontal = await horizontalEvidence(page);
+    const bytes = await page.screenshot(options);
+    await assertTextScaleStable(page);
+    assert.deepEqual(await geometryEvidence(page, selectors), geometry, 'capture target geometry cannot change during capture');
+    assert.deepEqual(await horizontalEvidence(page), horizontal, 'tested layout cannot change during capture');
+    assert.deepEqual(await page.evaluate(() => window.fixtureCaptureMotion), [], 'new CSS motion cannot start during capture');
+    return bytes;
+  } finally {
+    await page.evaluate(() => {
+      document.removeEventListener('transitionrun', window.fixtureCaptureMotionListener, true);
+      document.removeEventListener('animationstart', window.fixtureCaptureMotionListener, true);
+      delete window.fixtureCaptureMotionListener;
+    });
+  }
 }
 
 const maximumFixtureNodes = 5000;
@@ -204,13 +297,11 @@ async function captureProductionControl(browser, width, scale) {
     assert.equal(await page.locator('[data-channel-card="shopify"] .connection-title').textContent(), 'Shopify');
     assert.equal(await page.locator('[data-channel-card="ebay"] .connection-title').textContent(), 'eBay');
     const font = await enlargeText(page, scale, '#page-title');
-    await settle(page);
-    await assertTextScaleStable(page);
+    await prepareCapture(page);
     const horizontal = await horizontalEvidence(page);
     assertOverflowNonRegression(horizontal, horizontal);
     const file = `${width}/production-ordinary-${scale * 100}pct.png`;
-    await page.screenshot({ path: path.join(output, file) });
-    await assertTextScaleStable(page);
+    await checkedScreenshot(page, { path: path.join(output, file) }, ['.command-bar', '#page-title', '#connection-grid']);
     assert.deepEqual(await horizontalEvidence(page), horizontal, 'production layout cannot change during capture');
     assert.deepEqual(errors, []); assert.deepEqual(requests, []);
     const bytes = await fs.readFile(path.join(output, file));
@@ -252,6 +343,36 @@ function checkComparatorRejections() {
   rejected(() => requireHash('changed', ordinaryPayloadHash, 'Synthetic fixture'), 'fixture mismatch cannot fall back');
   rejected(() => assertOverflowNonRegression({ ...baseline, textScale: 1 }, { ...baseline, textScale: 1 }), 'normal text cannot inherit enlarged overflow');
   return { passed: true, syntheticRejectionCases: attackCases, productionUIHash: sha256(productionUI) };
+}
+
+async function checkMotionSettling() {
+  const animation = { target: 'synthetic-control', property: 'background-color', playState: 'running', pending: false, currentTime: 16, endTime: 160 };
+  const runtime = sample => {
+    let time = 0;
+    return { now: () => time, fontsReady: async () => {}, frame: async () => { time += 16; }, sample: () => sample(time) };
+  };
+  const delayed = await waitForSettledMotion({ runtime: runtime(time => time >= 48 && time <= 112 ? [animation] : []) });
+  assert.equal(delayed.busySamples, 5, 'late motion must be discovered after initially quiet frames');
+  assert.equal(delayed.firstBusySample, 3);
+  assert.ok(delayed.elapsedMs >= 208, 'quiet observations restart after late motion');
+  const restarted = await waitForSettledMotion({ runtime: runtime(time => time === 48 || time === 80 ? [{ ...animation, pending: time === 80 }] : []) });
+  assert.equal(restarted.busySamples, 2, 'a pending restart invalidates the earlier quiet interval');
+  assert.ok(restarted.elapsedMs >= 176);
+  for (const state of ['paused', 'pending']) {
+    await assert.rejects(() => waitForSettledMotion({ timeoutMs: 96, runtime: runtime(() => [{ ...animation, playState: state === 'paused' ? 'paused' : 'idle', pending: state === 'pending' }]) }), error => {
+      assert.match(error.message, /Animation settling exceeded 96ms/);
+      assert.match(error.message, /synthetic-control/);
+      assert.match(error.message, /background-color/);
+      assert.match(error.message, state === 'paused' ? /"playState":"paused"/ : /"pending":true/);
+      return true;
+    });
+  }
+  for (const phase of ['fonts', 'frames']) {
+    const clock = runtime(() => []);
+    clock[phase === 'fonts' ? 'fontsReady' : 'frame'] = () => new Promise(() => {});
+    await assert.rejects(() => waitForSettledMotion({ timeoutMs: 25, runtime: clock }), new RegExp(`exceeded 25ms during ${phase}`));
+  }
+  return { passed: true, injectedRuntimeChecks: ['late-start', 'pending-restart', 'paused-deadline', 'pending-deadline', 'stalled-font-deadline', 'stalled-frame-deadline'] };
 }
 
 async function verifyCollectorInBrowser(browser) {
@@ -310,6 +431,106 @@ async function verifyCollectorInBrowser(browser) {
     } finally { await context.close(); }
   }
   return { passed: true, isolatedSyntheticBrowserProbes: results };
+}
+
+async function verifyMotionInBrowser(browser) {
+  const results = [];
+  for (const scale of scales) {
+    const context = await browser.newContext({ viewport: { width: 320, height: 900 }, timezoneId: 'UTC', locale: 'en-GB', reducedMotion: 'no-preference' });
+    const page = await context.newPage(), errors = [], requests = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.route('**/*', route => { requests.push(route.request().url()); return route.abort(); });
+    try {
+      await page.setContent(document); await settle(page);
+      const opener = page.locator('[data-channel-card="shopify"] .connection-title');
+      await opener.click();
+      assert.equal(await page.locator('#connection-close').evaluate(element => document.activeElement === element), true);
+      await enlargeText(page, scale); await settle(page);
+      const summary = page.locator('.connection-write summary');
+      await summary.click();
+      await page.evaluate(() => {
+        window.fixtureHoverTransitions = [];
+        document.addEventListener('transitionrun', event => {
+          if (event.target.matches('[data-write="write_legacy"]')) window.fixtureHoverTransitions.push(event.propertyName);
+        });
+      });
+      const apply = page.locator('[data-write="write_legacy"]');
+      await apply.hover();
+      const hovered = await settle(page);
+      assert.equal(await apply.evaluate(element => element.matches(':hover')), true, 'settling preserves a real hovered control');
+      const hoverTransitions = await page.evaluate(() => window.fixtureHoverTransitions);
+      assert.ok(hoverTransitions.length > 0, 'normal production hover transitions remain enabled');
+      await assertTextScaleStable(page);
+
+      const history = page.locator('#connection-detail > .connection-section:has(.connection-history) > h3');
+      await history.scrollIntoViewIfNeeded();
+      await history.evaluate(element => {
+        const dialog = document.querySelector('#connection-dialog');
+        dialog.scrollTop += element.getBoundingClientRect().top - document.querySelector('#connection-close').getBoundingClientRect().bottom - 12;
+        const rect = element.getBoundingClientRect();
+        document.elementFromPoint(rect.left + 8, rect.top + 8);
+      });
+      await settle(page); await assertTextScaleStable(page);
+      for (const height of [1100, 900]) { await page.setViewportSize({ width: 320, height }); await settle(page); await assertTextScaleStable(page); }
+      await summary.click();
+      assert.equal(await page.locator('.connection-write details').getAttribute('open'), null);
+      await page.keyboard.press('Tab'); await settle(page);
+      assert.equal(await page.evaluate(() => document.querySelector('#connection-dialog').contains(document.activeElement)), true);
+      await summary.click(); await settle(page);
+      assert.notEqual(await page.locator('.connection-write details').getAttribute('open'), null);
+
+      // Start an actual finite CSS transition after the wait has already seen
+      // quiet frames. This exercises the old one-snapshot race in a browser.
+      await page.evaluate(`window.fixtureWaitForSettledMotion = (${waitForSettledMotion.toString()})`);
+      const late = await page.evaluate(async () => {
+        const target = document.querySelector('[data-write="write_legacy"]');
+        const previousStyle = target.getAttribute('style');
+        target.style.transition = 'transform 120ms linear';
+        getComputedStyle(target).transform;
+        const startLater = remaining => requestAnimationFrame(() => remaining ? startLater(remaining - 1) : (target.style.transform = 'translateY(2px)'));
+        startLater(2);
+        try { return await window.fixtureWaitForSettledMotion(); }
+        finally { if (previousStyle === null) target.removeAttribute('style'); else target.setAttribute('style', previousStyle); }
+      });
+      assert.ok(late.busySamples > 0 && late.firstBusySample > 1, 'late CSS motion must be discovered after initially quiet frames');
+      await settle(page); await assertTextScaleStable(page);
+
+      await page.evaluate(() => {
+        window.fixturePausedAnimation = document.querySelector('#connection-close').animate([{ opacity: 1 }, { opacity: .8 }], { duration: 1000 });
+        window.fixturePausedAnimation.pause();
+      });
+      await assert.rejects(() => settle(page, { timeoutMs: 150 }), /Animation settling exceeded 150ms.*"playState":"paused"/);
+      await assert.rejects(() => assertTextScaleStable(page), /tested text scale and nodes/);
+      await page.evaluate(() => window.fixturePausedAnimation.cancel());
+      await page.evaluate(() => {
+        window.fixtureFinishedAnimation = document.querySelector('#connection-close').animate([{ opacity: 1 }, { opacity: 1 }], { duration: 20, fill: 'forwards' });
+      });
+      await settle(page); await assertTextScaleStable(page);
+      assert.equal(await page.evaluate(() => window.fixtureFinishedAnimation.playState), 'finished');
+      assert.equal(await page.evaluate(() => document.getAnimations().includes(window.fixtureFinishedAnimation)), true, 'a retained finished animation is inspected without blocking');
+      await page.evaluate(() => window.fixtureFinishedAnimation.cancel());
+      await prepareCapture(page);
+      const targets = ['#connection-detail > .connection-section:has(.connection-write)', '#connection-close'];
+      const screenshot = await checkedScreenshot(page, {}, targets);
+      assert.equal(screenshot.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+      // A vertical-only movement introduced at capture must fail immediately;
+      // unchanged horizontal contributors alone are insufficient evidence.
+      const driftingPage = { evaluate: (...args) => page.evaluate(...args), screenshot: async options => {
+        await page.evaluate(selector => { document.querySelector(selector).style.transform = 'translateY(2px)'; }, targets[0]);
+        return page.screenshot(options);
+      } };
+      await assert.rejects(() => checkedScreenshot(driftingPage, {}, targets), /capture target geometry cannot change/);
+      await page.evaluate(selector => { document.querySelector(selector).style.removeProperty('transform'); }, targets[0]);
+      await settle(page); await assertTextScaleStable(page);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.locator('#connection-dialog').isVisible(), false);
+      assert.equal(await opener.evaluate(element => document.activeElement === element), true);
+      assert.deepEqual(errors, []); assert.deepEqual(requests, []);
+      assert.equal(await page.evaluate(() => window.fixtureRequests.every(request => request.method === 'GET')), true);
+      results.push({ textScale: scale, hovered, hoverTransitions, late, pausedDeadlineRejected: true, immediateMotionGuardRejected: true, retainedFinishedAnimationAccepted: true, verticalCaptureDriftRejected: true });
+    } finally { await context.close(); }
+  }
+  return { passed: true, isolatedSyntheticBrowserSequences: results };
 }
 
 async function overflowDiagnostics(page) {
@@ -380,6 +601,7 @@ async function diagnoseFailure(page, browser, { width, scenario, scale, error })
 }
 
 async function checkLayout(page, width, productionControl) {
+  await settle(page);
   await assertTextScaleStable(page);
   const layout = await page.evaluate(() => {
     const dialog = document.querySelector('#connection-dialog');
@@ -427,6 +649,7 @@ async function checkLayout(page, width, productionControl) {
     assert.equal(position.withinSection, true, 'saved-change/history heading is visible to the user');
     scrollTargets.push({ selector, ...position });
   }
+  await settle(page);
   await assertTextScaleStable(page);
   return { ...layout, scrollTargets, horizontal, productionControl: productionControl.file };
 }
@@ -454,7 +677,9 @@ async function captureEvidence(page, width, scenario, scale) {
     const top = dialog.getBoundingClientRect().top + close.getBoundingClientRect().height + 36;
     dialog.scrollTop += first.getBoundingClientRect().top - top;
   }, selectors);
-  await settle(page);
+  await prepareCapture(page);
+  const captureTargets = [...selectors, '#connection-close'];
+  const clipGeometry = await geometryEvidence(page, captureTargets);
   const clip = await page.evaluate(selectors => {
     const first = document.querySelector(selectors[0]).getBoundingClientRect();
     const last = document.querySelector(selectors.at(-1)).getBoundingClientRect();
@@ -465,29 +690,32 @@ async function captureEvidence(page, width, scenario, scale) {
   }, selectors);
   const file = `${scenario}-${scale * 100}pct.png`;
   const destination = path.join(output, String(width), file);
-  await assertTextScaleStable(page);
-  const beforeCapture = await horizontalEvidence(page);
-  await page.screenshot({ path: destination, clip });
-  await assertTextScaleStable(page);
-  assert.deepEqual(await horizontalEvidence(page), beforeCapture, 'tested layout cannot change during capture');
+  assert.deepEqual(await geometryEvidence(page, captureTargets), clipGeometry, 'clip geometry must remain current before capture');
+  await checkedScreenshot(page, { path: destination, clip }, captureTargets);
+  assert.deepEqual(await geometryEvidence(page, captureTargets), clipGeometry, 'captured geometry must still match the validated clip');
   const bytes = await fs.readFile(destination);
   assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'evidence is an actual PNG');
   const dimensions = { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
   assert.equal(dimensions.width, clip.width);
   assert.equal(dimensions.height, clip.height);
   await page.setViewportSize({ width, height: 900 });
+  await page.mouse.move(0, 0);
   await settle(page);
   return { file: `${width}/${file}`, sha256: sha256(bytes), bytes: bytes.length, dimensions, captureViewport, clip };
 }
 
 const comparatorChecks = checkComparatorRejections();
+const motionSettlingChecks = await checkMotionSettling();
 if (process.argv.includes('--self-test')) {
-  console.log(JSON.stringify({ ...comparatorChecks, productionFixtureSha256: sha256(productionDocument), ordinaryPayloadHash }));
+  console.log(JSON.stringify({ ...comparatorChecks, motionSettlingChecks, productionFixtureSha256: sha256(productionDocument), ordinaryPayloadHash }));
 } else {
 let browser;
 try {
   browser = await chromium.launch({ headless: true });
   manifest.domCollectorProbes = await verifyCollectorInBrowser(browser);
+  manifest.motionSettlingChecks = motionSettlingChecks;
+  manifest.motionSettlingProbes = await verifyMotionInBrowser(browser);
+  console.log(JSON.stringify({ motionSettlingChecks, motionSettlingProbes: manifest.motionSettlingProbes }));
   for (const width of widths) {
     const productionControls = new Map();
     for (const scale of scales) {
