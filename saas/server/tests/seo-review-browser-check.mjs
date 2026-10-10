@@ -47,18 +47,33 @@ async function createSeoCaptureSession(panel) {
     const chrome = [...document.querySelectorAll('.topbar, .skip-link, .global-message')];
     const pending = () => [...new Set([panel, ...ancestors, ...chrome].flatMap(node => node.getAnimations({ subtree: node === panel || chrome.includes(node) })))]
       .filter(animation => animation.effect && animation.playbackRate !== 0 && Number.isFinite(animation.effect.getComputedTiming().endTime) && !['finished', 'idle'].includes(animation.playState));
-    let timeout;
+    let timeout, stopped = false, phase = 'fonts', rounds = 0;
+    const diagnostics = () => ({ phase, rounds, fonts: document.fonts.status, pending: pending().slice(0, 12).map(animation => {
+      const target = animation.effect.target;
+      return { target: target?.id ? '#' + target.id : String(target?.tagName || 'unknown') + '.' + String(target?.className || '').slice(0, 120),
+        name: animation.animationName || animation.id || null, property: animation.transitionProperty || null,
+        state: animation.playState, currentTime: animation.currentTime, endTime: animation.effect.getComputedTiming().endTime, playbackRate: animation.playbackRate };
+    }) });
     try {
       await Promise.race([(async () => {
         // The existing view reveal translates its children by up to 4px.
         // Wait naturally before measuring; the screenshot must not finish that
         // ancestor animation after the clip was calculated.
         await document.fonts.ready;
-        await Promise.allSettled(pending().map(animation => animation.finished));
-        await new Promise(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(resolve)));
-        check(pending().length === 0, 'relevant finite animations must settle before measuring');
-      })(), new Promise((_, reject) => { timeout = view.setTimeout(() => reject(new Error('SEO capture: fonts and finite animations did not settle within 5 seconds')), 5000); })]);
-    } finally { view.clearTimeout(timeout); }
+        while (!stopped) {
+          phase = 'finite motion'; rounds++;
+          await Promise.allSettled(pending().map(animation => animation.finished));
+          if (stopped) return;
+          phase = 'layout frames';
+          await new Promise(resolve => view.requestAnimationFrame(() => view.requestAnimationFrame(resolve)));
+          if (stopped || pending().length === 0) return;
+          // Scroll, focus and typography may start a new hover transition on
+          // the next frame. Rescan within the same overall deadline.
+        }
+      })(), new Promise((_, reject) => { timeout = view.setTimeout(() => {
+        stopped = true; reject(new Error('SEO capture: fonts and finite animations did not settle within 5 seconds: ' + JSON.stringify(diagnostics())));
+      }, 5000); })]);
+    } finally { stopped = true; view.clearTimeout(timeout); }
   };
   await settle();
   const scroll = { x: view.scrollX, y: view.scrollY }, viewport = { width: view.innerWidth, height: view.innerHeight };
@@ -121,12 +136,29 @@ async function createSeoCaptureSession(panel) {
   };
 }
 
+async function withCaptureCleanup(work, cleanups) {
+  let result, primary, failed = false;
+  try { result = await work(); } catch (error) { primary = error; failed = true; }
+  const failures = [];
+  for (const [label, cleanup] of cleanups) {
+    try { await cleanup(); } catch (error) { failures.push({ label, error }); }
+  }
+  if (failures.length) {
+    const details = failures.map(({ label, error }) => ({ label, message: error.message, stack: error.stack }));
+    if (!failed) { primary = new AggregateError(failures.map(item => item.error), 'SEO capture cleanup failed: ' + details.map(item => item.label + ': ' + item.message).join('; ')); failed = true; }
+    primary.captureCleanupErrors = [...(primary.captureCleanupErrors || []), ...details];
+    console.error('SEO capture cleanup diagnostics (primary failure preserved): ' + JSON.stringify(details));
+  }
+  if (failed) throw primary;
+  return result;
+}
+
 async function capture(page, width, name, manifest, outputDirectory) {
   const panel = page.locator('#seo-review-panel'), original = await panel.evaluateHandle(createSeoCaptureSession);
   let typography;
   const save = async textScale => {
     const position = await panel.evaluateHandle(createSeoCaptureSession);
-    try {
+    return withCaptureCleanup(async () => {
       if (name === 'history-open') {
         const geometry = await position.evaluate(session => session.historyViewport());
         const file = `seo-${name}-viewport-${textScale}.png`;
@@ -150,26 +182,24 @@ async function capture(page, width, name, manifest, outputDirectory) {
       assert.ok(Math.abs(height - geometry.panel.height) <= 2 && Math.abs(imageWidth - geometry.panel.width) <= 2, 'Screenshot must cover the full SEO panel without clipping');
       manifest.captures.push({ file, state: name, textScale, region: 'complete SEO review panel', width: imageWidth, height,
         bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), layout, geometry });
-    } finally {
-      try { await position.evaluate(session => session.restore()); } finally { await position.dispose(); }
-    }
+    }, [['restore ' + textScale + '% capture position', () => position.evaluate(session => session.restore())], ['dispose ' + textScale + '% capture position', () => position.dispose()]]);
   };
-  try {
+  return withCaptureCleanup(async () => {
     typography = await panel.evaluateHandle(createRestrictionTypographySession);
     await typography.evaluate(session => session.assertBaseline()); await save(100);
     await typography.evaluate(session => session.begin());
-    try { await typography.evaluate(session => session.enlarge()); await save(200); }
-    finally { await typography.evaluate(session => session.restore()); }
+    await withCaptureCleanup(async () => { await typography.evaluate(session => session.enlarge()); await save(200); },
+      [['restore normal typography', () => typography.evaluate(session => session.restore())]]);
     await typography.evaluate(session => session.assertBaseline());
-  } finally {
+  }, [
     // Restore the original normal-text scroll after 200% text has shrunk again;
     // restoring only inside each text-scale capture misses scroll anchoring.
-    try { await original.evaluate(session => session.restore()); }
-    finally { if (typography) await typography.dispose(); await original.dispose(); }
-  }
+    ['restore outer normal-text position', () => original.evaluate(session => session.restore())],
+    ['dispose typography session', () => typography?.dispose()], ['dispose outer position', () => original.dispose()]
+  ]);
 }
 
-try {
+await withCaptureCleanup(async () => {
   const seed = seedWorkspaceState({}, { workspaceId: 'seo-browser', name: 'Synthetic SEO review', email: 'seo@example.test', passwordHash: 'fixture-only' });
   seed.products = products; seed.orders = []; seed.connections = []; seed.approvals = [];
   await server.packsmart.store.save(seed.workspace.id, seed);
@@ -221,6 +251,7 @@ try {
     };
     const load = async nextMode => { mode = nextMode; await page.goto(base); await page.locator('#app-shell:not(.hidden)').waitFor(); await navigate('issues'); };
     try {
+      await withCaptureCleanup(async () => {
       await load('mixed');
       const initialCalls = [...calls], history = page.locator('#seo-retained-history');
       assert.equal(await history.getAttribute('open'), null);
@@ -257,11 +288,11 @@ try {
       await page.locator('#seo-retained-history summary').click();
       await containment(page, width, 'clipped-history-open', 100);
       const clippedTypography = await page.locator('#seo-review-panel').evaluateHandle(createRestrictionTypographySession);
-      try {
+      await withCaptureCleanup(async () => {
         await clippedTypography.evaluate(session => session.begin());
-        try { await clippedTypography.evaluate(session => session.enlarge()); await containment(page, width, 'clipped-history-open', 200); }
-        finally { await clippedTypography.evaluate(session => session.restore()); }
-      } finally { await clippedTypography.dispose(); }
+        await withCaptureCleanup(async () => { await clippedTypography.evaluate(session => session.enlarge()); await containment(page, width, 'clipped-history-open', 200); },
+          [['restore clipping-check typography', () => clippedTypography.evaluate(session => session.restore())]]);
+      }, [['dispose clipping-check typography', () => clippedTypography.dispose()]]);
       manifest.checks.push('Independent 100-finding limits and exact omitted counts, with full row containment at 100% and 200% text; large fixture checked without screenshot');
       await load('xss');
       assert.equal(await page.locator('#seo-review-panel img, #seo-review-panel script, #seo-review-panel [onerror]').count(), 0);
@@ -278,15 +309,15 @@ try {
       execFileSync('tar', ['-czf', archive, '-C', outputDirectory, '.']);
       const archiveBytes = (await fs.stat(archive)).size;
       assert.ok(archiveBytes < maxArchiveBytes, 'Each viewport archive must stay below 12 MiB');
-      console.log(`SEO review ${width}px passed; ${manifest.captures.length} complete-panel images; archive ${archiveBytes} bytes.`);
+      console.log(`SEO review ${width}px passed; ${manifest.captures.length} evidence images; archive ${archiveBytes} bytes.`);
+      }, [['close ' + width + 'px context', () => context.close()]]);
     } catch (error) {
       manifest.status = 'failed'; manifest.error = error.message;
-      await fs.writeFile(path.join(outputDirectory, 'manifest.json'), JSON.stringify(manifest, null, 2));
-      throw error;
-    } finally { await context.close(); }
+      manifest.captureCleanupErrors = error.captureCleanupErrors || [];
+      await withCaptureCleanup(async () => { throw error; },
+        [['write failure manifest', () => fs.writeFile(path.join(outputDirectory, 'manifest.json'), JSON.stringify(manifest, null, 2))]]);
+    }
   }
-} finally {
-  if (browser) await browser.close();
-  if (server.listening) await new Promise(resolve => server.close(resolve));
-  await fs.rm(directory, { recursive: true, force: true });
-}
+}, [['close browser', async () => { if (browser) await browser.close(); }],
+  ['close synthetic server', async () => { if (server.listening) await new Promise(resolve => server.close(resolve)); }],
+  ['remove synthetic state directory', () => fs.rm(directory, { recursive: true, force: true })]]);
