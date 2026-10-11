@@ -11,7 +11,7 @@ import { assertShopifySourceScope, captureShopifyOrderMoney, inspectShopifyOrder
 import { assertShopifyOrderRecoveryCapability, authorizeShopifyOrderRecovery, claimShopifyOrderRecoveryCapability,
   checkpointShopifyOrderRecoveryPage, getShopifyOrderRecoveryStage, shopifyOrderRecoveryObservation, shopifyOrderRecoveryError } from './shopify-order-recovery.mjs';
 import { assertEbayReadAdmission, createEbayReadContext, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown, parseEbayRetryAfter } from './ebay-read-cooldown.mjs';
-import { hasAmount } from './profit.mjs';
+import { hasAmount, hasCataloguePrice } from './profit.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -145,7 +145,7 @@ function mapAdminProduct(product) {
       externalId: String(variant.id),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
-      price: Number(variant.price || 0),
+      price: hasCataloguePrice(variant.price) ? Number(variant.price) : null,
       inventory: nullableNumber(variant.inventoryQuantity),
       available: nullableNumber(variant.inventoryQuantity) === null || Number(variant.inventoryQuantity) > 0,
       image: variant.media?.nodes?.[0]?.preview?.image?.url || productImage
@@ -171,7 +171,7 @@ function mapSnapshotProduct(product) {
       externalId: String(variant.id || variant.sku || ''),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
-      price: Number(variant.price || 0),
+      price: hasCataloguePrice(variant.price) ? Number(variant.price) : null,
       inventory: nullableNumber(variant.inventory_quantity),
       available: variant.available !== false,
       image: variant.featured_image?.src || product.image?.src || product.image || product.images?.[0]?.src || null
@@ -204,7 +204,7 @@ function mapPublicProduct(product) {
       externalId: variant.id ? shopifyGid('ProductVariant', variant.id) : String(variant.sku || ''),
       title: String(variant.title || 'Default'),
       sku: String(variant.sku || ''),
-      price: Number(variant.price || 0),
+      price: hasCataloguePrice(variant.price) ? Number(variant.price) : null,
       inventory: null,
       available: variant.available !== false,
       image: variant.featured_image?.src || productImage

@@ -13,7 +13,7 @@ import { createSessionToken } from '../lib/security.mjs';
 const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-brief-browser-'));
 const secret = 'saved-brief-browser-fixture-over-thirty-two-characters';
 const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret, SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, { schedulerEnabled: false, agentOpsEnabled: false });
-const captures = [], verifiedStates = [], executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const captures = [], verifiedStates = [], scrolledStates = [], scrollCoverage = [], executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
 const capturedStates = new Set(['list', 'verified', 'complete-detail', 'legacy', 'unavailable', 'oversized']);
 let browser;
 const hold = () => { let release; const promise = new Promise(resolve => { release = resolve; }); return { promise, release }; };
@@ -38,8 +38,9 @@ async function scaleText(page, percent) {
     elements.forEach((element, i) => { element.style.fontSize = sizes[i] * 2 + 'px'; });
   });
 }
-async function capture(page, width, percent, state) {
-  await scaleText(page, percent); await page.mouse.move(0, 0);
+async function capture(page, width, percent, state, scrolled = false) {
+  if (!scrolled) await scaleText(page, percent);
+  await page.mouse.move(0, 0);
   if (state === 'complete-detail') await page.locator('#brief-history-body').evaluate(body => { body.scrollTop = body.scrollHeight; });
   const modal = page.locator('#brief-history-dialog');
   await modal.evaluate(async element => {
@@ -77,12 +78,56 @@ async function capture(page, width, percent, state) {
     await fs.writeFile(filename.replace(/\.png$/, '.json'), JSON.stringify({ viewportWidth: width, textScale: percent, state, error: String(error.message).slice(0, 4096), dimensions, crop: clip, filename, imageError }, null, 2));
     throw error;
   }
-  verifiedStates.push({ viewportWidth: width, textScale: percent, state, geometry: 'passed', dimensions });
-  if (!capturedStates.has(state)) return;
+  (scrolled ? scrolledStates : verifiedStates).push({ viewportWidth: width, textScale: percent, state, geometry: 'passed', dimensions });
+  if (!scrolled && !capturedStates.has(state)) return;
   const filename = `/tmp/runvara-brief-history-${width}-${state}-${percent}pct.png`;
   const clip = { x: Math.floor(dimensions.modal.left), y: Math.floor(dimensions.modal.top), width: Math.ceil(dimensions.modal.right) - Math.floor(dimensions.modal.left), height: Math.ceil(dimensions.modal.bottom) - Math.floor(dimensions.modal.top) };
   const bytes = await page.screenshot({ path: filename, clip, fullPage: false, animations: 'allow', scale: 'css' });
   captures.push({ filename, viewportWidth: width, textScale: percent, state, crop: clip, bytes: bytes.length });
+  if (!scrolled && percent === 200 && state !== 'complete-detail') await captureScrolledEvidence(page, width, percent, state);
+}
+async function captureScrolledEvidence(page, width, percent, state) {
+  const selectors = {
+    list: '#brief-history-list .brief-history-record',
+    verified: '#brief-history-detail > h3, #brief-history-detail > .brief-history-integrity, #brief-history-detail > .muted, #brief-history-detail > .brief-history-notice',
+    legacy: '#brief-history-detail > h3, #brief-history-detail > .brief-history-integrity, #brief-history-detail > .brief-history-notice',
+    unavailable: '#brief-history-back, #brief-history-status, #brief-history-retry',
+    oversized: '#brief-history-back, #brief-history-status, #brief-history-retry'
+  };
+  const selector = selectors[state];
+  assert.ok(selector, 'a captured enlarged state has an explicit content target');
+  const body = page.locator('#brief-history-body');
+  const target = await body.evaluate((element, selector) => {
+    const bounds = element.getBoundingClientRect();
+    const nodes = [...element.querySelectorAll(selector)];
+    const boxes = nodes.map(node => node.getBoundingClientRect());
+    return { count: boxes.length, visible: nodes.every(node => !node.hidden && node.getClientRects().length),
+      start: Math.min(...boxes.map(box => box.top - bounds.top + element.scrollTop)),
+      end: Math.max(...boxes.map(box => box.bottom - bounds.top + element.scrollTop)),
+      height: element.clientHeight, maximum: element.scrollHeight - element.clientHeight,
+      overflowY: getComputedStyle(element).overflowY };
+  }, selector);
+  assert.ok(target.count && target.visible && target.height > 100 && target.end > target.start, 'bounded visible scroll targets');
+  assert.ok(['auto', 'scroll'].includes(target.overflowY), 'the real body permits user scrolling');
+  const frames = [];
+  let requested = Math.min(target.maximum, Math.max(0, target.start - 12)), covered = target.start;
+  for (let index = 0; index < 8; index++) {
+    const before = await body.evaluate(element => ({ top: element.scrollTop, box: element.getBoundingClientRect().toJSON() }));
+    await page.mouse.move(before.box.left + before.box.width / 2, before.box.top + before.box.height / 2);
+    await page.mouse.wheel(0, requested - before.top);
+    await page.waitForFunction(top => Math.abs(document.getElementById('brief-history-body').scrollTop - top) <= 2, requested);
+    // Preserve real app styles and motion. Do not rescale at this position: temporarily
+    // shrinking fonts could clamp scrollTop and hide the evidence being reviewed.
+    const frameState = `${state}-scrolled-${index + 1}`;
+    await capture(page, width, percent, frameState, true);
+    const top = await body.evaluate(element => element.scrollTop), bottom = top + target.height;
+    assert.ok(top <= covered + 2 && bottom > covered, 'scrolled pixels cover the target without gaps');
+    frames.push({ state: frameState, top, bottom }); covered = bottom;
+    if (covered >= target.end - 1) break;
+    requested = Math.min(target.maximum, top + target.height - 96);
+  }
+  assert.ok(covered >= target.end - 1, 'every line and target control is covered within eight real viewport captures');
+  scrollCoverage.push({ viewportWidth: width, textScale: percent, state, selector, target, frames });
 }
 try {
   const state = seedWorkspaceState({}, { workspaceId: 'brief-browser', name: 'Synthetic saved briefs', email: 'brief@example.test', passwordHash: 'fixture-only' }); state.products = [];
@@ -170,8 +215,10 @@ try {
     await context.close();
   }
   assert.equal(verifiedStates.length, 14 * 8, 'all states receive geometry checks across every width and text scale');
-  assert.equal(captures.length, 6 * 8, 'review pixels are bounded to six distinct states per variant');
-  await fs.writeFile('/tmp/runvara-brief-history-manifest.json', JSON.stringify({ browser: { version: browser.version(), executablePath: executablePath || 'Playwright bundled Chromium' }, widths: [320, 390, 430, 1200], textScales: [100, 200], verifiedStateCount: verifiedStates.length, captureCount: captures.length, verifiedStates, captures }, null, 2));
+  assert.equal(captures.length - scrolledStates.length, 6 * 8, 'all 48 original initial/detail captures remain');
+  assert.equal(scrollCoverage.length, 5 * 4, 'each enlarged list, integrity and error state has complete scroll evidence');
+  assert.ok(scrolledStates.length >= 20 && scrolledStates.length <= 160, 'additional pixels have a fixed per-state bound');
+  await fs.writeFile('/tmp/runvara-brief-history-manifest.json', JSON.stringify({ browser: { version: browser.version(), executablePath: executablePath || 'Playwright bundled Chromium' }, widths: [320, 390, 430, 1200], textScales: [100, 200], verifiedStateCount: verifiedStates.length, captureCount: captures.length, verifiedStates, scrolledStates, scrollCoverage, captures }, null, 2));
   console.log(`Saved brief browser checks passed: ${verifiedStates.length} verified states and ${captures.length} focused captures at 320, 390, 430 and 1200px, with 100% and 200% text.`);
 } finally {
   if (browser) await browser.close();
