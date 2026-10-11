@@ -27,12 +27,19 @@ const ASSETS = [
   ['/control-ui.js', 'control-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/outcomes-ui.js', 'outcomes-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/activity-ui.js', 'activity-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
+  ['/brief-history-ui.js', 'brief-history-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/connections-ui.js', 'connections-ui.js', 'text/javascript; charset=utf-8', 'no-cache'],
   ['/styles.css', 'styles.css', 'text/css; charset=utf-8', 'public, max-age=300'],
   ['/favicon.svg', 'favicon.svg', 'image/svg+xml', 'public, max-age=300']
 ];
 const assetUrl = filename => new URL(`../../${filename}`, import.meta.url);
 const contentTag = bytes => `"sha256-${crypto.createHash('sha256').update(bytes).digest('hex')}"`;
+
+test('saved-brief styles have a new cache key while the application shell revalidates', async () => {
+  const html = await fs.readFile(assetUrl('index.html'), 'utf8');
+  assert.match(html, /href="\/styles\.css\?v=6\.15\.2-brief-history-v1"/);
+  assert.match(html, /src="\/brief-history-ui\.js\?v=6\.15\.2"/);
+});
 
 async function fixture(t) {
   const states = new Map(), cookies = {}, calls = [];

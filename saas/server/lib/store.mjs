@@ -24,6 +24,9 @@ import { LEGACY_AI_USAGE_COLUMNS, LEGACY_AI_USAGE_MAX_ROWS, LEGACY_AI_USAGE_MAX_
   legacyAiUsageWindow, legacyAiUsageUnknown, legacyAiUsagePage } from './legacy-ai-usage.mjs';
 import { planAutomationRetention, applyAutomationRetention, verifyAutomationArchivePayload,
   AUTOMATION_ARCHIVE_BATCH_SIZE, AUTOMATION_ARCHIVE_BATCH_BYTES, AUTOMATION_ARCHIVE_SINGLE_BODY_MAX_BYTES } from './automation-retention.mjs';
+import { BRIEF_HISTORY_CONTRACT, BRIEF_HISTORY_READ_MAX_BYTES, BRIEF_HISTORY_LEGACY_READ_MAX_BYTES,
+  planBriefHistoryCompaction, assertBriefHistoryPlanCurrent, assertBriefArchiveReference,
+  verifyBriefArchiveRow, isLegacyBriefArchiveReference, verifyLegacyBriefArchiveRow, briefArchiveError } from './brief-history.mjs';
 import {
   providerUsageError, providerUsageMonth, providerUsageReservationParams, providerUsageReservationResult,
   providerUsageSettlementParams, providerUsageSettlementResult, providerUsageSummaryResult,
@@ -460,7 +463,17 @@ class FileStore {
   invalidateSchedulerCache() {}
   async listWorkspaceIds() { return Object.keys(await this.readAll()); }
 
-  async getBrief(workspaceId, briefId) { return (await this.get(workspaceId))?.dailyBriefs?.find(item => item.id === briefId) || null; }
+  async getBrief(workspaceId, briefId, options = {}) {
+    const state = Object.hasOwn(options, 'state') ? options.state : await this.get(workspaceId);
+    if (Object.hasOwn(options, 'state') || state) assertWorkspace(workspaceId, state);
+    const matches = state?.dailyBriefs?.filter(item => item?.id === briefId) || [];
+    if (matches.length > 1) throw briefArchiveError('BRIEF_ARCHIVE_REFERENCE_INVALID');
+    const brief = matches[0];
+    // File mode has no operations_briefs archive. Never present a copied stub
+    // as the full historical record, including when an auth state is supplied.
+    if (brief && Object.hasOwn(brief, 'archive')) throw briefArchiveError('BRIEF_ARCHIVE_UNAVAILABLE');
+    return brief || null;
+  }
 
   async getArchivedAutomationRun(workspaceId, runId, archiveRef) {
     assertAutomationArchiveReference(workspaceId, runId, archiveRef);
@@ -614,6 +627,7 @@ class SupabaseStore {
     Object.defineProperty(this, 'businessOutcomePublicationEnabled', { value: String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() === 'true' });
     Object.defineProperty(this, 'orderRecoveryCapability', { value: env.SHOPIFY_ORDER_RECOVERY_CONTRACT ?? null });
     Object.defineProperty(this, 'contentExecutionReceiptCapability', { value: env.CONTENT_EXECUTION_RECEIPT_CONTRACT ?? null });
+    Object.defineProperty(this, 'briefHistoryCompactionEnabled', { value: env.BRIEF_HISTORY_COMPACTION_CONTRACT === BRIEF_HISTORY_CONTRACT });
     this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: true });
     this.url = String(env.SUPABASE_URL || '').replace(/\/$/, '');
     this.key = String(env.SUPABASE_SERVICE_ROLE_KEY || '');
@@ -1215,7 +1229,7 @@ class SupabaseStore {
     })), 'id');
 
     // Archived full snapshots are immutable: never replace them with summaries.
-    await mirror('operations_briefs', (state.dailyBriefs || []).filter(brief => !brief.archive).map(brief => ({
+    await mirror('operations_briefs', (state.dailyBriefs || []).filter(brief => !Object.hasOwn(brief, 'archive')).map(brief => ({
       id: brief.id,
       workspace_id: workspaceId,
       summary: brief.summary,
@@ -1444,11 +1458,22 @@ class SupabaseStore {
     const archivedBriefs = briefs.slice(SUPABASE_DAILY_BRIEF_LIMIT);
     for (const brief of archivedBriefs) {
       if (!brief?.id) continue;
+      // Versioned content keys already identify their durable full row. Never
+      // reinterpret them as the legacy original-ID row or write a stub over it.
+      if (Object.hasOwn(brief, 'archive')) {
+        if (isLegacyBriefArchiveReference(brief.archive, brief.id)) {
+          // Prove that the original full legacy row still exists before losing
+          // its retained pointer. Never turn a missing archive into stub data,
+          // or rewrite an original-ID row from a potentially stale reread.
+          await this.readLegacyBriefArchive(workspaceId, brief.id, brief.archive);
+        } else assertBriefArchiveReference(brief.archive, workspaceId, brief.id);
+        continue;
+      }
       await this.upsert('operations_briefs', [{
         id: brief.id,
         workspace_id: workspaceId,
         summary: brief.summary || '',
-        metrics: brief.archive ? ((await this.scopedRequest(workspaceId, 'archive_read', `operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(brief.id)}&select=metrics&limit=1`))?.[0]?.metrics || brief) : brief,
+        metrics: brief,
         logic: brief.logic || 'deterministic-v1',
         created_at: brief.generatedAt || new Date().toISOString()
       }], 'id', {}, { workspaceId, operation: 'archive_write' });
@@ -1491,6 +1516,7 @@ class SupabaseStore {
     }
     const existing = Boolean(state[PERSISTED] || state._revision);
     const expectedRevision = state._revision;
+    const briefPlan = existing && this.briefHistoryCompactionEnabled ? planBriefHistoryCompaction(state) : null;
     // Plan against the predecessor and original run references, not the new
     // revision or a deep clone. Scheduler claim handles survive save/finish.
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(protectedContentCommit ? source : state) : null;
@@ -1510,7 +1536,7 @@ class SupabaseStore {
     if (existing) {
       const briefs = [];
       for (const brief of upgraded.dailyBriefs) {
-        if (brief.archive || Buffer.byteLength(JSON.stringify(brief)) <= 65536) { briefs.push(brief); continue; }
+        if (Object.hasOwn(brief, 'archive') || Buffer.byteLength(JSON.stringify(brief)) <= 65536) { briefs.push(brief); continue; }
         // Commit the full historical snapshot before replacing it with a pointer.
         // One snapshot per request also avoids the gateway's bulk payload limit.
         await this.upsert('operations_briefs', [{ id: brief.id, workspace_id: workspaceId, summary: brief.summary,
@@ -1519,6 +1545,33 @@ class SupabaseStore {
       }
       upgraded.dailyBriefs = briefs;
     }
+    if (briefPlan?.candidates.length) {
+      const verifiedCandidates = [];
+      for (const candidate of briefPlan.candidates) {
+        // Application-level append-only convention, not a DB immutability
+        // claim. Insert-ignore alone is insufficient: validate the exact row
+        // after writing, including when an earlier attempt already inserted it.
+        try {
+          await this.upsert('operations_briefs', [candidate.row], 'id', {
+            headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
+            maxResponseBytes: BRIEF_HISTORY_READ_MAX_BYTES
+          }, { workspaceId, operation: 'archive_write' });
+          assertBriefHistoryPlanCurrent(briefPlan);
+          await this.readBriefArchive(workspaceId, candidate.row.metrics.id, candidate.reference);
+          verifiedCandidates.push(candidate);
+        } catch (error) {
+          if (error.code === 'BRIEF_HISTORY_SOURCE_CHANGED') throw error;
+          // Compaction is optional, business completion is not. A failed
+          // attempt retains the original full row; the unchanged primary size
+          // limit/CAS still decides whether that save is safe. Never log bodies.
+          console.warn(JSON.stringify({ event: 'brief_history_compaction_deferred', workspaceId,
+            code: error.code === 'BRIEF_ARCHIVE_INTEGRITY_FAILED' ? 'BRIEF_ARCHIVE_INTEGRITY_FAILED' : 'BRIEF_ARCHIVE_UNAVAILABLE' }));
+        }
+        assertBriefHistoryPlanCurrent(briefPlan);
+      }
+      const replacements = new Map(verifiedCandidates.map(candidate => [candidate.index, structuredClone(candidate.stub)]));
+      upgraded.dailyBriefs = upgraded.dailyBriefs.map((brief, index) => replacements.get(index) || brief);
+    }
     const now = new Date().toISOString();
     upgraded.integrationStatus.supabase = { status: 'connected', detail: 'Authoritative workspace state committed.', lastSyncAt: now, lastError: null };
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
@@ -1526,6 +1579,7 @@ class SupabaseStore {
     // the CAS write. Caller state is changed only after that commit succeeds.
     const retainedAutomationRuns = automationPlan ? applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns : null;
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
+    if (briefPlan?.candidates.length) assertBriefHistoryPlanCurrent(briefPlan);
     assertCurrent(upgraded);
     const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery });
     if (protectedResult?.recovered) {
@@ -1597,13 +1651,35 @@ class SupabaseStore {
     return user ? { ...user, workspaceId: rows[0].workspace_id } : null;
   }
 
-  async getBrief(workspaceId, briefId) {
-    const state = await this.get(workspaceId);
-    const brief = state?.dailyBriefs?.find(item => item.id === briefId);
-    if (!brief?.archive) return brief || null;
-    const rows = await this.scopedRequest(workspaceId, 'archive_read', `operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=metrics&limit=1`);
-    if (!rows?.[0]?.metrics) throw Object.assign(new Error('Historical brief is temporarily unavailable'), { status: 503, code: 'BRIEF_ARCHIVE_UNAVAILABLE' });
-    return rows[0].metrics;
+  async readBriefArchive(workspaceId, briefId, reference) {
+    assertBriefArchiveReference(reference, workspaceId, briefId);
+    let rows;
+    try {
+      rows = await this.scopedRequest(workspaceId, 'archive_read', `operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(reference.archiveId)}&select=id,workspace_id,metrics&limit=2`,
+        { maxResponseBytes: BRIEF_HISTORY_READ_MAX_BYTES });
+    } catch (error) { throw briefArchiveError(error.code === 'SUPABASE_RESPONSE_TOO_LARGE' ? 'BRIEF_ARCHIVE_TOO_LARGE' : 'BRIEF_ARCHIVE_UNAVAILABLE'); }
+    return verifyBriefArchiveRow(rows, reference, workspaceId, briefId);
+  }
+
+  async readLegacyBriefArchive(workspaceId, briefId, reference) {
+    if (!isLegacyBriefArchiveReference(reference, briefId)) throw briefArchiveError('BRIEF_ARCHIVE_REFERENCE_INVALID');
+    let rows;
+    try {
+      rows = await this.scopedRequest(workspaceId, 'archive_read', `operations_briefs?workspace_id=eq.${encodeURIComponent(workspaceId)}&id=eq.${encodeURIComponent(briefId)}&select=id,workspace_id,metrics&limit=2`,
+        { maxResponseBytes: BRIEF_HISTORY_LEGACY_READ_MAX_BYTES });
+    } catch (error) { throw briefArchiveError(error.code === 'SUPABASE_RESPONSE_TOO_LARGE' ? 'BRIEF_ARCHIVE_TOO_LARGE' : 'BRIEF_ARCHIVE_UNAVAILABLE'); }
+    return verifyLegacyBriefArchiveRow(rows, workspaceId, briefId);
+  }
+
+  async getBrief(workspaceId, briefId, options = {}) {
+    const state = Object.hasOwn(options, 'state') ? options.state : await this.get(workspaceId);
+    if (Object.hasOwn(options, 'state') || state) assertWorkspace(workspaceId, state);
+    const matches = state?.dailyBriefs?.filter(item => item?.id === briefId) || [];
+    if (matches.length > 1) throw briefArchiveError('BRIEF_ARCHIVE_REFERENCE_INVALID');
+    const brief = matches[0];
+    if (!brief || !Object.hasOwn(brief, 'archive')) return brief || null;
+    if (brief.archive && Object.hasOwn(brief.archive, 'schema')) return this.readBriefArchive(workspaceId, briefId, brief.archive);
+    return this.readLegacyBriefArchive(workspaceId, briefId, brief.archive);
   }
 
   async getArchivedAutomationRun(workspaceId, runId, archiveRef) {

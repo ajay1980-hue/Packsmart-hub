@@ -75,6 +75,17 @@ jobs:
         run: node saas/server/tests/governed-paused-browser-check.mjs
       - name: Verify quiet startup feedback and manual reload
         run: node saas/server/tests/quiet-startup-browser-check.mjs
+      - name: Verify saved brief history and authenticated recovery
+        run: node saas/server/tests/brief-history-browser-check.mjs
+      - name: Upload saved brief history qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-brief-history-responsive
+          path: |
+            /tmp/runvara-brief-history-*.png
+            /tmp/runvara-brief-history-*.json
+          if-no-files-found: warn
       - name: Upload quiet startup qualification
         if: always()
         uses: actions/upload-artifact@v4

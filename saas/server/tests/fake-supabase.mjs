@@ -23,7 +23,8 @@ export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
     const url = new URL(input), method = options.method || 'GET', table = url.pathname.split('/').pop();
     const body = options.body ? JSON.parse(options.body) : null;
     calls.push({ url, method, headers: options.headers, body: options.body || '' });
-    const failure = fault({ table, method, body, states });
+    const failure = fault({ table, method, body, states, tables, url, calls });
+    if (failure instanceof Response) return failure;
     if (failure) return Response.json(failure, { status: failure.status || 409 });
     if (method === 'HEAD') return new Response(null, { status: 200 });
     if (table === 'runvara_create_workspace') {
@@ -63,16 +64,27 @@ export function fakeSupabase({ initialStates = [], fault = () => null } = {}) {
     if (method === 'POST') {
       const rows = tables.get(table) || [];
       const keys = url.searchParams.get('on_conflict').split(',');
+      const ignore = new Headers(options.headers || {}).get('prefer')?.split(',').some(value => value.trim() === 'resolution=ignore-duplicates');
       for (const next of body) {
         const previous = rows.findIndex(row => keys.every(key => row[key] === next[key]));
-        if (previous < 0) rows.push(next); else rows[previous] = next;
+        if (previous < 0) rows.push(next); else if (!ignore) rows[previous] = next;
       }
       tables.set(table, rows);
       return new Response(null, { status: 204 });
     }
-    const id = url.searchParams.get('workspace_id')?.slice(3);
-    const recordId = url.searchParams.get('id')?.slice(3);
-    return Response.json((tables.get(table) || []).filter(row => (!id || row.workspace_id === id) && (!recordId || row.id === recordId)));
+    let selected = tables.get(table) || [];
+    for (const key of ['workspace_id', 'id', 'collection', 'record_id']) {
+      const filter = url.searchParams.get(key);
+      if (filter?.startsWith('eq.')) selected = selected.filter(row => row[key] === filter.slice(3));
+    }
+    const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 200);
+    selected = selected.slice(offset, offset + limit);
+    const select = url.searchParams.get('select');
+    if (select && select !== '*') selected = selected.map(row => Object.fromEntries(select.split(',').map(key => {
+      if (!/^[A-Za-z_]\w*$/.test(key)) throw new Error(`Unsupported fake Supabase projection: ${key}`);
+      return [key, row[key] ?? null];
+    })));
+    return Response.json(selected);
   };
   return { fetchImpl, states, tables, calls };
 }

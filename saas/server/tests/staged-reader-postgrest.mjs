@@ -166,9 +166,10 @@ async function startGateway(db, maxRows, name) {
   assertRunning();
   return gateway;
 }
-function store(gateway = ordinary, { open = false, role = 'service_role', token = jwt(role), beforeFetch } = {}) {
+function store(gateway = ordinary, { open = false, briefCompaction = false, role = 'service_role', token = jwt(role), beforeFetch } = {}) {
   return createStore({ SUPABASE_URL: gateway.url, SUPABASE_SERVICE_ROLE_KEY: token,
-    CONTENT_EXECUTION_RECEIPT_CONTRACT: contract, ...(open ? { GOVERNED_RECORD_PRODUCER_CONTRACT } : {}) }, {
+    CONTENT_EXECUTION_RECEIPT_CONTRACT: contract, ...(open ? { GOVERNED_RECORD_PRODUCER_CONTRACT } : {}),
+    ...(briefCompaction ? { BRIEF_HISTORY_COMPACTION_CONTRACT: 'runvara-brief-history/v1' } : {}) }, {
     fetchImpl: async (input, options) => {
       assertRunning();
       const target = new URL(input); assert.equal(target.origin, gateway.url); assert.ok(target.pathname.startsWith('/rest/v1/'));
@@ -300,6 +301,51 @@ for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) process.once(s
   cleanupAll().then(() => process.exit(code), error => { console.error('Qualification cleanup failed: ' + error.message); process.exit(99); });
 });
 process.once('exit', () => { for (const gateway of gateways) if (!gateway.exit) gateway.child.kill('SIGKILL'); });
+
+test('verified brief history uses existing schema, real insert-ignore and JSONB-safe recovery with compaction closed', async () => {
+  const f = await seed(old);
+  const brief = { id: 'recorded-brief-' + randomUUID(), generatedAt: '2020-01-02T12:00:00.000Z',
+    summary: 'Historical synthetic snapshot; totals remain unknown.', logic: 'deterministic-v2',
+    sourceSignature: 'synthetic-recorded-source', calculationVersion: 'synthetic-history/v1',
+    today: { unknown: null, nested: { z: 1e-7, a: 'Unicode 雪', values: [false, 0, '0', null] },
+      records: Array.from({ length: 40 }, (_, n) => ({ id: n, detail: 'Recorded synthetic source; no provider calls. '.repeat(4) })) } };
+  f.state.dailyBriefs = [{ id: 'latest-' + randomUUID(), generatedAt: new Date().toISOString(), summary: 'Current brief' }, brief];
+  await old.admin.query('UPDATE public.saas_workspace_state SET state=$2 WHERE workspace_id=$1', [f.workspaceId, f.state]);
+  const producer = store(legacy, { briefCompaction: true });
+  const before = traces.length;
+  await producer.save(f.workspaceId, await producer.get(f.workspaceId));
+  const reader = store(legacy), saved = await reader.get(f.workspaceId), pointer = saved.dailyBriefs[1].archive;
+  assert.equal(pointer.schema, 'runvara-brief-history/v1');
+  assert.notEqual(pointer.archiveId, brief.id);
+  assert.deepEqual(await reader.getBrief(f.workspaceId, brief.id, { state: saved }), brief);
+  const insert = traces.slice(before).find(call => call.path.startsWith('/rest/v1/operations_briefs?') && call.prefer?.includes('ignore-duplicates'));
+  assert.ok(insert, 'The real gateway must receive insert-ignore');
+  assert.equal(insert.status, 201);
+  const archiveRead = traces.at(-1);
+  assert.match(archiveRead.path, /select=id,workspace_id,metrics/);
+  assert.deepEqual(Object.keys(archiveRead.json[0]).sort(), ['id', 'metrics', 'workspace_id']);
+
+  const conflicting = { id: pointer.archiveId, workspace_id: f.workspaceId, summary: 'Ignored collision',
+    metrics: { ...brief, summary: 'Ignored collision' }, logic: brief.logic, created_at: brief.generatedAt };
+  await reader.upsert('operations_briefs', [conflicting], 'id', { headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' } },
+    { workspaceId: f.workspaceId, operation: 'archive_write' });
+  assert.deepEqual(await reader.getBrief(f.workspaceId, brief.id, { state: saved }), brief);
+  // A stale pre-format reporting writer uses the original ID. It cannot change
+  // the separately keyed snapshot selected by the retained v1 reference.
+  await reader.upsert('operations_briefs', [{ ...conflicting, id: brief.id }], 'id', {},
+    { workspaceId: f.workspaceId, operation: 'reporting_write' });
+  assert.deepEqual(await reader.getBrief(f.workspaceId, brief.id, { state: saved }), brief);
+  for (const role of ['anon', 'authenticated']) {
+    await assert.rejects(store(legacy, { role }).request('operations_briefs?select=id&limit=1'), { databaseCode: '42501' });
+  }
+  await old.admin.query("UPDATE public.operations_briefs SET metrics=jsonb_set(metrics,'{summary}',to_jsonb('corrupt fixture'::text)) WHERE id=$1", [pointer.archiveId]);
+  await assert.rejects(reader.getBrief(f.workspaceId, brief.id, { state: saved }), error => error.status === 503);
+  await old.admin.query('DELETE FROM public.operations_briefs WHERE id=$1', [pointer.archiveId]);
+  await assert.rejects(reader.getBrief(f.workspaceId, brief.id, { state: saved }), error => error.status === 503);
+  observations.push({ briefHistory: { baselineSchemaOnly: true, actualInsertIgnore: true, jsonbKeyOrderSafe: true,
+    closedProducerReader: true, staleOriginalIdMirrorIsolated: true, privilegedCorruptionDetected: true,
+    missingArchiveRejected: true, addedSchemaOrGrants: false, requests: traces.length - before } });
+});
 
 test('genuine authenticator JWT role switching and anonymous/authenticated/invalid-token denials', async () => {
   const role = (await base.query('SELECT rolinherit,rolsuper,rolcanlogin,rolbypassrls FROM pg_roles WHERE rolname=$1', [authRole])).rows[0];

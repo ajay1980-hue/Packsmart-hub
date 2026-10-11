@@ -14,7 +14,7 @@ const SECRET = 'quiet-startup-session-fixture-over-thirty-two-characters';
 const ENV = { NODE_ENV: 'production', SESSION_SECRET: SECRET, CREDENTIALS_KEY: SECRET,
   APP_PUBLIC_URL: 'https://quiet.example.test', RUNVARA_STARTUP_MODE: 'quiet' };
 const ASSETS = ['/', '/index.html', '/app.js', '/presentation.js', '/control-ui.js', '/outcomes-ui.js',
-  '/activity-ui.js', '/connections-ui.js', '/styles.css', '/favicon.svg'];
+  '/activity-ui.js', '/brief-history-ui.js', '/connections-ui.js', '/styles.css', '/favicon.svg'];
 // Include both read-looking routes with side effects and every mutation family.
 const BLOCKED = [
   '/api/public/support', '/api/webhooks/stripe', '/api/auth/activate-owner', '/api/auth/login', '/api/auth/signup-options',

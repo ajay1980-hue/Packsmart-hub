@@ -39,6 +39,7 @@ import {
   onboardingState
 } from './lib/operations.mjs';
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
+import { briefHistoryList, briefHistoryIntegrity } from './lib/brief-history.mjs';
 import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, runCommander } from './lib/agents.mjs';
 import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, governedApproval, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
 import { recordWork } from './lib/events.mjs';
@@ -93,6 +94,7 @@ const STATIC_FILES = new Map([
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
   ['/activity-ui.js', ['saas/activity-ui.js', 'text/javascript; charset=utf-8']],
+  ['/brief-history-ui.js', ['saas/brief-history-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
@@ -457,7 +459,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const etag = `"sha256-${crypto.createHash('sha256').update(body).digest('hex')}"`;
       const notModified = matchesStaticEtag(ifNoneMatch, etag);
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/brief-history-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(notModified ? 304 : 200, {
         ...headers(contentType, cacheControl),
         ETag: etag,
@@ -2068,13 +2070,23 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           send(res, 202, { job }); return;
         }
         if (req.method === 'GET' && pathname === '/api/briefs') {
+          if (url.searchParams.has('view')) {
+            if (url.searchParams.get('view') !== 'history') throw Object.assign(new Error('Unsupported brief view'), { status: 400, code: 'INVALID_BRIEF_VIEW' });
+            send(res, 200, { briefs: briefHistoryList(auth.state), limit: 30 }); return;
+          }
           send(res, 200, { briefs: auth.state.dailyBriefs || [] }); return;
         }
         const historicalBrief = pathname.match(/^\/api\/briefs\/([^/]+)$/);
         if (req.method === 'GET' && historicalBrief) {
-          const brief = await store.getBrief(auth.session.workspaceId, historicalBrief[1]);
+          let briefId;
+          try { briefId = decodeURIComponent(historicalBrief[1]); }
+          catch { throw Object.assign(new Error('Invalid brief identifier'), { status: 400, code: 'INVALID_BRIEF_ID' }); }
+          // Authentication already loaded this exact workspace. Reuse that trusted
+          // snapshot; the client can select a retained ID, never an archive pointer.
+          const retained = (auth.state.dailyBriefs || []).find(item => item?.id === briefId);
+          const brief = await store.getBrief(auth.session.workspaceId, briefId, { state: auth.state });
           if (!brief) throw Object.assign(new Error('Brief not found'), { status: 404, code: 'BRIEF_NOT_FOUND' });
-          send(res, 200, { brief }); return;
+          send(res, 200, { brief, integrity: briefHistoryIntegrity(retained, { workspaceId: auth.session.workspaceId, verified: true }) }); return;
         }
         if (req.method === 'PUT' && pathname === '/api/autopilot') {
           requireOwner(auth);

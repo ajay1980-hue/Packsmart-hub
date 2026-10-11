@@ -197,7 +197,7 @@
     resetSeoReview();
     resetObjectiveEditing(true);
     resetBusinessGraph(true);
-    resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
+    resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); window.RunvaraBriefHistory?.reset();
     closeWorkspaceSearch();
     $('#commander-result').replaceChildren(); $('#commander-result').classList.add('hidden');
     $('#loading-screen')?.classList.add('hidden');
@@ -218,7 +218,7 @@
     window.RunvaraConnections?.interruptContent('Password replacement required', true);
     resetObjectiveEditing(true);
     resetBusinessGraph(true);
-    resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
+    resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); window.RunvaraBriefHistory?.reset();
     closeWorkspaceSearch();
     $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
@@ -257,6 +257,7 @@
   }
 
   async function loadBootstrap(options) {
+    window.RunvaraBriefHistory?.reset();
     resetSeoReview('Refreshing SEO review. Classification is unavailable until the current workspace snapshot loads.');
     const seoTicket = { epoch: seoReviewUI.epoch, session: state.session, signature: seoSessionSignature() };
     window.RunvaraConnections?.interruptContent('Workspace refresh started');
@@ -274,7 +275,7 @@
     if (state.data?.workspace?.id !== data.workspace.id || state.data?.user?.id !== data.user?.id || state.data?.user?.role !== data.user?.role) resetObjectiveEditing(true);
     state.data = data; state.csrf = data.csrf || state.csrf;
     seoReviewUI.context = currentSeoLoad ? { session: state.session, signature: seoSessionSignature(), data } : null;
-    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset();
+    state.graphGeneration++; state.objectiveGeneration++; resetObjectiveReview(); resetAutomationHistory(); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); window.RunvaraBriefHistory?.reset();
     $('#business-graph-result').replaceChildren();
     $('#business-objectives-list').replaceChildren();
     $('#fleet-provider-usage-result').replaceChildren();
@@ -305,7 +306,7 @@
     if (view !== state.view) window.RunvaraConnections?.interruptContent('Navigation changed');
     if (view !== state.view) resetObjectiveEditing();
     if (view !== 'overview') resetBusinessGraph(true);
-    if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); }
+    if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); window.RunvaraBriefHistory?.pause(); }
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
     closeWorkspaceSearch();
     state.view = view;
@@ -2949,7 +2950,7 @@
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
-  $('#logout').addEventListener('click', async () => { resetSeoReview(); window.RunvaraConnections?.interruptContent('Signing out', true); resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
+  $('#logout').addEventListener('click', async () => { resetSeoReview(); window.RunvaraConnections?.interruptContent('Signing out', true); resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); window.RunvaraBriefHistory?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));
   $('#account-password-form').addEventListener('submit', async event => {
     window.RunvaraConnections?.interruptContent('Password change started');
@@ -2957,7 +2958,7 @@
     resetObjectiveEditing(true, true);
     resetBusinessGraph();
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = form.querySelector('.form-error'); error.textContent = ''; setBusy(button, true, 'Updating…');
-    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); window.RunvaraConnections?.interruptContent('Password changed', true); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; resetSeoReview(); form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
+    try { const payload = await request('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ currentPassword: form.currentPassword.value, newPassword: form.newPassword.value }) }); window.RunvaraConnections?.interruptContent('Password changed', true); window.RunvaraBriefHistory?.reset(); resetObjectiveEditing(true); resetBusinessGraph(); state.csrf = payload.csrf; resetSeoReview(); form.reset(); form.classList.add('hidden'); showMessage('Password updated and older sessions revoked.'); }
     catch (passwordError) { error.textContent = passwordError.message; }
     finally { setBusy(button, false); }
   });
@@ -3009,6 +3010,7 @@
 
   window.RunvaraOutcomes?.init({ request, getContext: () => ({ session: state.session, workspaceId: state.data?.workspace?.id, userId: state.session?.user?.id, role: state.data?.user?.role, view: state.view, experiments: state.data?.revenueEngine?.experiments || [] }) });
   window.RunvaraActivity?.init({ request, getContext: () => ({ session:state.session, workspaceId:state.data?.workspace?.id, role:state.data?.user?.role, view:state.view }) });
+  window.RunvaraBriefHistory?.init({ request, getContext: () => ({ session: state.session, workspaceId: state.data?.workspace?.id, userId: state.data?.user?.id, role: state.data?.user?.role, view: state.view, generation: state.graphGeneration, csrf: state.csrf, sessionWorkspaceId: state.session?.workspace?.id, sessionUserId: state.session?.user?.id, sessionRole: state.session?.user?.role }) });
   window.RunvaraControl.init({ request, reload: loadBootstrap, notify: showMessage, setView, money, date, escapeHtml });
   window.RunvaraConnections?.init({ request, reload: loadBootstrap, notify: showMessage, setView, date, escapeHtml,
     getContentContext: () => ({ session:state.session, csrf:state.csrf, sessionCsrf:state.session?.csrf, generation:state.graphGeneration, bootstrap:state.data, view:state.view,
