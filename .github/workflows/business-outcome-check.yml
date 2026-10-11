@@ -55,4 +55,6 @@ jobs:
       - name: Verify recovery importer through the real storage adapter
         run: node --test --test-concurrency=1 saas/server/tests/shopify-order-recovery-transport-postgres.mjs
       - name: Verify staged readers, publication reconciliation and admitted receipt completion
+        env:
+          STAGED_READER_DISPOSABLE_FIXTURE: github-actions-postgres17
         run: node --test --test-concurrency=1 saas/server/tests/staged-reader-postgres.mjs

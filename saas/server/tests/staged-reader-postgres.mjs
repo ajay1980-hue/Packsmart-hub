@@ -17,6 +17,17 @@ const baseUrl = new URL(process.env.OUTCOME_TEST_DATABASE_URL);
 assert.equal(baseUrl.protocol, 'postgres:'); assert.equal(baseUrl.hostname, '127.0.0.1');
 assert.equal(baseUrl.username, 'postgres'); assert.equal(baseUrl.pathname, '/runvara_outcome_test');
 assert.equal(baseUrl.search, ''); assert.equal(baseUrl.hash, '');
+const fixtureMode = process.env.STAGED_READER_DISPOSABLE_FIXTURE || 'local';
+assert.ok(['local', 'github-actions-postgres17'].includes(fixtureMode), 'Unknown disposable fixture mode');
+if (fixtureMode === 'github-actions-postgres17') {
+  // The official CI service listens on * inside its container; the runner must
+  // still connect to the exact disposable fixture through 127.0.0.1:5432.
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  assert.equal(process.env.CI, 'true');
+  assert.equal(process.env.GITHUB_JOB, 'postgres-business-outcomes');
+  assert.equal(baseUrl.port, '5432');
+} else assert.equal(baseUrl.password, '');
+assert.ok(Number.isInteger(Number(baseUrl.port)) && Number(baseUrl.port) > 1024);
 const { Client } = createRequire(new URL('./atomic-usage/package.json', import.meta.url))('pg');
 const openStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 const scopeKeys = ['workspaceId','workspace_id','tenantId','tenant_id','tenant'];
@@ -102,8 +113,9 @@ async function capabilityProfile(name) {
 before(async () => {
   base = new Client({ connectionString: baseUrl.toString(),ssl:false,connectionTimeoutMillis:5000 }); await base.connect();
   assert.equal(base.connection.stream.remoteAddress,'127.0.0.1');
-  const info = (await base.query("SELECT current_setting('server_version_num')::int version,current_setting('listen_addresses') listen")).rows[0];
-  assert.equal(info.version,170006); assert.equal(info.listen,'127.0.0.1');
+  const info = (await base.query("SELECT current_database() db,current_user role,current_setting('server_version_num')::int version,current_setting('listen_addresses') listen")).rows[0];
+  assert.equal(info.db,'runvara_outcome_test'); assert.equal(info.role,'postgres');
+  assert.equal(info.version,170006); assert.equal(info.listen,fixtureMode === 'github-actions-postgres17' ? '*' : '127.0.0.1');
   database = 'runvara_staged_reader_'+randomUUID().replaceAll('-',''); await base.query('CREATE DATABASE '+ident(database));
   const childUrl = new URL(baseUrl); childUrl.pathname = '/'+database;
   admin = new Client({ connectionString:childUrl.toString(),ssl:false,statement_timeout:20000 }); await admin.connect();
@@ -116,7 +128,7 @@ after(async () => {
   await service?.end(); await admin?.end();
   if (database) { await base.query('DROP DATABASE '+ident(database)); assert.equal((await base.query('SELECT count(*)::int n FROM pg_database WHERE datname=$1',[database])).rows[0].n,0); }
   await base?.end(); console.log('STAGED_READER_STORAGE_PROFILES='+JSON.stringify(profiles));
-  console.log('STAGED_READER_PROOF='+JSON.stringify({localOnly:true,synthetic:true,postgres:'17.6',actualPostgrest:false,externalProviderCalls:0,cleanup:'child database removal verified'}));
+  console.log('STAGED_READER_PROOF='+JSON.stringify({localOnly:true,synthetic:true,postgres:'17.6',actualPostgrest:false,externalProviderCalls:0,cleanup:database ? 'child database removal verified' : 'no child database created'}));
 });
 
 test('exact baseline and ordered existing forward migrations support reader-first compatibility and missing capability refusal',async()=>{

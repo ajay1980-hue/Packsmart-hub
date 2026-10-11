@@ -12,6 +12,7 @@ import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../l
 import { buildObjectiveReview } from '../lib/objective-review.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
 import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 
 async function captureRestriction(page, width, name, typography) {
   const panel = page.locator('#business-objective-restriction');
@@ -40,7 +41,8 @@ const secret = 'objective-review-browser-test-only-more-than-thirty-two-characte
 // The real browser sends Origin on PUT. Configure the same dedicated loopback
 // origin before server creation, when the server captures its CSRF allowlist.
 const port = 18876, base = `http://127.0.0.1:${port}`;
-const fixtureEnv = { NODE_ENV: 'test', APP_PUBLIC_URL: base, SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
+// This forward-behavior fixture saves enforced restrictions through the real API.
+const fixtureEnv = { NODE_ENV: 'test', GOVERNED_RECORD_PRODUCER_CONTRACT, APP_PUBLIC_URL: base, SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
   SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' };
 const server = createPacksmartServer(fixtureEnv);
 let browser;
