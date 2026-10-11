@@ -44,6 +44,7 @@ import { recordWork } from './lib/events.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { createAgentOperations } from './lib/agent-ops.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
+import { prepareInternalGrokEvaluation } from './lib/grok-evaluation.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest } from './lib/connection-writes.mjs';
@@ -1138,6 +1139,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       }
 
       if (pathname.startsWith('/api/')) {
+        if (pathname === '/api/operator/grok-evaluation' && typeof store.getIdentity !== 'function') {
+          throw Object.assign(new Error('Compact evaluation identity is unavailable'), { status: 503, code: 'GROK_EVALUATION_IDENTITY_UNAVAILABLE' });
+        }
         if (req.method === 'GET' && pathname === '/api/activity') {
           // This verified-session precheck can only deny. Every admitted request
           // still performs fresh identity, role and session checks below.
@@ -1148,7 +1152,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { identityOnly: pathname === '/api/operator/grok-evaluation' || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -1903,6 +1907,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           send(res, 200, result); return;
         }
 
+        if (pathname === '/api/operator/grok-evaluation') {
+          requireLaunchAdmin(auth, env);
+          if (req.method !== 'GET') throw Object.assign(new Error('Grok evaluation preparation is read only'), { status: 405, code: 'GROK_EVALUATION_READ_ONLY' });
+          if ([...url.searchParams.keys()].length || Number(req.headers['content-length'] || 0) > 0 || req.headers['transfer-encoding']) {
+            throw Object.assign(new Error('Evaluation scope comes from the platform owner session'), { status: 400, code: 'GROK_EVALUATION_REQUEST_INVALID' });
+          }
+          send(res, 200, prepareInternalGrokEvaluation({ auth, env })); return;
+        }
         if (req.method === 'GET' && pathname === '/api/operator/provider-usage') {
           requireLaunchAdmin(auth, env);
           const workspaceId = text(url.searchParams.get('workspaceId') || auth.session.workspaceId, 256);
