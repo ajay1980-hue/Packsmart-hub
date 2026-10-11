@@ -66,6 +66,18 @@ try {
             await Promise.all(document.getAnimations().filter(animation => animation.playState !== 'finished' && Number.isFinite(animation.effect?.getTiming().iterations)).map(animation => animation.finished.catch(() => {})));
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           });
+          // Narrow enlarged text may need vertical scrolling. Verify both ends,
+          // including the heading before moving down to the keyboard retry.
+          await card.locator('h1').scrollIntoViewIfNeeded();
+          const headingView = await card.locator('h1').evaluate(node => {
+            const rect = node.getBoundingClientRect(), range = document.createRange();
+            range.selectNodeContents(node);
+            const words = Array.from(range.getClientRects()).filter(box => box.width && box.height);
+            const hit = document.elementFromPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+            return { top: rect.top, bottom: rect.bottom, viewportHeight: innerHeight, documentScrollTop: scrollY,
+              screenScrollTop: node.closest('#loading-screen').scrollTop,
+              visible: (node === hit || node.contains(hit)) && words.length > 0 && words.every(box => box.top >= -1 && box.bottom <= innerHeight + 1) };
+          });
           await retry.scrollIntoViewIfNeeded();
           // Start at the preceding native focus target and reach retry with a real Tab.
           await page.locator('.skip-link').focus();
@@ -84,7 +96,9 @@ try {
                   overflowX: style.overflowX, paddingLeft: style.paddingLeft, paddingRight: style.paddingRight }, words };
             };
             const button = node.querySelector('#startup-retry'), rect = button.getBoundingClientRect(), hit = document.elementFromPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
-            return { viewport: { width: innerWidth, height: innerHeight }, document: { client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth },
+            return { viewport: { width: innerWidth, height: innerHeight },
+              document: { client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight, scrollTop: scrollY },
+              screenVertical: { client: node.parentElement.clientHeight, scroll: node.parentElement.scrollHeight, scrollTop: node.parentElement.scrollTop },
               screen: inspect(node.parentElement, false), card: inspect(node, false), heading: inspect(node.querySelector('h1')), description: inspect(node.querySelector('h1 + p')),
               error: inspect(node.querySelector('#startup-error')), retry: inspect(button), retryVisible: button === hit || button.contains(hit),
               retryKeyboardFocused: document.activeElement === button, reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
@@ -95,7 +109,7 @@ try {
           const image = `/tmp/runvara-quiet-startup-${width}-${scale * 100}${reducedMotion === 'reduce' ? '-reduced' : ''}.png`;
           await page.screenshot({ path: image, fullPage: true, animations: 'disabled' });
           const bytes = await fs.readFile(image);
-          captures.push({ width, textScale: scale, reducedMotion, file: image, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), geometry });
+          captures.push({ width, textScale: scale, reducedMotion, file: image, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), headingView, geometry });
           for (const value of [geometry.error, geometry.retry]) {
             assert.ok(value.left >= -1 && value.right <= width + 1 && value.scroll <= value.client + 1, 'Pause feedback must fit horizontally');
             for (const word of value.words) assert.ok(word.rects.length && word.rects.every(rect => rect.left >= value.left - 1 && rect.right <= value.right + 1), `Clipped feedback word: ${word.text}`);
@@ -105,6 +119,7 @@ try {
             for (const word of value.words) assert.ok(word.rects.length && word.rects.every(rect => rect.left >= value.left - 1 && rect.right <= value.right + 1), `Clipped ${name} word: ${word.text}`);
           }
           assert.ok(geometry.document.scroll <= geometry.document.client + 1, 'Startup document must not scroll horizontally');
+          assert.ok(headingView.visible && headingView.top >= 0 && headingView.bottom <= headingView.viewportHeight, 'Startup heading must remain reachable by vertical scrolling');
           assert.ok(geometry.retryVisible && geometry.retry.top >= 0 && geometry.retry.bottom <= geometry.viewport.height && geometry.retry.height >= 44, 'Manual retry must remain reachable');
           assert.equal(geometry.retryKeyboardFocused, true, 'Tab must reach the manual retry');
           assert.equal(geometry.reducedMotion, reducedMotion === 'reduce', 'Requested motion preference must be active');

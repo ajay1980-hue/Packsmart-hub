@@ -172,6 +172,10 @@ p { line-height: 1.55; }
   background: linear-gradient(155deg, rgba(28, 28, 34, .97), rgba(13, 13, 16, .98));
   box-shadow: var(--shadow);
 }
+/* Keep enlarged startup text inside the viewport instead of sizing the grid
+   from the heading's longest word. The card can grow vertically as it wraps. */
+#loading-screen { grid-template-columns: minmax(0, 1fr); }
+#loading-screen .auth-card { min-width: 0; overflow-wrap: anywhere; }
 .auth-card .brand-lockup { margin-bottom: 2rem; }
 .auth-card h1 { margin: .7rem 0 1rem; }
 .auth-form {
