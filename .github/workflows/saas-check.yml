@@ -30,6 +30,15 @@ jobs:
         run: node saas/tests/saas-guard.test.cjs
       - name: Phase 2 security and tenancy tests
         run: npm --prefix saas/server test
+        env:
+          RUNVARA_QUIET_PROCESS_EVIDENCE_DIR: /tmp/runvara-quiet-process
+      - name: Verify pinned predecessor and quiet process cutover
+        run: |
+          git fetch --no-tags --depth=1 origin d32da62d0e7935597638266d44d88ae5e066d51f
+          node --test saas/server/tests/quiet-startup-process-d32.mjs
+        env:
+          RUNVARA_D32_SOURCE_DIR: ${{ github.workspace }}
+          RUNVARA_QUIET_PROCESS_EVIDENCE_DIR: /tmp/runvara-quiet-process
       - name: Install browser for mobile layout checks
         run: cd saas/server && npx playwright install --with-deps chromium
       - name: Verify customer onboarding on mobile and desktop
@@ -64,6 +73,18 @@ jobs:
         run: node saas/server/tests/seo-review-browser-check.mjs
       - name: Verify closed-stage feedback and retained uncertainty
         run: node saas/server/tests/governed-paused-browser-check.mjs
+      - name: Verify quiet startup feedback and manual reload
+        run: node saas/server/tests/quiet-startup-browser-check.mjs
+      - name: Upload quiet startup qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-quiet-startup-responsive
+          path: |
+            /tmp/runvara-quiet-startup-*.png
+            /tmp/runvara-quiet-startup-manifest.json
+            /tmp/runvara-quiet-process/*.json
+          if-no-files-found: warn
       - name: Upload closed-stage 320px evidence
         if: always()
         uses: actions/upload-artifact@v4

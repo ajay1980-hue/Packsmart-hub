@@ -47,6 +47,7 @@ import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown } from './lib/ebay-read-cooldown.mjs';
 import { createAgentOperations } from './lib/agent-ops.mjs';
 import { closePacksmartServer } from './lib/server-shutdown.mjs';
+import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
@@ -347,6 +348,7 @@ function verifyStripeSignature(env, raw, header) {
 
 export function createPacksmartServer(customEnv = process.env, options = {}) {
   const env = { ...customEnv };
+  const startupPolicy = createStartupPolicy(env, STATIC_FILES.keys());
   const governedRecordStage = createGovernedRecordStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
@@ -1084,6 +1086,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
 
+      // Reject before any body, authentication, persistence or provider work,
+      // including GET callbacks and reads that normally refresh or save state.
+      if (!startupPolicy.allowsRequest(req.method, pathname)) {
+        send(res, 503, QUIET_STARTUP_RESPONSE);
+        return;
+      }
+
       if (['GET', 'HEAD'].includes(req.method) && pathname === '/api/health') {
         if (!healthSnapshot || Date.now() - healthSnapshot.checkedMs > 5000) {
           healthPending ||= (async () => {
@@ -1105,10 +1114,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           version: VERSION,
           commit: env.RENDER_GIT_COMMIT || null,
           startedAt,
+          startupMode: startupPolicy.mode,
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
           checkCacheMaxAgeMs: 5000,
           storage: store.provider,
-          productionReady: persistence && primaryPersistence && stateSizeSafe && store.provider === 'supabase' && authConfigured && encryptionConfigured,
+          productionReady: !startupPolicy.quiet && persistence && primaryPersistence && stateSizeSafe && store.provider === 'supabase' && authConfigured && encryptionConfigured,
           persistence: persistenceDetails,
           agentOps: { running: agentOps?.status?.running || false, lastTickAt: agentOps?.status?.lastTickAt || null, lastError: agentOps?.status?.lastError || null },
           checks: {
@@ -2609,12 +2619,17 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
 
   const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
-    enabled: options.schedulerEnabled ?? isProduction, intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
+    enabled: !startupPolicy.quiet && (options.schedulerEnabled ?? isProduction), intervalMs: clamp(env.AUTOPILOT_TICK_MS, 15000, 3600000, 60000) });
   const agentOps = createAgentOperations({ store, integrations, withWorkspaceLock, aiProvider, env,
-    enabled: options.agentOpsEnabled ?? isProduction, intervalMs: clamp(env.AGENT_OPS_TICK_MS, 1000, 60000, 2500) });
+    enabled: !startupPolicy.quiet && (options.agentOpsEnabled ?? isProduction), intervalMs: clamp(env.AGENT_OPS_TICK_MS, 1000, 60000, 2500) });
+  if (startupPolicy.quiet) {
+    // Keep explicit worker ticks closed too; disabled start() cannot reopen them.
+    scheduler.stop();
+    agentOps.stop();
+  }
   let integrityTimer = null;
   const performIntegrityCheck = async () => {
-    if (draining || store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
+    if (startupPolicy.quiet || draining || store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
     try {
       let result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
       if (!result.healthy && !draining) {
@@ -2634,14 +2649,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
   };
   const runIntegrityCheck = () => {
-    if (draining) return;
+    if (startupPolicy.quiet || draining) return;
     let finished;
     const pending = new Promise(resolve => { finished = resolve; });
     integrityTasks.add(pending);
     void performIntegrityCheck().finally(() => { integrityTasks.delete(pending); finished(); });
   };
   server.once('listening', () => {
-    if (draining) return;
+    if (startupPolicy.quiet || draining) return;
     scheduler.start();
     agentOps.start();
     runIntegrityCheck();
@@ -2675,6 +2690,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return drainPromise;
   };
   server.packsmart = { store, integrations, aiProvider, env, scheduler, agentOps, drain };
+  Object.defineProperty(server.packsmart, 'startupMode', { value: startupPolicy.mode, enumerable: true });
   return server;
 }
 
@@ -2682,7 +2698,7 @@ export async function start() {
   const port = Number(process.env.PORT || 8787);
   const server = createPacksmartServer(process.env);
   server.listen(port, '0.0.0.0', () => {
-    console.log(JSON.stringify({ event: 'server_started', service: 'packsmart-ops', version: VERSION, port, storage: server.packsmart.store.provider }));
+    console.log(JSON.stringify({ event: 'server_started', service: 'packsmart-ops', version: VERSION, port, storage: server.packsmart.store.provider, startupMode: server.packsmart.startupMode }));
   });
   const shutdown = async signal => {
     console.log(JSON.stringify({ event: 'server_stopping', signal }));
