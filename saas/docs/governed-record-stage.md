@@ -137,6 +137,33 @@ transaction contracts. A SQL-backed HTTP-shaped adapter is not a complete
 PostgREST deployment test; its URL parsing/projection behavior needs independent
 qualification in the final evidence.
 
+The separate `staged-reader-postgrest.mjs` qualification exercises the unchanged
+store through a real, pinned PostgREST 14.5 process and PostgreSQL 17.6. It creates
+only synthetic rows in fresh disposable child databases. A loopback-only relay
+removes the application's `/rest/v1/` prefix without interpreting query filters,
+JSON bodies, or database errors. The gateway uses a dedicated temporary
+authenticator and ephemeral test JWTs to exercise the existing API roles; it does
+not connect as the database superuser for HTTP requests. Private credentials and
+request bodies are excluded from retained evidence. The runner verifies gateway,
+relay, database and temporary-role cleanup; its local wrapper also removes the
+disposable PostgreSQL cluster. Missing dependencies fail the qualification.
+
+The official [PostgREST 14.5 release](https://github.com/PostgREST/postgrest/releases/tag/v14.5)
+Linux x86-64 archive is pinned to SHA-256
+`ab5cc7e974d4940447991804588cfb8b3f7b2c57b691f0905df04d51ede69470`;
+the extracted executable is independently checked before execution. The fixture
+qualifies that version's URL parser, JSON projections, RPC dispatch, role checks,
+embedded relationships and row-count responses. It does not establish the hosted
+gateway's exact binary, configuration, installed migration profile, network path
+or live health. Those facts still need separate permitted release evidence.
+
+No application code, database migration, deployed permission, production
+credential, provider request or additional hosted service is needed by this
+qualification. Any future storage installation must verify explicit grants:
+[Supabase's published default-privilege change](https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically)
+affects newly created objects; a passing superuser SQL test alone cannot establish
+Data API access. This fixture applies the existing migration files unchanged.
+
 Final exact-source test counts, source hashes, measured request/byte deltas,
 storage-profile results and remaining checks belong in the candidate's release
 evidence. This document does not assert that an unfinished check passed.

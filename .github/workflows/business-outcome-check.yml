@@ -22,7 +22,7 @@ jobs:
           POSTGRES_PASSWORD: disposable-test-password
           POSTGRES_DB: runvara_outcome_test
         ports:
-          - 5432:5432
+          - '127.0.0.1:5432:5432'
         options: >-
           --health-cmd "pg_isready -U postgres -d runvara_outcome_test"
           --health-interval 5s
@@ -58,3 +58,24 @@ jobs:
         env:
           STAGED_READER_DISPOSABLE_FIXTURE: github-actions-postgres17
         run: node --test --test-concurrency=1 saas/server/tests/staged-reader-postgres.mjs
+      - name: Verify the pinned official PostgREST test binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_dir="$RUNNER_TEMP/runvara-postgrest-tools"
+          mkdir -p "$test_dir"
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 60 \
+            --output "$test_dir/postgrest.tar.xz" \
+            https://github.com/PostgREST/postgrest/releases/download/v14.5/postgrest-v14.5-linux-static-x86-64.tar.xz
+          echo 'ab5cc7e974d4940447991804588cfb8b3f7b2c57b691f0905df04d51ede69470  '"$test_dir/postgrest.tar.xz" | sha256sum --check --strict
+          test "$(tar -tJf "$test_dir/postgrest.tar.xz")" = postgrest
+          tar -xJf "$test_dir/postgrest.tar.xz" --directory "$test_dir" --no-same-owner --no-same-permissions postgrest
+          echo '39ce04b0597c6b3c3eb4c5f34fe6ab590a2d0172616eeaccf1e4c659b822295a  '"$test_dir/postgrest" | sha256sum --check --strict
+          chmod 700 "$test_dir/postgrest"
+          test "$("$test_dir/postgrest" --version)" = 'PostgREST 14.5'
+      - name: Qualify staged readers through actual local PostgREST HTTP
+        env:
+          STAGED_READER_DISPOSABLE_FIXTURE: github-actions-postgres17
+          STAGED_READER_POSTGREST_BIN: ${{ runner.temp }}/runvara-postgrest-tools/postgrest
+          STAGED_READER_EVIDENCE_DIR: ${{ runner.temp }}/runvara-postgrest-evidence
+        run: node --test --test-concurrency=1 saas/server/tests/staged-reader-postgrest.mjs
