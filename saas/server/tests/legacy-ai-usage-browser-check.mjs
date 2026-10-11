@@ -30,6 +30,69 @@ async function usageTypography(locator, numericReference) {
   }, numericReference);
 }
 
+async function captureBusyDoctor(page, row, width, enlarged) {
+  const changedText = row.locator('.bad-text, button'), scale = enlarged ? 2 : 1;
+  const originals = await changedText.evaluateAll(elements => elements.map(element => ({
+    inline: element.style.fontSize, pixels: parseFloat(getComputedStyle(element).fontSize)
+  })));
+  try {
+    if (enlarged) await changedText.evaluateAll((elements, values) => elements.forEach((element, index) => {
+      element.style.fontSize = `${values[index].pixels * 2}px`;
+    }), originals);
+    await page.mouse.move(0, 0);
+    await row.evaluate(async element => {
+      element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+      await document.fonts.ready;
+      const ancestors = [];
+      for (let node = element; node; node = node.parentElement) ancestors.push(node);
+      // Settle naturally before measuring the crop. A screenshot must not
+      // finish an ancestor reveal animation after its coordinates were read.
+      const animations = [...new Set(ancestors.flatMap(node => node.getAnimations({ subtree: node === element })))];
+      await Promise.allSettled(animations.filter(animation => animation.playbackRate !== 0 &&
+        Number.isFinite(animation.effect?.getComputedTiming().endTime) && !['finished', 'idle'].includes(animation.playState)).map(animation => animation.finished));
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    const dimensions = await row.evaluate(element => {
+      const rect = node => {
+        const box = node.getBoundingClientRect();
+        return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height };
+      };
+      const inside = (a, b) => a.left >= b.left - 1 && a.right <= b.right + 1 && a.top >= b.top - 1 && a.bottom <= b.bottom + 1;
+      const bounds = rect(element), text = [...element.querySelectorAll(':scope > div > b, :scope > div > small, :scope > button')].map(node => {
+        const box = rect(node), style = getComputedStyle(node), range = document.createRange();
+        range.selectNodeContents(node);
+        const lines = [...range.getClientRects()].filter(line => line.width && line.height);
+        return { text: node.textContent, box, fontSize: parseFloat(style.fontSize),
+          clipped: style.textOverflow === 'ellipsis' || ['hidden', 'clip'].includes(style.overflowX) || ['hidden', 'clip'].includes(style.overflowY),
+          fits: lines.length > 0 && lines.every(line => inside(line, box) && inside(line, bounds)),
+          visible: lines.every(line => { const hit = document.elementFromPoint((line.left + line.right) / 2, (line.top + line.bottom) / 2); return hit === node || node.contains(hit); }) };
+      });
+      return { bounds, text, pageWidth: document.documentElement.scrollWidth,
+        width: element.clientWidth, scrollWidth: element.scrollWidth, height: element.clientHeight, scrollHeight: element.scrollHeight,
+        viewportHeight: innerHeight, open: element.closest('details').open };
+    });
+    const detail = `${width}px/${scale * 100}%: ${JSON.stringify(dimensions)}`;
+    assert.equal(dimensions.open, true, 'the affected Doctor row is actually expanded: ' + detail);
+    assert.ok(dimensions.pageWidth <= width + 2 && dimensions.scrollWidth <= dimensions.width + 2 && dimensions.scrollHeight <= dimensions.height + 2, 'Doctor row must not overflow: ' + detail);
+    assert.ok(dimensions.bounds.left >= 0 && dimensions.bounds.right <= width && dimensions.bounds.top >= 0 && dimensions.bounds.bottom <= dimensions.viewportHeight, 'the complete Doctor row fits the real viewport: ' + detail);
+    assert.equal(dimensions.text.length, 4, 'title, status, explanation and retry label are all measured');
+    for (const item of dimensions.text) assert.ok(item.fits && item.visible && !item.clipped, 'Doctor text must be fully visible without clipping or obstruction: ' + detail);
+    for (let first = 0; first < dimensions.text.length; first++) for (let second = first + 1; second < dimensions.text.length; second++) {
+      const a = dimensions.text[first].box, b = dimensions.text[second].box;
+      assert.ok(Math.min(a.right, b.right) - Math.max(a.left, b.left) <= 1 || Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) <= 1, 'Doctor labels and control must not overlap: ' + detail);
+    }
+    for (const [index, item] of dimensions.text.slice(2).entries()) assert.ok(Math.abs(item.fontSize - originals[index].pixels * scale) < 0.1, 'changed text uses the requested scale: ' + detail);
+    const clip = { x: Math.floor(dimensions.bounds.left), y: Math.floor(dimensions.bounds.top),
+      width: Math.ceil(dimensions.bounds.right) - Math.floor(dimensions.bounds.left), height: Math.ceil(dimensions.bounds.bottom) - Math.floor(dimensions.bounds.top) };
+    assert.ok(clip.width <= width && clip.height <= 800, 'affected-row evidence stays within its finite crop budget: ' + detail);
+    const filename = `/tmp/runvara-legacy-ai-usage-${width}-doctor-busy-${enlarged ? 'large-text' : 'normal'}.png`;
+    const bytes = await page.screenshot({ path: filename, fullPage: false, clip, animations: 'allow', scale: 'css' });
+    console.log('Busy Doctor row capture: ' + JSON.stringify({ filename, viewportWidth: width, textScale: scale * 100, crop: clip, bytes: bytes.length }));
+  } finally {
+    await changedText.evaluateAll((elements, values) => elements.forEach((element, index) => { element.style.fontSize = values[index].inline; }), originals);
+  }
+}
+
 const complete = (cost = 0, requests = 0) => ({ status: 'complete', reason: null, totals: { estimatedCostUsd: cost, requests }, byModel: [] });
 function fixture(status = 'partial') {
   const workspaces = [
@@ -184,6 +247,20 @@ try {
     assert.match(await page.locator('#view-fleet').textContent(), /not complete provider billing or all provider spend/);
     assert.match(await page.locator('#view-fleet').textContent(), /these scopes must not be added together/);
     assert.match(await page.locator('#fleet-model-catalog').textContent(), /Catalogue dated <img/);
+    const busyFixture = fixture('complete');
+    busyFixture.workspaces[0].counts = { blocked: 1 };
+    busyFixture.workspaces[0].jobs = [{ id: 'synthetic-busy-doctor', type: 'connection_doctor', provider: 'shopify', status: 'blocked', attempts: 1, maxAttempts: 5, errorCode: 'CONNECTION_CHECK_BUSY' }];
+    await refresh(busyFixture);
+    const busyDetails = page.locator('[data-fleet-workspace="packsmart-solutions"] .fleet-jobs');
+    await busyDetails.locator('summary').click();
+    const busyRow = busyDetails.locator('.fleet-job');
+    await busyRow.waitFor({ state: 'visible' });
+    assert.equal(await busyRow.locator('.bad-text').textContent(), "Connection check needs review: another run may still be active, or an earlier run's completion is uncertain. Review connection activity before retrying.");
+    assert.equal(await busyRow.getByRole('button', { name: 'Retry check', exact: true }).count(), 1);
+    assert.doesNotMatch(await busyRow.textContent(), /CONNECTION_CHECK_BUSY|Retry safely|provider failed|repair completed|repaired/i);
+    const beforeDoctorCaptures = operatorCalls.length;
+    for (const enlarged of [false, true]) await captureBusyDoctor(page, busyRow, width, enlarged);
+    assert.equal(operatorCalls.length, beforeDoctorCaptures, 'Doctor layout and text-size inspection add no requests or retries');
     assert.deepEqual(errors, []);
     assert.deepEqual(externalCalls, [], 'synthetic fixture must never contact external providers');
     assert.equal(operatorCalls.every(call => call.path === '/api/operator/agent-ops' && call.method === 'GET'), true, 'Fleet never fetches governed usage or performs mutations');

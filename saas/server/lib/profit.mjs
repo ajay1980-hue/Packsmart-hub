@@ -29,15 +29,17 @@ export const ECONOMICS_FIELDS = Object.freeze([
 export const ECONOMICS_TEXT_FIELDS = Object.freeze(['supplierId', 'supplierSku', 'notes']);
 export { REQUIRED_UNIT_COSTS };
 
+// Recorded amounts accept finite numbers and signed decimal strings only.
+// Blank/coerced values are unknown; explicit zero and historical negatives remain valid.
 export function hasAmount(value) {
-  return value !== '' && value !== null && value !== undefined && Number.isFinite(Number(value));
+  return (typeof value === 'number' || (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim()))) &&
+    Number.isFinite(Number(value));
 }
 
 // Catalogue prices may arrive as decimal strings. Blank/coerced values do not
 // establish a selling price; an explicitly recorded zero does.
 export function hasCataloguePrice(value) {
-  return (typeof value === 'number' || (typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim()))) &&
-    Number.isFinite(Number(value)) && Number(value) >= 0;
+  return hasAmount(value) && Number(value) >= 0;
 }
 
 export function amount(value, fallback = 0) {
@@ -104,7 +106,7 @@ export function unitEconomics(item = {}, record = {}, options = {}) {
   const totalVariableCost = complete ? recordedCost : null;
   const contribution = complete && price !== null ? price - totalVariableCost : null;
   const margin = contribution !== null && price > 0 ? contribution / price * 100 : null;
-  const configuredFloor = hasAmount(record.marginFloor) ? amount(record.marginFloor) : amount(options.marginFloor, 20);
+  const configuredFloor = hasAmount(record.marginFloor) ? amount(record.marginFloor) : hasAmount(options.marginFloor) ? amount(options.marginFloor) : 20;
   const status = !complete
     ? 'missing-costs'
     : price === null
@@ -199,7 +201,7 @@ export function calculateOrderProfit(order = {}, economics = {}, options = {}) {
 
   for (const line of lines) {
     const sku = String(line.sku || '').trim();
-    const quantity = Math.max(0, Math.floor(amount(line.quantity)));
+    const quantity = hasAmount(line.quantity) ? Math.max(0, Math.floor(amount(line.quantity))) : 0;
     if (!sku) missing.push('line item SKU');
     if (!quantity) missing.push(`${sku || 'line item'} quantity`);
     const record = economics[sku] || {};

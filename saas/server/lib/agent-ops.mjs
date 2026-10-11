@@ -170,6 +170,22 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   const status = { workerId, running:false, lastTickAt:null, lastError:null, processed:0, failed:0, deadLettered:0,
     pollCalls:0, emptyPolls:0, pollErrors:0, backoffMs:baseIntervalMs, nextPollAt:null };
   const claimNotAdmitted = Symbol('claimNotAdmitted');
+  const notStarted = Symbol('agent job not started');
+  let admissionEpoch = 0, draining = false, activeTick = null, drainPromise = null;
+  // Constant-size lifetime diagnostics. A retained claim includes an unknown
+  // completion reply, whose durable row might already have committed.
+  const lifecycle = { retainedClaims:0, errors:0, lastError:null };
+  const admitted = epoch => !stopped && !draining && epoch === admissionEpoch;
+  function noteError(error) {
+    lifecycle.errors++;
+    lifecycle.lastError = status.lastError = safeCode(error);
+  }
+  function retainClaim(error) {
+    // No shutdown write: the claim may have committed, and its existing lease
+    // recovery policy remains responsible for any unfinished durable job.
+    lifecycle.retainedClaims++;
+    if (error) noteError(error);
+  }
 
   function clearPoll() {
     if (timer !== null) cancelTimeout(timer);
@@ -181,7 +197,12 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     clearPoll();
     if (!started || stopped) return;
     status.nextPollAt = new Date(now() + delay).toISOString();
-    timer = scheduleTimeout(() => { timer = null; status.nextPollAt = null; void tick(); }, delay);
+    const epoch = admissionEpoch;
+    const scheduled = scheduleTimeout(() => {
+      if (timer !== scheduled || !admitted(epoch)) return;
+      timer = null; status.nextPollAt = null; void tick();
+    }, delay);
+    timer = scheduled;
     timer.unref?.();
   }
 
@@ -271,7 +292,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     throw objectiveError('OBJECTIVE_COMPLETION_UNCERTAIN', 503);
   }
 
-  async function processObjective(job) {
+  async function processObjective(job, epoch) {
     // A malformed/stale claim must not even load tenant state. The trigger and
     // FileStore recovery cap leases; this also bounds work against an older DB.
     if (job.status !== 'running' || job.worker_id !== workerId
@@ -280,7 +301,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       || !Number.isSafeInteger(job.attempts) || job.attempts < 1
       || !Number.isSafeInteger(job.max_attempts) || job.max_attempts < 1 || job.max_attempts > 10
       || typeof job.lease_until !== 'string' || !Number.isFinite(Date.parse(job.lease_until)) || Date.parse(job.lease_until) <= now()) {
-      status.lastError = 'OBJECTIVE_JOB_CLAIM_INVALID';
+      retainClaim(objectiveError('OBJECTIVE_JOB_CLAIM_INVALID'));
       return;
     }
     if (job.attempts > job.max_attempts) {
@@ -289,7 +310,8 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         const finished = await store.finishAgentJob(job, { status:'dead_letter', result:job.result ?? null,
           errorCode:status.lastError, completedAt:new Date(now()).toISOString() });
         if (finished) { status.failed++; status.deadLettered++; }
-      } catch { /* Never recompute or loop if exhausted-claim closure is uncertain. */ }
+        else retainClaim(objectiveError('OBJECTIVE_COMPLETION_UNCERTAIN'));
+      } catch (error) { retainClaim(error); }
       return;
     }
     let result;
@@ -297,13 +319,15 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       objectivePayload(job.payload);
       if (job.provider !== null || job.ai_provider != null || job.ai_model != null || job.ai_units !== 0
         || ![null, undefined, 'deterministic'].includes(job.ai_tier)) throw objectiveError('OBJECTIVE_JOB_INPUT_INVALID', 400);
-      if (Date.parse(job.lease_until) <= now()) return;
+      if (Date.parse(job.lease_until) <= now()) { retainClaim(); return; }
       const state = await store.get(job.workspace_id);
+      if (!admitted(epoch)) { retainClaim(); return; }
       objectiveBindings(state, job.workspace_id, job.payload, job.actor, new Date(now()).toISOString());
       result = buildObjectiveReview(state, { objectiveId: job.payload.objectiveId,
         objectiveRevision: job.payload.objectiveRevision, jobId: job.id }, { workspaceId: job.workspace_id, now: new Date(now()).toISOString() });
       if (Buffer.byteLength(JSON.stringify(result)) > 65536 || result.specialists.length > 3) throw objectiveError('OBJECTIVE_REVIEW_RESULT_TOO_LARGE', 413);
     } catch (error) {
+      if (!admitted(epoch)) { retainClaim(); return; }
       const code = safeCode(error);
       try {
         let finished;
@@ -312,14 +336,16 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         });
         else finished = await store.finishAgentJob(job, { status: /OBJECTIVE|AGENT_OPS_PAUSED|WORKSPACE_NOT_FOUND/.test(code) ? 'blocked' : 'dead_letter', errorCode: code, completedAt: new Date(now()).toISOString() });
         if (finished) status.failed++;
-      } catch { /* Leave an uncertain claim for durable lease recovery. */ }
+        else retainClaim(objectiveError('OBJECTIVE_COMPLETION_UNCERTAIN'));
+      } catch (completionError) { retainClaim(completionError); }
       return;
     }
     try {
       if (await completeObjective(job, { status: 'succeeded', result, errorCode: null, completedAt: new Date(now()).toISOString() })) status.processed++;
+      else retainClaim(objectiveError('OBJECTIVE_COMPLETION_UNCERTAIN'));
     } catch (error) {
       // Lost outcome is neither a failed report nor permission to reschedule it.
-      status.lastError = safeCode(error);
+      retainClaim(error);
     }
   }
 
@@ -355,7 +381,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       || typeof job.workspace_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(job.workspace_id)
       || !Number.isSafeInteger(job.attempts) || job.attempts < 1
       || typeof job.lease_until !== 'string' || !Number.isFinite(Date.parse(job.lease_until)) || Date.parse(job.lease_until) <= now()) {
-      status.lastError = 'AGENT_JOB_CLAIM_INVALID';
+      retainClaim(objectiveError('AGENT_JOB_CLAIM_INVALID'));
       return false;
     }
     const validMax = Number.isSafeInteger(job.max_attempts) && job.max_attempts >= 1 && job.max_attempts <= 10;
@@ -368,16 +394,22 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       const finished = await store.finishAgentJob(job, { status:'dead_letter', result:job.result ?? null,
         errorCode:code, completedAt:new Date(now()).toISOString() });
       if (finished) { status.failed++; status.deadLettered++; }
-    } catch { /* Leave an uncertain closure for durable lease recovery. */ }
+      else retainClaim(objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED'));
+    } catch (error) { retainClaim(error); }
     return false;
   }
 
-  async function execute(job) {
+  async function execute(job, epoch) {
     return withWorkspaceLock(job.workspace_id || job.workspaceId, async () => {
+      if (!admitted(epoch)) return notStarted;
       // A claim can expire while waiting behind another workspace operation.
       if (!await admitClaim(job)) return claimNotAdmitted;
+      if (!admitted(epoch)) return notStarted;
       const workspaceId = job.workspace_id || job.workspaceId;
-      const state = await store.get(workspaceId);
+      let state;
+      try { state = await store.get(workspaceId); }
+      catch (error) { if (!admitted(epoch)) return notStarted; throw error; }
+      if (!admitted(epoch)) return notStarted;
       if (!state) throw Object.assign(new Error('Workspace not found'), { code:'WORKSPACE_NOT_FOUND' });
       const settings = ensureAgentOps(state);
       if (!settings.enabled || settings.paused) throw Object.assign(new Error('Agent operations are paused'), { code:'AGENT_OPS_PAUSED' });
@@ -447,65 +479,107 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         result = { provider, status:sync.status, failedAreas:sync.failedAreas || [], externalWrites:false };
       } else if (job.type === 'connection_doctor') {
         result = await runConnectionDoctor(state, { integrations, readSync:monitoredSync, save:()=>store.save(workspaceId,state), now:new Date() });
+        // A live repair lease is an unfinished check, not a completed repair.
+        // Doctor has already saved any work completed for other providers.
+        if (result.busy?.length) return { result };
         // The job's fenced completion is enough evidence for an unchanged held
         // check. Do not turn its no-op into another full workspace save.
-        if (!result.changed && (orderReadHeld(state, 'shopify', undefined, integrations) || shopifyOrderReadBudgetExhausted(state, integrations))) return result;
+        if (!result.changed && (orderReadHeld(state, 'shopify', undefined, integrations) || shopifyOrderReadBudgetExhausted(state, integrations))) return { result };
       } else if (job.type === 'marketing_plan') {
         const plan = marketingPlannerCycle(state, { now:new Date(), source:'agent-ops' });
         result = { created:Boolean(plan.created), campaignId:plan.campaign?.id || null, reason:plan.reason || null, externalWrites:false };
       } else {
         throw Object.assign(new Error('Unsupported agent job type'), { code:'AGENT_JOB_TYPE_INVALID' });
       }
-      addAudit(state, { type:'agent_job_completed', actor:'agent-ops', detail:{ jobId:job.id, type:job.type, provider:job.provider || null, externalWrites:false,
-        ...(result.ai?.effects ? {providerEffects:result.ai.effects} : {}) } });
-      await store.save(workspaceId, state);
-      return result;
+      // Once an action produced a result, a failed completion save is not an
+      // execution failure or permission to immediately resubmit that action.
+      try {
+        addAudit(state, { type:'agent_job_completed', actor:'agent-ops', detail:{ jobId:job.id, type:job.type, provider:job.provider || null, externalWrites:false,
+          ...(result.ai?.effects ? {providerEffects:result.ai.effects} : {}) } });
+        await store.save(workspaceId, state);
+      } catch (error) { return { result, bookkeepingError:error }; }
+      return { result };
     });
   }
 
-  async function process(job) {
-    if (job?.type === 'objective_prepare') return processObjective(job);
+  async function process(job, epoch) {
+    if (!admitted(epoch)) { retainClaim(); return; }
+    if (job?.type === 'objective_prepare') return processObjective(job, epoch);
     if (!await admitClaim(job)) return;
+    if (!admitted(epoch)) { retainClaim(); return; }
+    let execution;
     try {
-      const result = await execute(job);
-      if (result === claimNotAdmitted) return;
-      await store.finishAgentJob(job, { status:'succeeded', result, errorCode:null, completedAt:nowIso() });
-      status.processed++;
+      execution = await execute(job, epoch);
     } catch (error) {
       const code = safeCode(error);
       const attempts = Number(job.attempts || 0);
+      let finished;
       if (job.type === 'connection_sync' && isShopifyOrderSourceFailure(job.provider || job.payload?.provider, code)) {
-        let finished;
         try {
           finished = await store.finishAgentJob(job, { status: 'dead_letter', errorCode: code, completedAt: nowIso(),
             result: { provider: 'shopify', externalWrites: false, orderReadHold: error.orderReadHoldOutcome || { status: 'not_confirmed', durable: false } } });
         } catch { /* An uncertain close cannot authorize a retry or a success claim. */ }
         if (!finished) {
-          status.lastError = 'SHOPIFY_ORDER_HOLD_JOB_CLOSURE_UNCONFIRMED';
+          retainClaim(objectiveError('SHOPIFY_ORDER_HOLD_JOB_CLOSURE_UNCONFIRMED'));
           console.warn(JSON.stringify({ event: 'agent_job_closure_unconfirmed', jobId: job.id, workspaceId: job.workspace_id || job.workspaceId, code: status.lastError }));
           return;
         }
         status.deadLettered++;
       } else if (blocked(error)) {
-        await store.finishAgentJob(job, { status:'blocked', errorCode:code, completedAt:nowIso() });
+        finished = await store.finishAgentJob(job, { status:'blocked', errorCode:code, completedAt:nowIso() });
       } else if (transient(error) && attempts < Number(job.max_attempts || job.maxAttempts || 3)) {
         const backoff = 15000 * 2 ** Math.max(0, attempts - 1);
         const delay = Math.min(3600000, Math.max(backoff, Number(error.retryAfterMs) || 0));
-        await store.rescheduleAgentJob(job, { errorCode:code, availableAt:new Date(Date.now()+delay).toISOString() });
+        finished = await store.rescheduleAgentJob(job, { errorCode:code, availableAt:new Date(Date.now()+delay).toISOString() });
       } else {
-        await store.finishAgentJob(job, { status:'dead_letter', errorCode:code, completedAt:nowIso() });
-        status.deadLettered++;
+        finished = await store.finishAgentJob(job, { status:'dead_letter', errorCode:code, completedAt:nowIso() });
+        if (finished) status.deadLettered++;
       }
-      status.failed++;
+      if (finished) status.failed++;
+      else retainClaim(objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED'));
       console.warn(JSON.stringify({ event:'agent_job_failed', jobId:job.id, workspaceId:job.workspace_id || job.workspaceId, type:job.type, code }));
+      return;
     }
+    if (execution === claimNotAdmitted) return;
+    if (execution === notStarted) { retainClaim(); return; }
+    if ('bookkeepingError' in execution) { retainClaim(execution.bookkeepingError || objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED')); return; }
+    const { result } = execution;
+    if (job.type === 'connection_doctor' && result.busy?.length) {
+      let finished;
+      try {
+        finished = await store.finishAgentJob(job, { status:'blocked', result, errorCode:'CONNECTION_CHECK_BUSY', completedAt:nowIso() });
+      } catch { /* An uncertain settlement is not permission to retry. */ }
+      if (!finished) {
+        retainClaim(objectiveError('AGENT_JOB_CLOSURE_UNCONFIRMED'));
+        console.warn(JSON.stringify({ event:'agent_job_closure_unconfirmed', jobId:job.id, workspaceId:job.workspace_id || job.workspaceId, code:status.lastError }));
+        return;
+      }
+      status.lastError = 'CONNECTION_CHECK_BUSY';
+      status.failed++;
+      return;
+    }
+    try {
+      const finished = await store.finishAgentJob(job, { status:'succeeded', result, errorCode:null, completedAt:nowIso() });
+      if (finished) status.processed++;
+      else retainClaim(objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED'));
+    } catch (error) { retainClaim(error || objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED')); }
   }
 
-  async function tick() {
-    if (running || stopped) return;
+  function tick() {
+    if (running || stopped || draining) return Promise.resolve();
     // Explicit ticks bypass backoff, but replace any scheduled poll.
     clearPoll();
     running = true; status.running = true; status.lastError = null;
+    // Publish the full admitted tick before invoking a possibly synchronous
+    // store implementation. Drain includes the claim and final bookkeeping.
+    let settle;
+    const completion = new Promise(resolve => { settle = resolve; });
+    activeTick = completion;
+    void runTick(admissionEpoch).then(settle, error => { noteError(error); settle(); });
+    return completion;
+  }
+
+  async function runTick(epoch) {
     try {
       status.pollCalls++;
       const jobs = await store.claimAgentJobs(workerId, Math.max(1, Math.min(20, Number(env.AGENT_OPS_GLOBAL_CONCURRENCY) || 8)), 300);
@@ -514,12 +588,13 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         status.emptyPolls++;
         status.backoffMs = Math.min(maxBackoffMs, status.backoffMs * 2);
       }
-      await Promise.allSettled((jobs || []).map(process));
+      const outcomes = await Promise.allSettled((jobs || []).map(job => process(job, epoch)));
+      for (const outcome of outcomes) if (outcome.status === 'rejected') retainClaim(outcome.reason || objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED'));
       status.lastTickAt = new Date(now()).toISOString();
     } catch (error) {
       status.pollErrors++;
       status.backoffMs = Math.min(maxBackoffMs, status.backoffMs * 2);
-      status.lastError = safeCode(error);
+      noteError(error);
       console.warn(JSON.stringify({ event:'agent_ops_tick_failed', code:status.lastError }));
     } finally {
       running = false; status.running = false;
@@ -650,14 +725,24 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
   }
 
   function start() {
-    if (!enabled || started) return;
+    if (!enabled || started || draining) return;
     started = true; stopped = false; status.backoffMs = baseIntervalMs;
     if (running) wakePending = true;
     else void tick();
   }
-  function stop() { stopped = true; started = false; wakePending = false; clearPoll(); }
+  function stop() { admissionEpoch++; stopped = true; started = false; wakePending = false; clearPoll(); }
 
-  return { enqueue, enqueueObjectiveReview, objectiveReview, retry, configureWorkspace, tick, start, stop, get status() { return Object.freeze({ ...status }); }, workspaceSnapshot, fleetSnapshot, workerId };
+  function drain() {
+    if (drainPromise) return drainPromise;
+    draining = true;
+    stop();
+    // This is local settlement, not proof that retained durable jobs finished.
+    // The server owns its shutdown deadline; timing out does not cancel work.
+    drainPromise = (activeTick || Promise.resolve()).then(() => Object.freeze({ settled:true, ...lifecycle }));
+    return drainPromise;
+  }
+
+  return { enqueue, enqueueObjectiveReview, objectiveReview, retry, configureWorkspace, tick, start, stop, drain, get status() { return Object.freeze({ ...status }); }, workspaceSnapshot, fleetSnapshot, workerId };
 }
 
 function compactObjectiveRetry(job) { return { ...objectiveStatus(job), workspace_id: job.workspace_id }; }

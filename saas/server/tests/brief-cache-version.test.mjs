@@ -111,7 +111,7 @@ for (const storage of ['file', 'mock-supabase']) test(`${storage}: bootstrap inv
   assert.notEqual(first.brief.id, preservedBrief.id, 'Changed calculation semantics must invalidate a same-day cache');
   assert.equal(first.dashboard.lowMargin, 0);
   assert.equal(first.brief.lowMargin, 0);
-  assert.equal(first.brief.calculationVersion, 'imported-order-analytics/v3');
+  assert.equal(first.brief.calculationVersion, 'catalogue-recorded-costs/v1');
   assert.equal(first.dashboard.refundedOrders30d, 0, 'derived legacy amounts cannot survive as refund review counts');
   assert.equal(first.dashboard.customerServiceIssues, 0);
   assert.doesNotMatch(first.brief.summary, /below their contribution-margin floor|below its contribution-margin floor/);

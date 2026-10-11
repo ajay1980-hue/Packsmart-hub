@@ -802,7 +802,7 @@ test('reconnection verifies identity, retries selected reads once, preserves fai
   assert.equal(connectionDue(state,'shopify',new Date(Date.now()+86400000)),false,'permission loss waits for owner repair');
 });
 
-test('new Shopify OAuth returns during durable first sync, completes defaults and preserves the other tenant',async t=>{
+test('new Shopify OAuth returns during durable first sync, completes defaults and preserves the other tenant',{timeout:15000},async t=>{
   const f=await fixture(t);let release;f.flags.delay=new Promise(resolve=>release=resolve);
   t.after(()=>release());
   const started=await f.request('/api/integrations/shopify/oauth/start',{method:'POST',body:{storeDomain:'alpha.myshopify.com'}});
@@ -813,7 +813,17 @@ test('new Shopify OAuth returns during durable first sync, completes defaults an
   const response=await f.request(url.pathname+url.search,{cookie:started.headers.get('set-cookie').split(';')[0]});assert.equal(response.status,303);
   for(let i=0;i<100&&!f.calls.some(c=>c.query.includes('Products'));i++)await new Promise(r=>setTimeout(r,5));
   const during=await f.channel();assert.equal(during.firstSync.status,'running');assert.equal(during.firstSync.areas.products,'running');assert.equal(during.firstSync.areas.orders,'pending');assert.equal(during.settings.permissionMode,'read_only');assert.equal(during.settings.managedReadSchedule,true);assert.ok(!during.settings.areas.includes('customers'));
-  release();await f.server.packsmart.drain();
+  // Drain is terminal shutdown, not a reusable test barrier. Observe the
+  // existing completion save so the assertions still exercise a live API.
+  let syncFinished;
+  const completed = new Promise(resolve => { syncFinished = resolve; });
+  const save = f.server.packsmart.store.save.bind(f.server.packsmart.store);
+  f.server.packsmart.store.save = async (workspaceId, state, ...rest) => {
+    const result = await save(workspaceId, state, ...rest);
+    if (workspaceId === 'alpha' && state.connectionFirstSync?.shopify?.status === 'completed') syncFinished();
+    return result;
+  };
+  release();await completed;
   const after=await f.channel();assert.equal(after.firstSync.status,'completed');assert.equal(after.firstSync.validation.ok,true);assert.equal(after.counts.products,1);assert.ok(after.lastSuccessfulSyncAt);
   assert.equal((await f.request('/api/onboarding')).body.journey.complete,true);
   assert.equal((await f.channel('shopify','beta')).firstSync,null);assert.equal((await f.server.packsmart.store.get('beta')).products[0].title,'Before');

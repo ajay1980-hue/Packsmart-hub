@@ -104,13 +104,42 @@ export async function monitoredSync(state, integrations, provider, { automatic =
 }
 
 export function createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env = process.env, enabled = true, intervalMs = 60000, creativeCycle = marketingCreativeCycle, webCycle = runWebIntelligence }) {
-  let timer = null, running = false, stopped = false;
+  let timer = null, running = false, stopped = false, draining = false, generation = 0, drainPromise = null, failureSequence = 0;
+  const inFlight = new Set();
   const status = { lastTickAt: null, lastError: null, running: false };
 
-  async function runWorkspace(workspaceId, { manual = false, now = new Date() } = {}) {
+  const admitted = epoch => !stopped && !draining && epoch === generation;
+  const stoppedResult = () => ({ skipped: true, reason: 'SCHEDULER_STOPPED' });
+
+  function track(action) {
+    const task = { errors: 0, lastError: null, failureSequence: 0 };
+    const recordFailure = error => {
+      task.errors++;
+      task.lastError = safeCode(error);
+      task.failureSequence = ++failureSequence;
+    };
+    // Register before calling dependencies, including synchronous/reentrant ones.
+    task.promise = Promise.resolve().then(() => action(recordFailure));
+    inFlight.add(task);
+    task.promise.then(() => inFlight.delete(task), error => { recordFailure(error); inFlight.delete(task); });
+    return task.promise;
+  }
+
+  function runWorkspace(workspaceId, options = {}) {
+    if (stopped || draining) return Promise.resolve(stoppedResult());
+    const epoch = generation;
+    return track(() => executeWorkspace(workspaceId, options, epoch));
+  }
+
+  async function executeWorkspace(workspaceId, { manual = false, now = new Date() } = {}, epoch) {
+    if (!admitted(epoch)) return stoppedResult();
     return withWorkspaceLock(workspaceId, async () => {
+      if (!admitted(epoch)) return stoppedResult();
       const state = await (store.getForScheduler ? store.getForScheduler(workspaceId) : store.get(workspaceId));
+      if (!admitted(epoch)) return stoppedResult();
       if (!state) return { skipped: true, reason: 'WORKSPACE_NOT_FOUND' };
+      // From here the cycle has started. Keep its existing provider/result/save
+      // ordering through shutdown; cancelling it could discard effect evidence.
       ensureControl(state);
       await runConnectionDoctor(state, { integrations, readSync: monitoredSync, save: () => store.save(workspaceId, state), now });
       const expired = state.automationRuns.filter(run => run.status === 'IN PROGRESS' && Date.parse(run.leaseUntil) <= now.getTime());
@@ -218,27 +247,56 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
     });
   }
 
-  async function tick() {
-    if (running || stopped) return;
+  function tick() {
+    if (running || stopped || draining) return Promise.resolve();
+    const epoch = generation;
     running = true; status.running = true;
-    try {
-      status.lastError = null;
-      const ids = await store.listWorkspaceIds();
-      for (const id of ids) {
-        if (stopped) break;
-        try { await runWorkspace(id); }
-        catch (error) {
-          if (error.code !== 'STATE_CONFLICT') {
-            status.lastError = safeCode(error);
-            console.error(JSON.stringify({ event: 'autopilot_workspace_failed', workspaceId: id, code: safeCode(error), table: error.table || null, httpStatus: error.httpStatus || null, databaseCode: error.databaseCode || null, payloadBytes: error.payloadBytes || null }));
+    return track(async recordFailure => {
+      try {
+        if (!admitted(epoch)) return;
+        status.lastError = null;
+        const ids = await store.listWorkspaceIds();
+        for (const id of ids) {
+          if (!admitted(epoch)) break;
+          try { await executeWorkspace(id, {}, epoch); }
+          catch (error) {
+            recordFailure(error);
+            if (error.code !== 'STATE_CONFLICT') {
+              status.lastError = safeCode(error);
+              console.error(JSON.stringify({ event: 'autopilot_workspace_failed', workspaceId: id, code: safeCode(error), table: error.table || null, httpStatus: error.httpStatus || null, databaseCode: error.databaseCode || null, payloadBytes: error.payloadBytes || null }));
+            }
           }
         }
-      }
-      status.lastTickAt = new Date().toISOString();
-    } catch (error) { status.lastError = safeCode(error); }
-    finally { running = false; status.running = false; }
+        status.lastTickAt = new Date().toISOString();
+      } catch (error) { recordFailure(error); status.lastError = safeCode(error); }
+      finally { running = false; status.running = false; }
+    });
   }
-  function start() { if (!enabled || timer) return; stopped = false; timer = setInterval(() => { void tick(); }, intervalMs); timer.unref(); void tick(); }
-  function stop() { stopped = true; clearInterval(timer); timer = null; }
-  return { runWorkspace, tick, start, stop, status };
+  function start() {
+    if (!enabled || timer || draining) return;
+    stopped = false;
+    const epoch = generation;
+    const scheduled = setInterval(() => {
+      if (timer !== scheduled || !admitted(epoch)) return;
+      void tick();
+    }, intervalMs);
+    timer = scheduled;
+    timer.unref();
+    void tick();
+  }
+  function stop() { stopped = true; generation++; clearInterval(timer); timer = null; }
+  function drain() {
+    if (drainPromise) return drainPromise;
+    draining = true;
+    stop();
+    const tasks = [...inFlight];
+    // Settlement means every admitted operation finished locally, not that a
+    // failed save became durable. Keep those failures on their original caller.
+    drainPromise = Promise.allSettled(tasks.map(task => task.promise)).then(() => {
+      const latest = tasks.reduce((last, task) => task.failureSequence > (last?.failureSequence || 0) ? task : last, null);
+      return { settled: true, errors: tasks.reduce((total, task) => total + task.errors, 0), lastError: latest?.lastError || null };
+    });
+    return drainPromise;
+  }
+  return { runWorkspace, tick, start, stop, drain, status };
 }

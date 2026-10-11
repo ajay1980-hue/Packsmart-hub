@@ -11,6 +11,7 @@ import { assertShopifySourceScope, captureShopifyOrderMoney, inspectShopifyOrder
 import { assertShopifyOrderRecoveryCapability, authorizeShopifyOrderRecovery, claimShopifyOrderRecoveryCapability,
   checkpointShopifyOrderRecoveryPage, getShopifyOrderRecoveryStage, shopifyOrderRecoveryObservation, shopifyOrderRecoveryError } from './shopify-order-recovery.mjs';
 import { assertEbayReadAdmission, createEbayReadContext, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown, parseEbayRetryAfter } from './ebay-read-cooldown.mjs';
+import { hasAmount } from './profit.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -295,6 +296,11 @@ function nullableNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function nullableRecordedCost(value) {
+  const selected = value?.value ?? value?.amount ?? value;
+  return hasAmount(selected) ? Number(selected) : null;
+}
+
 function sumAmounts(items, selector = value => value) {
   if (!Array.isArray(items) || !items.length) return null;
   const values = items.map(item => nullableNumber(selector(item))).filter(value => value !== null);
@@ -307,8 +313,8 @@ function mapEbayOrder(order) {
   const refunds = nullableNumber(order.refunds ?? order.refundAmount ?? order.pricingSummary?.refunds) ??
     sumAmounts(order.paymentSummary?.refunds, refund => refund.refundAmount ?? refund.amount) ??
     sumAmounts(order.lineItems?.flatMap(line => line.refunds || []), refund => refund.refundAmount ?? refund.amount);
-  const channelFees = nullableNumber(order.channelFees ?? order.ebayFees ?? order.fees ?? order.totalMarketplaceFee);
-  const advertisingCost = nullableNumber(order.advertisingCost ?? order.promotedListingFee ?? order.adFees);
+  const channelFees = nullableRecordedCost(order.channelFees ?? order.ebayFees ?? order.fees ?? order.totalMarketplaceFee);
+  const advertisingCost = nullableRecordedCost(order.advertisingCost ?? order.promotedListingFee ?? order.adFees);
   const currentTotal = total === null ? null : Math.max(0, total - (refunds || 0));
   return {
     id: String(order.id || order.orderId || order.legacyOrderId || ''),
@@ -328,11 +334,11 @@ function mapEbayOrder(order) {
     currentTax: nullableNumber(order.currentTax ?? order.tax ?? order.taxAmount ?? order.pricingSummary?.tax),
     discounts: nullableNumber(order.discounts ?? order.discountAmount ?? order.pricingSummary?.priceDiscount),
     shippingCharged: nullableNumber(order.shippingCharged ?? order.deliveryCost ?? order.pricingSummary?.deliveryCost),
-    actualShippingCost: nullableNumber(order.actualShippingCost ?? order.postageCost),
-    paymentFees: nullableNumber(order.paymentFees ?? order.paymentProcessingFees),
+    actualShippingCost: nullableRecordedCost(order.actualShippingCost ?? order.postageCost),
+    paymentFees: nullableRecordedCost(order.paymentFees ?? order.paymentProcessingFees),
     channelFees,
     advertisingCost,
-    otherVariableCosts: nullableNumber(order.otherVariableCosts),
+    otherVariableCosts: nullableRecordedCost(order.otherVariableCosts),
     lineItems: payloadItems(order.lineItems || order.items || order.orderLines, ['lineItems', 'items']).map(line => ({
       id: String(line.id || line.lineItemId || ''),
       name: String(line.name || line.title || ''),

@@ -157,6 +157,7 @@ export async function runFirstSync(state, provider, { integrations, readSync, sa
 // stock, pricing, deletion, financial, approval-execution or OAuth-start path.
 export async function runConnectionDoctor(state, { integrations, readSync, save, now = new Date() }) {
   let changed = false;
+  const busy = [];
   for (const provider of Object.keys(CONNECTORS)) {
     const configured = connectionSettings(state,provider), settings = {...configured,areas:automaticConnectionAreas(state,provider,configured.areas)}, record = recordFor(state, provider);
     if (!settings.areas.length) continue;
@@ -192,8 +193,19 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     const unaffectedRead = Boolean(orderHold && issue?.kind === 'order_source_review');
     if (issue && !issue.repair && !commerceOnly && !unaffectedRead) continue;
     if (commerceOnly && !settings.areas.some(area => area !== 'promotions')) continue;
-    const running = (state.connectionSyncs || []).some(r => r.provider === provider && r.status === 'running' && Date.parse(r.leaseUntil) > now.getTime());
-    if (running || Date.parse(doctor.leaseUntil) > now.getTime() || Date.parse(doctor.nextRetryAt) > now.getTime() || Date.parse(state.integrationStatus?.[provider]?.retryAt) > now.getTime() || (provider === 'shopify' ? orderBudgetExhausted(doctor) : doctor.exhausted)) continue;
+    const syncDeadline = (state.connectionSyncs || []).reduce((latest, run) => {
+      const deadline = run.provider === provider && run.status === 'running' ? Date.parse(run.leaseUntil) : NaN;
+      return deadline > latest ? deadline : latest;
+    }, now.getTime());
+    const doctorDeadline = Date.parse(doctor.leaseUntil);
+    if (syncDeadline > now.getTime() || doctorDeadline > now.getTime()) {
+      // This is descriptive evidence only; no deadline here admits or schedules
+      // another attempt. Report one bounded entry per configured provider.
+      const syncing = syncDeadline > now.getTime();
+      busy.push({ provider, reason: syncing ? 'sync_lease' : 'doctor_lease', leaseUntil: new Date(syncing ? syncDeadline : doctorDeadline).toISOString() });
+      continue;
+    }
+    if (Date.parse(doctor.nextRetryAt) > now.getTime() || Date.parse(state.integrationStatus?.[provider]?.retryAt) > now.getTime() || (provider === 'shopify' ? orderBudgetExhausted(doctor) : doctor.exhausted)) continue;
     const resume = first && ['queued','running'].includes(first.status) && !orderHold;
     const scheduled = settings.managedReadSchedule && settings.autoSync && connectionDue(state, provider, now, integrations);
     const repairRead = settings.autoSync && issue?.repair === 'read';
@@ -268,5 +280,5 @@ export async function runConnectionDoctor(state, { integrations, readSync, save,
     await save();
   }
   if (changed) await save();
-  return { changed, externalWrites:false };
+  return { changed, externalWrites:false, ...(busy.length ? { busy } : {}) };
 }

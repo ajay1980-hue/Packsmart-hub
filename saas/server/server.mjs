@@ -46,6 +46,7 @@ import { createOrderRecoveryRunner, orderRecoveryActor, publicOrderRecoveryObser
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
 import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown } from './lib/ebay-read-cooldown.mjs';
 import { createAgentOperations } from './lib/agent-ops.mjs';
+import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
@@ -134,7 +135,7 @@ function cleanEconomics(value = {}) {
     const raw = value[field];
     if (raw === '' || raw === null || raw === undefined) clean[field] = '';
     else {
-      const number = Number(raw);
+      const number = hasAmount(raw) ? Number(raw) : NaN;
       const maximum = ['marginFloor', 'supplierVatRate'].includes(field) ? 100 : field === 'boxQuantity' ? 100000000 : 1000000;
       if (!Number.isFinite(number) || number < 0 || number > maximum) {
         throw Object.assign(new Error(`Invalid ${field} value`), { status: 400, code: 'VALIDATION_FAILED' });
@@ -162,7 +163,7 @@ function cleanOrderCosts(value = {}) {
     const raw = value[field];
     if (raw === '' || raw === null || raw === undefined) clean[field] = null;
     else {
-      const number = Number(raw);
+      const number = hasAmount(raw) ? Number(raw) : NaN;
       if (!Number.isFinite(number) || number < 0 || number > 10000000) throw Object.assign(new Error(`Invalid ${field} value`), { status: 400, code: 'VALIDATION_FAILED' });
       clean[field] = Number(number.toFixed(4));
     }
@@ -364,6 +365,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     blockMs: clamp(env.ACTIVATION_BLOCK_MS, 60000, 86400000, 30 * 60 * 1000)
   });
   const locks = new Map();
+  let draining = false, drainPromise;
+  const requests = new Set(), integrityTasks = new Set();
   const apiLimiter = new SlidingWindowLimiter({ limit: 240, windowMs: 60000, blockMs: 60000 });
   const activityReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const commandLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
@@ -1072,7 +1075,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     });
   }
 
-  const server = http.createServer(async (req, res) => {
+  const handleRequest = async (req, res) => {
     const requestId = crypto.randomUUID();
     res.setHeader('X-Request-Id', requestId);
     try {
@@ -1662,7 +1665,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const channel = text(body.channel, 50).toLowerCase();
           if (!/^[a-z0-9_]+$/.test(channel) || !hasAmount(body.spend)) throw Object.assign(new Error('Channel and spend are required'), { status: 400, code: 'VALIDATION_FAILED' });
           const spend = Number(body.spend);
-          const attributableRevenue = body.attributableRevenue === '' || body.attributableRevenue === null || body.attributableRevenue === undefined ? null : Number(body.attributableRevenue);
+          const revenueMissing = body.attributableRevenue === '' || body.attributableRevenue === null || body.attributableRevenue === undefined;
+          if (!revenueMissing && !hasAmount(body.attributableRevenue)) throw Object.assign(new Error('Advertising revenue is invalid'), { status: 400, code: 'VALIDATION_FAILED' });
+          const attributableRevenue = revenueMissing ? null : Number(body.attributableRevenue);
           const periodTimestamp = body.date ? Date.parse(body.date) : Date.now();
           if (spend < 0 || spend > 10000000 || !Number.isFinite(periodTimestamp) || (attributableRevenue !== null && (!Number.isFinite(attributableRevenue) || attributableRevenue < 0 || attributableRevenue > 100000000))) throw Object.assign(new Error('Advertising amounts or date are invalid'), { status: 400, code: 'VALIDATION_FAILED' });
           const record = await mutate(auth, async state => {
@@ -2568,6 +2573,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       console.error(JSON.stringify({ event: 'request_error', requestId, method: req.method, path, status: safe.status, code: safe.code }));
       if (!res.headersSent) send(res, safe.status, { error: safe.publicMessage, code: safe.code });
     }
+  };
+  const server = http.createServer((req, res) => {
+    if (draining) {
+      send(res, 503, { error: 'The server is stopping. Check saved activity before retrying any change.', code: 'SERVER_DRAINING' }, { Connection: 'close' });
+      return;
+    }
+    // Register before invoking an async handler: authentication can still be
+    // waiting before any workspace lock exists when shutdown begins.
+    let finished;
+    const pending = new Promise(resolve => { finished = resolve; });
+    requests.add(pending);
+    void handleRequest(req, res).catch(() => {
+      if (!res.headersSent) send(res, 500, { error: 'Request failed', code: 'REQUEST_FAILED' });
+      else res.destroy();
+    }).finally(() => { requests.delete(pending); finished(); });
   });
 
   const scheduler = createScheduler({ store, integrations, withWorkspaceLock, currentBrief, env,
@@ -2575,16 +2595,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const agentOps = createAgentOperations({ store, integrations, withWorkspaceLock, aiProvider, env,
     enabled: options.agentOpsEnabled ?? isProduction, intervalMs: clamp(env.AGENT_OPS_TICK_MS, 1000, 60000, 2500) });
   let integrityTimer = null;
-  const runIntegrityCheck = async () => {
-    if (store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
+  const performIntegrityCheck = async () => {
+    if (draining || store.provider !== 'supabase' || typeof store.integrityCheck !== 'function') return;
     try {
       let result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
-      if (!result.healthy) {
+      if (!result.healthy && !draining) {
         console.warn(JSON.stringify({ event: 'persistence_integrity_warning', ...result }));
         await withWorkspaceLock(CUSTOMER_ZERO_WORKSPACE, async () => {
+          if (draining) return;
           const state = await store.get(CUSTOMER_ZERO_WORKSPACE);
+          if (draining) return;
           if (state) await store.save(CUSTOMER_ZERO_WORKSPACE, state);
         });
+        if (draining) return;
         result = await store.integrityCheck(CUSTOMER_ZERO_WORKSPACE);
         console.log(JSON.stringify({ event: 'persistence_integrity_repaired', ...result }));
       }
@@ -2592,7 +2615,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       console.warn(JSON.stringify({ event: 'persistence_integrity_check_failed', code: error.code || 'PERSISTENCE_UNAVAILABLE' }));
     }
   };
+  const runIntegrityCheck = () => {
+    if (draining) return;
+    let finished;
+    const pending = new Promise(resolve => { finished = resolve; });
+    integrityTasks.add(pending);
+    void performIntegrityCheck().finally(() => { integrityTasks.delete(pending); finished(); });
+  };
   server.once('listening', () => {
+    if (draining) return;
     scheduler.start();
     agentOps.start();
     runIntegrityCheck();
@@ -2606,7 +2637,26 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   server.headersTimeout = 15000;
   server.requestTimeout = 120000;
-  server.packsmart = { store, integrations, aiProvider, env, scheduler, agentOps, drain:async()=>{scheduler.stop();agentOps.stop();await Promise.all([...locks.values()]);} };
+  const drain = () => {
+    if (drainPromise) return drainPromise;
+    draining = true;
+    scheduler.stop(); agentOps.stop();
+    if (integrityTimer) { clearInterval(integrityTimer); integrityTimer = null; }
+    // Worker drains close their admission synchronously and include late claim
+    // replies and final bookkeeping. Existing requests retain their results;
+    // no new request or integrity cycle can add work after this boundary.
+    const settleWorker = worker => { try { return worker.drain(); } catch { return Promise.reject(new Error('WORKER_DRAIN_FAILED')); } };
+    const workers = Promise.allSettled([settleWorker(scheduler), settleWorker(agentOps)]);
+    drainPromise = (async () => {
+      await Promise.all([...requests, ...integrityTasks]);
+      const [schedulerResult, agentResult] = await workers;
+      await Promise.all([...locks.values()]);
+      if (schedulerResult.status !== 'fulfilled' || agentResult.status !== 'fulfilled') throw new Error('WORKER_DRAIN_FAILED');
+      return Object.freeze({ settled: true, scheduler: schedulerResult.value, agentOps: agentResult.value });
+    })();
+    return drainPromise;
+  };
+  server.packsmart = { store, integrations, aiProvider, env, scheduler, agentOps, drain };
   return server;
 }
 
@@ -2616,10 +2666,11 @@ export async function start() {
   server.listen(port, '0.0.0.0', () => {
     console.log(JSON.stringify({ event: 'server_started', service: 'packsmart-ops', version: VERSION, port, storage: server.packsmart.store.provider }));
   });
-  const shutdown = signal => {
+  const shutdown = async signal => {
     console.log(JSON.stringify({ event: 'server_stopping', signal }));
-    server.close(async () => { await server.packsmart.drain(); process.exit(0); });
-    setTimeout(() => process.exit(1), 10000).unref();
+    const result = await closePacksmartServer(server);
+    console.log(JSON.stringify({ event: result.timedOut ? 'server_shutdown_timeout' : result.settled ? 'server_shutdown_settled' : 'server_shutdown_failed', ...result }));
+    process.exit(result.settled ? 0 : 1);
   };
   process.once('SIGTERM', () => shutdown('SIGTERM'));
   process.once('SIGINT', () => shutdown('SIGINT'));
