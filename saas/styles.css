@@ -1518,6 +1518,8 @@ dialog,#connection-dialog { background: var(--surface-raised); border-color: #43
 @media (max-width: 680px) {
   #connection-order-recovery-form .button-row { display: grid; grid-template-columns: minmax(0, 1fr); }
   #connection-order-recovery-form .button-row > button { overflow-wrap: normal; word-break: normal; }
+  #connection-content-form .button-row { display: grid; grid-template-columns: minmax(0, 1fr); }
+  #connection-content-form .button-row > button { overflow-wrap: normal; word-break: normal; }
 }
 
 /* Keep keyboard focus and channel actions clear of the mobile sticky header. */

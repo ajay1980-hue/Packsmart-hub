@@ -27,7 +27,7 @@ const server = createPacksmartServer({ NODE_ENV:'test', GOVERNED_RECORD_PRODUCER
   SESSION_SECRET:secret, CREDENTIALS_KEY:secret, SAAS_STATE_FILE:path.join(directory,'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED:'false' },
   { schedulerEnabled:false, agentOpsEnabled:false, fetchImpl:async()=>{providerCalls++;assert.fail('Provider transport forbidden');} });
 server.packsmart.aiProvider.enhanceCommander = async()=>{modelCalls++;assert.fail('Model transport forbidden');};
-const captures = [], interactions = [];
+const captures = [], interactions = [], actionChecks = [];
 const writesProjection = state => structuredClone({ objectives:state.businessObjectives, writes:state.connectionWrites,
   approvals:state.approvals, decisions:state.decisions, measurements:state.experimentMeasurements, outcomes:state.businessOutcomes });
 
@@ -84,12 +84,61 @@ function createModalViewportSession(panel) {
 }
 async function writeManifest(width,{complete=true,failure=null,diagnosticErrors=[]}={}) {
   const images=captures.filter(row=>row.width===width);for(const row of images)row.bytes=(await fs.stat(row.file)).size;
-  const manifest={width,complete,transport:'Mocked HTTP 503 + GOVERNED_RECORDS_PAUSED and aborted mutations; real app and content read/reconciliation APIs; mocked outcome reads.',imageCount:images.length,bytes:images.reduce((sum,row)=>sum+row.bytes,0),interactions:interactions.filter(row=>row.width===width),images,...(failure?{failure,diagnosticErrors}:{})};
+  const manifest={width,complete,transport:'Mocked HTTP 503 + GOVERNED_RECORDS_PAUSED and aborted mutations; real app and content read/reconciliation APIs; mocked outcome reads.',imageCount:images.length,bytes:images.reduce((sum,row)=>sum+row.bytes,0),interactions:interactions.filter(row=>row.width===width),actionChecks:actionChecks.filter(row=>row.width===width),images,...(failure?{failure,diagnosticErrors}:{})};
   await fs.writeFile(`/tmp/runvara-governed-paused-${width}-manifest.json`,JSON.stringify(manifest,null,2));return manifest;
 }
+async function assertManualContentActions(page,width,state,textScale) {
+  const layout=await page.locator('#connection-content-form').evaluate(form=>{
+    const view=form.ownerDocument.defaultView,dialog=form.closest('dialog'),row=form.querySelector('.button-row');
+    const box=node=>{const rect=node.getBoundingClientRect();return {left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom,width:rect.width,height:rect.height};};
+    const buttons=Array.from(row.querySelectorAll('button')).filter(node=>node.getBoundingClientRect().height>0).map(node=>{
+      const style=view.getComputedStyle(node),words=[],walker=form.ownerDocument.createTreeWalker(node,view.NodeFilter.SHOW_TEXT);
+      while(walker.nextNode())for(const match of walker.currentNode.textContent.matchAll(/\S+/g)){
+        const range=form.ownerDocument.createRange();range.setStart(walker.currentNode,match.index);range.setEnd(walker.currentNode,match.index+match[0].length);
+        words.push({text:match[0],rects:Array.from(range.getClientRects()).filter(rect=>rect.width>0&&rect.height>0).map(rect=>({left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom}))});
+      }
+      return {id:node.id,...box(node),disabled:node.disabled,tabIndex:node.tabIndex,order:style.order,scroll:node.scrollWidth,client:node.clientWidth,words};
+    });
+    return {actualViewportWidth:view.innerWidth,viewportHeight:view.innerHeight,row:box(row),buttons,
+      dialog:{...box(dialog),scroll:dialog.scrollHeight,client:dialog.clientHeight,overflow:view.getComputedStyle(dialog).overflowY}};
+  });
+  const label=`${layout.actualViewportWidth}px ${state} ${textScale*100}% text`,expected=state==='content-first-paused'?['content-prepare','content-reload','content-new']:['content-check'];
+  assert.deepEqual(layout.buttons.map(button=>button.id),expected,`${label}: recovery actions must match the refusal/unknown state`);
+  assert.ok(layout.dialog.top>=0&&layout.dialog.bottom<=layout.viewportHeight&&layout.dialog.height<=layout.viewportHeight-14,`${label}: dialog must stay within the viewport`);
+  assert.ok(layout.dialog.scroll>layout.dialog.client&&['auto','scroll'].includes(layout.dialog.overflow),`${label}: long content must scroll inside the dialog`);
+  for(const [index,button] of layout.buttons.entries()){
+    assert.equal(button.disabled,button.id==='content-prepare',`${label}: refused preparation stays disabled while recovery actions stay enabled`);
+    assert.ok(Math.abs(button.left-layout.row.left)<=2&&Math.abs(button.right-layout.row.right)<=2,`${label}: ${button.id} must use the full action row`);
+    assert.ok(index===0||button.top>=layout.buttons[index-1].bottom,`${label}: actions must stack in their DOM order`);
+    assert.equal(button.order,'0',`${label}: CSS must not reorder actions`);assert.equal(button.tabIndex,0,`${label}: natural tab order must remain`);
+    assert.ok(button.height>=44&&button.scroll<=button.client+2,`${label}: ${button.id} must retain a usable, unclipped target`);
+    assert.ok(button.words.length>0,`${label}: ${button.id} must have a visible label`);
+    for(const word of button.words){
+      assert.ok(word.rects.length>0&&word.rects.every(rect=>Math.abs(rect.top-word.rects[0].top)<=1),`${label}: ${button.id} splits the word ${word.text}`);
+      assert.ok(word.rects.every(rect=>rect.left>=button.left&&rect.right<=button.right&&rect.top>=button.top&&rect.bottom<=button.bottom),`${label}: ${button.id} clips the word ${word.text}`);
+    }
+    const target=page.locator(`#${button.id}`),viewport=await target.evaluateHandle(createModalViewportSession),pageScroll=await page.evaluate(()=>window.scrollY);
+    try{
+      await viewport.evaluate(session=>session.reveal(0));const bounds=await viewport.evaluate(session=>session.bounds());
+      assert.ok(bounds.from<=1&&bounds.to>=bounds.height-1&&bounds.left>=bounds.visibleLeft&&bounds.right<=bounds.visibleRight,`${label}: ${button.id} must be fully reachable below Close`);
+      assert.equal(await page.evaluate(()=>window.scrollY),pageScroll,`${label}: reaching an action must not scroll the background page`);
+      assert.ok(await target.evaluate(node=>{const rect=node.getBoundingClientRect(),hit=node.ownerDocument.elementFromPoint((rect.left+rect.right)/2,(rect.top+rect.bottom)/2);return node===hit||node.contains(hit);}),`${label}: ${button.id} must not be covered`);
+      assert.ok(await page.locator('#connection-close').evaluate(node=>{const rect=node.getBoundingClientRect(),hit=node.ownerDocument.elementFromPoint((rect.left+rect.right)/2,(rect.top+rect.bottom)/2);return rect.top>=0&&rect.bottom<=innerHeight&&(node===hit||node.contains(hit));}),`${label}: Close must remain visible and reachable`);
+    }finally{await viewport.dispose();}
+  }
+  const enabled=layout.buttons.filter(button=>!button.disabled);
+  assert.ok(enabled.length>0,`${label}: an enabled recovery action must remain`);
+  await page.locator(`#${enabled[0].id}`).focus();
+  for(const [index,button] of enabled.entries()){
+    assert.equal(await page.evaluate(()=>document.activeElement.id),button.id,`${label}: keyboard focus must follow the displayed actions`);
+    if(index<enabled.length-1)await page.keyboard.press('Tab');
+  }
+  actionChecks.push({width,state,textScale,...layout});
+}
 async function captureFeedback(page,width,name,rootSelector,selectors) {
-  const root=page.locator(rootSelector), typography=await root.evaluateHandle(createRestrictionTypographySession);
+  const root=page.locator(rootSelector), typography=await root.evaluateHandle(createRestrictionTypographySession),actualViewportWidth=page.viewportSize().width;
   const image=async suffix=>{
+    if(rootSelector==='#connection-content-editor'&&actualViewportWidth<=430)await assertManualContentActions(page,width,name,suffix?2:1);
     for(let index=0;index<selectors.length;index++){
       const target=page.locator(selectors[index]);await target.waitFor({state:'visible'});
       const modal=await target.evaluate(node=>Boolean(node.closest('dialog')));
@@ -98,8 +147,8 @@ async function captureFeedback(page,width,name,rootSelector,selectors) {
         await viewport.evaluate((session,offset)=>session.reveal(offset),Math.max(0,covered-60));const bounds=await viewport.evaluate(session=>session.bounds());
         assert.ok(bounds.height>0&&bounds.left>=bounds.visibleLeft-2&&bounds.right<=bounds.visibleRight+2&&bounds.scroll<=bounds.client+2,`${name}${suffix} horizontal clipping: ${JSON.stringify(bounds)}`);
         assert.ok(bounds.from<=covered+2&&bounds.to>covered+1,`${name}${suffix} lost visible text: ${JSON.stringify({covered,...bounds})}`);
-        const file=`/tmp/runvara-governed-paused-${width}-${name}${suffix}-${index+1}-${++part}.png`;
-        await page.screenshot({path:file,fullPage:false,caret:'initial'});captures.push({width,state:name,selector:selectors[index],textScale:suffix?2:1,file,bounds});
+        const file=`/tmp/runvara-governed-paused-${width}-${name}${actualViewportWidth===width?'':`-viewport-${actualViewportWidth}`}${suffix}-${index+1}-${++part}.png`;
+        await page.screenshot({path:file,fullPage:false,caret:'initial'});captures.push({width,actualViewportWidth,state:name,selector:selectors[index],textScale:suffix?2:1,file,bounds,...(actualViewportWidth===width?{}:{probe:'manual-content-layout'})});
         covered=bounds.to;if(covered>=bounds.height-1)break;assert.ok(part<8,'Bounded feedback capture exceeded eight viewport slices');
       }}finally{await viewport.dispose();}
     }
@@ -121,16 +170,28 @@ async function openObjectives(page,objective) {
 async function checkContent(page,width,h,objectiveMode) {
   const prefix=objectiveMode?'objective-content':'content', root=objectiveMode?'#objective-content-editor':'#connection-content-editor';
   const el=name=>page.locator(`#${prefix}-${name}`), status=el('status'), error=el('error');
+  const capture=async(state,action)=>{
+    const selectors=[`#${prefix}-status`,`#${prefix}-error`,`#${prefix}-${action}`],row='#connection-content-form .button-row';
+    if(!objectiveMode&&width<=430)selectors.push(row);
+    await captureFeedback(page,width,`${prefix}-${state}`,root,selectors);
+    // Reuse the 390px manual state for a 430px layout probe only. Keep all five
+    // existing flows and artifact groups; record the actual viewport in each image.
+    if(!objectiveMode&&width===390){const viewport=page.viewportSize(),writeCount=h.writes.length;
+      try{await page.setViewportSize({...viewport,width:430});await captureFeedback(page,width,`${prefix}-${state}`,root,[row]);}
+      finally{await page.setViewportSize(viewport);}
+      assert.equal(h.writes.length,writeCount,'The 430px layout probe must not submit or retry a request');
+    }
+  };
   const open=async()=>{await page.locator('#connection-grid [data-provider="shopify"][data-connection-action="open"]').first().click();await el('title').waitFor();};
   if(objectiveMode){await openObjectives(page,h.objective);await page.locator(`[data-prepare-objective-review="${h.objective.id}"]`).click();await page.locator(`[data-request-objective-content="${h.candidate.id}"]`).click();await settleForm(page,'#objective-content-form');}
   else {await navigate(page,'channels');await open();}
   const fill=async()=>{await el('account').selectOption(h.state.connections[0].id);await el('product').selectOption(OBJECTIVE_CONTENT_PRODUCT);await el('title').fill('Exact synthetic paused content');await el('description').fill('Only these exact retained words.');await el('ack').check();};
   await fill();await el('prepare').click();await status.getByText('Preparation was refused.',{exact:false}).waitFor();assert.equal(await error.textContent(),pausedMessage);assert.equal(h.writes.length,1);assert.equal(await el('check').isVisible(),false);assert.equal(await el('ack').isChecked(),false);
-  await captureFeedback(page,width,`${prefix}-first-paused`,root,[`#${prefix}-status`,`#${prefix}-error`,`#${prefix}-reload`]);
+  await capture('first-paused','reload');
   await el('reload').click();await settleForm(page,objectiveMode?'#objective-content-form':'#connection-content-form');assert.equal(h.writes.length,1);await fill();h.mode='lose';await el('prepare').click();await status.getByText('The preparation outcome is unknown.',{exact:false}).waitFor();const original=h.writes[1].body;
   await el('check').click();await status.getByText('No matching request was found',{exact:false}).waitFor();assert.equal(h.writes.length,2);await el('ack').check();h.mode='paused';await el('retry').click();await status.getByText('The preparation outcome is unknown.',{exact:false}).waitFor();
   assert.equal(h.writes.length,3);assert.equal(h.writes[2].body,original);assert.ok((await error.textContent()).includes(pausedMessage));assert.equal(await el('reload').isVisible(),false);assert.equal(await el('retry').isVisible(),false);assert.equal(await el('ack').isChecked(),false);
-  await captureFeedback(page,width,`${prefix}-retained-unknown`,root,[`#${prefix}-status`,`#${prefix}-error`,`#${prefix}-check`]);
+  await capture('retained-unknown','check');
   if(objectiveMode){await el('cancel').click();await page.locator('#resume-objective-content').click();}else{await page.locator('#connection-close').click();await open();}
   assert.ok((await el('exact').textContent()).includes(JSON.parse(original).requestId));assert.match(await status.textContent(),/outcome is unknown/);assert.equal(h.writes.length,3);
 }
@@ -216,6 +277,10 @@ try {
     }
     const images=captures.filter(row=>row.width===width);for(const row of images)row.bytes=(await fs.stat(row.file)).size;
     assert.equal(new Set(images.map(row=>row.state)).size,10);assert.ok(images.every(row=>row.textScale===1||row.textScale===2));
+    if(width<=430)for(const actualViewportWidth of width===390?[390,430]:[width])for(const state of ['content-first-paused','content-retained-unknown'])for(const textScale of [1,2]){
+      assert.equal(actionChecks.filter(row=>row.width===width&&row.actualViewportWidth===actualViewportWidth&&row.state===state&&row.textScale===textScale).length,1,'Each mobile recovery state must pass normal and 200% text action checks');
+      assert.ok(images.some(row=>row.actualViewportWidth===actualViewportWidth&&row.state===state&&row.textScale===textScale&&row.selector==='#connection-content-form .button-row'),'Each checked mobile action row must have viewport evidence');
+    }
     const bytes=images.reduce((sum,row)=>sum+row.bytes,0);assert.ok(bytes<31*1024*1024,`${width}px artifacts must leave room below the 32 MiB ZIP bound`);
     await writeManifest(width);console.log(`${width}px: ${images.length} screenshots, ${bytes} bytes; all five surfaces preserve refusal/uncertainty boundaries.`);
   }
