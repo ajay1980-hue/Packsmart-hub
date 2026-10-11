@@ -20,18 +20,23 @@ const user = { id: 'quiet-owner', name: 'Synthetic owner', email: 'quiet-owner@e
 const original = JSON.stringify({ [workspace.id]: { workspace, users: [user] } });
 await fs.writeFile(file, original);
 let browser, base, providerCalls = 0, browserExternalRequests = 0, saves = 0, complete = false, failure = null;
+let browserVersion = null;
+const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const widths = [320, 390, 430, 768, 1200], motionPreferences = ['no-preference', 'reduce'], textScales = [1, 2];
 const server = createPacksmartServer({ NODE_ENV: 'test', RUNVARA_STARTUP_MODE: 'quiet',
   SESSION_SECRET: secret, CREDENTIALS_KEY: secret, SAAS_STATE_FILE: file },
 { schedulerEnabled: true, agentOpsEnabled: true, fetchImpl: async () => { providerCalls++; throw new Error('External transport forbidden'); } });
 server.packsmart.store.save = async () => { saves++; throw new Error('Quiet save forbidden'); };
-const failures = [], captures = [], requests = [];
+const failures = [], captures = [], requests = [], retries = [];
 try {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   base = `http://127.0.0.1:${server.address().port}`;
   const token = createSessionToken({ userId: user.id, workspaceId: workspace.id, email: user.email, role: user.role, sessionVersion: 1 }, secret);
-  browser = await chromium.launch({ headless: true });
-  for (const width of [320, 390, 1200]) {
-    const context = await browser.newContext({ viewport: { width, height: 900 }, deviceScaleFactor: 1, reducedMotion: 'no-preference' });
+  if (executablePath) assert.ok(path.isAbsolute(executablePath), 'Local Chromium executable must use an absolute path');
+  browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+  browserVersion = browser.version();
+  for (const width of widths) for (const reducedMotion of motionPreferences) {
+    const context = await browser.newContext({ viewport: { width, height: 900 }, deviceScaleFactor: 1, reducedMotion });
     try {
       await context.addCookies([{ name: 'packsmart_session', value: token, url: base, httpOnly: true, sameSite: 'Lax' }]);
       const page = await context.newPage();
@@ -39,7 +44,7 @@ try {
       await page.route('**/*', route => {
         const request = route.request(), url = new URL(request.url());
         if (url.origin !== base) { browserExternalRequests++; return route.abort('blockedbyclient'); }
-        requests.push({ width, method: request.method(), path: url.pathname });
+        requests.push({ width, reducedMotion, method: request.method(), path: url.pathname });
         return route.continue();
       });
       await page.goto(base, { waitUntil: 'networkidle' });
@@ -55,52 +60,80 @@ try {
       const card = page.locator('#loading-screen .auth-card');
       const typography = await card.evaluateHandle(createRestrictionTypographySession);
       try {
-        for (const scale of [1, 2]) {
+        for (const scale of textScales) {
           if (scale === 2) { await typography.evaluate(session => session.begin()); await typography.evaluate(session => session.enlarge()); }
           await page.evaluate(async () => {
             await Promise.all(document.getAnimations().filter(animation => animation.playState !== 'finished' && Number.isFinite(animation.effect?.getTiming().iterations)).map(animation => animation.finished.catch(() => {})));
             await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
           });
           await retry.scrollIntoViewIfNeeded();
+          // Start at the preceding native focus target and reach retry with a real Tab.
+          await page.locator('.skip-link').focus();
+          await page.keyboard.press('Tab');
           const geometry = await card.evaluate(node => {
-            const inspect = element => {
+            const inspect = (element, includeWords = true) => {
               const rect = element.getBoundingClientRect(), words = [];
               const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-              while (walker.nextNode()) for (const match of walker.currentNode.textContent.matchAll(/\S+/g)) {
+              while (includeWords && walker.nextNode()) for (const match of walker.currentNode.textContent.matchAll(/\S+/g)) {
                 const range = document.createRange(); range.setStart(walker.currentNode, match.index); range.setEnd(walker.currentNode, match.index + match[0].length);
                 words.push({ text: match[0], rects: Array.from(range.getClientRects()).filter(box => box.width && box.height).map(box => ({ left: box.left, right: box.right, top: box.top, bottom: box.bottom })) });
               }
-              return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height, client: element.clientWidth, scroll: element.scrollWidth, words };
+              const style = getComputedStyle(element);
+              return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height, client: element.clientWidth, scroll: element.scrollWidth,
+                style: { width: style.width, minWidth: style.minWidth, gridTemplateColumns: style.gridTemplateColumns, overflowWrap: style.overflowWrap, fontSize: style.fontSize,
+                  overflowX: style.overflowX, paddingLeft: style.paddingLeft, paddingRight: style.paddingRight }, words };
             };
             const button = node.querySelector('#startup-retry'), rect = button.getBoundingClientRect(), hit = document.elementFromPoint((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
-            return { viewport: { width: innerWidth, height: innerHeight }, error: inspect(node.querySelector('#startup-error')), retry: inspect(button), retryVisible: button === hit || button.contains(hit) };
+            return { viewport: { width: innerWidth, height: innerHeight }, document: { client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth },
+              screen: inspect(node.parentElement, false), card: inspect(node, false), heading: inspect(node.querySelector('h1')), description: inspect(node.querySelector('h1 + p')),
+              error: inspect(node.querySelector('#startup-error')), retry: inspect(button), retryVisible: button === hit || button.contains(hit),
+              retryKeyboardFocused: document.activeElement === button, reducedMotion: matchMedia('(prefers-reduced-motion: reduce)').matches,
+              activeAnimations: node.getAnimations({ subtree: true }).filter(animation => animation.playState === 'running').length };
           });
+          // Record the failing case before assertions, so CI retains its pixels and bounds.
+          await page.mouse.move(0, 0);
+          const image = `/tmp/runvara-quiet-startup-${width}-${scale * 100}${reducedMotion === 'reduce' ? '-reduced' : ''}.png`;
+          await page.screenshot({ path: image, fullPage: true, animations: 'disabled' });
+          const bytes = await fs.readFile(image);
+          captures.push({ width, textScale: scale, reducedMotion, file: image, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), geometry });
           for (const value of [geometry.error, geometry.retry]) {
             assert.ok(value.left >= -1 && value.right <= width + 1 && value.scroll <= value.client + 1, 'Pause feedback must fit horizontally');
             for (const word of value.words) assert.ok(word.rects.length && word.rects.every(rect => rect.left >= value.left - 1 && rect.right <= value.right + 1), `Clipped feedback word: ${word.text}`);
           }
+          for (const [name, value] of Object.entries({ screen: geometry.screen, card: geometry.card, heading: geometry.heading, description: geometry.description })) {
+            assert.ok(value.left >= -1 && value.right <= width + 1 && value.scroll <= value.client + 1, `Startup ${name} must fit horizontally`);
+            for (const word of value.words) assert.ok(word.rects.length && word.rects.every(rect => rect.left >= value.left - 1 && rect.right <= value.right + 1), `Clipped ${name} word: ${word.text}`);
+          }
+          assert.ok(geometry.document.scroll <= geometry.document.client + 1, 'Startup document must not scroll horizontally');
           assert.ok(geometry.retryVisible && geometry.retry.top >= 0 && geometry.retry.bottom <= geometry.viewport.height && geometry.retry.height >= 44, 'Manual retry must remain reachable');
-          await retry.focus(); assert.equal(await page.evaluate(() => document.activeElement.id), 'startup-retry');
-          await page.mouse.move(0, 0);
-          const image = `/tmp/runvara-quiet-startup-${width}-${scale * 100}.png`;
-          await page.screenshot({ path: image, fullPage: true, animations: 'disabled' });
-          const bytes = await fs.readFile(image);
-          captures.push({ width, textScale: scale, file: image, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'), geometry });
+          assert.equal(geometry.retryKeyboardFocused, true, 'Tab must reach the manual retry');
+          assert.equal(geometry.reducedMotion, reducedMotion === 'reduce', 'Requested motion preference must be active');
+          if (reducedMotion === 'reduce') assert.equal(geometry.activeAnimations, 0, 'Reduced-motion startup must not animate');
           if (scale === 2) await typography.evaluate(session => session.restore());
         }
       } finally { await typography.dispose(); }
-      const before = requests.filter(row => row.width === width && row.path === '/api/bootstrap').length;
-      await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle' }), retry.click()]);
-      await error.waitFor({ state: 'visible' });
-      assert.equal(requests.filter(row => row.width === width && row.path === '/api/bootstrap').length, before + 1, 'Manual retry makes one new bootstrap attempt');
-      assert.equal(await page.locator('#login-screen').isVisible(), false);
+      for (const activation of ['keyboard', 'pointer']) {
+        const attempts = () => requests.filter(row => row.width === width && row.reducedMotion === reducedMotion && row.path === '/api/bootstrap').length;
+        const before = attempts();
+        if (activation === 'keyboard') {
+          await page.locator('.skip-link').focus(); await page.keyboard.press('Tab');
+          assert.equal(await page.evaluate(() => document.activeElement.id), 'startup-retry');
+        }
+        await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle' }), activation === 'keyboard' ? page.keyboard.press('Enter') : retry.click()]);
+        await error.waitFor({ state: 'visible' });
+        assert.equal(attempts(), before + 1, `${activation} retry makes one new bootstrap attempt`);
+        assert.equal(await page.locator('#login-screen').isVisible(), false);
+        assert.equal(await retry.isEnabled(), true);
+        retries.push({ width, reducedMotion, activation, bootstrapAttempts: attempts() - before });
+      }
     } finally { await context.close(); }
   }
   assert.equal(providerCalls, 0); assert.equal(browserExternalRequests, 0); assert.equal(saves, 0); assert.deepEqual(failures, []);
   assert.equal(await fs.readFile(file, 'utf8'), original, 'Browser checks retain fixture bytes');
   assert.ok(requests.every(row => ['GET', 'HEAD'].includes(row.method)), 'Startup and manual reload do not submit mutations');
-  assert.equal(captures.length, 6);
-  assert.ok(captures.reduce((sum, image) => sum + image.bytes, 0) < 24 * 1024 * 1024, 'Six-image archive must remain within supported materialization bounds');
+  assert.equal(captures.length, widths.length * motionPreferences.length * textScales.length);
+  assert.equal(retries.length, widths.length * motionPreferences.length * 2);
+  assert.ok(captures.reduce((sum, image) => sum + image.bytes, 0) < 24 * 1024 * 1024, 'Responsive archive must remain within supported materialization bounds');
   complete = true;
 } catch (error) {
   failure = String(error.code || error.message || 'BROWSER_QUALIFICATION_FAILED');
@@ -117,8 +150,9 @@ try {
   const cleaned = cleanup.browserClosed && cleanup.server.settled === true && fixtureRemoved;
   complete &&= cleaned;
   await fs.writeFile('/tmp/runvara-quiet-startup-manifest.json', JSON.stringify({ complete, failure,
-    captures, requests, providerCalls, browserExternalRequests, saves, pageErrors: failures, cleanup,
+    browser: { version: browserVersion, executablePath: executablePath || 'Playwright bundled Chromium' },
+    matrix: { widths, motionPreferences, textScales }, captures, retries, requests, providerCalls, browserExternalRequests, saves, pageErrors: failures, cleanup,
     limits: ['Synthetic file persistence and session only', '200% affected card text, not browser zoom or whole-app accessibility', 'No production access, provider response or deployment termination evidence'] }, null, 2));
   assert.equal(cleaned, true, 'Every quiet fixture cleanup must complete');
 }
-console.log('Quiet startup browser qualification: six normal/enlarged captures, zero provider calls/saves and verified local cleanup.');
+console.log('Quiet startup browser qualification: twenty normal/enlarged and reduced-motion captures, keyboard/pointer retries, zero provider calls/saves and verified local cleanup.');
