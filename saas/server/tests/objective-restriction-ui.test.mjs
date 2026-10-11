@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 // Real app HTML/JS, synthetic workspace definitions, and controlled responses only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -9,7 +10,11 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
-import { upsertBusinessObjective, businessObjectivesSnapshot } from '../lib/business-objectives.mjs';
+import { upsertBusinessObjective as upsertForwardObjective, businessObjectivesSnapshot } from '../lib/business-objectives.mjs';
+
+// These existing fixtures exercise the explicitly enabled producer contract.
+const forwardRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+const upsertBusinessObjective = (state, input, options = {}) => upsertForwardObjective(state, input, { governedRecordStage: forwardRecordStage, ...options });
 
 const NOW = '2026-10-07T12:00:00.000Z', API = '/api/business-objectives';
 const schema = 'runvara-objective-execution-policy/v1';
@@ -195,6 +200,17 @@ test('lost response reconciles saved state without retry or claiming the request
   assert.match(h.status.textContent,/Reloaded saved state/);assert.equal(h.writes().length,1);h.submit();assert.equal(h.writes().length,1);
 });
 
+test('first restriction pause is a known refusal with unchanged saved state and no implicit retry',async t=>{
+ const h=await harness(t);await h.open();h.choose();const before=copy(h.state.businessObjectives);
+ h.put=async()=>Response.json({code:'GOVERNED_RECORDS_PAUSED',error:'PRIVATE_PAUSED_RESPONSE_CANARY'},{status:503});h.submit();await until(()=>h.form.getAttribute('aria-busy')==='false');
+ assert.match(h.error.textContent,/^New governed records are paused on this server\. Existing records remain available for review and exact reconciliation\./);assert.doesNotMatch(h.error.textContent,/unknown|PRIVATE_PAUSED_RESPONSE_CANARY/);assert.deepEqual(h.state.businessObjectives,before);assert.equal(h.ack.checked,false);assert.equal(h.save.disabled,true);h.submit();assert.equal(h.writes().length,1);
+ await h.reload();assert.equal(h.mode.value,'preparation_only');assert.equal(h.ack.checked,false);assert.equal(h.writes().length,1);
+});
+
+test('restriction gate code with HTTP 500 is still an unknown save',async t=>{
+ const h=await harness(t);await h.open();h.choose();h.put=async()=>Response.json({code:'GOVERNED_RECORDS_PAUSED',error:'Unconfirmed response'},{status:500});h.submit();await until(()=>h.form.getAttribute('aria-busy')==='false');assert.match(h.error.textContent,/outcome is unknown/);assert.doesNotMatch(h.error.textContent,/New governed records are paused/);assert.equal(h.writes().length,1);
+});
+
 for (const malformed of ['missing policy','wrong schema','forbidden scope','wrong objective','wrong workspace','wrong revision','changed limit','snapshot mismatch']) {
   test('malformed removal success is unknown: '+malformed,async t=>{
     const h=await harness(t,{enforced:true});await h.open();h.change(h.mode,'preparation_only');h.change(h.ack,true);
@@ -234,7 +250,7 @@ for (const interruption of ['cancel','panel close','navigation','history','hidde
   });
 }
 
-for (const resultType of ['success','network failure','401','403']) {
+for (const resultType of ['success','network failure','401','403','paused']) {
   test('late PUT '+resultType+' cannot clear or unlock a newer draft after navigation and explicit reconciliation',async t=>{
     const h=await harness(t);await h.open();h.choose();const pending=deferred();let body;
     h.put=(_route,options)=>{body=JSON.parse(options.body);return pending.promise;};h.submit();
@@ -244,6 +260,7 @@ for (const resultType of ['success','network failure','401','403']) {
     if(resultType==='success')pending.resolve(Response.json(h.savedResult(body)));
     if(resultType==='network failure')pending.reject(new Error('lost'));
     if(resultType==='401'||resultType==='403')pending.resolve(Response.json({error:'late authorization failure'},{status:Number(resultType)}));
+    if(resultType==='paused')pending.resolve(Response.json({error:'late pause',code:'GOVERNED_RECORDS_PAUSED'},{status:503}));
     await delay();assert.equal(h.form.getAttribute('aria-busy'),'true');assert.equal(h.el('reload-objective-restriction').disabled,true);assert.equal(h.el('app-shell').classList.contains('hidden'),false);
     newer.resolve(Response.json({connections:h.state.connections}));await until(()=>h.form.getAttribute('aria-busy')==='false');
     assert.equal(h.writes().length,1);assert.equal(h.ack.checked,false);

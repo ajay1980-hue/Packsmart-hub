@@ -9,6 +9,7 @@ import { createPacksmartServer } from '../server.mjs';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import { createSessionToken, verifySessionToken, decryptCredentials, encryptCredentials } from '../lib/security.mjs';
 import { IntegrationService, mergeSelectedShopify } from '../lib/integrations.mjs';
 import { connectionCentre, connectionDue, saveConnectionSettings, recoveryFor } from '../lib/connection-centre.mjs';
@@ -109,7 +110,7 @@ const connect=async()=>request('/api/connections',{method:'POST',body:{provider:
 }
 
 test('HTTP execution rejects legacy bypass, unknown finance, and malformed or foreign stored policies', async t => {
-  const f = await fixture(t, {}, { storage: 'mock-supabase' });
+  const f = await fixture(t, { GOVERNED_RECORD_PRODUCER_CONTRACT }, { storage: 'mock-supabase' });
   await f.connect();
   assert.equal((await f.request('/api/connections/shopify/test', { method: 'POST', body: {} })).status, 200);
   const channel = await f.channel();

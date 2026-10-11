@@ -4,6 +4,8 @@ import { AUTOMATION_DEFINITIONS, deriveOperations, ebayComparisonAvailable, inte
 import { addAudit, recordWork } from './events.mjs';
 import { automationEvidenceCount } from './automation-retention.mjs';
 import { evidenceInWorkspace } from './business-evidence-scope.mjs';
+import { assertGovernedRecordCreation, hasGovernedConnectionWriteMarkers } from './governed-record-stage.mjs';
+import { captureObjectiveDispatchPolicy } from './objective-dispatch-policy.mjs';
 
 const nowIso = () => new Date().toISOString();
 const clean = (value, max = 1000) => String(value ?? '').trim().slice(0, max);
@@ -198,10 +200,20 @@ export function requestOpportunityApproval(state, id, actor) {
   return approval;
 }
 
-export function modifyApproval(state, id, body, actor) {
+export function governedApproval(state, approval) {
+  if (hasGovernedConnectionWriteMarkers(null, approval)) return true;
+  // A broken or one-way reference must not turn governed work into legacy work.
+  return (state.connectionWrites || []).some(item => (item.approvalId === approval?.id
+    || item.id === approval?.payload?.connectionWriteId)
+    && (hasGovernedConnectionWriteMarkers(item, approval)
+      || captureObjectiveDispatchPolicy(state, item)?.policies.length));
+}
+
+export function modifyApproval(state, id, body, actor, { governedRecordStage } = {}) {
   const item = state.approvals.find(record => record.id === id);
   if (!item) throw Object.assign(new Error('Approval not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
   if (item.status !== 'pending' || body.revision !== (item.revision || 1)) throw Object.assign(new Error('Approval is decided or changed; refresh before editing'), { status: 409, code: 'APPROVAL_CONFLICT' });
+  if (governedApproval(state, item)) assertGovernedRecordCreation(governedRecordStage);
   const next = normalizeApprovalRequest({ ...item, ...body, type: item.type, source: item.source, payload: item.payload }, item.requestedBy);
   const history = [...(item.history || []), { revision: item.revision || 1, action: item.action, reason: item.reason, financialImpact: item.financialImpact,
     expectedBenefit: item.expectedBenefit, risk: item.risk, evidence: item.evidence || [], actor, at: nowIso() }];

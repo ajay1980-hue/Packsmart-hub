@@ -109,6 +109,32 @@ test('definitive refusal permits explicit reload and fresh review; a resolved sa
  h.el('content-new').click();await h.idle();h.fill();h.submit();await settle();assert.equal(h.writes().length,2);assert.match(h.el('content-error').textContent,/already prepared/);
 });
 
+const pausedMessage = 'New governed records are paused on this server. Existing records remain available for review and exact reconciliation.';
+const pausedError = () => Object.assign(new Error('PRIVATE_PAUSED_RESPONSE_CANARY'),{status:503,code:'GOVERNED_RECORDS_PAUSED'});
+test('first manual-content pause is a known refusal and explicit reload never sends another request',async t=>{
+ const h=await harness(t);h.open();h.fill();h.post=async()=>{throw pausedError();};h.submit();await until(()=>h.writes().length===1);await h.idle();assert.match(h.el('content-status').textContent,/refused/);assert.doesNotMatch(h.el('content-status').textContent,/unknown/);assert.equal(h.el('content-error').textContent,pausedMessage);assert.equal(h.records.size,0);
+ assert.equal(h.el('content-check').classList.contains('hidden'),true);assert.equal(h.el('content-ack').checked,false);h.submit();assert.equal(h.writes().length,1);const id=h.id();h.el('content-reload').click();await h.idle();assert.equal(h.writes().length,1);h.fill();h.submit();await until(()=>h.writes().length===2);await h.idle();assert.equal(JSON.parse(h.writes()[1].body).requestId,id);assert.equal(h.records.size,0);
+});
+
+test('manual-content timeout then pause keeps the same frozen unknown request through close and workspace reload',async t=>{
+ const h=await harness(t);h.open();h.fill();h.post=async()=>{throw new Error('Lost response');};h.submit();await until(()=>h.writes().length===1);await h.idle();const original=h.writes()[0].body;h.el('content-check').click();await h.idle();h.change('content-ack',true);h.post=async()=>{throw pausedError();};h.el('content-retry').click();await until(()=>h.writes().length===2);await h.idle();
+ assert.equal(h.writes()[1].body,original);assert.match(h.el('content-status').textContent,/outcome is unknown/);assert.ok(h.el('content-error').textContent.includes(pausedMessage));assert.equal(h.el('content-reload').classList.contains('hidden'),true);h.el('content-reload').click();h.submit();h.close();h.open();assert.ok(h.el('content-exact').textContent.includes(JSON.parse(original).requestId));assert.match(h.el('content-status').textContent,/unknown/);
+ h.w.RunvaraConnections.interruptContent('Workspace refresh started');h.generation++;h.data={...h.data};h.render();assert.ok(h.el('content-exact').textContent.includes(JSON.parse(original).requestId));assert.match(h.el('content-status').textContent,/unknown/);assert.equal(h.writes().length,2);assert.equal(h.records.size,0);
+});
+
+test('late manual-content pause cannot overwrite a newer exact reconciliation',async t=>{
+ const h=await harness(t);h.open();h.fill();const old=defer();h.post=()=>old.promise;h.submit();await until(()=>h.writes().length===1);h.close();h.open();const check=defer();h.read=()=>check.promise;h.el('content-check').click();old.reject(pausedError());await settle();assert.equal(h.el('connection-content-form').getAttribute('aria-busy'),'true');assert.equal(h.el('content-check').disabled,true);
+ check.resolve({schema:'runvara-manual-content-request/v1',workspaceId:h.data.workspace.id,requestId:h.id(),requestedBy:h.session.user.id,found:false,request:null});await h.idle();assert.doesNotMatch(h.el('content-status').textContent,/refused/);assert.ok(h.el('content-exact').textContent.includes(h.id()));assert.equal(h.writes().length,1);
+});
+
+test('manual-content pause classification ignores response words and nested client tags',async t=>{
+ const h=await harness(t);h.open();h.fill();h.post=async()=>{throw Object.assign(new Error(pausedMessage),{status:503,body:{code:'GOVERNED_RECORDS_PAUSED'},clientTag:'GOVERNED_RECORDS_PAUSED'});};h.submit();await until(()=>h.writes().length===1);await h.idle();assert.match(h.el('content-status').textContent,/outcome is unknown/);assert.equal(h.el('content-reload').classList.contains('hidden'),true);
+});
+
+for(const status of [undefined,500])test('manual-content gate code without HTTP 503 remains unknown: '+status,async t=>{
+ const h=await harness(t);h.open();h.fill();h.post=async()=>{throw Object.assign(new Error('Unconfirmed response'),{status,code:'GOVERNED_RECORDS_PAUSED'});};h.submit();await until(()=>h.writes().length===1);await h.idle();assert.match(h.el('content-status').textContent,/outcome is unknown/);assert.ok(!h.el('content-error').textContent.includes(pausedMessage));
+});
+
 test('executing is exact saved history and never a new apply permission',async t=>{
  const h=await harness(t);h.open();h.fill();h.post=async(_path,options)=>{const result=h.response(JSON.parse(options.body));h.records.get(result.write.requestId).status='executing';assert.equal(result.write.status,'pending_approval','display projection is detached from stored state');throw new Error('Lost');};h.submit();await until(()=>h.writes().length===1);await h.idle();h.el('content-check').click();await h.idle();assert.match(h.el('content-status').textContent,/Exact request found.*executing.*not permission to apply/);assert.equal(h.writes().length,1);assert.equal(h.el('connection-content-editor').querySelector('[data-connection-action=execute]'),null);
 });

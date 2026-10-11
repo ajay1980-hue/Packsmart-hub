@@ -1738,9 +1738,11 @@
     } catch(error) {
       if (!currentObjectiveContent(ticket)) return;
       if (objectiveContentIdentityError(error)) { interruptObjectiveContent('Owner access unavailable',true); return; }
-      if (attempt.sent && (attempt.hadUnknown || !error.status || error.status >= 500 || error.code === 'STATE_CONFLICT')) { attempt.phase = 'unknown'; attempt.hadUnknown = true; editor.ackKey = null; }
+      const paused = error.status === 503 && error.code === 'GOVERNED_RECORDS_PAUSED';
+      // A refusal now cannot resolve an earlier request whose result was lost.
+      if (attempt.sent && (attempt.hadUnknown || (!paused && (!error.status || error.status >= 500 || error.code === 'STATE_CONFLICT')))) { attempt.phase = 'unknown'; attempt.hadUnknown = true; editor.ackKey = null; }
       else { attempt.phase = 'refused'; editor.stale = true; editor.ackKey = null; editor.message = 'Preparation was refused. Reload and review the source before another draft.'; }
-      $('#objective-content-error').textContent = error.message;
+      $('#objective-content-error').textContent = paused ? governedRecordsPausedMessage : error.message;
     } finally { if (objectiveContent.ticket === ticket) { objectiveContent.ticket = null; renderObjectiveContent(); } }
   }
   $('#objective-content-form').addEventListener('submit',event=>{event.preventDefault();prepareObjectiveContent();});
@@ -1797,6 +1799,7 @@
     finally {if(objectiveContent.handoff===ticket)objectiveContent.handoff=null;}
   });
 
+  const governedRecordsPausedMessage = 'New governed records are paused on this server. Existing records remain available for review and exact reconciliation.';
   const restrictionSchema = 'runvara-objective-execution-policy/v1';
   const preparationPolicy = () => ({ schema: restrictionSchema, mode: 'preparation_only' });
   const objectiveCopy = value => JSON.parse(JSON.stringify(value));
@@ -2049,10 +2052,12 @@
       if (!currentRestriction(editor) || objectiveUI.mutation !== ticket) return;
       if (error.status === 401 || error.status === 403) { resetObjectiveEditing(true); showMessage('Restriction editing is unavailable for this session. Sign in or refresh your workspace before continuing.', 'error'); return; }
       objectiveUI.needsReload = true;
-      objectiveUI.unknownSave = error.code === 'REQUEST_UNAVAILABLE' || error.code === 'RESTRICTION_RESULT_UNKNOWN' || error.status >= 500;
-      const message = ['OBJECTIVE_CONFLICT','STATE_CONFLICT'].includes(error.code) ? 'The saved objective or workspace changed. Your choices remain visible but cannot be saved. Discard the draft and reload/review the current saved state.' :
+      const paused = error.status === 503 && error.code === 'GOVERNED_RECORDS_PAUSED';
+      objectiveUI.unknownSave ||= !paused && (error.code === 'REQUEST_UNAVAILABLE' || error.code === 'RESTRICTION_RESULT_UNKNOWN' || error.status >= 500);
+      const message = paused && !objectiveUI.unknownSave ? governedRecordsPausedMessage + ' Reload the saved objective and review before another save.' :
+        ['OBJECTIVE_CONFLICT','STATE_CONFLICT'].includes(error.code) ? 'The saved objective or workspace changed. Your choices remain visible but cannot be saved. Discard the draft and reload/review the current saved state.' :
         error.code === 'OBJECTIVE_POLICY_CONNECTION_REQUIRED' ? 'The saved account reference changed or is missing. Your exact old and proposed bindings remain visible. Reload the saved objective/accounts, deliberately choose a current reference and review again.' :
-        error.code === 'REQUEST_UNAVAILABLE' || error.code === 'RESTRICTION_RESULT_UNKNOWN' || error.status >= 500 ? 'The restriction save outcome is unknown. It may have been saved. Reload the saved objective and review its current state before another save; this request will not be retried.' :
+        objectiveUI.unknownSave ? 'The restriction save outcome is unknown. It may have been saved. Reload the saved objective and review its current state before another save; this request will not be retried.' :
         'The restriction was not confirmed: ' + error.message + ' Reload the saved objective and review before another save.';
       staleRestriction(editor, message);
     } finally {

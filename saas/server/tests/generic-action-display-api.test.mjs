@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import { objectiveCanonicalDigest } from '../lib/objective-dispatch-policy.mjs';
 import { objectiveContentApiFixture, OBJECTIVE_CONTENT_POST, OBJECTIVE_CONTENT_PRODUCT as PRODUCT,
   OBJECTIVE_CONTENT_OPPORTUNITY as OPPORTUNITY } from './objective-content-test-fixture.mjs';
@@ -256,7 +257,7 @@ test('fresh synthetic HTTP dispatch records known success before projection and 
   await f.store.save(CONTENT_WORKSPACE, before);
   const proposalBytes = JSON.stringify(write.objectivePolicyProposal), approvalPayload = structuredClone(before.approvals[0].payload);
   let calls = 0, saves = 0;
-  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: SECRET, CREDENTIALS_KEY: SECRET, SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, {
+  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: SECRET, CREDENTIALS_KEY: SECRET, SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', GOVERNED_RECORD_PRODUCER_CONTRACT }, {
     store: f.store, schedulerEnabled: false, agentOpsEnabled: false,
     fetchImpl: async (url, options) => {
       calls++; assert.match(String(url), /objective-content-fixture\.myshopify\.com\/admin\/api\/2026-07\/graphql\.json$/);

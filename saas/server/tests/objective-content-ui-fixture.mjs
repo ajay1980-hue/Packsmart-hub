@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 // Real app.js and HTML. Browser-facing transport uses isolated synthetic rows;
 // production bridge API/dispatch tests cover the separate trusted source checks.
 import assert from 'node:assert/strict';
@@ -10,9 +11,13 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
-import { upsertBusinessObjective, businessObjectivesSnapshot } from '../lib/business-objectives.mjs';
+import { upsertBusinessObjective as upsertForwardObjective, businessObjectivesSnapshot } from '../lib/business-objectives.mjs';
 import { buildObjectiveReview } from '../lib/objective-review.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
+
+// These existing fixtures exercise the explicitly enabled producer contract.
+const forwardRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+const upsertBusinessObjective = (state, input, options = {}) => upsertForwardObjective(state, input, { governedRecordStage: forwardRecordStage, ...options });
 export const POST='/api/objective-content/requests', CONTEXT='/api/objective-content/context?', REVIEW='/api/business-objectives/reviews';
 export const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {resolve,reject,promise};};
 export const pause=()=>new Promise(resolve=>setTimeout(resolve,10));
@@ -20,7 +25,7 @@ export async function until(check,detail=()=> '') {for(let i=0;i<250;i++){if(che
 export async function objectiveContentHarness(t,{role='owner',enforce=true,issue='Thin product title',realBackend=false}={}) {
  const directory=await fs.mkdtemp(path.join(os.tmpdir(),'objective-content-ui-')), secret='objective-content-fixture-only-over-thirty-two-characters';
  let providerRequests=0;
- const server=createPacksmartServer({NODE_ENV:'test',SESSION_SECRET:secret,CREDENTIALS_KEY:secret,SAAS_STATE_FILE:path.join(directory,'state.json'),SHOPIFY_PUBLIC_SYNC_ENABLED:'false'},{schedulerEnabled:false,agentOpsEnabled:false,fetchImpl:()=>{providerRequests++;assert.fail('Provider transport forbidden');}});
+ const server=createPacksmartServer({NODE_ENV:'test',GOVERNED_RECORD_PRODUCER_CONTRACT,SESSION_SECRET:secret,CREDENTIALS_KEY:secret,SAAS_STATE_FILE:path.join(directory,'state.json'),SHOPIFY_PUBLIC_SYNC_ENABLED:'false'},{schedulerEnabled:false,agentOpsEnabled:false,fetchImpl:()=>{providerRequests++;assert.fail('Provider transport forbidden');}});
  const state=seedWorkspaceState({}, {workspaceId:'objective-content-ui',userId:'content-owner',name:'Synthetic goal request workspace',email:'objective-content@example.test',passwordHash:'synthetic'});
  state.settings={...state.settings,growthCapacityHours:4,maxConcurrentGrowthExperiments:2};
  state.products=[{id:'gid://shopify/Product/10',provider:'shopify',title:'Box',description:'',status:'active',variants:[]}];

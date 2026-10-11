@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT, createGovernedRecordStage } from '../lib/governed-record-stage.mjs';
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
@@ -11,11 +13,11 @@ import { prepareContentReceiptTransaction, commitContentReceiptTransaction,
   CONTENT_RECEIPT_TRANSACTION_MAX_BYTES, CONTENT_RECEIPT_HTTP_BODY_MAX_BYTES } from '../lib/content-execution-receipt-store.mjs';
 
 const WS = 'tenant-a', SECRET = 'private-source-body-do-not-log';
-const env = { SUPABASE_URL: 'https://synthetic.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-test-key',
+const env = { GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://synthetic.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-test-key',
   CONTENT_EXECUTION_RECEIPT_CONTRACT };
 function fixture(kind = 'reserve') {
   const f = reviewedActionFixture({ description: SECRET }), phase = f.write.dispatchClaim.phases.shopify_mutation;
-  const reserve = prepareContentExecutionAdmission({ state: f.state, write: f.write, preparedInput: f.write.input,
+  const reserve = prepareContentExecutionAdmission({ governedRecordStage, state: f.state, write: f.write, preparedInput: f.write.input,
     actor: 'user_owner', actorSession: { sessionVersion: 1 }, approval: f.approval,
     objectivePolicy: { workspaceId: WS, policies: [] }, dispatchRequestDigest: phase.requestDigest,
     claimId: f.write.dispatchClaim.id, claimIdentity: f.write.dispatchClaim.identity,
@@ -72,6 +74,25 @@ function protectedFake(state, { mutate, lookup, ordinary } = {}) {
   return { ...fake, ledger, fetchImpl, counts: () => ({ mutations, reads }) };
 }
 const rpcCalls = fake => fake.calls.filter(c => /runvara_(reserve|finalize|read)_content_receipt$/.test(c.url.pathname));
+
+test('closed startup producer stage refuses retained reserve descriptors before transport and preserves admitted finalize', async () => {
+  for (const marker of [undefined, null, '', true, 'true', `${GOVERNED_RECORD_PRODUCER_CONTRACT} `]) {
+    const f = fixture('reserve'), fake = protectedFake(f.state);
+    const store = createStore({ ...env, GOVERNED_RECORD_PRODUCER_CONTRACT: marker }, { fetchImpl: fake.fetchImpl });
+    const before = structuredClone(f.state);
+    await assert.rejects(store.save(WS, f.state, { protectedContentCommit: f.descriptor }), { code: 'GOVERNED_RECORDS_PAUSED', status: 503 });
+    assert.equal(fake.calls.length, 0); assert.deepEqual(f.state, before); assert.deepEqual(fake.states.get(WS), before);
+    const direct = { ...structuredClone(f.state), _revision: randomUUID() };
+    await assert.rejects(store.commit(WS, direct, f.state._revision, true, { protectedContentCommit: f.descriptor }), { code: 'GOVERNED_RECORDS_PAUSED', status: 503 });
+    assert.equal(fake.calls.length, 0); assert.deepEqual(fake.states.get(WS), before);
+  }
+  const f = fixture('finalize'), fake = protectedFake(f.state);
+  const store = createStore({ ...env, GOVERNED_RECORD_PRODUCER_CONTRACT: undefined }, { fetchImpl: fake.fetchImpl });
+  const saved = await store.save(WS, f.state, { protectedContentCommit: f.descriptor });
+  assert.equal(assertContentReceiptAcknowledgement(saved, f.descriptor).kind, 'finalize');
+  assert.equal(rpcCalls(fake).filter(call => call.url.pathname.endsWith('/runvara_finalize_content_receipt')).length, 1);
+  assert.equal(rpcCalls(fake).filter(call => call.url.pathname.endsWith('/runvara_reserve_content_receipt')).length, 0);
+});
 
 test('default capability is private and disabled; missing, unknown, invalid baseline and FileStore fail before I/O', async () => {
   const f = fixture();

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { types } from 'node:util';
+import { assertGovernedRecordCreation, governedRecordCreationEnabled, hasGovernedConnectionWriteMarkers } from './governed-record-stage.mjs';
 import { createRecordedActionContext, REVIEWED_ACTION_STATE_MAX_BYTES } from './reviewed-action-evidence.mjs';
 import { connectionError, connectionSettings } from './connection-centre.mjs';
 import { normalizeApprovalRequest } from './operations.mjs';
@@ -122,7 +123,7 @@ export async function previewShopifyTagTest(state, productId, integrations) {
     rollback: { operation: 'product_tags_remove', productId: product.id, tags: [tag], expectedTags: [...result.product.tags, tag] },
     notice: 'No write or permission change has occurred. Tags may affect storefront collections or external workflows. The inverse removal needs its own exact approval.' };
 }
-export function proposeConnectionWrite(state, provider, body, actor) {
+export function proposeConnectionWrite(state, provider, body, actor, { governedRecordStage } = {}) {
   const operationField = provider === 'shopify' ? Object.getOwnPropertyDescriptor(body, 'operation') : null;
   if (provider === 'shopify' && (!operationField && 'operation' in body || operationField && !Object.hasOwn(operationField, 'value'))) throw connectionError('The requested operation must be ordinary own data.', 'WRITE_CONTENT_INPUT_INVALID');
   if (['origin', 'objectiveRef', 'objectivePolicyProposal', 'policyBinding', 'executionPolicy', 'financialEvidence'].some(key => Object.hasOwn(body, key))) {
@@ -139,8 +140,7 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   if (!manualContent && (settings.disconnected || settings.permissionMode === 'read_only')) throw connectionError('This connection is read-only. The owner must authorise write access first.', 'WRITE_NOT_AUTHORISED', 403);
   if (!((provider === 'shopify' && ['product_content', 'internal_note', 'product_tags_add', 'product_tags_remove'].includes(body.operation)) || (provider === 'meta' && META_WRITES.includes(body.operation)))) throw connectionError('Runvara does not support this write action. No change was made.', 'WRITE_UNSUPPORTED', 422);
   if (manualContent && typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId || '')) throw connectionError('A unique request reference is required.', 'WRITE_REQUEST_ID_REQUIRED');
-  state.connectionWrites ||= [];
-  const existing = manualContent ? contentRequest(state, body.requestId, actor) : state.connectionWrites.find(item => item.requestId === body.requestId);
+  const existing = manualContent ? contentRequest(state, body.requestId, actor) : (state.connectionWrites || []).find(item => item.requestId === body.requestId);
   const products = manualContent ? manualContentRows(state.products || []) : state.products || [];
   const matches = manualContent ? products.filter(item => item.id === body.productId && item.provider === 'shopify')
     : [products.find(item => item.id === body.productId && item.provider === 'shopify')];
@@ -184,6 +184,7 @@ export function proposeConnectionWrite(state, provider, body, actor) {
   const write = { id: `write_${crypto.randomUUID()}`, requestId: body.requestId, provider, input, digest: digest(input), connectionId: connection.id, account: provider === 'meta' ? connection.metadata.accountId : connection.metadata.shopDomain, requestedBy: actor,
     requiresApproval, status: requiresApproval ? 'pending_approval' : 'ready', createdAt: new Date().toISOString() };
   const objectiveProposal = prepareObjectiveDispatchProposal(write, captureObjectiveDispatchPolicy(state, write));
+  if (objectiveProposal) assertGovernedRecordCreation(governedRecordStage);
   if (objectiveProposal) write.objectivePolicyProposal = objectiveProposal;
   if (requiresApproval) {
     const approval = normalizeApprovalRequest({ type: provider === 'meta' ? 'risky_marketplace_action' : body.operation !== 'internal_note' ? 'customer_facing_publish' : 'integration_change',
@@ -195,7 +196,7 @@ export function proposeConnectionWrite(state, provider, body, actor) {
         ...(objectiveProposal ? { objectivePolicyProposalDigest: objectiveProposal.digest } : {}) } }, actor);
     state.approvals.unshift(approval); write.approvalId = approval.id;
   }
-  state.connectionWrites.unshift(write);
+  (state.connectionWrites ||= []).unshift(write);
   addAudit(state, { type: 'connection_write_requested', actor, detail: { provider, writeId: write.id, operation: input.operation, requiresApproval, digest: write.digest } });
   return write;
 }
@@ -232,7 +233,7 @@ export async function readObjectiveContentRequest(state, requestId, session, loa
   return objectiveRequestProjection(state, requestId, session, write, sourceStatus);
 }
 
-export async function prepareObjectiveContentRequest(state, body, session, { loadJob, persist } = {}) {
+export async function prepareObjectiveContentRequest(state, body, session, { loadJob, persist, governedRecordStage } = {}) {
   manualContentRecord(body);
   const keys = ['requestId', 'jobId', 'opportunityId', 'sourceRevision', 'target', 'productId', 'title', 'description', 'confirmedDestinationProduct'];
   if (Reflect.ownKeys(body).length !== keys.length || !keys.every(key => Object.hasOwn(body, key))
@@ -246,7 +247,6 @@ export async function prepareObjectiveContentRequest(state, body, session, { loa
   body = JSON.parse(objectiveCanonicalText(body));
   assertObjectiveContentOwner(state, session);
   const input = contentInput(body), inputDigest = digest(input);
-  state.connectionWrites ||= [];
   const existing = contentRequest(state, body.requestId, session.userId, true);
   if (existing) {
     if (existing.digest !== inputDigest || existing.connectionId !== body.target.connectionId || existing.account !== body.target.account
@@ -258,6 +258,7 @@ export async function prepareObjectiveContentRequest(state, body, session, { loa
     }
     return readObjectiveContentRequest(state, body.requestId, session, loadJob);
   }
+  assertGovernedRecordCreation(governedRecordStage);
   assertManualContentTarget(state, body.target);
   const current = await loadObjectiveContentSource(state, body.jobId, body.opportunityId, session, loadJob);
   if (objectiveCanonicalDigest(current.source) !== body.sourceRevision || body.productId !== current.product.id) throw blocked('OBJECTIVE_CONTENT_SOURCE_CHANGED');
@@ -272,12 +273,13 @@ export async function prepareObjectiveContentRequest(state, body, session, { loa
       { type: 'objective_review', id: current.source.reportId, detail: 'Server-recorded diagnostic history; not independently authenticated execution proof.' },
       { type: 'product', id: input.productId, detail: `Owner confirmed destination ${write.account}. Retained product account provenance is unverified. Full exact content is in the saved request.` }],
     payload: { connectionWriteId: write.id, digest: write.digest } }, session.userId);
-  if (state.approvals.some(row => row.id === approval.id) || state.connectionWrites.some(row => row.id === write.id)) throw blocked('WRITE_CONFLICT');
+  if (state.approvals.some(row => row.id === approval.id) || (state.connectionWrites || []).some(row => row.id === write.id)) throw blocked('WRITE_CONFLICT');
   write.approvalId = approval.id;
   write.objectivePolicyProposal = prepareObjectiveContentDispatchProposal(write, current.policy,
     { source: current.source, approvalId: approval.id, approvalDigest: objectiveContentApprovalDigest(approval) });
   approval.payload.objectivePolicyProposalDigest = write.objectivePolicyProposal.digest;
-  state.approvals.unshift(approval); state.connectionWrites.unshift(write);
+  assertGovernedRecordCreation(governedRecordStage);
+  state.approvals.unshift(approval); (state.connectionWrites ||= []).unshift(write);
   addAudit(state, { type: 'connection_write_requested', actor: session.userId,
     detail: { provider: 'shopify', writeId: write.id, operation: 'product_content', requiresApproval: true, digest: write.digest } });
   // Re-read the separate history row when preparing the actual commit. A
@@ -448,7 +450,7 @@ function preflightContentCompletionState(state, writeId, actor, phase) {
   }
 }
 
-export async function executeConnectionWrite(state, writeId, actor, integrations, persistClaim, { loadFreshState, loadObjectiveJob, durableStore = false, actorSession: authenticatedSession, protectedContentReceipts = null } = {}) {
+export async function executeConnectionWrite(state, writeId, actor, integrations, persistClaim, { loadFreshState, loadObjectiveJob, durableStore = false, actorSession: authenticatedSession, protectedContentReceipts = null, governedRecordStage } = {}) {
   const write = state.connectionWrites?.find(item => item.id === writeId);
   if (!write) throw connectionError('Write request not found in this workspace.', 'WRITE_NOT_FOUND', 404);
   if (write.status === 'completed') return write;
@@ -478,6 +480,10 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const authorityDigest = authority(state, write, actor, actorSession, comparisonContract);
   const objectivePolicy = captureObjectiveDispatchPolicy(state, write);
   const objectiveContent = isObjectiveContentWrite(write);
+  const governedExecution = objectiveContent || receiptRequired || objectivePolicy?.policies.length > 0
+    || hasGovernedConnectionWriteMarkers(write, state.approvals?.find(row => row.id === write.approvalId));
+  const assertProducerAdmission = () => { if (governedExecution) assertGovernedRecordCreation(governedRecordStage); };
+  assertProducerAdmission();
   const sourceAuthorityTime = Date.now();
   const admissionIdentity = digest(writeIdentity(write, comparisonContract)), admissionStatus = write.status;
   let contentSource = null, contentBinding = null;
@@ -525,6 +531,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   const identity = digest(writeIdentity(write, comparisonContract));
   const workspaceId = state.workspace?.id;
   const config = write.provider === 'shopify' ? { ...integrations.shopifyConfig(state), connection: undefined } : {};
+  assertProducerAdmission();
   const metaCredentials = write.provider === 'meta' ? immutable(structuredClone(await integrations.connectorCredentials(state, 'meta'))) : null;
   if (config.mode === 'oauth') config.accessToken = (await integrations.connectorCredentials(state, 'shopify')).accessToken;
   checkPreparedSnapshot();
@@ -567,6 +574,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     // Preserve its known result under the immutable request/decision/claim and
     // existing workspace CAS instead of running a new authorization gate.
     if (contentSubmitted()) return;
+    assertProducerAdmission();
     if ((write.providerState?.containerId || null) !== containerId) throw blocked('WRITE_REQUEST_CHANGED');
     if (state.workspace?.id !== workspaceId || state.connectionWrites?.filter(row => row.id === writeId).length !== 1
       || !state.connectionWrites.includes(write) || digest(writeIdentity(write, comparisonContract)) !== identity
@@ -642,6 +650,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     if (write.provider === 'shopify' && digest(configBinding(integrations.shopifyConfig(fresh))) !== configDigest) throw blocked('WRITE_CONNECTION_CHANGED');
   };
   localCheck();
+  assertProducerAdmission();
   if (write.dispatchClaim && (write.dispatchClaim.identity !== identity || write.dispatchClaim.authority !== authorityDigest
     || write.dispatchClaim.workspaceId !== workspaceId)) throw blocked('WRITE_CLAIM_CHANGED');
   write.dispatchClaim ||= { id: `write_claim_${crypto.randomUUID()}`, workspaceId, identity, authority: authorityDigest, phases: {} };
@@ -667,6 +676,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
     if (request.phase === 'instagram_publish') write.providerState.publishStartedAt = new Date().toISOString();
     const phase = { requestDigest: digest(request), status: 'dispatching', at: new Date().toISOString() };
     if (receiptRequired) {
+      assertGovernedRecordCreation(governedRecordStage);
       preflightContentCompletionState(state, writeId, actor, phase);
       // Preflight owns the entire prospective source and receipt before either
       // the reservation transaction or provider request can be sent. The
@@ -752,7 +762,7 @@ export async function executeConnectionWrite(state, writeId, actor, integrations
   // catch. A size/shape failure cannot erase a known Shopify response, change it
   // to uncertain, add another save, or replay the provider mutation. The exact
   // same final save below acknowledges the retained context and terminal result.
-  if (write.status === 'completed' && approvedActionDecision) {
+  if (write.status === 'completed' && approvedActionDecision && governedRecordCreationEnabled(governedRecordStage)) {
     try {
       write.recordedActionContext = createRecordedActionContext({ state, write, preparedInput, actor,
         approval: approvedActionDecision, approvedProposal: approvedActionProposal, objectivePolicy, dispatchRequestDigest: digest(expectedShopifyRequest),

@@ -1,3 +1,4 @@
+import { GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -58,7 +59,7 @@ test('execution restrictions require explicit owner configuration and cannot be 
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-policy-api-'));
   const secret = 'objective-policy-api-synthetic-secret-more-than-thirty-two-characters';
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
-    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', GOVERNED_RECORD_PRODUCER_CONTRACT });
   const state = seedWorkspaceState({}, { workspaceId: 'policy-alpha', userId: 'policy-owner', email: 'owner@example.test', passwordHash: 'fixture-only' });
   state.users.push({ ...state.users[0], id: 'policy-admin', role: 'admin', email: 'admin@example.test' });
   state.connections = [{ id: 'policy-shopify', provider: 'shopify', metadata: { shopDomain: 'policy-fixture.myshopify.com' } }];
@@ -108,7 +109,7 @@ test('saved restriction patches preserve definitions and legacy omissions; stale
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-policy-patch-api-'));
   const secret = 'objective-policy-patch-synthetic-secret-more-than-thirty-two-characters';
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
-    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', GOVERNED_RECORD_PRODUCER_CONTRACT });
   const state = seedWorkspaceState({}, { workspaceId: 'policy-patch', userId: 'patch-owner', email: 'owner@example.test', passwordHash: 'fixture-only' });
   state.users.push({ ...state.users[0], id: 'patch-admin', role: 'admin', email: 'admin@example.test' });
   state.connections = [{ id: 'patch-shopify', provider: 'shopify', status: 'disconnected', metadata: { shopDomain: 'patch-fixture.myshopify.com' } }];

@@ -1,9 +1,14 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { businessObjectivesSnapshot, upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
+import { businessObjectivesSnapshot, upsertBusinessObjective as upsertForwardObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import { captureObjectiveDispatchPolicy, prepareObjectiveDispatchProposal, assertObjectiveDispatchBinding,
   assertObjectiveDispatchAllowed, assertObjectivePolicySource, protectObjectivePolicySource, assessObjectiveDispatchPolicy,
   OBJECTIVE_DISPATCH_PROPOSAL_MAX_BYTES } from '../lib/objective-dispatch-policy.mjs';
+
+// These existing fixtures exercise the explicitly enabled producer contract.
+const forwardRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+const upsertBusinessObjective = (state, input, options = {}) => upsertForwardObjective(state, input, { governedRecordStage: forwardRecordStage, ...options });
 
 const NOW = Date.parse('2026-10-07T12:00:00.000Z');
 const scope = { provider: 'shopify', operation: 'product_content', connectionId: 'shopify-a', account: 'policy-fixture.myshopify.com' };

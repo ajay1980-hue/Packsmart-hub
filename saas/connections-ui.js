@@ -14,6 +14,7 @@
   const button = (action, text, channel, style = 'secondary') => `<button type="button" class="${style}" data-connection-action="${action}" data-provider="${channel.id}" ${busy.has(channel.id) || (!manager() && action !== 'open') ? 'disabled' : ''}>${esc(text)}</button>`;
   const content = { editor: null, attempt: null, previous: null, ticket: null, epoch: 0 };
   const contentSchema = 'runvara-manual-content-target/v1';
+  const governedRecordsPausedMessage = 'New governed records are paused on this server. Existing records remain available for review and exact reconciliation.';
   const cloneContent = value => JSON.parse(JSON.stringify(value));
   const freezeContent = value => { if (value && typeof value === 'object') { Object.values(value).forEach(freezeContent); Object.freeze(value); } return value; };
   const contentId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value);
@@ -373,8 +374,10 @@
     } catch (error) {
       if (!currentContentTicket(ticket)) return;
       if (contentIdentityError(error)) { interruptContent('Owner session unavailable',true); return; }
-      if (attempt.sent && (attempt.hadUnknown || !error.status || error.status >= 500 || error.code === 'STATE_CONFLICT' || error.code === 'CONTENT_RESULT_UNKNOWN')) unavailableContentAttempt(attempt,'The outcome is unknown. Check the exact saved request before retrying. ' + error.message);
-      else { attempt.phase = 'refused'; editor.ackKey = null; editor.stale = true; editor.message = 'Preparation was refused. Reload targets and review a deliberate draft before another request.'; contentError(error.message); }
+      const paused = error.status === 503 && error.code === 'GOVERNED_RECORDS_PAUSED', message = paused ? governedRecordsPausedMessage : error.message;
+      // A gate on this attempt says nothing about an earlier uncertain save.
+      if (attempt.sent && (attempt.hadUnknown || (!paused && (!error.status || error.status >= 500 || error.code === 'STATE_CONFLICT' || error.code === 'CONTENT_RESULT_UNKNOWN')))) unavailableContentAttempt(attempt,'The outcome is unknown. Check the exact saved request before retrying. ' + message);
+      else { attempt.phase = 'refused'; editor.ackKey = null; editor.stale = true; editor.message = 'Preparation was refused. Reload targets and review a deliberate draft before another request.'; contentError(message); }
     } finally {
       if (content.ticket === ticket) { content.ticket = null; if (currentContentIdentity()) renderContentState(); }
     }

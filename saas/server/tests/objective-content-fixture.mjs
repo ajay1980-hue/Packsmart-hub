@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import crypto from 'node:crypto';
 import { seedWorkspaceState, createStore } from '../lib/store.mjs';
 import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
@@ -6,6 +7,8 @@ import { objectiveContentContext } from '../lib/objective-content-source.mjs';
 import { prepareObjectiveContentRequest, executeConnectionWrite } from '../lib/connection-writes.mjs';
 import { IntegrationService } from '../lib/integrations.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
 export const CONTENT_WORKSPACE = 'objective-content-fixture';
 export const CONTENT_PRODUCT = 'gid://shopify/Product/71';
@@ -22,7 +25,7 @@ export function objectiveContentSeed({ limits = { profitFirst: false }, now = Da
   const objective = upsertBusinessObjective(state, { title: 'Improve catalogue content', metric: 'orders', baseline: 1, target: 2, direction: 'increase',
     startsAt: new Date(now - 60000).toISOString(), endsAt: new Date(now + 86400000).toISOString(), limits,
     executionPolicy: { schema: OBJECTIVE_EXECUTION_POLICY_SCHEMA, mode: 'enforce', scope: { provider: 'shopify', operation: 'product_content', connectionId: 'content-shopify', account: CONTENT_ACCOUNT } } },
-  { actorId: 'content-owner', now: new Date(now) });
+  { governedRecordStage, actorId: 'content-owner', now: new Date(now) });
   return { state, objective, session: { workspaceId, userId: 'content-owner', sessionVersion: 1 } };
 }
 export function objectiveContentJob(state, objective, { id = 'job_objective_content', now = Date.now() } = {}) {
@@ -46,7 +49,7 @@ export function approveObjectiveContent(state, write, actor = 'content-owner') {
 }
 export async function objectiveContentFixture(options = {}) {
   const initial = objectiveContentSeed(options), database = fakeSupabase(), workspaceId = initial.state.workspace.id;
-  const env = { SUPABASE_URL: 'https://objective-content.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' };
+  const env = { GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://objective-content.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' };
   const store = createStore(env, { fetchImpl: database.fetchImpl }), replica = createStore(env, { fetchImpl: database.fetchImpl });
   await store.save(workspaceId, initial.state);
   let state = await store.get(workspaceId);
@@ -56,7 +59,7 @@ export async function objectiveContentFixture(options = {}) {
   const loadJob = async id => { counts.job++; if (hooks.job) await hooks.job(counts.job); return store.getAgentJob(workspaceId, id, { includeReport: true }); };
   const context = await objectiveContentContext(state, job.id, 'opportunity-content', initial.session, loadJob);
   const body = { ...objectiveContentBody(context), ...options.contentInput };
-  const result = await prepareObjectiveContentRequest(state, body, initial.session, { loadJob, persist: options => store.save(workspaceId, state, options) });
+  const result = await prepareObjectiveContentRequest(state, body, initial.session, { governedRecordStage, loadJob, persist: options => store.save(workspaceId, state, options) });
   let write = state.connectionWrites.find(row => row.id === result.request.id);
   if (options.approveRequest) {
     await options.approveRequest({ store, workspaceId, session: initial.session, write });
@@ -73,7 +76,7 @@ export async function objectiveContentFixture(options = {}) {
   service.connectorCredentials = async () => { counts.credentials++; if (hooks.credentials) await hooks.credentials(); return { accessToken: 'synthetic-token' }; };
   const run = (overrides = {}) => executeConnectionWrite(state, write.id, 'content-owner', service,
     async options => { counts.saves++; if (hooks.save) await hooks.save(counts.saves, options); return store.save(workspaceId, state, options); }, {
-      durableStore: true, actorSession: initial.session, loadObjectiveJob: loadJob,
+      governedRecordStage, durableStore: true, actorSession: initial.session, loadObjectiveJob: loadJob,
       loadFreshState: async input => { counts.fresh++; if (hooks.fresh) await hooks.fresh(counts.fresh, input); return store.getConnectionWriteContext(workspaceId, input); }, ...overrides });
   Object.assign(counts, { job: 0, credentials: 0, saves: 0, fresh: 0, mutations: 0 });
   return { ...initial, state, database, store, replica, job, context, body, write, service, hooks, counts, loadJob, run };

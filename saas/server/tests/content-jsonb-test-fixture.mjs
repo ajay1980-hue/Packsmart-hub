@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { createStore } from '../lib/store.mjs';
@@ -10,6 +11,8 @@ import { IntegrationService } from '../lib/integrations.mjs';
 import { objectiveContentSeed, objectiveContentJob, objectiveContentBody, approveObjectiveContent,
   CONTENT_WORKSPACE, CONTENT_PRODUCT, CONTENT_ACCOUNT } from './objective-content-fixture.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
 export { CONTENT_WORKSPACE, CONTENT_PRODUCT, CONTENT_ACCOUNT };
 export const CONTENT_FAMILIES = ['manual', 'manual-v1-policy', 'objective-v2'];
@@ -83,7 +86,7 @@ export async function contentJsonbFixture({ family = 'manual', consent = 'absent
     }
     return response;
   };
-  const env = { SUPABASE_URL: 'https://content-jsonb.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' };
+  const env = { GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://content-jsonb.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' };
   const store = createStore(env, { fetchImpl }), replica = createStore(env, { fetchImpl });
   await store.save(CONTENT_WORKSPACE, initial.state);
   let state = await store.get(CONTENT_WORKSPACE);
@@ -109,7 +112,7 @@ export async function contentJsonbFixture({ family = 'manual', consent = 'absent
   if (job) {
     context = await objectiveContentContext(state, job.id, 'opportunity-content', initial.session, loadJob);
     body = { ...objectiveContentBody(context, 'content-jsonb-request-0001'), title: CONTENT_TITLE, description: CONTENT_DESCRIPTION };
-    await prepareObjectiveContentRequest(state, body, initial.session, { loadJob,
+    await prepareObjectiveContentRequest(state, body, initial.session, { governedRecordStage, loadJob,
       persist: async options => {
         preparation.saves++;
         const saved = await store.save(CONTENT_WORKSPACE, state, { ...options, beforeCommit: snapshot => {
@@ -121,7 +124,7 @@ export async function contentJsonbFixture({ family = 'manual', consent = 'absent
   } else {
     body = { operation: 'product_content', requestId: 'content-jsonb-request-0001', productId: CONTENT_PRODUCT,
       title: CONTENT_TITLE, description: CONTENT_DESCRIPTION, target: resolveManualContentTarget(state).target };
-    proposeConnectionWrite(state, 'shopify', body, initial.session.userId);
+    proposeConnectionWrite(state, 'shopify', body, initial.session.userId, { governedRecordStage });
   }
   approveObjectiveContent(state, state.connectionWrites[0]);
   await initialChange?.(state);
@@ -162,7 +165,7 @@ export async function contentJsonbFixture({ family = 'manual', consent = 'absent
     return await hooks.fresh?.(fresh, number, input) ?? fresh;
   };
   const run = (overrides = {}) => executeConnectionWrite(state, write.id, initial.session.userId, service, persist,
-    { durableStore: true, actorSession: initial.session, loadObjectiveJob: loadJob, loadFreshState, ...overrides });
+    { governedRecordStage, durableStore: true, actorSession: initial.session, loadObjectiveJob: loadJob, loadFreshState, ...overrides });
   const coldHistory = async () => {
     const coldState = await replica.get(CONTENT_WORKSPACE);
     const history = job ? await readObjectiveContentRequest(coldState, body.requestId, initial.session, loadJob)

@@ -93,7 +93,7 @@ test('new content requires an exact asserted account, unique product and origina
   state.products.push(structuredClone(state.products[0])); code(() => propose(state, request), 'PRODUCT_NOT_FOUND'); state.products.pop();
   state.products[0].tenantId = 'foreign'; code(() => propose(state, request), 'WRITE_TARGET_INVALID'); delete state.products[0].tenantId;
   state.users.push(structuredClone(state.users[0])); code(() => propose(state, request), 'WRITE_ACTOR_CHANGED'); state.users.pop();
-  assert.equal(state.approvals.length, 0); assert.equal(state.connectionWrites.length, 0);
+  assert.equal(state.approvals.length, 0); assert.equal(state.connectionWrites, undefined, 'Rejected preparation leaves the absent request collection unchanged');
 });
 
 test('notes and tags retain their prior preparation contract without the new content assertion', () => {
@@ -223,6 +223,22 @@ test('lost save acknowledgement is reconciled without a second approval or chang
   const retry = await f.request(POST, { method: 'POST', body: request }); assert.equal(retry.body.write.id, found.body.request.id);
   const saved = await f.store.get(ID); assert.equal(saved.approvals.length, 1); assert.equal(saved.connectionWrites.length, 1);
   assert.equal(Object.hasOwn(saved.connectionWrites[0], 'target'), false);
+});
+
+test('ordinary request creation saves once and exact HTTP replay preserves revision, audit and response without another save', async t => {
+  const f = await fixture(t, { durable: true }), request = body(f.state);
+  const save = f.store.save.bind(f.store); let saves = 0;
+  f.store.save = async (...args) => { saves++; return save(...args); };
+  const created = await f.request(POST, { method: 'POST', body: request });
+  assert.equal(created.status, 200); assert.equal(saves, 1);
+  const retained = await f.store.get(ID);
+  assert.equal(retained.connectionWrites.length, 1); assert.equal(retained.approvals.length, 1);
+  const replay = await f.request(POST, { method: 'POST', body: request });
+  assert.deepEqual(replay, created); assert.equal(saves, 1);
+  assert.deepEqual(await f.store.get(ID), retained);
+  const changed = await f.request(POST, { method: 'POST', body: { ...request, title: 'Changed intent' } });
+  assert.equal(changed.status, 409); assert.equal(changed.body.code, 'WRITE_CONFLICT');
+  assert.equal(saves, 1); assert.deepEqual(await f.store.get(ID), retained);
 });
 
 test('current actor changes after authentication refuse content preparation and exact reconciliation', async t => {

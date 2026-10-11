@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { requiresApproval, RISKY_ACTION_TYPES } from './security.mjs';
+import { assertGovernedRecordCreation } from './governed-record-stage.mjs';
 
 // Tenant-state definitions and deterministic, read-only preparation checks only.
 // Nothing here grants authority, executes actions, calls providers, or writes a
@@ -190,6 +191,11 @@ export function upsertBusinessObjective(state, input, options = {}) {
       throw fail('Select the exact existing Shopify connection for this restriction', 'OBJECTIVE_POLICY_CONNECTION_REQUIRED', 409);
     }
     assertScope(workspaceId, connections[0]);
+  }
+  // Closed reader stages retain every existing restriction. Even a status-only
+  // edit or removal changes its revision and therefore needs producer admission.
+  if (previous?.executionPolicy?.mode === 'enforce' || result.executionPolicy?.mode === 'enforce') {
+    assertGovernedRecordCreation(options.governedRecordStage);
   }
   state.businessObjectives = previous ? rows.map(row => row.id === previous.id ? result : row) : [...rows, result];
   return structuredClone(result);

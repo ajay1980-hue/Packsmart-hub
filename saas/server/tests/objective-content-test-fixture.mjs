@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -5,8 +6,12 @@ import path from 'node:path';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
-import { upsertBusinessObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
+import { upsertBusinessObjective as upsertForwardObjective, OBJECTIVE_EXECUTION_POLICY_SCHEMA } from '../lib/business-objectives.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
+
+// These existing fixtures exercise the explicitly enabled producer contract.
+const forwardRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+const upsertBusinessObjective = (state, input, options = {}) => upsertForwardObjective(state, input, { governedRecordStage: forwardRecordStage, ...options });
 
 export const OBJECTIVE_CONTENT_PRODUCT = 'gid://shopify/Product/10';
 export const OBJECTIVE_CONTENT_OPPORTUNITY = 'opportunity_title_10';
@@ -30,12 +35,12 @@ export function objectiveContentState(workspaceId = 'content-alpha') {
   return { state, objective };
 }
 
-export async function objectiveContentApiFixture(t) {
+export async function objectiveContentApiFixture(t, { env = {} } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-objective-content-api-'));
   const secret = 'objective-content-api-synthetic-secret-more-than-thirty-two-characters';
   let providerCalls = 0;
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
-    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, {
+    SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', GOVERNED_RECORD_PRODUCER_CONTRACT, ...env }, {
     schedulerEnabled: false, agentOpsEnabled: false, fetchImpl: async () => { providerCalls++; assert.fail('External provider transport forbidden'); }
   });
   const store = server.packsmart.store, states = {};

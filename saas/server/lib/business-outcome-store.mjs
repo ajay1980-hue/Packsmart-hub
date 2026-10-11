@@ -3,10 +3,17 @@ import { validateProtectedReceiptSelector, validateProtectedReceiptSource, valid
 import { randomUUID } from 'node:crypto';
 import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
 import { assessExperimentOutcomeMeasurement, digestMeasurementValue, validateExperimentOutcomeMeasurement } from './experiment-measurements.mjs';
+import { governedRecordCreationEnabled, assertGovernedRecordCreation } from './governed-record-stage.mjs';
+import { evidenceInWorkspace } from './business-evidence-scope.mjs';
 
 export const OUTCOME_CURRENT_LIMIT = 50;
 export const OUTCOME_READ_BYTES = 2 * 1024 * 1024;
 export const SELECTED_OUTCOME_RELATIONSHIPS_MAX_BYTES = 4096;
+export const OUTCOME_PUBLICATION_READ_BYTES = 128 * 1024;
+export const OUTCOME_HEAD_READ_BYTES = 4096;
+// users_json is PostgreSQL's JSONB text (256 KiB), escaped once in the response.
+export const OUTCOME_IDENTITY_READ_BYTES = 512 * 1024 + 4096;
+const IDENTITY_SCOPE = ['workspaceId', 'workspace_id', 'tenantId', 'tenant_id', 'tenant'];
 const VERSION_COLUMNS = 'workspace_id,outcome_id,revision,version_id,digest,status,payload,publication_id,intent_digest,committed_at,commit_revision';
 const CURRENT_COLUMNS = `workspace_id,outcome_id,version_id,version:runvara_business_outcome_versions!runvara_outcome_head_version_fk(${VERSION_COLUMNS})`;
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$/;
@@ -184,14 +191,171 @@ function pairFromRow(row, workspaceId, now) {
   catch { throw failure('OUTCOME_PUBLICATION_INVALID'); }
 }
 
+// This exact ordered array is the SQL publisher's existing intent contract.
+// A payload digest alone does not prove the original session or CAS fences.
+export function businessOutcomePublicationIntentDigest(params) {
+  return digestMeasurementValue([params.p_workspace_id, params.p_actor_id, params.p_actor_session_version,
+    params.p_publication_id, params.p_action, params.p_experiment_id, params.p_expected_workspace_revision,
+    params.p_expected_measurement_revision, params.p_expected_measurement_digest, params.p_expected_head_version_id,
+    params.p_expected_head_digest, params.p_withdrawal_reason]);
+}
+
+function assertPublicationIntent(publication, params) {
+  const { head, version } = publication;
+  if (head.publicationId !== params.p_publication_id || version.source.experimentId !== params.p_experiment_id
+    || version.source.measurementRevision !== params.p_expected_measurement_revision || version.source.measurementDigest !== params.p_expected_measurement_digest
+    || version.verification.actorId !== params.p_actor_id || version.lineage.previousVersionId !== params.p_expected_head_version_id
+    || version.lineage.previousDigest !== params.p_expected_head_digest
+    || (params.p_action === 'withdraw' ? version.status !== 'withdrawn' || version.lineage.reason !== params.p_withdrawal_reason : version.status !== 'recorded'))
+    throw failure('OUTCOME_PUBLICATION_INVALID');
+}
+
+function genuinelyUnlinked(measurement, sourceAction = null) {
+  return measurement?.schema === 'runvara-experiment-measurement/v1'
+    && !Object.hasOwn(measurement, 'intervention') && !Object.hasOwn(measurement, 'receiptSource')
+    && sourceAction === null && plain(measurement.links)
+    && ['action', 'approval', 'objective', 'opportunity'].every(key => measurement.links[key] === null);
+}
+
 /** Only call with the existing server's authenticated Supabase transport.
  * No public/client field can inject a resolver or choose table/column names.
  */
-export function createBusinessOutcomePersistence({ request, invalidate = () => {}, now = () => new Date() }) {
+export function createBusinessOutcomePersistence({ request, invalidate = () => {}, now = () => new Date(), governedRecordStage, publicationEnabled: startupPublicationEnabled = true }) {
   if (typeof request !== 'function' || typeof invalidate !== 'function' || typeof now !== 'function') throw new TypeError('Outcome persistence needs a trusted transport');
+  if (typeof startupPublicationEnabled !== 'boolean') throw new TypeError('Outcome publication availability must be a trusted boolean');
 
-  async function publish(workspaceId, actor, input) {
-    const params = businessOutcomePublicationParams(workspaceId, actor, input);
+  async function readRows(path, maximum) {
+    let rows;
+    try { rows = await request(path, { maxResponseBytes: maximum }); }
+    catch (cause) { throw readError(cause); }
+    bounded(rows, maximum);
+    if (!Array.isArray(rows) || rows.length > 1) throw failure('OUTCOME_PUBLICATION_INVALID');
+    return rows;
+  }
+
+  async function publicationHead(workspaceId, outcomeId) {
+    const rows = await readRows(`runvara_business_outcome_heads?workspace_id=eq.${encodeURIComponent(workspaceId)}&outcome_id=eq.${outcomeId}&select=workspace_id,outcome_id,version_id&limit=2`, OUTCOME_HEAD_READ_BYTES);
+    if (!rows.length) return null;
+    const row = rows[0];
+    try { exact(row, ['workspace_id', 'outcome_id', 'version_id']); }
+    catch { throw failure('OUTCOME_PUBLICATION_INVALID'); }
+    if (row.workspace_id !== workspaceId || row.outcome_id !== outcomeId || !VERSION.test(row.version_id || '')) throw failure('OUTCOME_PUBLICATION_INVALID');
+    return row.version_id;
+  }
+
+  async function publicationIdentity(params, { matchRevision = false } = {}) {
+    const workspaceId = params.p_workspace_id;
+    // Arrow JSON extraction distinguishes absent (SQL NULL) from explicit JSON
+    // null in the filter. Projection alone cannot preserve that distinction.
+    // Quoted filter operands follow PostgREST's reserved-character grammar.
+    const quoted = JSON.stringify(workspaceId);
+    const scopeFilter = '(' + IDENTITY_SCOPE.map(key => `or(state->${key}.is.null,state->>${key}.eq.${quoted}${key === 'tenant' ? `,state->tenant->>id.eq.${quoted}` : ''})`).join(',') + ')';
+    const select = ['workspace_id', 'revision:state->>_revision', 'workspace:state->workspace', 'users_json:state->>users',
+      ...IDENTITY_SCOPE.map(key => `scope_${key}:state->${key}`)].join(',');
+    const rows = await readRows(`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&and=${encodeURIComponent(scopeFilter)}&select=${select}&limit=2`, OUTCOME_IDENTITY_READ_BYTES);
+    if (rows.length !== 1) throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+    const row = rows[0];
+    try { exact(row, ['workspace_id', 'revision', 'workspace', 'users_json', ...IDENTITY_SCOPE.map(key => `scope_${key}`)]); }
+    catch { throw failure('OUTCOME_PUBLICATION_INVALID'); }
+    if (row.workspace_id !== workspaceId || !plain(row.workspace) || row.workspace.id !== workspaceId
+      || !evidenceInWorkspace(row.workspace, workspaceId) || typeof row.revision !== 'string' || !ID.test(row.revision)
+      || typeof row.users_json !== 'string') throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+    for (const key of IDENTITY_SCOPE) {
+      if (!Object.hasOwn(row, `scope_${key}`)) throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+      const value = row[`scope_${key}`];
+      if (value !== null && (key === 'tenant' && plain(value) ? value.id : value) !== workspaceId) throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+    }
+    if (Buffer.byteLength(row.users_json) > 256 * 1024) throw failure('OUTCOME_SIZE_LIMIT', 413);
+    let users;
+    const sessionTokens = new WeakMap();
+    try {
+      users = JSON.parse(row.users_json, function (key, value, context) {
+        // Keep the JSONB numeric spelling: binary rounding must never turn a
+        // fractional session into the integer requested by an old token.
+        if (key === 'sessionVersion' && typeof value === 'number') sessionTokens.set(this, context?.source);
+        return value;
+      });
+    } catch { throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403); }
+    if (!Array.isArray(users)) throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+    if (users.length > 500) throw failure('OUTCOME_SIZE_LIMIT', 413);
+    // SQL checks uniqueness using ->>id before requiring a string actor id.
+    // Fail closed on non-string IDs: JSON.parse may erase numeric lexical
+    // details (1.0 versus 1) that SQL could match to another actor's string ID.
+    if (users.some(user => plain(user) && Object.hasOwn(user, 'id') && typeof user.id !== 'string')) throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+    const actors = users.filter(user => plain(user) && user.id === params.p_actor_id);
+    const actor = actors[0];
+    if (actors.length !== 1 || actor.id !== params.p_actor_id || !evidenceInWorkspace(actor, workspaceId) || actor.role !== 'owner'
+      || Object.hasOwn(actor, 'active') && actor.active !== true
+      || Object.hasOwn(actor, 'passwordChangeRequired') && actor.passwordChangeRequired !== false
+      || (Object.hasOwn(actor, 'sessionVersion') ? !Number.isSafeInteger(actor.sessionVersion) || actor.sessionVersion < 1
+        // The publisher additionally casts ->>sessionVersion text to bigint;
+        // even whole-valued scaled text (3.000) is rejected by that cast.
+        || !/^[1-9]\d{0,15}$/.test(sessionTokens.get(actor) ?? '')
+        || actor.sessionVersion !== params.p_actor_session_version : params.p_actor_session_version !== 1)) throw failure('OUTCOME_OWNER_SESSION_CHANGED', 403);
+    if (matchRevision && row.revision !== params.p_expected_workspace_revision) throw failure('OUTCOME_WORKSPACE_CONFLICT', 409);
+  }
+
+  async function replay(params) {
+    const workspaceId = params.p_workspace_id;
+    const rows = await readRows(`runvara_business_outcome_versions?workspace_id=eq.${encodeURIComponent(workspaceId)}&publication_id=eq.${encodeURIComponent(params.p_publication_id)}&select=${VERSION_COLUMNS}&limit=2`, OUTCOME_PUBLICATION_READ_BYTES);
+    if (!rows.length) return null;
+    const row = rows[0], publication = pairFromRow(row, workspaceId, now());
+    if (row.publication_id !== params.p_publication_id) throw failure('OUTCOME_PUBLICATION_INVALID');
+    if (row.intent_digest !== businessOutcomePublicationIntentDigest(params)) throw failure('OUTCOME_PUBLICATION_CONFLICT', 409);
+    assertPublicationIntent(publication, params);
+    const headVersion = await publicationHead(workspaceId, publication.head.outcomeId);
+    // Recheck current owner authority after the immutable receipt/head reads.
+    await publicationIdentity(params);
+    return { publication, replayed: true, isCurrent: headVersion === publication.head.versionId };
+  }
+
+  async function admitClosedPublication(params) {
+    const workspaceId = params.p_workspace_id;
+    if (params.p_action === 'withdraw') {
+      // Ignore the mutable draft entirely: withdrawal keeps the exact previous
+      // immutable source, including retained advanced source unions.
+      const outcomeId = `outcome_${digestMeasurementValue([workspaceId, 'experiment_measurement', params.p_experiment_id, 'incrementalContribution'])}`;
+      const headVersion = await publicationHead(workspaceId, outcomeId);
+      if (headVersion !== params.p_expected_head_version_id) throw failure('OUTCOME_HEAD_CONFLICT', 409);
+      const retained = await evidence(workspaceId, headVersion);
+      if (retained.publication.head.outcomeId !== outcomeId || retained.publication.head.digest !== params.p_expected_head_digest) throw failure('OUTCOME_HEAD_CONFLICT', 409);
+      if (retained.publication.head.status === 'withdrawn') throw failure('OUTCOME_WITHDRAWN_FINAL', 409);
+      if (retained.sourceMeasurement.revision !== params.p_expected_measurement_revision
+        || retained.sourceMeasurement.digest !== params.p_expected_measurement_digest) throw failure('OUTCOME_MEASUREMENT_CONFLICT', 409);
+      await publicationIdentity(params, { matchRevision: true });
+      return;
+    }
+    const snapshot = await review(workspaceId, params.p_experiment_id,
+      { id: params.p_actor_id, sessionVersion: params.p_actor_session_version });
+    if (snapshot.workspaceRevision !== params.p_expected_workspace_revision) throw failure('OUTCOME_WORKSPACE_CONFLICT', 409);
+    if (snapshot.measurement?.revision !== params.p_expected_measurement_revision
+      || snapshot.measurement?.digest !== params.p_expected_measurement_digest) throw failure('OUTCOME_MEASUREMENT_CONFLICT', 409);
+    if ((snapshot.currentPublication?.head.versionId ?? null) !== params.p_expected_head_version_id
+      || (snapshot.currentPublication?.head.digest ?? null) !== params.p_expected_head_digest) throw failure('OUTCOME_HEAD_CONFLICT', 409);
+    if (!genuinelyUnlinked(snapshot.measurement)) assertGovernedRecordCreation();
+    if (snapshot.currentPublication) {
+      if (snapshot.currentPublication.head.status === 'withdrawn') throw failure('OUTCOME_WITHDRAWN_FINAL', 409);
+      const retained = await evidence(workspaceId, params.p_expected_head_version_id);
+      if (retained.publication.head.digest !== params.p_expected_head_digest
+        || retained.publication.head.outcomeId !== snapshot.currentPublication.head.outcomeId) throw failure('OUTCOME_HEAD_CONFLICT', 409);
+      if (!genuinelyUnlinked(retained.sourceMeasurement, retained.sourceAction)) assertGovernedRecordCreation();
+    }
+  }
+
+  async function publish(workspaceId, actor, input, options = {}) {
+    exact(options, ['governedRecordStage', 'publicationEnabled']);
+    if (Object.hasOwn(options, 'publicationEnabled') && typeof options.publicationEnabled !== 'boolean') throw failure('OUTCOME_REQUEST_INVALID', 400);
+    const publicationEnabled = startupPublicationEnabled && (options.publicationEnabled ?? true);
+    // A caller may narrow a store's startup stage, but cannot open a closed one.
+    const creationEnabled = governedRecordCreationEnabled(governedRecordStage)
+      && (!Object.hasOwn(options, 'governedRecordStage') || governedRecordCreationEnabled(options.governedRecordStage));
+    const params = Object.freeze(businessOutcomePublicationParams(workspaceId, actor, input));
+    if (!creationEnabled || !publicationEnabled) {
+      const prior = await replay(params);
+      if (prior) return prior;
+      if (!publicationEnabled) throw failure('OUTCOME_PUBLICATION_PAUSED');
+      await admitClosedPublication(params);
+    }
     let result;
     try {
       // Never automatically repeat a mutation after an uncertain response.
@@ -210,13 +374,8 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
       exact(result, ['publication', 'replayed', 'isCurrent']);
       if (typeof result.replayed !== 'boolean' || typeof result.isCurrent !== 'boolean') throw failure('OUTCOME_PUBLICATION_INVALID');
       const publication = validateBusinessOutcomePublication(result.publication, { workspaceId, now: now() });
-      const { head, version } = publication;
-      if (head.publicationId !== params.p_publication_id || version.source.experimentId !== params.p_experiment_id
-        || version.source.measurementRevision !== params.p_expected_measurement_revision || version.source.measurementDigest !== params.p_expected_measurement_digest
-        || version.verification.actorId !== params.p_actor_id || version.lineage.previousVersionId !== params.p_expected_head_version_id
-        || version.lineage.previousDigest !== params.p_expected_head_digest
-        || (params.p_action === 'withdraw' ? version.status !== 'withdrawn' || version.lineage.reason !== params.p_withdrawal_reason : version.status !== 'recorded')
-        || (!result.replayed && !result.isCurrent)) throw failure('OUTCOME_PUBLICATION_INVALID');
+      assertPublicationIntent(publication, params);
+      if (!result.replayed && !result.isCurrent) throw failure('OUTCOME_PUBLICATION_INVALID');
       return { publication, replayed: result.replayed, isCurrent: result.isCurrent };
     } catch {
       // Malformed success is not proof that the database did not commit.

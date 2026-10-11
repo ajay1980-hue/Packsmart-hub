@@ -40,7 +40,7 @@ import {
 } from './lib/operations.mjs';
 import { addAudit, createStore, getOrSeed, seedWorkspaceState } from './lib/store.mjs';
 import { AGENT_DEFINITIONS, AUTONOMY_LEVELS, agentTeamSnapshot, recordAgentRun, runCommander } from './lib/agents.mjs';
-import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
+import { configureAutopilot, controlSnapshot, detectExceptions, detectOpportunities, ensureControl, governedApproval, modifyApproval, putDecision, requestOpportunityApproval, setExceptionStatus } from './lib/control.mjs';
 import { recordWork } from './lib/events.mjs';
 import { createOrderRecoveryRunner, orderRecoveryActor, publicOrderRecoveryObservation } from './lib/shopify-order-recovery-run.mjs';
 import { createScheduler, monitoredSync } from './lib/scheduler.mjs';
@@ -52,6 +52,7 @@ import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, readManualContentRequest,
   prepareObjectiveContentRequest, readObjectiveContentRequest } from './lib/connection-writes.mjs';
+import { createGovernedRecordStage, assertGovernedRecordCreation, GOVERNED_RECORDS_PAUSED_MESSAGE } from './lib/governed-record-stage.mjs';
 import { objectiveContentContext } from './lib/objective-content-source.mjs';
 import { publicConnectionWrite, publicApproval } from './lib/action-display.mjs';
 
@@ -346,6 +347,7 @@ function verifyStripeSignature(env, raw, header) {
 
 export function createPacksmartServer(customEnv = process.env, options = {}) {
   const env = { ...customEnv };
+  const governedRecordStage = createGovernedRecordStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
   const orderRecovery = createOrderRecoveryRunner({store,integrations,env});
@@ -1245,6 +1247,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             requireOwner(auth); consume(outcomeDraftLimiter);
             const id = decodeId(source[1]), body = await jsonBody(req, 16384);
             const selection = validateActionSelection(body.actionSelection);
+            if (selection) assertGovernedRecordCreation(governedRecordStage);
             let reusedAction = null, reuseSourceMeasurement = null, actionLinkContract = null, sourceReview = null, receiptEvidence = null;
             if (selection) {
               if (selection.reuseVersionId) {
@@ -1274,6 +1277,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
                 || actors.length !== 1 || !owned(actors[0]) || actors[0].passwordChangeRequired) {
                 throw Object.assign(new Error('Experiment is not available in this workspace'), { status: 404, code: 'OUTCOME_SOURCE_NOT_FOUND' });
               }
+              // A closed stage cannot remove, replace or silently down-convert a
+              // previously linked draft, even when the client omits selection.
+              const forwardMeasurement = measurement => measurement != null && (measurement.schema !== 'runvara-experiment-measurement/v1'
+                || Object.hasOwn(measurement, 'intervention') || Object.hasOwn(measurement, 'receiptSource')
+                || measurement.links?.action != null || measurement.links?.approval != null);
+              if (forwardMeasurement(matches[0].outcomeMeasurement)) assertGovernedRecordCreation(governedRecordStage);
               if ((selection?.receipt || reuseSourceMeasurement?.schema === 'runvara-experiment-measurement/v4')
                 && state._revision !== sourceReview.workspaceRevision) throw Object.assign(new Error('Workspace changed; reload before editing'), { status: 409, code: 'OUTCOME_WORKSPACE_CONFLICT' });
               if (matches[0].outcomeMeasurement?.schema === 'runvara-experiment-measurement/v4' && !Object.hasOwn(body, 'actionSelection')) throw Object.assign(new Error('Choose explicitly whether to retain, replace or remove the protected content source'), { status: 409, code: 'MEASUREMENT_INVALID' });
@@ -1282,6 +1291,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               const measurement = prepareExperimentOutcomeMeasurement(body, { workspaceId, experimentId: id,
                 actorId: auth.user.id, now: new Date(), previousMeasurement: matches[0].outcomeMeasurement ?? null,
                 ...(selection?.receipt ? { receiptEvidence } : selection ? { actionEvidence, reuseVersionId: selection.reuseVersionId ?? null, ...(reuseSourceMeasurement ? { reuseSourceMeasurement } : {}) } : {}) });
+              if (forwardMeasurement(measurement)) assertGovernedRecordCreation(governedRecordStage);
               matches[0].outcomeMeasurement = measurement;
               const assessment = assessExperimentOutcomeMeasurement(measurement, { workspaceId, experimentId: id, now: new Date() });
               addAudit(state, { type: 'experiment_outcome_measurement_recorded', actor: auth.user.id,
@@ -1293,12 +1303,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           }
           if (req.method === 'POST' && pathname === '/api/business-outcomes/publish') {
             requireApprover(auth); consume(outcomePublicationLimiter);
-            if (String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() !== 'true') {
-              throw Object.assign(new Error('Outcome publication is paused; existing results remain available'), { status: 503, code: 'OUTCOME_PUBLICATION_PAUSED' });
-            }
             const input = await jsonBody(req, 4096);
             const result = await withWorkspaceLock(workspaceId, () => store.publishBusinessOutcome(workspaceId,
-              { id: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) }, input));
+              { id: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) }, input,
+              { governedRecordStage, publicationEnabled: String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() === 'true' }));
             // Publication owns its atomic state/ledger/audit transaction. Never
             // follow it with a stale generic state.save or auto-retry callback.
             send(res, 200, result); return;
@@ -1442,7 +1450,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           requireOwner(auth);
           const body = await jsonBody(req, 16384);
           const result = await mutate(auth, async state => {
-            const objective = upsertBusinessObjective(state, body, {workspaceId:auth.session.workspaceId, actorId:auth.user.id});
+            const objective = upsertBusinessObjective(state, body, {workspaceId:auth.session.workspaceId, actorId:auth.user.id, governedRecordStage});
             addAudit(state, {type:'business_objective_configured', actor:auth.user.id,
               detail:{objectiveId:objective.id, revision:objective.revision, metric:objective.metric, status:objective.status,
                 executionPolicyMode:objective.executionPolicy?.mode || 'preparation_only', externalWrites:false}});
@@ -1884,6 +1892,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const body = await jsonBody(req, 128 * 1024);
           const approval = normalizeApprovalRequest(body, auth.user.id);
           await mutate(auth, async state => {
+            if (governedApproval(state, approval)) assertGovernedRecordCreation(governedRecordStage);
             state.approvals = [approval, ...(state.approvals || [])];
             addAudit(state, { type: 'approval_requested', actor: auth.user.id, detail: { approvalId: approval.id, actionType: approval.type, financialImpact: approval.financialImpact } });
           });
@@ -1902,12 +1911,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             if (!approval) throw Object.assign(new Error('Approval request not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
             if (approval.status !== 'pending') throw Object.assign(new Error('Approval already decided'), { status: 409, code: 'APPROVAL_ALREADY_DECIDED' });
             if ((body.revision ?? 1) !== (approval.revision || 1)) throw Object.assign(new Error('Approval changed; review its current revision'), { status: 409, code: 'APPROVAL_CONFLICT' });
+            const connectionWrite = (state.connectionWrites || []).find(item => item.id === approval.payload?.connectionWriteId && item.approvalId === approval.id && item.digest === approval.payload?.digest && item.status === 'pending_approval' && (approval.revision || 1) === 1);
+            if (decision === 'approved' && governedApproval(state, approval)) {
+              assertGovernedRecordCreation(governedRecordStage);
+            }
             approval.status = decision;
             approval.decidedAt = new Date().toISOString();
             approval.decidedBy = auth.user.id;
             approval.decisionNote = text(body.note, 500) || null;
             approval.executedExternally = false;
-            const connectionWrite = (state.connectionWrites || []).find(item => item.id === approval.payload?.connectionWriteId && item.approvalId === approval.id && item.digest === approval.payload?.digest && item.status === 'pending_approval' && (approval.revision || 1) === 1);
             if (connectionWrite) connectionWrite.status = decision === 'approved' ? 'ready' : 'rejected';
             approval.executionStatus = connectionWrite ? decision === 'approved' ? 'ready' : 'cancelled' : 'not_connected';
             approval.workStatus = decision === 'approved' ? connectionWrite ? 'PLANNED' : 'BLOCKED' : 'COMPLETED';
@@ -2107,7 +2119,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'PATCH' && modifyMatch) {
           requireApprover(auth);
           const body = await jsonBody(req, 32768);
-          const approval = await mutate(auth, async state => modifyApproval(state, modifyMatch[1], body, auth.user.id));
+          const approval = await mutate(auth, async state => modifyApproval(state, modifyMatch[1], body, auth.user.id, { governedRecordStage }));
           send(res, 200, { approval: publicApproval(approval), executedExternally: false }); return;
         }
 
@@ -2259,7 +2271,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const result = await mutate(auth, state => contextRead
             ? objectiveContentContext(state, url.searchParams.get('jobId'), url.searchParams.get('opportunityId'), session, loadJob)
             : objectiveContentRead ? readObjectiveContentRequest(state, objectiveContentRead[1], session, loadJob)
-              : prepareObjectiveContentRequest(state, body, session, { loadJob, persist: options => store.save(session.workspaceId, state, options) }), { persist: false });
+              : prepareObjectiveContentRequest(state, body, session, { loadJob, governedRecordStage, persist: options => store.save(session.workspaceId, state, options) }), { persist: false });
           send(res, 200, result); return;
         }
         const contentRequestRead = pathname.match(/^\/api\/connections\/shopify\/content-requests\/([A-Za-z0-9_-]{16,100})$/);
@@ -2333,7 +2345,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             }
             if (action === 'writes') {
               if (provider === 'shopify' && body.operation === 'product_content' && state.workspace?.id !== auth.session.workspaceId) throw connectionError('Workspace identity changed. Sign in and review the request again.', 'WORKSPACE_MISMATCH', 403);
-              return { write: proposeConnectionWrite(state, provider, body, auth.user.id) };
+              const retainedWrites = new Set(state.connectionWrites || []);
+              const write = proposeConnectionWrite(state, provider, body, auth.user.id, { governedRecordStage });
+              // Exact reconciliation returns the retained object. Only a new
+              // request creates approval/audit state and needs a workspace save.
+              const created = !retainedWrites.has(write);
+              if (created) await store.save(auth.session.workspaceId, state);
+              return { write };
             }
             try {
               if (action === 'sync') {
@@ -2369,7 +2387,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               addAudit(state, { type: 'connection_action_failed', actor: auth.user.id, detail: { provider, action, code } });
               return { failure: { error: recoveryFor(provider, state.integrationStatus[provider]).message, code, status: 422 } };
             }
-          });
+          }, { persist: action !== 'writes' });
           if (result.failure) send(res, result.failure.status, result.failure);
           else send(res, 200, action === 'writes' ? { write: publicConnectionWrite(result.write) } : result);
           return;
@@ -2381,7 +2399,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
           connectionWriteLimiter.fail(auth.session.workspaceId);
           const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, options => store.save(auth.session.workspaceId, state, options), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), loadObjectiveJob: jobId => store.getAgentJob(auth.session.workspaceId, jobId, { includeReport: true }), durableStore: store.provider === 'supabase',
-            protectedContentReceipts: store.contentExecutionReceiptCapability,
+            protectedContentReceipts: store.contentExecutionReceiptCapability, governedRecordStage,
             actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write: publicConnectionWrite(write), executedExternally: write.status === 'completed' }); return;
         }
@@ -2571,7 +2589,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const safe = sanitizeError(error);
       const path = String(req.url || '').split('?')[0].slice(0, 200);
       console.error(JSON.stringify({ event: 'request_error', requestId, method: req.method, path, status: safe.status, code: safe.code }));
-      if (!res.headersSent) send(res, safe.status, { error: safe.publicMessage, code: safe.code });
+      if (!res.headersSent) send(res, safe.status, { error: safe.code === 'GOVERNED_RECORDS_PAUSED' ? GOVERNED_RECORDS_PAUSED_MESSAGE : safe.publicMessage, code: safe.code });
     }
   };
   const server = http.createServer((req, res) => {

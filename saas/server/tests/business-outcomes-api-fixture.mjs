@@ -11,7 +11,8 @@ import path from 'node:path';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState, createStore } from '../lib/store.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
-import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
+import { createBusinessOutcomePersistence, businessOutcomePublicationParams, businessOutcomePublicationIntentDigest } from '../lib/business-outcome-store.mjs';
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import { prepareExperimentOutcomeMeasurement, validateExperimentOutcomeMeasurement, assessExperimentOutcomeMeasurement, digestMeasurementValue } from '../lib/experiment-measurements.mjs';
 import { createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { reviewedActionFixture } from './reviewed-action-test-fixture.mjs';
@@ -33,17 +34,20 @@ function recordInput(measurement, verification) {
   return { source: { type: 'experiment_measurement', experimentId: measurement.experimentId, measurementRevision: measurement.revision, measurementDigest: measurement.digest },
     ...Object.fromEntries(['metric','amount','currency','window','coverage','method','provenance','links'].map(k => [k, measurement[k]])), verification };
 }
-function publicationRow(workspaceId, version, publicationId, commitRevision, at, measurement) {
+function publicationRow(workspaceId, version, publicationId, commitRevision, at, measurement, params) {
   const head = { schema: 'runvara-outcome-head/v1', workspaceId, outcomeId: version.outcomeId, revision: version.revision,
     versionId: version.versionId, digest: version.digest, status: version.status === 'withdrawn' ? 'withdrawn' : 'published', publicationId, committedAt: at, commitRevision };
   const row = { workspace_id: workspaceId, outcome_id: version.outcomeId, revision: version.revision, version_id: version.versionId,
     digest: version.digest, status: version.status, payload: version, publication_id: publicationId,
-    intent_digest: digestMeasurementValue([workspaceId,publicationId]), committed_at: at, commit_revision: commitRevision, source_measurement: structuredClone(measurement) };
+    intent_digest: businessOutcomePublicationIntentDigest(params), committed_at: at, commit_revision: commitRevision, source_measurement: structuredClone(measurement) };
   return { row, receipt: { publication: { head, version }, replayed: false, isCurrent: true } };
 }
 const joinedRow = row => { const { source_measurement, source_action, ...compact } = row; return { workspace_id: row.workspace_id, outcome_id: row.outcome_id, version_id: row.version_id, version: compact }; };
 
 export async function fixture(t, { measured = true, published = false, env = {}, linkedContract = false, primaryState = null, protectedSources = [] } = {}) {
+  // Existing forward-behavior suites explicitly run the producer profile.
+  // Closed-stage suites override this field with undefined or an invalid value.
+  env = { GOVERNED_RECORD_PRODUCER_CONTRACT, ...env };
   const primaryWorkspace = primaryState?.workspace.id || 'outcome-alpha';
   const states = new Map(), rows = new Map(), receipts = new Map(), calls = [], invalidations = [];
   const protectedEvidence = new Map(protectedSources.map(value => [value.receipt.attemptId, structuredClone(value)]));
@@ -64,8 +68,11 @@ export async function fixture(t, { measured = true, published = false, env = {},
   function seedPublication(workspaceId = primaryWorkspace) {
     const s = states.get(workspaceId), measurement = getExperiment(s).outcomeMeasurement, at = new Date().toISOString();
     const version = createBusinessOutcomeCandidate(recordInput(measurement, { kind: 'owner_attestation', actorId: s.users[0].id, verifiedAt: at, measurementDigest: measurement.digest }), { workspaceId, now: at });
-    const value = publicationRow(workspaceId, version, randomUUID(), randomUUID(), at, measurement);
+    const input = publicationInput(workspaceId);
+    const value = publicationRow(workspaceId, version, input.publicationId, randomUUID(), at, measurement,
+      businessOutcomePublicationParams(workspaceId, { id: s.users[0].id, sessionVersion: s.users[0].sessionVersion ?? 1 }, input));
     rows.set(version.versionId, value.row); s._revision = value.receipt.publication.head.commitRevision;
+    receipts.set(`${workspaceId}:${input.publicationId}`, value.receipt);
     getExperiment(s).currentOutcome = value.receipt.publication.head;
     return value.receipt;
   }
@@ -76,7 +83,9 @@ export async function fixture(t, { measured = true, published = false, env = {},
     async get(id) { counts.gets++; return structuredClone(states.get(id) ?? null); },
     async save(id, state) { counts.saves++; assert.equal(state.workspace.id, id); if (state._revision !== states.get(id)._revision) throw Object.assign(new Error('Synthetic CAS conflict'), { status: 409, code: 'STATE_CONFLICT' }); state._revision = randomUUID(); states.set(id, structuredClone(state)); return state; }
   };
-  const persistence = createBusinessOutcomePersistence({ invalidate: id => invalidations.push(id), request: async (path, options = {}) => {
+  const persistence = createBusinessOutcomePersistence({ governedRecordStage: createGovernedRecordStage(env),
+    publicationEnabled: String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() === 'true',
+    invalidate: id => invalidations.push(id), request: async (path, options = {}) => {
     calls.push({ path, options: structuredClone(options) });
     if (hooks.transport) return hooks.transport(path, options);
     if (path === 'rpc/runvara_read_business_outcome_review' || path === 'rpc/runvara_read_outcome_content_sources') {
@@ -133,7 +142,14 @@ export async function fixture(t, { measured = true, published = false, env = {},
       const p = JSON.parse(options.body), s = states.get(p.p_workspace_id), actors = s?.users?.filter(x => x.id === p.p_actor_id) || [];
       const actor = actors[0];
       if (actors.length !== 1 || actor.role !== 'owner' || actor.active === false || actor.passwordChangeRequired || (actor.sessionVersion ?? 1) !== p.p_actor_session_version) throw sqlError('P0O03');
-      if (receipts.has(p.p_publication_id)) return { ...structuredClone(receipts.get(p.p_publication_id)), replayed: true };
+      const existing = [...rows.values()].find(row => row.workspace_id === p.p_workspace_id && row.publication_id === p.p_publication_id);
+      if (existing) {
+        if (existing.intent_digest !== businessOutcomePublicationIntentDigest(p)) throw sqlError('P0O06');
+        const prior = receipts.get(`${p.p_workspace_id}:${p.p_publication_id}`);
+        assert.ok(prior, 'A mutation replay must have an actual retained synthetic receipt');
+        const latest = [...rows.values()].filter(row => row.workspace_id === p.p_workspace_id && row.outcome_id === existing.outcome_id).sort((a,b) => b.revision-a.revision)[0];
+        return { ...structuredClone(prior), replayed: true, isCurrent: latest.version_id === existing.version_id };
+      }
       if (s._revision !== p.p_expected_workspace_revision) throw sqlError('P0O04');
       const e = s.revenueEngine.experiments.find(x => x.id === p.p_experiment_id);
       if (!e || !evidenceInWorkspace(e, p.p_workspace_id)) throw sqlError('P0O09');
@@ -148,35 +164,50 @@ export async function fixture(t, { measured = true, published = false, env = {},
       const version = p.p_action === 'withdraw' ? withdrawBusinessOutcomeCandidate(previous.payload, { reason: p.p_withdrawal_reason, verification }, context)
         : p.p_action === 'correct' ? correctBusinessOutcomeCandidate(previous.payload, recordInput(measurement, verification), context)
         : createBusinessOutcomeCandidate(recordInput(measurement, verification), context);
-      const value = publicationRow(p.p_workspace_id, version, p.p_publication_id, randomUUID(), at, measurement);
+      const value = publicationRow(p.p_workspace_id, version, p.p_publication_id, randomUUID(), at, measurement, p);
       if (measurement.intervention) {
         value.row.source_action = p.p_action === 'withdraw' ? previous.source_action
           : measurement.intervention.reuseVersionId ? rows.get(measurement.intervention.reuseVersionId)?.source_action
           : measurement.schema === 'runvara-experiment-measurement/v4' ? resolveProtectedReceiptEvidence(protectedEvidence.get(measurement.receiptSource.attemptId), { workspaceId: p.p_workspace_id, selector: { attemptId: measurement.receiptSource.attemptId, receiptDigest: measurement.receiptSource.receiptDigest, sourceDigest: measurement.receiptSource.sourceDigest } }).source
           : resolveRecordedActionEvidence(s, measurement.intervention.action.id);
       } else value.row.source_action = null;
-      rows.set(version.versionId, value.row); receipts.set(p.p_publication_id, value.receipt);
+      rows.set(version.versionId, value.row); receipts.set(`${p.p_workspace_id}:${p.p_publication_id}`, value.receipt);
       s._revision = value.receipt.publication.head.commitRevision; e.currentOutcome = value.receipt.publication.head;
       return structuredClone(value.receipt);
     }
     const url = new URL(path, 'https://synthetic.invalid/'), workspaceId = url.searchParams.get('workspace_id')?.slice(3);
     assert.ok(states.has(workspaceId), 'The adapter must bind an explicit authenticated tenant');
+    if (url.pathname === '/saas_workspace_state') {
+      const state = states.get(workspaceId);
+      // The SQL predicate rejects explicit-null/foreign root markers. JSON
+      // projection by itself cannot distinguish them from absent properties.
+      if (!evidenceInWorkspace(state, workspaceId)) return [];
+      return [{ workspace_id: workspaceId, revision: state._revision, workspace: structuredClone(state.workspace),
+        users_json: JSON.stringify(state.users), ...Object.fromEntries(['workspaceId', 'workspace_id', 'tenantId', 'tenant_id', 'tenant']
+          .map(key => [`scope_${key}`, structuredClone(state[key] ?? null)])) }];
+    }
     if (url.pathname === '/runvara_business_outcome_heads') {
       const byOutcome = new Map();
       for (const row of rows.values()) if (row.workspace_id === workspaceId && (!byOutcome.has(row.outcome_id) || byOutcome.get(row.outcome_id).revision < row.revision)) byOutcome.set(row.outcome_id, row);
-      const data = [...byOutcome.values()].map(joinedRow);
-      return { data, contentRange: data.length ? `0-${data.length-1}/${data.length}` : '*/0' };
+      const outcomeId = url.searchParams.get('outcome_id')?.slice(3);
+      const data = [...byOutcome.values()].filter(row => !outcomeId || row.outcome_id === outcomeId).map(row =>
+        url.searchParams.get('select') === 'workspace_id,outcome_id,version_id'
+          ? { workspace_id: row.workspace_id, outcome_id: row.outcome_id, version_id: row.version_id } : joinedRow(row));
+      return options.includeResponseMetadata ? { data, contentRange: data.length ? `0-${data.length-1}/${data.length}` : '*/0' } : data;
     }
     if (url.pathname === '/runvara_business_outcome_versions') {
-      const id = url.searchParams.get('version_id')?.slice(3), row = rows.get(id);
-      return row?.workspace_id === workspaceId ? [structuredClone(row)] : [];
+      const id = url.searchParams.get('version_id')?.slice(3), publicationId = url.searchParams.get('publication_id')?.slice(3);
+      return [...rows.values()].filter(row => row.workspace_id === workspaceId && (id ? row.version_id === id : row.publication_id === publicationId)).map(row => {
+        const fields = url.searchParams.get('select').split(',');
+        return structuredClone(Object.fromEntries(fields.filter(key => Object.hasOwn(row, key)).map(key => [key, row[key]])));
+      });
     }
     assert.fail('Unexpected synthetic database path: ' + path);
   } });
   store.businessOutcomeSummary = workspace => persistence.current(workspace);
   store.getBusinessOutcomeReview = (workspace,id,actor,options) => persistence.review(workspace,id,actor,options);
   store.getBusinessOutcomeEvidence = (workspace,id) => persistence.evidence(workspace,id);
-  store.publishBusinessOutcome = (workspace,actor,input) => persistence.publish(workspace,actor,input);
+  store.publishBusinessOutcome = (workspace,actor,input,options) => persistence.publish(workspace,actor,input,options);
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: SECRET, CREDENTIALS_KEY: SECRET, SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', ...env }, {
     store, schedulerEnabled: false, agentOpsEnabled: false,
     fetchImpl: async () => { counts.providerCalls++; assert.fail('Outcome routes must not call providers or remote networks'); },

@@ -2,6 +2,7 @@
 (() => {
   'use strict';
   const LIMIT = 20;
+  const governedRecordsPausedMessage = 'New governed records are paused on this server. Existing records remain available for review and exact reconciliation.';
   let api, generation = 0, scope = null, session = null, selected = null, overview = null;
   let pending = null, stale = false, busy = new Set(), controllers = new Set();
   let relationship = null, receiptPreview = null, receiptRead = null, receiptEpoch = 0;
@@ -675,7 +676,7 @@
         receiptPreview = checkReceiptReview(merged, { allowSavedMissing: true });
       } else receiptPreview = null;
       selected = merged; renderDetail(); populateForm(); status('Draft saved. Owner review is still required.');
-    } catch (error) { if (active(t)) { stale = true; status(error.status === 409 ? 'The measurement changed. Refresh the experiment before editing again.' : 'Save was not confirmed. Refresh the experiment before making another change.', true); } }
+    } catch (error) { if (active(t)) { stale = true; status(error.status === 503 && error.code === 'GOVERNED_RECORDS_PAUSED' ? governedRecordsPausedMessage : error.status === 409 ? 'The measurement changed. Refresh the experiment before editing again.' : 'Save was not confirmed. Refresh the experiment before making another change.', true); } }
     finally { controllers.delete(controller); if (t.scope === scope && t.session === session) { busy.delete('save'); if (!active(t)) stale = true; controls(); } }
   }
   function review(action) {
@@ -725,8 +726,12 @@
       }
       pending = null; stale = true; renderDetail(result.isCurrent === true && p.action !== 'withdraw' && result.publication.version.source?.measurementDigest === selected?.measurement?.digest); renderReview(); status(result.isCurrent === false ? 'This action was recorded; a newer result is now available. Refresh the experiment and results.' : 'Review saved. Refresh the experiment and results to see the latest version.');
     } catch (error) {
-      if ([400,403,404,409,413,422].includes(error.status)) { if (pending !== p || t.scope !== scope || t.session !== session) return; pending = null; stale = true; if (active(t)) { renderReview(); status('The action was not accepted. Refresh the experiment and review its current details before trying again.', true); } }
-      else { p.uncertain = true; if (active(t)) { renderReview(); status('Confirmation was not received. Retry only the same reviewed action.', true); } }
+      // Only the first current, definitive gate response can release a review.
+      // A later gate must keep the exact pending action for reconciliation.
+      const paused = error.status === 503 && error.code === 'GOVERNED_RECORDS_PAUSED';
+      if (paused && !p.uncertain && active(t)) { pending = null; stale = true; renderReview(); status(governedRecordsPausedMessage, true); }
+      else if ([400,403,404,409,413,422].includes(error.status)) { if (pending !== p || t.scope !== scope || t.session !== session) return; pending = null; stale = true; if (active(t)) { renderReview(); status('The action was not accepted. Refresh the experiment and review its current details before trying again.', true); } }
+      else { p.uncertain = true; if (active(t)) { renderReview(); status('Confirmation was not received. Retry only the same reviewed action.' + (paused ? ' ' + governedRecordsPausedMessage : ''), true); } }
     } finally { controllers.delete(controller); if (t.scope === scope && t.session === session) { busy.delete('publish'); controls(); } }
   }
   function evidence(publication, target, button) {

@@ -7,10 +7,11 @@ import { objectiveContentFixture } from './objective-content-fixture.mjs';
 import { resolveRecordedActionEvidence } from '../lib/reviewed-action-evidence.mjs';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 
 async function approveThroughExistingRoute({ store, workspaceId, session, write }) {
   const secret = 'objective-publication-approval-fixture-at-least-thirty-two-characters';
-  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret, SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' }, {
+  const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret, SHOPIFY_PUBLIC_SYNC_ENABLED: 'false', GOVERNED_RECORD_PRODUCER_CONTRACT }, {
     store, schedulerEnabled: false, agentOpsEnabled: false,
     fetchImpl: async () => assert.fail('Approval must not call a provider')
   });

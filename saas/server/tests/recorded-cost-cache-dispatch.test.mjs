@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -15,6 +16,8 @@ import { proposeConnectionWrite, executeConnectionWrite } from '../lib/connectio
 import { resolveManualContentTarget } from '../lib/manual-content-target.mjs';
 import { objectiveContentSeed, approveObjectiveContent, CONTENT_PRODUCT } from './objective-content-fixture.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
 const priorVersion = 'imported-order-analytics/v3';
 const nextVersion = 'catalogue-recorded-costs/v1';
@@ -160,14 +163,14 @@ test('unknown catalogue costs and valid zero costs do not authorize enforced fin
       assert.equal(metrics.costCoverage, kind === 'malformed' ? 0 : 100);
       const write = proposeConnectionWrite(state, 'shopify', { target: resolveManualContentTarget(state).target,
         requestId: 'recorded_cost_policy_0001', operation: 'product_content', productId: CONTENT_PRODUCT,
-        title: 'Synthetic reviewed content', description: 'Synthetic approved description' }, session.userId);
+        title: 'Synthetic reviewed content', description: 'Synthetic approved description' }, session.userId, { governedRecordStage });
       approveObjectiveContent(state, write);
       const before = structuredClone(state);
       let preparation = 0, saves = 0, freshReads = 0;
       const integrations = new Proxy({}, { get() { preparation++; assert.fail('Financial denial must precede every integration preparation'); } });
       await assert.rejects(executeConnectionWrite(state, write.id, session.userId, integrations,
         async () => { saves++; assert.fail('Financial denial must precede a claim save'); },
-        { durableStore: true, actorSession: session, loadFreshState: async () => { freshReads++; assert.fail('No claim or final dispatch read is needed'); } }),
+        { governedRecordStage, durableStore: true, actorSession: session, loadFreshState: async () => { freshReads++; assert.fail('No claim or final dispatch read is needed'); } }),
         error => error.code === 'WRITE_POLICY_EVIDENCE_REQUIRED');
       assert.equal(preparation, 0); assert.equal(saves, 0); assert.equal(freshReads, 0);
       assert.equal(write.dispatchClaim, undefined); assert.deepEqual(state, before);

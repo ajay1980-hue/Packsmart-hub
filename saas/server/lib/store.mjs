@@ -14,6 +14,7 @@ import { ensureAiEconomics } from './ai-economics.mjs';
 import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
 import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
+import { createGovernedRecordStage, assertGovernedRecordCreation } from './governed-record-stage.mjs';
 import { CONTENT_EXECUTION_RECEIPT_CONTRACT, validateContentExecutionCommit,
   recordContentReceiptAcknowledgement } from './content-execution-receipt.mjs';
 import { prepareContentReceiptTransaction, commitContentReceiptTransaction } from './content-execution-receipt-store.mjs';
@@ -609,6 +610,8 @@ class FileStore {
 
 class SupabaseStore {
   constructor(env, fetchImpl, activityOptions = {}) {
+    Object.defineProperty(this, 'governedRecordStage', { value: createGovernedRecordStage(env) });
+    Object.defineProperty(this, 'businessOutcomePublicationEnabled', { value: String(env.BUSINESS_OUTCOME_PUBLICATION_ENABLED ?? 'true').trim().toLowerCase() === 'true' });
     Object.defineProperty(this, 'orderRecoveryCapability', { value: env.SHOPIFY_ORDER_RECOVERY_CONTRACT ?? null });
     Object.defineProperty(this, 'contentExecutionReceiptCapability', { value: env.CONTENT_EXECUTION_RECEIPT_CONTRACT ?? null });
     this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: true });
@@ -725,7 +728,9 @@ class SupabaseStore {
   }
   businessOutcomePersistence(workspaceId) {
     // Each call captures its trusted workspace, including compatibility reads.
-    return createBusinessOutcomePersistence({ request: (pathname, options) => this.scopedRequest(workspaceId, 'other', pathname, options),
+    return createBusinessOutcomePersistence({ governedRecordStage: this.governedRecordStage,
+      publicationEnabled: this.businessOutcomePublicationEnabled,
+      request: (pathname, options) => this.scopedRequest(workspaceId, 'other', pathname, options),
       invalidate: workspaceId => {
         this.schedulerCache.delete(workspaceId);
         this.mirrorRevisions.delete(workspaceId);
@@ -735,7 +740,7 @@ class SupabaseStore {
   async getBusinessOutcome(workspaceId, experimentId) { return this.businessOutcomePersistence(workspaceId).one(workspaceId, experimentId); }
   async getBusinessOutcomeReview(workspaceId, experimentId, actor, options) { return this.businessOutcomePersistence(workspaceId).review(workspaceId, experimentId, actor, options); }
   async getBusinessOutcomeEvidence(workspaceId, versionId) { return this.businessOutcomePersistence(workspaceId).evidence(workspaceId, versionId); }
-  async publishBusinessOutcome(workspaceId, actor, input) { return this.businessOutcomePersistence(workspaceId).publish(workspaceId, actor, input); }
+  async publishBusinessOutcome(workspaceId, actor, input, options) { return this.businessOutcomePersistence(workspaceId).publish(workspaceId, actor, input, options); }
 
   // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
   // DTO validation rejects client overrides, prices, raw bodies and credentials.
@@ -1301,6 +1306,7 @@ class SupabaseStore {
           throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
         }
         const transaction = prepareContentReceiptTransaction(workspaceId, state, expectedRevision, protectedContentCommit);
+        if (transaction.descriptor.kind === 'reserve') assertGovernedRecordCreation(this.governedRecordStage);
         try {
           protectedResult = await commitContentReceiptTransaction(transaction, (operation, pathname, options, retryKind) =>
             this.scopedRequest(workspaceId, operation, pathname, options, retryKind));
@@ -1466,6 +1472,7 @@ class SupabaseStore {
       }
       // Detach both the descriptor and workspace before the first archive await.
       protectedContentCommit = validateContentExecutionCommit(protectedContentCommit);
+      if (protectedContentCommit.kind === 'reserve') assertGovernedRecordCreation(this.governedRecordStage);
       if (protectedContentCommit.admission.workspaceId !== workspaceId) throw Object.assign(new Error('WORKSPACE_MISMATCH'), { code: 'WORKSPACE_MISMATCH', status: 403 });
       if (typeof state._revision !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(state._revision)) {
         throw Object.assign(new Error('CONTENT_RECEIPT_INVALID'), { code: 'CONTENT_RECEIPT_INVALID', status: 409 });

@@ -2,6 +2,39 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {objectiveContentHarness as harness,deferred,pause,until,POST} from './objective-content-ui-fixture.mjs';
 
+const pausedMessage = 'New governed records are paused on this server. Existing records remain available for review and exact reconciliation.';
+const pausedResponse = () => Response.json({ code: 'GOVERNED_RECORDS_PAUSED', error: 'PRIVATE_PAUSED_RESPONSE_CANARY' }, { status: 503 });
+
+test('first governed pause is a known refusal without a saved record or automatic retry', async t => {
+ const h=await harness(t);await h.open();h.fill();h.post=async()=>pausedResponse();h.submit();await until(()=>h.writes().length===1);await h.idle();
+ assert.match(h.elc('status').textContent,/Preparation was refused/);assert.doesNotMatch(h.elc('status').textContent,/unknown/);assert.equal(h.elc('error').textContent,pausedMessage);assert.equal(h.records.size,0);
+ assert.equal(h.elc('check').classList.contains('hidden'),true);assert.equal(h.elc('reload').classList.contains('hidden'),false);assert.equal(h.elc('ack').checked,false);h.submit();assert.equal(h.writes().length,1);
+ h.elc('reload').click();await h.idle();assert.equal(h.elc('account').value,'');assert.equal(h.elc('ack').checked,false);assert.equal(h.writes().length,1);assert.equal(h.checks().length,0);
+});
+
+test('a pause on an explicit retry cannot turn earlier uncertain objective content into an unsaved draft', async t => {
+ const h=await harness(t,{realBackend:true});await h.open();h.fill();h.post=async()=>{throw new Error('Lost response');};h.submit();await until(()=>h.writes().length===1);await h.idle();const original=h.writes()[0].body;
+ h.elc('check').click();await h.idle();h.change('ack',true);h.post=async()=>pausedResponse();h.elc('retry').click();await until(()=>h.writes().length===2);await h.idle();
+ assert.equal(h.writes()[1].body,original);assert.match(h.elc('status').textContent,/outcome is unknown/);assert.equal(h.elc('error').textContent,pausedMessage);assert.equal(h.elc('reload').classList.contains('hidden'),true);
+ h.elc('reload').click();h.submit();h.elc('cancel').click();h.el('resume-objective-content').click();assert.match(h.elc('status').textContent,/outcome is unknown/);assert.ok(h.elc('exact').textContent.includes(JSON.parse(original).requestId));assert.equal(h.writes().length,2);
+ await h.controls.reload({migrate:false});h.controls.setView('ai-team');h.details.open=true;h.el('resume-objective-content').click();assert.ok(h.elc('exact').textContent.includes(JSON.parse(original).requestId));assert.match(h.elc('status').textContent,/outcome is unknown/);assert.equal(h.writes().length,2);
+ const stored=await h.server.packsmart.store.get(h.state.workspace.id);assert.equal(stored.connectionWrites.length,0);assert.equal(stored.approvals.length,0);
+});
+
+test('a late pause cannot replace an active exact history read after the editor was closed', async t => {
+ const h=await harness(t);await h.open();h.fill();const old=deferred();h.post=()=>old.promise;h.submit();await until(()=>h.writes().length===1);const body=JSON.parse(h.writes()[0].body);
+ h.elc('cancel').click();h.el('resume-objective-content').click();const current=deferred();h.read=()=>current.promise;h.elc('check').click();old.resolve(pausedResponse());await pause();assert.equal(h.form.getAttribute('aria-busy'),'true');assert.match(h.elc('status').textContent,/Checking this exact request/);
+ current.resolve(Response.json(h.history(body.requestId)));await h.idle();assert.ok(h.elc('exact').textContent.includes(body.requestId));assert.equal(h.writes().length,1);assert.equal(h.checks().length,1);assert.doesNotMatch(h.elc('status').textContent,/refused/);
+});
+
+test('paused words or nested client tags cannot classify a generic objective-content server error', async t => {
+ const h=await harness(t);await h.open();h.fill();h.post=async()=>Response.json({error:pausedMessage,code:'INTERNAL_ERROR',body:{code:'GOVERNED_RECORDS_PAUSED'},clientTag:'GOVERNED_RECORDS_PAUSED'},{status:503});h.submit();await until(()=>h.writes().length===1);await h.idle();assert.match(h.elc('status').textContent,/outcome is unknown/);assert.equal(h.elc('reload').classList.contains('hidden'),true);
+});
+
+test('objective-content gate code on a different server error remains unknown',async t=>{
+ const h=await harness(t);await h.open();h.fill();h.post=async()=>Response.json({error:'Unconfirmed response',code:'GOVERNED_RECORDS_PAUSED'},{status:500});h.submit();await until(()=>h.writes().length===1);await h.idle();assert.match(h.elc('status').textContent,/outcome is unknown/);assert.notEqual(h.elc('error').textContent,pausedMessage);
+});
+
 test('owner deliberately selects source, destination and product, reviews exact authored content and submits once',async t=>{
  const h=await harness(t);assert.equal(h.contextReads().length,0);await h.open();assert.ok(h.button);assert.equal(h.contextReads().length,1);assert.equal(h.elc('account').value,'');assert.equal(h.elc('product').value,'');assert.equal(h.elc('title').value,'');assert.equal(h.elc('description').value,'');assert.equal(h.writes().length,0);
  assert.match(h.elc('policy').textContent,/blocked.*zero.*evidence/);assert.match(h.panel.textContent,/import account is unverified/);assert.match(h.panel.textContent,/not independently immutable proof/);assert.match(h.panel.textContent,/not necessarily the same login/);

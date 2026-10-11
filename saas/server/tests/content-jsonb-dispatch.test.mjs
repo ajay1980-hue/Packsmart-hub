@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { executeConnectionWrite, readObjectiveContentRequest } from '../lib/connection-writes.mjs';
@@ -5,6 +6,8 @@ import { reviewedActionClaimIdentity, sourceActionFromRecordedContext } from '..
 import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
 import { contentJsonbFixture, CONTENT_FAMILIES, CONTENT_CONSENTS, CONTENT_WORKSPACE, CONTENT_PRODUCT,
   CONTENT_TITLE, CONTENT_DESCRIPTION, jsonbOrder, reverseObjectOrder, fingerprint } from './content-jsonb-test-fixture.mjs';
+
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
 async function blocked(f, mutations = 0) {
   const result = await f.run().catch(error => error);
@@ -68,7 +71,7 @@ async function completed(f) {
   const durable = structuredClone(f.database.states.get(CONTENT_WORKSPACE));
   const prior = { ...f.counts };
   const replay = await executeConnectionWrite(cold.state, result.id, f.session.userId, f.service, f.persist,
-    { durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob, loadFreshState: f.loadFreshState });
+    { governedRecordStage, durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob, loadFreshState: f.loadFreshState });
   assert.equal(replay.status, 'completed'); assert.deepEqual(f.counts, prior);
   assert.deepEqual(f.database.states.get(CONTENT_WORKSPACE), durable, 'Cold completed history never rewrites claims or evidence');
   return result;
@@ -332,7 +335,7 @@ test('two cold JSONB replicas cannot both claim and submit the same request', as
     const f = await contentJsonbFixture({ family, consent: 'settings', ackOrder: true });
     const secondState = await f.replica.get(CONTENT_WORKSPACE);
     const second = () => executeConnectionWrite(secondState, f.write.id, f.session.userId, f.service,
-      options => f.replica.save(CONTENT_WORKSPACE, secondState, options), { durableStore: true, actorSession: f.session,
+      options => f.replica.save(CONTENT_WORKSPACE, secondState, options), { governedRecordStage, durableStore: true, actorSession: f.session,
         loadObjectiveJob: f.loadJob, loadFreshState: input => f.replica.getConnectionWriteContext(CONTENT_WORKSPACE, input) });
     const results = await Promise.allSettled([f.run(), second()]);
     assert.equal(f.counts.mutations, 1);
@@ -390,7 +393,7 @@ test('known rejection, transport ambiguity and lost final ACK remain unreplayabl
     assert.equal(history.request.status, mode === 'lost-final' ? 'completed' : mode === 'rejected' ? 'failed' : 'uncertain');
     const claim = structuredClone(state.connectionWrites[0].dispatchClaim);
     await executeConnectionWrite(state, f.write.id, f.session.userId, f.service, f.persist,
-      { durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob, loadFreshState: f.loadFreshState }).catch(error => error);
+      { governedRecordStage, durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob, loadFreshState: f.loadFreshState }).catch(error => error);
     assert.equal(f.counts.mutations, 1); assert.deepEqual(state.connectionWrites[0].dispatchClaim, claim);
   });
 });
@@ -407,7 +410,7 @@ test('final revision conflict preserves competing workspace and the known local 
   assert.deepEqual(state.products, []); assert.equal(state.connectionWrites[0].status, 'executing');
   assert.equal(state.connectionWrites[0].dispatchClaim.phases.shopify_mutation.status, 'dispatching');
   await executeConnectionWrite(state, f.write.id, f.session.userId, f.service, f.persist,
-    { durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob, loadFreshState: f.loadFreshState }).catch(error => error);
+    { governedRecordStage, durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob, loadFreshState: f.loadFreshState }).catch(error => error);
   assert.equal(f.counts.mutations, 1);
 });
 
@@ -479,7 +482,7 @@ test('policy, approval-history and admission arrays preserve order, length and s
     const first = state.businessObjectives[0];
     upsertBusinessObjective(state, { title: 'Second exact content restriction', metric: first.metric,
       baseline: first.baseline, target: first.target, direction: first.direction, startsAt: first.startsAt,
-      endsAt: first.endsAt, limits: first.limits, executionPolicy: first.executionPolicy }, { actorId: state.users[0].id });
+      endsAt: first.endsAt, limits: first.limits, executionPolicy: first.executionPolicy }, { governedRecordStage, actorId: state.users[0].id });
   };
   for (const family of ['manual-v1-policy', 'objective-v2']) await t.test(`two-policies:${family}:valid`, async () => {
     const f = await contentJsonbFixture({ family, seedChange: addPolicy, privateOrder: true, ackOrder: true });

@@ -99,6 +99,52 @@ test('draft writes preserve unknown costs and zero counts without defaulting cur
   assert.equal(h.d.querySelector('[data-outcome-action="publish"]'), null);
 });
 
+const pausedMessage = 'New governed records are paused on this server. Existing records remain available for review and exact reconciliation.';
+const pausedError = () => Object.assign(new Error('PRIVATE_PAUSED_RESPONSE_CANARY'), { status: 503, code: 'GOVERNED_RECORDS_PAUSED' });
+
+test('first measurement pause is a known refusal with saved measurement unchanged and no retry', async t => {
+ const h=await harness(t);await h.open();await h.load();const before=structuredClone(h.m),original=h.handler;h.handler=async()=>{throw pausedError();};h.submit();await until(()=>h.$('business-outcomes-status').textContent===pausedMessage);
+ assert.deepEqual(h.m,before);assert.equal(h.form.elements.amount.disabled,true);h.submit();assert.equal(h.writes().length,1);assert.equal(h.$('business-outcomes-confirm'),null);
+ h.handler=original;await h.load();assert.equal(h.form.elements.amount.disabled,false);assert.equal(h.writes().length,1);assert.deepEqual(h.m,before);
+});
+
+test('late measurement pause after close cannot replace current details or resolve the interrupted save', async t => {
+ const h=await harness(t);await h.open();await h.load();const hold=deferred(),original=h.handler;h.handler=()=>hold.promise;h.submit();h.panel.open=false;await new Promise(r=>setTimeout(r,10));h.panel.open=true;await new Promise(r=>setTimeout(r,10));hold.reject(pausedError());await until(()=>!h.$('business-outcomes-load').disabled);
+ assert.notEqual(h.$('business-outcomes-status').textContent,pausedMessage);assert.equal(h.form.elements.amount.disabled,true);h.submit();assert.equal(h.writes().length,1);h.handler=original;await h.load();assert.equal(h.writes().length,1);
+});
+
+for (const action of ['publish','correct','withdraw']) test('first '+action+' pause is refused without creating a pending retry or changing saved results', async t => {
+ const first=measurement(),options=action==='publish'?{}:{publication:publication(first),measurement:action==='correct'?measurement({...input,expectedRevision:1,amount:'2'},first):first};
+ const h=await harness(t,options);await h.open();await h.load();h.review(action);if(action==='withdraw')h.$('business-outcomes-reason').value='incorrect_measurement';const before={m:structuredClone(h.m),p:structuredClone(h.p)};h.handler=async()=>{throw pausedError();};h.confirm();await until(()=>h.$('business-outcomes-status').textContent===pausedMessage);
+ assert.deepEqual({m:h.m,p:h.p},before);assert.equal(h.$('business-outcomes-confirm'),null);assert.equal(h.$('business-outcomes-review').classList.contains('hidden'),true);assert.equal(h.form.elements.amount.disabled,true);assert.equal(h.writes().length,1);h.panel.open=false;await new Promise(r=>setTimeout(r,10));h.panel.open=true;await new Promise(r=>setTimeout(r,10));assert.equal(h.$('business-outcomes-confirm'),null);assert.equal(h.writes().length,1);
+});
+
+for (const action of ['publish','correct','withdraw']) test(action+' timeout then paused retry retains exact action through close, reload and same-session reset', async t => {
+ const first=measurement(),options=action==='publish'?{}:{publication:publication(first),measurement:action==='correct'?measurement({...input,expectedRevision:1,amount:'2'},first):first};
+ const h=await harness(t,options);await h.open();await h.load();h.review(action);if(action==='withdraw')h.$('business-outcomes-reason').value='incorrect_measurement';const before={m:structuredClone(h.m),p:structuredClone(h.p)};h.handler=async()=>{throw new Error('Lost first response');};h.confirm();await until(()=>h.$('business-outcomes-confirm').textContent.includes('Retry same'));const body=h.writes()[0].body;
+ h.handler=async()=>{throw pausedError();};h.confirm();await until(()=>h.writes().length===2&&!h.$('business-outcomes-attest').checked);assert.equal(h.writes()[1].body,body);assert.match(h.$('business-outcomes-status').textContent,/Confirmation was not received/);assert.match(h.$('business-outcomes-confirm').textContent,/Retry same/);assert.deepEqual({m:h.m,p:h.p},before);
+ h.$('business-outcomes-load').click();assert.match(h.$('business-outcomes-status').textContent,/pending action/);h.$('business-outcomes-cancel').click();h.panel.open=false;await new Promise(r=>setTimeout(r,10));h.panel.open=true;await until(()=>!h.$('business-outcomes-review').classList.contains('hidden'));assert.match(h.$('business-outcomes-confirm').textContent,/Retry same/);assert.equal(h.writes().length,2);
+ h.w.RunvaraOutcomes.reset();h.panel.open=true;await new Promise(r=>setTimeout(r,10));assert.match(h.$('business-outcomes-confirm').textContent,/Retry same/);h.confirm();await until(()=>h.writes().length===3&&!h.$('business-outcomes-attest').checked);assert.equal(h.writes()[2].body,body);assert.deepEqual({m:h.m,p:h.p},before);
+});
+
+test('late publication pause after close retains its exact pending action', async t => {
+ const h=await harness(t);await h.open();await h.load();h.review('publish');const hold=deferred();h.handler=()=>hold.promise;h.confirm();const original=h.writes()[0].body;
+ h.panel.open=false;await new Promise(r=>setTimeout(r,10));h.panel.open=true;await new Promise(r=>setTimeout(r,10));hold.reject(pausedError());await until(()=>h.$('business-outcomes-confirm').textContent.includes('Retry same')&&!h.$('business-outcomes-attest').disabled);assert.notEqual(h.$('business-outcomes-status').textContent,pausedMessage);assert.equal(h.writes().length,1);
+ h.handler=async()=>{throw pausedError();};h.confirm();await until(()=>h.writes().length===2&&!h.$('business-outcomes-attest').checked);assert.equal(h.writes()[1].body,original);
+});
+
+test('generic outcome errors cannot become paused refusals through response words or nested tags', async t => {
+ const h=await harness(t);await h.open();await h.load();h.review('publish');h.handler=async()=>{throw Object.assign(new Error(pausedMessage),{status:503,body:{code:'GOVERNED_RECORDS_PAUSED'},clientTag:'GOVERNED_RECORDS_PAUSED'});};h.confirm();await until(()=>h.$('business-outcomes-confirm').textContent.includes('Retry same'));assert.notEqual(h.$('business-outcomes-status').textContent,pausedMessage);assert.equal(h.writes().length,1);
+});
+
+for (const status of [undefined,500]) test('publication gate code without HTTP 503 remains uncertain: '+status,async t=>{
+ const h=await harness(t);await h.open();await h.load();h.review('publish');h.handler=async()=>{throw Object.assign(new Error('Unconfirmed response'),{status,code:'GOVERNED_RECORDS_PAUSED'});};h.confirm();await until(()=>h.$('business-outcomes-confirm').textContent.includes('Retry same'));assert.notEqual(h.$('business-outcomes-status').textContent,pausedMessage);assert.equal(h.writes().length,1);
+});
+
+for (const status of [undefined,500]) test('measurement gate code without HTTP 503 is not a known refusal: '+status,async t=>{
+ const h=await harness(t);await h.open();await h.load();h.handler=async()=>{throw Object.assign(new Error('Unconfirmed response'),{status,code:'GOVERNED_RECORDS_PAUSED'});};h.submit();await until(()=>h.$('business-outcomes-status').textContent.includes('Save was not confirmed'));assert.notEqual(h.$('business-outcomes-status').textContent,pausedMessage);assert.equal(h.writes().length,1);
+});
+
 test('publication requires exact reviewed details, checked attestation, cancel, and one stable UUID per pending action', async t => {
   const h = await harness(t); await h.open(); await h.load(); h.review('publish');
   assert.equal(h.$('business-outcomes-confirm').disabled, true); h.$('business-outcomes-confirm').click(); assert.equal(h.writes().length, 0);

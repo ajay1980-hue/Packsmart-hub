@@ -8,6 +8,7 @@ import { seedWorkspaceState } from '../lib/store.mjs';
 import { connectionSettings, shopifyOrderReadBinding } from '../lib/connection-centre.mjs';
 import { createSessionToken, verifySessionToken } from '../lib/security.mjs';
 import { CONTENT_EXECUTION_RECEIPT_CONTRACT, CONTENT_EXECUTION_RECEIPT_ACK_SCHEMA, recordContentReceiptAcknowledgement } from '../lib/content-execution-receipt.mjs';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import { recoveryFixture } from './shopify-order-recovery-fixture.mjs';
 import { contentJsonbFixture, CONTENT_WORKSPACE, CONTENT_PRODUCT } from './content-jsonb-test-fixture.mjs';
 
@@ -185,7 +186,7 @@ for (const family of ['manual', 'objective-v2']) {
         return saved;
       } };
     f.hooks.fetch = async () => { providerEntered.resolve(); await providerDone.promise; };
-    const { server, request } = await serve(t, { state: f.state, store, integrations: f.service });
+    const { server, request } = await serve(t, { state: f.state, store, integrations: f.service, env: { GOVERNED_RECORD_PRODUCER_CONTRACT } });
     const route = `/api/connection-writes/${f.write.id}/execute`, work = request(route, {});
     await providerEntered.promise;
     const drain = server.packsmart.drain(); await pending(drain);

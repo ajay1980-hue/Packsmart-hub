@@ -1,4 +1,6 @@
 import test from 'node:test';
+import { GOVERNED_RECORD_PRODUCER_CONTRACT, createGovernedRecordStage } from '../lib/governed-record-stage.mjs';
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { aggregateBusinessOutcomes, createBusinessOutcomeCandidate, correctBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
@@ -34,7 +36,7 @@ function fixture(index = 1, amount = '10') {
   return { version, head, row, input, receipt: { publication: { head, version }, replayed: false, isCurrent: true },
     joined: { workspace_id: WS, outcome_id: version.outcomeId, version_id: version.versionId, version: row } };
 }
-const adapter = (request, invalidate) => createBusinessOutcomePersistence({ request: async (path, options) => {
+const adapter = (request, invalidate) => createBusinessOutcomePersistence({ governedRecordStage, request: async (path, options) => {
   const result = await request(path, options);
   return options.includeResponseMetadata && Array.isArray(result)
     ? { data: result, contentRange: result.length ? `0-${result.length - 1}/${result.length}` : '*/0' } : result;
@@ -235,7 +237,7 @@ test('explicit historical evidence retains and validates the original typed repo
 
 test('Supabase transport exposes only explicitly requested cardinality metadata', async () => {
   let calls = 0;
-  const store = createStore({ NODE_ENV: 'test', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only-key' }, { fetchImpl: async (_url, options) => {
+  const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, NODE_ENV: 'test', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only-key' }, { fetchImpl: async (_url, options) => {
     calls++; assert.equal(Object.hasOwn(options, 'includeResponseMetadata'), false);
     assert.equal(options.headers.Prefer, 'count=exact');
     return new Response('[]', { status: 200, headers: { 'content-range': '*/0', 'x-private-test-header': 'must-not-return' } });
@@ -392,7 +394,7 @@ test('copied relationship JSON and source failures cannot mint a selected review
 test('strict shared transport preserves outcome cardinality and withholds read success for undecodable evidence', async () => {
   const joined=fixture().joined;
   let contentRange='0-0/1',invalid=false,calls=0;
-  const store=createStore({NODE_ENV:'test',SUPABASE_URL:'https://outcome-fixture.invalid',SUPABASE_SERVICE_ROLE_KEY:'synthetic-only'}, {
+  const store=createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT,NODE_ENV:'test',SUPABASE_URL:'https://outcome-fixture.invalid',SUPABASE_SERVICE_ROLE_KEY:'synthetic-only'}, {
     fetchImpl:async(_url,options)=>{
       calls++;assert.equal(Object.hasOwn(options,'includeResponseMetadata'),false);assert.equal(options.headers.Prefer,'count=exact');
       assert.equal(options.method,undefined,'outcome inspection remains read-only');
@@ -419,7 +421,7 @@ test('strict shared transport preserves outcome cardinality and withholds read s
 test('metered outcome RPC preserves safe rejection codes and never repeats an uncertain mutation', async () => {
   for (const [databaseCode, expected] of [['P0O03', 'OUTCOME_OWNER_SESSION_CHANGED'], ['P0O05', 'OUTCOME_HEAD_CONFLICT'], ['42P01', 'OUTCOME_STORAGE_UNAVAILABLE'], [null, 'OUTCOME_PUBLICATION_UNCERTAIN']]) {
     let calls = 0;
-    const store = createStore({ NODE_ENV: 'test', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only-key' }, {
+    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, NODE_ENV: 'test', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only-key' }, {
       fetchImpl: async (_url, options) => {
         calls++;
         assert.equal(options.method, 'POST');
@@ -469,7 +471,7 @@ test('every outcome wrapper attributes its actual transport and exact UTF-8 bodi
   ];
   for (const [name, workspaceId, invoke, response, method, path] of cases) await t.test(name, async () => {
     const calls = [], responseText = JSON.stringify(response);
-    const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'private-transport-key' }, {
+    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'private-transport-key' }, {
       fetchImpl: async (url, options) => {
         calls.push({ url, options });
         return new Response(responseText, { headers: { 'content-range': '0-0/1' } });
@@ -497,7 +499,7 @@ test('every outcome wrapper attributes its actual transport and exact UTF-8 bodi
 
 test('interleaved outcome calls keep their caller tenant through foreign and malformed responses', async () => {
   const other = 'tenant-b', f = fixture(), pending = [];
-  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+  const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
     fetchImpl: (url, options) => new Promise(resolve => pending.push({ url, options, resolve }))
   });
   const summary = assert.rejects(store.businessOutcomeSummary(WS), { code: 'OUTCOME_PUBLICATION_INVALID' });
@@ -527,7 +529,7 @@ test('interleaved outcome calls keep their caller tenant through foreign and mal
 test('schema compatibility reads stay in their call workspace without retry labels or extra requests', { timeout: 5000 }, async t => {
   for (const kind of ['evidence', 'review']) await t.test(kind, async () => {
     const pending = [], other = 'tenant-b', fallbackStarted = Promise.withResolvers();
-    const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
       fetchImpl: (url, options) => new Promise(resolve => {
         pending.push({ url, options, resolve });
         if (pending.length === 3) fallbackStarted.resolve();
@@ -564,7 +566,7 @@ test('schema compatibility reads stay in their call workspace without retry labe
 test('uncertain publications invalidate only their workspace and retain known versus unknown response bytes without replay', async t => {
   for (const mode of ['network', 'stream', 'oversized', 'malformed', 'foreign']) await t.test(mode, async () => {
     const calls = [], f = fixture(), other = 'tenant-b', malformed = 'private incomplete acknowledgement é🌍';
-    const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
       fetchImpl: async (url, options) => {
         calls.push({ url, options });
         if (mode === 'network') throw new Error('private lost acknowledgement');
@@ -594,7 +596,7 @@ test('uncertain publications invalidate only their workspace and retain known ve
 
 test('meter capacity and rejected observation identities do not alter outcome operations or compatibility reads', async () => {
   const calls = [];
-  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+  const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
     activityOptions: { maxTenants: 1 },
     fetchImpl: async (url, options) => {
       calls.push({ url, options });
@@ -619,7 +621,7 @@ test('meter capacity and rejected observation identities do not alter outcome op
 
 test('outcome attribution never spills into later raw, unbound or global requests', async () => {
   let calls = 0;
-  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+  const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
     fetchImpl: async url => {
       calls++;
       return Response.json(url.endsWith('/rpc/runvara_claim_agent_jobs') ? [{ workspace_id: WS }] : [], { headers: { 'content-range': '*/0' } });
@@ -640,7 +642,7 @@ test('outcome attribution never spills into later raw, unbound or global request
 
 test('inflight meter overflow never cancels, replays or invents outcome reads', async () => {
   const pending = [];
-  const store = createStore({ SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
+  const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://outcome-fixture.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, {
     fetchImpl: () => new Promise(resolve => pending.push(resolve))
   });
   const reads = Array.from({ length: 129 }, () => store.businessOutcomeSummary(WS));

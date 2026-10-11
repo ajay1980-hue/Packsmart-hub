@@ -263,14 +263,17 @@ test('publication rollback switch and malformed values pause mutations while exi
     for (let attempt = 0; attempt < 2; attempt++) {
       assertError(await f.request(`${BASE}/publish`, { method: 'POST', body: input }), 503, 'OUTCOME_PUBLICATION_PAUSED');
     }
-    assert.equal(f.calls.length, 0, 'Paused publication must not reach or retry the ledger transport');
+    assert.equal(f.calls.length, 2, 'Each paused POST performs one bounded exact replay lookup');
+    assert.ok(f.calls.every(call => call.path.startsWith('runvara_business_outcome_versions?')
+      && call.path.includes('publication_id=eq.') && call.options.maxResponseBytes === 128 * 1024
+      && !call.options.method && !call.options.body));
     assert.equal(f.invalidations.length, 0); assert.equal(f.counts.gets, 0); assert.equal(f.counts.saves, 0);
     const summary = await f.request(BASE);
     const evidence = await f.request(`${BASE}/versions/${f.initialPublication.publication.head.versionId}`);
     assert.equal(summary.status, 200); assert.equal(evidence.status, 200);
     assert.equal(summary.body.current[0].head.versionId, f.initialPublication.publication.head.versionId);
     assert.equal(evidence.body.publication.head.versionId, f.initialPublication.publication.head.versionId);
-    assert.equal(f.calls.length, 2); assert.ok(f.calls.every(call => !call.path.startsWith('rpc/runvara_publish')));
+    assert.equal(f.calls.length, 4); assert.ok(f.calls.every(call => !call.path.startsWith('rpc/runvara_publish')));
     assert.deepEqual(f.states.get('outcome-alpha'), beforeState); assert.deepEqual([...f.rows], beforeRows);
     assert.equal(f.counts.providerCalls, 0);
   }

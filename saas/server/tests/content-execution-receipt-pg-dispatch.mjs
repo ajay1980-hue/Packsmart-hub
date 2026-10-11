@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 // Imported only by the opted-in disposable PostgreSQL test harness. This
 // bounded synthetic PostgREST bridge runs real workspace/receipt transactions,
 // while unrelated reporting mirrors, job history and Shopify stay synthetic.
@@ -15,9 +16,11 @@ import { originalContentPreimages } from './content-jsonb-test-fixture.mjs';
 import { objectiveContentSeed, objectiveContentJob, objectiveContentBody, approveObjectiveContent,
   CONTENT_PRODUCT, CONTENT_ACCOUNT } from './objective-content-fixture.mjs';
 
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+
 async function seededRequest(family, workspaceId) {
   const initial = objectiveContentSeed({ workspaceId }), fake = fakeSupabase();
-  const seedStore = createStore({ SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, { fetchImpl: fake.fetchImpl });
+  const seedStore = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, { fetchImpl: fake.fetchImpl });
   const state = initial.state;
   if (family === 'manual') state.businessObjectives = [];
   await seedStore.save(workspaceId, state);
@@ -27,11 +30,11 @@ async function seededRequest(family, workspaceId) {
     const loadJob = async () => job;
     const context = await objectiveContentContext(state, job.id, 'opportunity-content', initial.session, loadJob);
     await prepareObjectiveContentRequest(state, objectiveContentBody(context, `receipt_bridge_${randomUUID()}`), initial.session,
-      { loadJob, persist: options => seedStore.save(workspaceId, state, options) });
+      { governedRecordStage, loadJob, persist: options => seedStore.save(workspaceId, state, options) });
   } else {
     proposeConnectionWrite(state, 'shopify', { operation: 'product_content', requestId: `receipt_bridge_${randomUUID()}`,
       productId: CONTENT_PRODUCT, title: 'Synthetic exact title 雪', description: 'Synthetic <approved> text & details.\nSecond line.',
-      target: resolveManualContentTarget(state).target }, initial.session.userId);
+      target: resolveManualContentTarget(state).target }, initial.session.userId, { governedRecordStage });
   }
   approveObjectiveContent(state, state.connectionWrites[0]);
   await seedStore.save(workspaceId, state);
@@ -125,7 +128,7 @@ export async function runContentReceiptDispatcherPgTests({ admin, withService })
       }
       return f.fake.fetchImpl(input, options);
     };
-    const store = createStore({ SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only', CONTENT_EXECUTION_RECEIPT_CONTRACT }, { fetchImpl });
+    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only', CONTENT_EXECUTION_RECEIPT_CONTRACT }, { fetchImpl });
     const state = await store.get(workspaceId), write = state.connectionWrites[0];
     assert.deepEqual(write.input, f.state.connectionWrites[0].input);
     assert.notDeepEqual(Object.keys(write.input), Object.keys(f.state.connectionWrites[0].input), 'Actual PostgreSQL JSONB must reorder producer input');
@@ -137,7 +140,7 @@ export async function runContentReceiptDispatcherPgTests({ admin, withService })
     provider.shopifyConfig = snapshot => ({ domain: snapshot.connections[0].metadata.shopDomain, workspaceId, mode: 'oauth', apiVersion: '2026-07', accessToken: 'synthetic-only' });
     provider.connectorCredentials = async () => ({ accessToken: 'synthetic-only' });
     const run = () => executeConnectionWrite(state, write.id, f.session.userId, provider, options => store.save(workspaceId, state, options), {
-      durableStore: true, actorSession: f.session, protectedContentReceipts: store.contentExecutionReceiptCapability,
+      governedRecordStage, durableStore: true, actorSession: f.session, protectedContentReceipts: store.contentExecutionReceiptCapability,
       loadObjectiveJob: id => store.getAgentJob(workspaceId, id, { includeReport: true }),
       loadFreshState: request => store.getConnectionWriteContext(workspaceId, request) });
     const quotaBefore = (await admin.query("SELECT quota FROM public.runvara_content_receipt_quotas WHERE scope_key='global'")).rows[0].quota;
@@ -167,7 +170,7 @@ export async function runContentReceiptDispatcherPgTests({ admin, withService })
       assert.equal(quotaAfter.reservedBytes - quotaBefore.reservedBytes, admitted ? 40960 : 0);
       const beforeRepeat = { ...counters }; await assert.rejects(run, { code: 'WRITE_ALREADY_ATTEMPTED' });
       await assert.rejects(() => executeConnectionWrite(persisted, write.id, f.session.userId, provider,
-        () => assert.fail('A restarted executing request must never save'), { durableStore: true, actorSession: f.session,
+        () => assert.fail('A restarted executing request must never save'), { governedRecordStage, durableStore: true, actorSession: f.session,
           protectedContentReceipts: store.contentExecutionReceiptCapability, loadFreshState: () => assert.fail('No replay fresh read') }), { code: 'WRITE_ALREADY_ATTEMPTED' });
       assert.deepEqual(counters, beforeRepeat);
     } else if (mode === 'lost-reserve-newer') {

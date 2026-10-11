@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 // Actual app + server integration, with synthetic tenant records and a real
 // current-head adapter over local fixture rows only. Run in the existing CI gate.
 import assert from 'node:assert/strict';
@@ -9,13 +10,17 @@ import { createHash } from 'node:crypto';
 import { chromium } from 'playwright';
 import { createPacksmartServer } from '../server.mjs';
 import { createSessionToken } from '../lib/security.mjs';
-import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
+import { upsertBusinessObjective as upsertForwardObjective } from '../lib/business-objectives.mjs';
 import { createBusinessOutcomeCandidate, withdrawBusinessOutcomeCandidate } from '../lib/business-outcomes.mjs';
 import { createBusinessOutcomePersistence } from '../lib/business-outcome-store.mjs';
 import { CONTENT_WORKSPACE } from './objective-content-fixture.mjs';
 import { publishedActionGraphFixture } from './published-action-graph-fixture.mjs';
 import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
 import { createOutcomeViewportSession } from './business-outcomes-browser-capture.mjs';
+
+// These existing fixtures exercise the explicitly enabled producer contract.
+const forwardRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+const upsertBusinessObjective = (state, input, options = {}) => upsertForwardObjective(state, input, { governedRecordStage: forwardRecordStage, ...options });
 
 async function graphTypography(page) {
   return page.locator('.business-graph-inspector .status-list > div').evaluateAll(rows => rows.map(row => {

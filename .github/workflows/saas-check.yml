@@ -62,6 +62,35 @@ jobs:
         run: node saas/server/tests/imported-order-evidence-browser-check.mjs
       - name: Verify retained SEO visibility review
         run: node saas/server/tests/seo-review-browser-check.mjs
+      - name: Verify closed-stage feedback and retained uncertainty
+        run: node saas/server/tests/governed-paused-browser-check.mjs
+      - name: Upload closed-stage 320px evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-governed-paused-320-responsive
+          path: |
+            /tmp/runvara-governed-paused-320-*.png
+            /tmp/runvara-governed-paused-320-manifest.json
+          if-no-files-found: warn
+      - name: Upload closed-stage 390px evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-governed-paused-390-responsive
+          path: |
+            /tmp/runvara-governed-paused-390-*.png
+            /tmp/runvara-governed-paused-390-manifest.json
+          if-no-files-found: warn
+      - name: Upload closed-stage 1200px evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-governed-paused-1200-responsive
+          path: |
+            /tmp/runvara-governed-paused-1200-*.png
+            /tmp/runvara-governed-paused-1200-manifest.json
+          if-no-files-found: warn
       - name: Upload SEO review 320px evidence
         if: always()
         uses: actions/upload-artifact@v4

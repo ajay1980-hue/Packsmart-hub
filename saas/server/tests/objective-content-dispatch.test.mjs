@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { objectiveContentFixture, objectiveContentSeed, objectiveContentJob, objectiveContentBody, CONTENT_WORKSPACE, CONTENT_PRODUCT } from './objective-content-fixture.mjs';
@@ -6,6 +7,8 @@ import { captureObjectiveDispatchPolicy, assertObjectiveDispatchBinding } from '
 import { objectiveContentContext } from '../lib/objective-content-source.mjs';
 import { createStore } from '../lib/store.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+
+const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
 test('objective content synthetic dispatch binds source, reads history at admission and both phase checks, and preserves known completion', async () => {
   const f = await objectiveContentFixture();
@@ -215,7 +218,7 @@ test('two replicas cannot both claim and submit one objective-bound write', asyn
   const f = await objectiveContentFixture(), secondState = await f.replica.get(CONTENT_WORKSPACE);
   const { executeConnectionWrite } = await import('../lib/connection-writes.mjs');
   const second = () => executeConnectionWrite(secondState, f.write.id, f.session.userId, f.service,
-    options => f.replica.save(CONTENT_WORKSPACE, secondState, options), { durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob,
+    options => f.replica.save(CONTENT_WORKSPACE, secondState, options), { governedRecordStage, durableStore: true, actorSession: f.session, loadObjectiveJob: f.loadJob,
       loadFreshState: input => f.replica.getConnectionWriteContext(CONTENT_WORKSPACE, input) });
   const outcomes = await Promise.allSettled([f.run(), second()]);
   assert.equal(f.counts.mutations, 1); assert.equal(outcomes.filter(row => row.status === 'fulfilled' && row.value.status === 'completed').length, 1);
@@ -229,8 +232,8 @@ test('two replicas preparing one exact ID converge through CAS and exact reconci
   const loadJob = id => store.getAgentJob(CONTENT_WORKSPACE, id, { includeReport: true });
   const context = await objectiveContentContext(first, job.id, 'opportunity-content', f.session, loadJob), body = objectiveContentBody(context);
   const results = await Promise.allSettled([
-    prepareObjectiveContentRequest(first, body, f.session, { loadJob, persist: options => store.save(CONTENT_WORKSPACE, first, options) }),
-    prepareObjectiveContentRequest(second, body, f.session, { loadJob, persist: options => replica.save(CONTENT_WORKSPACE, second, options) })
+    prepareObjectiveContentRequest(first, body, f.session, { governedRecordStage, loadJob, persist: options => store.save(CONTENT_WORKSPACE, first, options) }),
+    prepareObjectiveContentRequest(second, body, f.session, { governedRecordStage, loadJob, persist: options => replica.save(CONTENT_WORKSPACE, second, options) })
   ]);
   assert.equal(results.filter(row => row.status === 'fulfilled').length, 1);
   assert.equal(results.find(row => row.status === 'rejected').reason.code, 'OBJECTIVE_CONTENT_SAVE_UNKNOWN');
@@ -239,6 +242,6 @@ test('two replicas preparing one exact ID converge through CAS and exact reconci
   const history = await readObjectiveContentRequest(retained, body.requestId, f.session, loadJob);
   assert.equal(history.found, true); assert.equal(history.sourceStatus.status, 'current');
   let writes = 0;
-  const reused = await prepareObjectiveContentRequest(retained, body, f.session, { loadJob, persist: async () => { writes++; } });
+  const reused = await prepareObjectiveContentRequest(retained, body, f.session, { governedRecordStage, loadJob, persist: async () => { writes++; } });
   assert.equal(reused.request.id, history.request.id); assert.equal(writes, 0);
 });

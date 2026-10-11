@@ -1,3 +1,4 @@
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 // Permitted remote CI Chromium only. Real app + local production review/context/
 // prepare/history APIs with synthetic retained data; no provider/model requests.
 import assert from 'node:assert/strict';
@@ -9,14 +10,18 @@ import { chromium } from 'playwright';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
-import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
+import { upsertBusinessObjective as upsertForwardObjective } from '../lib/business-objectives.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
 import { createRestrictionTypographySession } from './objective-browser-typography.mjs';
+
+// These existing fixtures exercise the explicitly enabled producer contract.
+const forwardRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
+const upsertBusinessObjective = (state, input, options = {}) => upsertForwardObjective(state, input, { governedRecordStage: forwardRecordStage, ...options });
 
 const directory=await fs.mkdtemp(path.join(os.tmpdir(),'runvara-objective-content-browser-'));
 const port=18879,base=`http://127.0.0.1:${port}`,secret='objective-content-browser-synthetic-only-over-thirty-two-characters';
 let providerRequests=0,modelRequests=0,browser;
-const server=createPacksmartServer({NODE_ENV:'test',APP_PUBLIC_URL:base,SESSION_SECRET:secret,CREDENTIALS_KEY:secret,SAAS_STATE_FILE:path.join(directory,'state.json'),SHOPIFY_PUBLIC_SYNC_ENABLED:'false'},
+const server=createPacksmartServer({NODE_ENV:'test',GOVERNED_RECORD_PRODUCER_CONTRACT,APP_PUBLIC_URL:base,SESSION_SECRET:secret,CREDENTIALS_KEY:secret,SAAS_STATE_FILE:path.join(directory,'state.json'),SHOPIFY_PUBLIC_SYNC_ENABLED:'false'},
  {schedulerEnabled:false,agentOpsEnabled:false,fetchImpl:()=>{providerRequests++;throw new Error('Provider transport forbidden in synthetic objective-content browser fixture');}});
 server.packsmart.aiProvider.enhanceCommander=async()=>{modelRequests++;throw new Error('Model transport forbidden in synthetic objective-content browser fixture');};
 const captures=[];

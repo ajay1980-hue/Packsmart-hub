@@ -8,6 +8,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 import { createPacksmartServer } from '../server.mjs';
 import { seedWorkspaceState } from '../lib/store.mjs';
 import { upsertBusinessObjective } from '../lib/business-objectives.mjs';
+import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
 import { detectOpportunities } from '../lib/control.mjs';
 import { createSessionToken, hashPasswordAsync } from '../lib/security.mjs';
 import { deriveBusinessGraph } from '../lib/business-graph.mjs';
@@ -336,7 +337,8 @@ test('reviewed-result graph inspection has an explicit, session-scoped request l
   const server = createPacksmartServer({ NODE_ENV: 'test', SESSION_SECRET: secret, CREDENTIALS_KEY: secret,
     SAAS_STATE_FILE: path.join(directory, 'state.json'), SHOPIFY_PUBLIC_SYNC_ENABLED: 'false' });
   const prepared = await objectiveContentFixture(), stored = prepared.state;
-  upsertBusinessObjective(stored, { id: stored.businessObjectives[0].id, revision: stored.businessObjectives[0].revision, title: 'Changed saved goal definition' }, { actorId: stored.users[0].id });
+  upsertBusinessObjective(stored, { id: stored.businessObjectives[0].id, revision: stored.businessObjectives[0].revision, title: 'Changed saved goal definition' },
+    { actorId: stored.users[0].id, governedRecordStage: createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT }) });
   const retained = deriveBusinessGraph(stored, { workspaceId: stored.workspace.id, nodeLimit: 200, edgeLimit: 400, recordLimit: 50, scanLimit: 2000 }).retainedRequests;
   assert.equal(retained.records[0].origin, 'owner_objective_content', 'the DOM consumes the real v2 preparation projection');
   assert.equal(retained.records[0].objective.revisionComparison, 'saved_revision_changed');
