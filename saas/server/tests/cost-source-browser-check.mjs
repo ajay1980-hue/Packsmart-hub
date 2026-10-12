@@ -1,4 +1,4 @@
-// Remote CI Chromium only. Real local app + synthetic workspace + local API.
+// Chromium only. Real local app + synthetic workspace + local API.
 // No provider, model, external URL, deploy or production account activity.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -28,6 +28,28 @@ const captures=[];
 const artifactGroup=label=>label==='objective-sidecar'?'objective':['draft','saved','correction','history'].includes(label)?'review':'reconciliation';
 const capturePath=(width,label,scale,index)=>path.join('/tmp/runvara-cost-source',String(width),artifactGroup(label),`runvara-cost-source-${width}-${label}-${scale}pct-${String(index).padStart(2,'0')}.png`);
 const waitIdle=page=>page.waitForFunction(()=>document.querySelector('#cost-source-form').getAttribute('aria-busy')==='false');
+async function captureSourceFailure(page,width,label,scale,error) {
+ const directory=path.dirname(capturePath(width,label,scale,1)),frames=[],captureErrors=[];
+ await fs.mkdir(directory,{recursive:true});
+ async function frame(suffix) {
+  const filename=capturePath(width,label,scale,'failure-'+suffix);
+  await page.screenshot({path:filename,fullPage:false,animations:'allow',caret:'initial',scale:'css'});
+  const bytes=await fs.readFile(filename);frames.push({filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')});
+ }
+ try {await frame('viewport');}catch(error){captureErrors.push(String(error));}
+ // Capture the failing typography before the owning session restores it. Date
+ // frames also preserve actual glyph evidence when failure precedes the pass.
+ const dates=page.locator('#cost-source-dialog input[type=date]:visible');
+ try {
+  for(let index=0;index<await dates.count();index++) {
+   await dates.nth(index).scrollIntoViewIfNeeded();await frame('date-'+(index+1));
+  }
+ }catch(error){captureErrors.push(String(error));}
+ await fs.writeFile(path.join(directory,`failure-${label}-${scale}pct.json`),JSON.stringify({complete:false,width,label,scale,
+  error:{name:error.name,message:error.message,stack:error.stack},frames,captureErrors,
+  files:captures.filter(item=>item.width===width&&artifactGroup(item.label)===artifactGroup(label)),
+  dateFitEvidence:'Actual native date pixels require review; preferred input width is not a clipping threshold.'},null,2));
+}
 async function checkNativeDates(page,width,label,scale) {
  const expected={draft:{disabled:false,value:''},saved:{disabled:true,value:''},correction:{disabled:false,value:'2026-09-17'},history:{disabled:true,value:'2026-09-17'}}[label];
  if(!expected)return [];
@@ -41,35 +63,38 @@ async function checkNativeDates(page,width,label,scale) {
   const issue=page.locator('[data-component="landed"] [data-source-field="issuedOn"]');
   await page.locator('[data-component="landed"] [data-source-field="identifier"]').focus();await page.keyboard.press('Tab');
   assert.equal(await issue.evaluate(node=>document.activeElement===node),true,'Tab reaches the native issue date');
-  await issue.fill('2026-09-17');await issue.press('ArrowUp');assert.notEqual(await issue.inputValue(),'2026-09-17','native keyboard changes a date segment');
-  assert.match(await issue.inputValue(),/^\d{4}-\d{2}-\d{2}$/);await issue.fill(expected.value);
+  let keyboardError;
+  try {
+   await issue.fill('2026-09-17');await issue.press('ArrowUp');assert.notEqual(await issue.inputValue(),'2026-09-17','native keyboard changes a date segment');
+   assert.match(await issue.inputValue(),/^\d{4}-\d{2}-\d{2}$/);
+  }catch(error){keyboardError=error;throw error;}
+  finally{
+   try {await issue.fill(expected.value);}catch(restoreError){
+    if(!keyboardError)throw restoreError;
+    console.error('Could not restore native date after keyboard failure:',restoreError);
+   }
+  }
  }
  const metrics=await dates.evaluateAll(nodes=>nodes.map(node=>{
-  const style=getComputedStyle(node),picker=getComputedStyle(node,'::-webkit-calendar-picker-indicator'),probe=node.cloneNode();
-  // The real input's scrollWidth does not expose clipped native date segments.
-  // Measure an unconstrained native twin at the same computed typography. It
-  // is removed before capturing; no live field is resized or restyled here.
-  probe.removeAttribute('id');probe.setAttribute('aria-hidden','true');probe.tabIndex=-1;
-  for(const name of style)probe.style.setProperty(name,style.getPropertyValue(name));
-  Object.assign(probe.style,{position:'fixed',left:'0',top:'0',visibility:'hidden',pointerEvents:'none',width:'max-content',minWidth:'0',maxWidth:'none'});
-  document.body.append(probe);let intrinsicWidth;
-  try {intrinsicWidth=probe.getBoundingClientRect().width;}finally{probe.remove();}
-  return {field:node.id||node.dataset.sourceField,value:node.value,disabled:node.disabled,width:node.getBoundingClientRect().width,intrinsicWidth,fontSize:style.fontSize,
+  const style=getComputedStyle(node),picker=getComputedStyle(node,'::-webkit-calendar-picker-indicator');
+  // Neither input scrollWidth nor a max-content twin proves native segment
+  // visibility. Keep actual control metrics; review full date pixels below.
+  return {field:node.id||node.dataset.sourceField,value:node.value,disabled:node.disabled,width:node.getBoundingClientRect().width,fontSize:style.fontSize,
    appearance:style.appearance,showPicker:typeof node.showPicker==='function',pickerDisplay:picker.display,pickerVisibility:picker.visibility,pickerOpacity:picker.opacity};
  }));
  for(const metric of metrics) {
-  assert.ok(metric.intrinsicWidth>0&&metric.width+1>=metric.intrinsicWidth,`${width}/${label}/${scale}: complete native date segments and calendar fit ${metric.field}: ${JSON.stringify(metric)}`);
   assert.ok(metric.appearance!=='none'&&metric.showPicker,`${width}/${label}/${scale}: native date control retained ${metric.field}`);
   // Chromium can hide its picker when disabled; only editable dates must keep
   // the calendar affordance. Disabled native fields were checked unfocusable.
   if(!metric.disabled)assert.ok(metric.pickerDisplay!=='none'&&metric.pickerVisibility!=='hidden'&&Number(metric.pickerOpacity)>0,`${width}/${label}/${scale}: native calendar affordance retained ${metric.field}`);
  }
- assert.deepEqual(await dates.evaluateAll(nodes=>nodes.map(node=>({value:node.value,inline:node.getAttribute('style')}))),original,'date keyboard and sizing checks preserve values and inline styles');
+ assert.deepEqual(await dates.evaluateAll(nodes=>nodes.map(node=>({value:node.value,inline:node.getAttribute('style')}))),original,'date keyboard checks preserve values and inline styles');
  return metrics;
 }
 async function captureState(page,width,label) {
  const panel=page.locator('#cost-source-dialog'),session=await panel.evaluateHandle(createRestrictionTypographySession);
  async function images(scale) {
+  try {
   await page.locator('.cost-source-history-section').evaluate(node=>{node.open=true;});
   const body=page.locator('#cost-source-dialog .cost-source-body');
   await panel.evaluate(async node=>{await document.fonts.ready;await Promise.allSettled(node.getAnimations({subtree:true}).filter(animation=>animation.playbackRate!==0&&Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
@@ -95,6 +120,11 @@ async function captureState(page,width,label) {
     return {modal:rect.toJSON(),body:b.toJSON(),close:c.toJSON(),heading:h.toJSON(),modalClient:node.clientWidth,modalScroll:node.scrollWidth,client:body.clientWidth,scroll:body.scrollWidth,top:body.scrollTop,height:body.clientHeight,total:body.scrollHeight,closeHit:hit===close||close.contains(hit),viewport:innerHeight,
      controls:[...node.querySelectorAll('button,input,select')].filter(control=>control.getClientRects().length).map(control=>({id:control.id,type:control.type,field:control.dataset.sourceField,width:control.clientWidth,scroll:control.scrollWidth,height:control.clientHeight,scrollHeight:control.scrollHeight,bounds:control.getBoundingClientRect().toJSON(),labelBounds:control.type==='date'?control.closest('label').getBoundingClientRect().toJSON():null}))};
    });
+   const filename=capturePath(width,label,scale,++index);await fs.mkdir(path.dirname(filename),{recursive:true});
+   // Save the actual viewport before asserting geometry, so failures retain
+   // their pixels. Preserve native caret behavior and exact inline-style state.
+   await page.screenshot({path:filename,fullPage:false,animations:'allow',caret:'initial',scale:'css'});
+   const bytes=await fs.readFile(filename);captures.push({width,label,scale,filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),geometry,...(index===1&&nativeDates.length?{nativeDates}:{})});
    assert.ok(geometry.modal.x>=0&&geometry.modal.right<=width+1&&geometry.modal.y>=0&&geometry.modal.bottom<=geometry.viewport+1,`${width}/${label}/${scale}: modal in viewport`);
    assert.ok(geometry.modalScroll<=geometry.modalClient+1&&geometry.scroll<=geometry.client+1,`${width}/${label}/${scale}: no horizontal overflow`);
    assert.ok(geometry.closeHit&&geometry.close.bottom<=geometry.heading.bottom+1&&geometry.body.top>=geometry.heading.bottom-1,`${width}/${label}/${scale}: close/header visible and separate from scrolling body`);
@@ -105,15 +135,14 @@ async function captureState(page,width,label) {
    }
    assert.ok(geometry.top<=covered+1&&geometry.top+geometry.height>covered,`${width}/${label}/${scale}: gap-free scroll coverage`);
    assert.ok(geometry.top>last,`${width}/${label}/${scale}: scrolling advances`);last=geometry.top;
-   const filename=capturePath(width,label,scale,++index);await fs.mkdir(path.dirname(filename),{recursive:true});
-   // Actual visible viewport, with native sticky/fixed chrome and normal motion.
-   // Keep native caret behavior: Playwright's default hiding leaves empty style
-   // attributes on inputs, which would change the exact typography baseline.
-   await page.screenshot({path:filename,fullPage:false,animations:'allow',caret:'initial',scale:'css'});
-   const bytes=await fs.readFile(filename);captures.push({width,label,scale,filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),geometry,...(index===1&&nativeDates.length?{nativeDates}:{})});
    covered=geometry.top+geometry.height;if(covered>=geometry.total-1)break;
   }
   for(const date of nativeDates)assert.ok(datesCaptured.has(date.field),`${width}/${label}/${scale}: whole native date and label captured ${date.field}`);
+  }catch(error){
+   console.error(`Source-review capture failed at ${width}/${label}/${scale}:`,error);
+   try {await captureSourceFailure(page,width,label,scale,error);}catch(captureError){console.error('Could not finish source-review failure evidence:',captureError);}
+   throw error;
+  }
  }
  try {await session.evaluate(s=>s.assertBaseline());await images(100);await session.evaluate(s=>s.begin());try{await session.evaluate(s=>s.enlarge());await images(200);}finally{await session.evaluate(s=>s.restore());}await session.evaluate(s=>s.assertBaseline());}
  finally {await session.dispose();}
@@ -279,10 +308,10 @@ try {
   for(const name of ['review','reconciliation','objective']) {
    const group=files.filter(item=>artifactGroup(item.label)===name),bytes=group.reduce((sum,item)=>sum+item.bytes,0);assert.ok(group.length>0);assert.ok(bytes<32*1024*1024,`width ${width}, group ${name} must fit32MiB without truncation`);
    const directory=path.join('/tmp/runvara-cost-source',String(width),name),manifest=path.join(directory,'manifest.json');
-   await fs.writeFile(manifest,JSON.stringify({width,group:name,bytes,states:[...new Set(group.map(item=>item.label))],scales:[100,200],screenshots:group.length,files:group},null,2));groups.push({name,bytes,directory,manifest});
+   await fs.writeFile(manifest,JSON.stringify({width,group:name,bytes,states:[...new Set(group.map(item=>item.label))],scales:[100,200],screenshots:group.length,files:group,...(name==='review'?{datePixelReview:{status:'pending',requirement:'Inspect complete month/day/four-digit year text and enabled calendar affordance in draft/saved/correction/history at both text scales. Native pixel fit is not asserted by outer geometry.'}}:{})},null,2));groups.push({name,bytes,directory,manifest});
   }
-  await fs.writeFile(`/tmp/runvara-cost-source/${width}/manifest.json`,JSON.stringify({width,totalBytes,artifactGroups:groups,states:[...new Set(files.map(item=>item.label))],scales:[100,200],screenshots:files.length,files,checks:['exact source-only PUT','native keyboard close and focus return','blank/populated enabled/disabled dates: native intrinsic fit and complete label capture','native date keyboard segments and calendar affordance retained','correction history retained','stale costs with action-scoped annotation status','unknown + close/reopen','same-ID retry','first pause versus unknown pause','normal motion','complete gap-free scroll coverage','no horizontal overflow','visible close/header','populated objective sidecar: matching/stale/unrecorded siblings','unchanged exact content-source digest and per-variant financial policy','zero provider/model writes']},null,2));
+  await fs.writeFile(`/tmp/runvara-cost-source/${width}/manifest.json`,JSON.stringify({width,totalBytes,artifactGroups:groups,states:[...new Set(files.map(item=>item.label))],scales:[100,200],screenshots:files.length,files,checks:['exact source-only PUT','native keyboard close and focus return','blank/populated enabled/disabled dates: complete label and control captures for native pixel review','native date keyboard segments and calendar affordance retained','correction history retained','stale costs with action-scoped annotation status','unknown + close/reopen','same-ID retry','first pause versus unknown pause','normal motion','complete gap-free scroll coverage','no horizontal overflow','visible close/header','populated objective sidecar: matching/stale/unrecorded siblings','unchanged exact content-source digest and per-variant financial policy','zero provider/model writes']},null,2));
   await context.close();
  }
- assert.equal(providerRequests,0);assert.equal(modelRequests,0);console.log(fixtureOnly?'Synthetic objective-sidecar fixture APIs passed for four widths with matching/stale/unrecorded variants and zero provider/model requests. Browser pixels were not run.':`Cost-source browser checks passed at320,390,430,1200 with nine states at100%/200% text and ${captures.length} visible scroll captures. Four width manifests and12 width/group manifests contain hashes without truncation. Zero provider/model requests.`);
+ assert.equal(providerRequests,0);assert.equal(modelRequests,0);console.log(fixtureOnly?'Synthetic objective-sidecar fixture APIs passed for four widths with matching/stale/unrecorded variants and zero provider/model requests. Browser pixels were not run.':`Cost-source browser checks passed at320,390,430,1200 with nine states at100%/200% text and ${captures.length} visible scroll captures. Native date pixel review is still required. Four width manifests and12 width/group manifests contain hashes without truncation. Zero provider/model requests.`);
 } finally {await browser?.close();if(server.listening){await new Promise(resolve=>server.close(resolve));await server.packsmart.drain();}await fs.rm(directory,{recursive:true,force:true});}
