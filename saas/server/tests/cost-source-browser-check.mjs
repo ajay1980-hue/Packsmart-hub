@@ -56,7 +56,9 @@ async function captureState(page,width,label) {
    assert.ok(geometry.top>last,`${width}/${label}/${scale}: scrolling advances`);last=geometry.top;
    const filename=capturePath(width,label,scale,++index);await fs.mkdir(path.dirname(filename),{recursive:true});
    // Actual visible viewport, with native sticky/fixed chrome and normal motion.
-   await page.screenshot({path:filename,fullPage:false,animations:'allow',scale:'css'});
+   // Keep native caret behavior: Playwright's default hiding leaves empty style
+   // attributes on inputs, which would change the exact typography baseline.
+   await page.screenshot({path:filename,fullPage:false,animations:'allow',caret:'initial',scale:'css'});
    const bytes=await fs.readFile(filename);captures.push({width,label,scale,filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),geometry});
    covered=geometry.top+geometry.height;if(covered>=geometry.total-1)break;
   }
@@ -154,7 +156,9 @@ async function captureObjectiveSidecar(page,width) {
    assert.ok(geometry.left>=geometry.visibleLeft-2&&geometry.right<=geometry.visibleRight+2&&geometry.scroll<=geometry.client+2,`${width}/objective-sidecar/${scale}: no horizontal clipping`);
    assert.ok(geometry.from<=covered+2&&geometry.to>covered+1,`${width}/objective-sidecar/${scale}: complete contiguous visible text coverage`);
    const filename=capturePath(width,'objective-sidecar',scale,++index);await fs.mkdir(path.dirname(filename),{recursive:true});
-   await page.screenshot({path:filename,fullPage:false,animations:'allow',scale:'css'});const bytes=await fs.readFile(filename);
+   // Preserve inline-style absence here too; screenshotting must not mutate the
+   // owner panel between its normal and exact 200% typography checks.
+   await page.screenshot({path:filename,fullPage:false,animations:'allow',caret:'initial',scale:'css'});const bytes=await fs.readFile(filename);
    captures.push({width,label:'objective-sidecar',scale,filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),geometry});
    covered=geometry.to;if(covered>=geometry.height-1)break;
   }
