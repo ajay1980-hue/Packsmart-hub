@@ -2,6 +2,56 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {costSourceHarness as harness,pause,until,deferred,GET,selector} from './cost-source-ui-fixture.mjs';
 const paused=()=>Response.json({code:'COST_SOURCE_REVIEW_PAUSED',error:'PRIVATE_GATE_CANARY'},{status:503});
+const fullIdentifier=h=>h.cs('fields').querySelector('[data-component="landed"] [data-source-identifier]');
+
+test('disabled saved identifiers have a complete plain-text copy and editing hides it',async t=>{
+ const h=await harness(t),identifier='A'.repeat(80);await h.sourceOpen();h.fillSource(identifier);
+ assert.equal(fullIdentifier(h).textContent,'');assert.equal(fullIdentifier(h).classList.contains('hidden'),true);
+ h.sourceChange(h.component('landed','include'),false);assert.equal(h.component('landed','identifier').disabled,true);assert.equal(fullIdentifier(h).textContent,'');h.sourceChange(h.component('landed','include'),true);h.sourceChange('ack',true);
+ h.sourceSubmit();await h.waitWrite(1);const body=h.sourceWrites()[0].body;
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.equal(fullIdentifier(h).classList.contains('hidden'),false);assert.equal(fullIdentifier(h).children.length,0);
+ assert.match(h.cs('history').textContent,new RegExp(identifier));assert.equal(JSON.parse(body).sourceReview.basis.sources[0].identifier,identifier);
+ h.cs('close').click();assert.equal(h.cs('fields').querySelector('[data-source-identifier]'),null);await h.sourceOpen();assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);
+ h.cs('correct').click();await h.sourceIdle();assert.equal(fullIdentifier(h).textContent,'');assert.equal(fullIdentifier(h).classList.contains('hidden'),true);assert.equal(h.component('landed','identifier').value,identifier);
+ h.fillSource('Replacement 82');h.sourceSubmit();await h.waitWrite(2);assert.equal(fullIdentifier(h).textContent,'Full identifier: Replacement 82');assert.match(h.cs('history').textContent,new RegExp(identifier));
+ assert.equal(h.sourceReads().length,3);assert.equal(h.sourceWrites()[0].body,body);assert.equal(h.state.costHistory.length,2);
+});
+
+test('unknown and paused retry display the exact retained identifier through close and reopen',async t=>{
+ const h=await harness(t),identifier='U'.repeat(80);await h.sourceOpen();h.fillSource(identifier);h.sourcePut=async()=>{throw new Error('Lost reply');};h.sourceSubmit();await h.waitWrite(1);
+ const body=h.sourceWrites()[0].body,requestId=JSON.parse(body).sourceReview.requestId;
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.doesNotMatch(h.cs('history').textContent,new RegExp(identifier));
+ h.cs('close').click();assert.equal(h.cs('fields').textContent,'');await h.sourceOpen();assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.match(h.cs('request').textContent,new RegExp(requestId));
+ h.sourceChange(h.component('landed','identifier'),'Tampered preview');h.sourceChange('ack',true);h.cs('retry').click();await pause();
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.equal(h.sourceWrites().length,1,'tampered disabled field cannot replace retained request');
+ h.cs('close').click();await h.sourceOpen();assert.equal(h.component('landed','identifier').value,identifier);h.sourceChange('ack',true);h.sourcePut=async()=>paused();h.cs('retry').click();await h.waitWrite(2);
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.match(h.cs('status').textContent,/outcome is unknown/);assert.match(h.cs('request').textContent,new RegExp(requestId));assert.equal(h.sourceWrites()[1].body,body);
+ h.cs('close').click();assert.equal(h.cs('fields').querySelector('[data-source-identifier]'),null);await h.sourceOpen();assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);
+ assert.equal(h.sourceReads().length,4);assert.equal(h.sourceWrites().length,2);assert.equal(h.state.costHistory.length,0);
+});
+
+test('first paused save exposes full unsaved identifier without implying a saved record',async t=>{
+ const h=await harness(t),identifier='P'.repeat(80);await h.sourceOpen();h.fillSource(identifier);h.sourcePut=async()=>paused();h.sourceSubmit();await h.waitWrite(1);
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.equal(fullIdentifier(h).classList.contains('hidden'),false);assert.match(h.cs('status').textContent,/refused/);assert.doesNotMatch(h.cs('history').textContent,new RegExp(identifier));assert.equal(h.state.costHistory.length,0);
+ h.cs('close').click();assert.equal(h.cs('fields').textContent,'');await h.sourceOpen();assert.equal(fullIdentifier(h).textContent,'');assert.equal(h.sourceReads().length,2);assert.equal(h.sourceWrites().length,1);
+});
+
+test('pending identifier remains bound to its original request when newer history and unknown costs arrive',async t=>{
+ const h=await harness(t),identifier='ORIGINAL'.padEnd(80,'9');await h.sourceOpen();h.fillSource(identifier);h.sourcePut=async()=>{throw new Error('Lost reply');};h.sourceSubmit();await h.waitWrite(1);
+ const body=JSON.parse(h.sourceWrites()[0].body);h.cs('close').click();
+ const newer=structuredClone(body);newer.sourceReview.requestId='11111111-1111-4111-8111-111111111111';newer.sourceReview.basis.sources[0].identifier='NEWER saved annotation';h.saveCost(newer);h.state.economics[selector.sku].landed=null;
+ await h.sourceOpen();assert.equal(h.component('landed','identifier').value,identifier);assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.equal(fullIdentifier(h).closest('.cost-source-component-fields').classList.contains('hidden'),false);
+ assert.match(h.cs('history').textContent,/NEWER saved annotation/);assert.match(h.cs('request').textContent,new RegExp(body.sourceReview.requestId));assert.match(h.cs('status').textContent,/outcome is unknown/);assert.equal(h.cs('retry').classList.contains('hidden'),true);assert.equal(h.cs('save').disabled,true);
+ h.sourceSubmit();assert.equal(h.sourceWrites().length,1);assert.equal(h.sourceReads().length,2);assert.equal(h.state.economics[selector.sku].landed,null);assert.equal(h.state.costHistory.length,1);
+ h.cs('close').click();assert.equal(h.cs('fields').textContent,'');
+});
+
+test('unsafe text remains inert in a disabled unsaved identifier and cannot be submitted',async t=>{
+ const h=await harness(t),identifier='<img src=x onerror=alert(1)>';await h.sourceOpen();h.fillSource(identifier);h.sourceSubmit();await pause();assert.equal(h.sourceWrites().length,0);assert.equal(fullIdentifier(h).textContent,'');
+ h.currentBootstrap.economics[selector.sku].landed='9';h.sourceSubmit();assert.equal(h.component('landed','identifier').disabled,true);
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: '+identifier);assert.equal(fullIdentifier(h).children.length,0);assert.equal(h.cs('fields').querySelector('img'),null);assert.equal(h.sourceWrites().length,0);
+ h.cs('close').click();assert.equal(h.cs('fields').textContent,'');
+});
 
 test('explicit exact-variant entry and source-only save preserve raw costs and financial holds',async t=>{
  const h=await harness(t);assert.equal(h.sourceReads().length,0);assert.equal(h.d.body.textContent.includes('INV 2026-42'),false);await h.sourceOpen();assert.equal(h.sourceReads().length,1);assert.equal(h.cs('dialog').open,true);assert.match(h.cs('target').textContent,/Product\/10.*\nVariant: gid:\/\/shopify\/ProductVariant\/11/);assert.match(h.cs('fields').textContent,/4.25/);assert.equal(h.component('packing','include').disabled,false);assert.equal(h.component('handling','include').disabled,true);
@@ -36,8 +86,10 @@ test('late response after close cannot overwrite a newer reconciliation read',as
 
 for(const change of ['navigation','hidden','session','csrf'])test('interrupted '+change+' retains unknown identity without disclosing private form',async t=>{
  const h=await harness(t);await h.sourceOpen();h.fillSource('PRIVATE SOURCE 84');const pending=deferred();h.sourcePut=()=>pending.promise;h.sourceSubmit();await until(()=>h.sourceWrites().length===1);const body=JSON.parse(h.sourceWrites()[0].body);
+ assert.equal(fullIdentifier(h).textContent,'Full identifier: PRIVATE SOURCE 84');
  if(change==='navigation')h.controls.setView('overview');if(change==='hidden'){h.hidden=true;h.d.dispatchEvent(new h.w.Event('visibilitychange'));}if(change==='session')h.session.user.role='viewer';if(change==='csrf')h.session.csrf='replacement';
  pending.resolve(Response.json(h.saveCost(body)));await pause();assert.equal(h.cs('dialog').open,false);assert.equal(h.cs('fields').textContent,'');assert.equal(h.cs('history').textContent,'');assert.equal(h.sourceWrites().length,1);
+ assert.equal(h.cs('fields').querySelector('[data-source-identifier]'),null);
  if(change==='hidden')h.hidden=false;if(change==='session')h.session.user.role='owner';if(change==='csrf')h.session.csrf=h.bootstrap.csrf;h.controls.setView('profit');await h.sourceOpen();assert.match(h.cs('status').textContent,/Exact source annotation found/);assert.equal(h.sourceWrites().length,1);
 });
 

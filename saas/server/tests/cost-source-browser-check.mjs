@@ -25,8 +25,8 @@ const server=createPacksmartServer({NODE_ENV:'test',COST_SOURCE_REVIEW_CONTRACT,
 server.packsmart.aiProvider.enhanceCommander=async()=>{modelRequests++;throw new Error('Model call forbidden');};
 const selector={productId:'gid://shopify/Product/810',variantId:'gid://shopify/ProductVariant/811',sku:'SOURCE-BROWSER-SKU'};
 const captures=[];
-const artifactGroup=label=>label==='objective-sidecar'?'objective':['draft','saved','correction','history'].includes(label)?'review':'reconciliation';
-const capturePath=(width,label,scale,index)=>path.join('/tmp/runvara-cost-source',String(width),artifactGroup(label),`runvara-cost-source-${width}-${label}-${scale}pct-${String(index).padStart(2,'0')}.png`);
+const artifactGroup=(label,width)=>label==='objective-sidecar'?'objective':['draft','saved','correction','history'].includes(label)?'review':width===1200?(['stale','unknown'].includes(label)?'reconciliation-initial':'reconciliation-retained'):'reconciliation';
+const capturePath=(width,label,scale,index)=>path.join('/tmp/runvara-cost-source',String(width),artifactGroup(label,width),`runvara-cost-source-${width}-${label}-${scale}pct-${String(index).padStart(2,'0')}.png`);
 const waitIdle=page=>page.waitForFunction(()=>document.querySelector('#cost-source-form').getAttribute('aria-busy')==='false');
 async function captureSourceFailure(page,width,label,scale,error) {
  const directory=path.dirname(capturePath(width,label,scale,1)),frames=[],captureErrors=[];
@@ -47,7 +47,7 @@ async function captureSourceFailure(page,width,label,scale,error) {
  }catch(error){captureErrors.push(String(error));}
  await fs.writeFile(path.join(directory,`failure-${label}-${scale}pct.json`),JSON.stringify({complete:false,width,label,scale,
   error:{name:error.name,message:error.message,stack:error.stack},frames,captureErrors,
-  files:captures.filter(item=>item.width===width&&artifactGroup(item.label)===artifactGroup(label)),
+  files:captures.filter(item=>item.width===width&&artifactGroup(item.label,width)===artifactGroup(label,width)),
   dateFitEvidence:'Actual native date pixels require review; preferred input width is not a clipping threshold.'},null,2));
 }
 async function checkNativeDates(page,width,label,scale) {
@@ -98,7 +98,9 @@ async function captureState(page,width,label) {
   await page.locator('.cost-source-history-section').evaluate(node=>{node.open=true;});
   const body=page.locator('#cost-source-dialog .cost-source-body');
   await panel.evaluate(async node=>{await document.fonts.ready;await Promise.allSettled(node.getAnimations({subtree:true}).filter(animation=>animation.playbackRate!==0&&Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
-  const nativeDates=await checkNativeDates(page,width,label,scale),datesCaptured=new Set();
+  const nativeDates=await checkNativeDates(page,width,label,scale),datesCaptured=new Set(),identifierLinesCaptured=new Map();
+  const visibleIdentifiers=await panel.locator('[data-source-identifier]:visible').count();
+  assert.equal(visibleIdentifiers,['draft','correction'].includes(label)?0:1,`${width}/${label}/${scale}: full identifier is present only for the locked component`);
   let covered=0,index=0,last=-1;
   while(true) {
    const requested=await body.evaluate((node,covered)=>{
@@ -106,8 +108,12 @@ async function captureState(page,width,label) {
     // Reuse this gap-free pass for the four native date states. If a date label
     // was split across the previous edge, keep its whole label and input in
     // the next capture instead of adding another full-dialog screenshot set.
-    for(const input of node.querySelectorAll('input[type=date]'))if(input.getClientRects().length){
-     const label=input.closest('label').getBoundingClientRect(),top=label.top-rect.top+node.scrollTop,bottom=label.bottom-rect.top+node.scrollTop;
+    const regions=[...node.querySelectorAll('input[type=date]')].filter(input=>input.getClientRects().length).map(input=>input.closest('label').getBoundingClientRect());
+    // A long identifier may span viewports. Preserve each rendered line across
+    // scroll edges without requiring its whole paragraph to fit one frame.
+    for(const paragraph of node.querySelectorAll('[data-source-identifier]'))if(paragraph.getClientRects().length){const range=document.createRange();range.selectNodeContents(paragraph);regions.push(...range.getClientRects());}
+    for(const label of regions){
+     const top=label.top-rect.top+node.scrollTop,bottom=label.bottom-rect.top+node.scrollTop;
      if(top<next&&bottom>next)next=Math.max(0,top);
     }
     return Math.min(Math.max(0,node.scrollHeight-node.clientHeight),next);
@@ -118,7 +124,11 @@ async function captureState(page,width,label) {
     const body=node.querySelector('.cost-source-body'),close=document.getElementById('cost-source-close'),heading=node.querySelector('.cost-source-heading');
     const rect=node.getBoundingClientRect(),b=body.getBoundingClientRect(),c=close.getBoundingClientRect(),h=heading.getBoundingClientRect(),hit=document.elementFromPoint(c.x+c.width/2,c.y+c.height/2);
     return {modal:rect.toJSON(),body:b.toJSON(),close:c.toJSON(),heading:h.toJSON(),modalClient:node.clientWidth,modalScroll:node.scrollWidth,client:body.clientWidth,scroll:body.scrollWidth,top:body.scrollTop,height:body.clientHeight,total:body.scrollHeight,closeHit:hit===close||close.contains(hit),viewport:innerHeight,
-     controls:[...node.querySelectorAll('button,input,select')].filter(control=>control.getClientRects().length).map(control=>({id:control.id,type:control.type,field:control.dataset.sourceField,width:control.clientWidth,scroll:control.scrollWidth,height:control.clientHeight,scrollHeight:control.scrollHeight,bounds:control.getBoundingClientRect().toJSON(),labelBounds:control.type==='date'?control.closest('label').getBoundingClientRect().toJSON():null}))};
+     controls:[...node.querySelectorAll('button,input,select')].filter(control=>control.getClientRects().length).map(control=>({id:control.id,type:control.type,field:control.dataset.sourceField,width:control.clientWidth,scroll:control.scrollWidth,height:control.clientHeight,scrollHeight:control.scrollHeight,bounds:control.getBoundingClientRect().toJSON(),labelBounds:control.type==='date'?control.closest('label').getBoundingClientRect().toJSON():null})),
+     identifiers:[...node.querySelectorAll('[data-source-identifier]')].filter(item=>item.getClientRects().length).map(item=>{
+      const component=item.closest('[data-component]'),input=component.querySelector('[data-source-field=identifier]'),range=document.createRange();range.selectNodeContents(item);
+      return {component:component.dataset.component,text:item.textContent,value:input.value,disabled:input.disabled,children:item.children.length,bounds:item.getBoundingClientRect().toJSON(),client:item.clientWidth,scroll:item.scrollWidth,height:item.clientHeight,scrollHeight:item.scrollHeight,lines:[...range.getClientRects()].map(rect=>rect.toJSON())};
+     })};
    });
    const filename=capturePath(width,label,scale,++index);await fs.mkdir(path.dirname(filename),{recursive:true});
    // Save the actual viewport before asserting geometry, so failures retain
@@ -133,11 +143,23 @@ async function captureState(page,width,label) {
     if(control.id&&control.id!=='cost-source-ack'&&!['cost-source-currency','cost-source-effectiveFrom','cost-source-effectiveUntil','cost-source-taxBasis'].includes(control.id)) assert.ok(control.scroll<=control.width+1&&control.scrollHeight<=control.height+1,`${width}/${label}/${scale}: complete control label ${control.id}`);
     if(control.type==='date'&&control.labelBounds.top>=geometry.body.top-1&&control.labelBounds.bottom<=geometry.body.bottom+1)datesCaptured.add(control.id||control.field);
    }
+   for(const identifier of geometry.identifiers) {
+    assert.equal(identifier.text,'Full identifier: '+identifier.value,`${width}/${label}/${scale}: exact full identifier text`);assert.equal(identifier.disabled,true);assert.equal(identifier.children,0);
+    assert.ok(identifier.scroll<=identifier.client+1&&identifier.scrollHeight<=identifier.height+1,`${width}/${label}/${scale}: identifier text does not overflow its paragraph`);
+    assert.ok(identifier.lines.length>0,`${width}/${label}/${scale}: identifier has rendered text lines`);
+    const coverage=identifierLinesCaptured.get(identifier.component)||{count:identifier.lines.length,lines:new Set()};assert.equal(coverage.count,identifier.lines.length);
+    identifier.lines.forEach((line,index)=>{
+     assert.ok(line.left>=identifier.bounds.left-1&&line.right<=identifier.bounds.right+1&&line.left>=geometry.body.left-1&&line.right<=geometry.body.right+1,`${width}/${label}/${scale}: full identifier line fits horizontally`);
+     if(line.top>=geometry.body.top-1&&line.bottom<=geometry.body.bottom+1)coverage.lines.add(index);
+    });identifierLinesCaptured.set(identifier.component,coverage);
+   }
    assert.ok(geometry.top<=covered+1&&geometry.top+geometry.height>covered,`${width}/${label}/${scale}: gap-free scroll coverage`);
    assert.ok(geometry.top>last,`${width}/${label}/${scale}: scrolling advances`);last=geometry.top;
    covered=geometry.top+geometry.height;if(covered>=geometry.total-1)break;
   }
   for(const date of nativeDates)assert.ok(datesCaptured.has(date.field),`${width}/${label}/${scale}: whole native date and label captured ${date.field}`);
+  assert.equal(identifierLinesCaptured.size,visibleIdentifiers);
+  for(const [component,coverage] of identifierLinesCaptured)assert.equal(coverage.lines.size,coverage.count,`${width}/${label}/${scale}: every wrapped identifier line captured ${component}`);
   }catch(error){
    console.error(`Source-review capture failed at ${width}/${label}/${scale}:`,error);
    try {await captureSourceFailure(page,width,label,scale,error);}catch(captureError){console.error('Could not finish source-review failure evidence:',captureError);}
@@ -289,9 +311,9 @@ try {
   await open();await fill('BROWSER INVOICE 1');await captureState(page,width,'draft');await ack.check();await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);await captureState(page,width,'saved');assert.equal(writes().length,1);
   await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE correction 2');for(const date of [page.locator('#cost-source-effectiveFrom'),page.locator('#cost-source-effectiveUntil'),field('landed','issuedOn')])await date.fill('2026-09-17');await captureState(page,width,'correction');await ack.check();await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);assert.match(await page.locator('#cost-source-history').textContent(),/BROWSER INVOICE 1/);assert.match(await page.locator('#cost-source-history').textContent(),/correction 2/);await captureState(page,width,'history');
   await page.locator('#cost-source-close').click();let state=await server.packsmart.store.get(seed.workspace.id);state.economics[selector.sku].landed='6.5000';await server.packsmart.store.save(seed.workspace.id,state);await open();assert.match(await page.locator('#cost-source-current').textContent(),/saved costs changed/);assert.match(await status.textContent(),/This annotation did not change saved costs or remove financial or action holds/);assert.doesNotMatch(await status.textContent(),/Costs and all financial holds are unchanged/);await captureState(page,width,'stale');
-  await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE unknown 3');mode='lose-before-save';await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/outcome is unknown/);const original=writes().at(-1).body;await captureState(page,width,'unknown');await page.locator('#cost-source-close').click();await open();assert.match(await status.textContent(),/outcome is unknown/);await ack.check();mode='pause';await page.locator('#cost-source-retry').click();await waitIdle(page);assert.equal(writes().at(-1).body,original);assert.match(await status.textContent(),/outcome is unknown/);await captureState(page,width,'unknown-paused');
+  await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSERINVOICEUNKNOWN3'.padEnd(80,'7'));mode='lose-before-save';await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/outcome is unknown/);const original=writes().at(-1).body;await captureState(page,width,'unknown');await page.locator('#cost-source-close').click();await open();assert.match(await status.textContent(),/outcome is unknown/);await ack.check();mode='pause';await page.locator('#cost-source-retry').click();await waitIdle(page);assert.equal(writes().at(-1).body,original);assert.match(await status.textContent(),/outcome is unknown/);await captureState(page,width,'unknown-paused');
   await page.locator('#cost-source-check').click();await waitIdle(page);await ack.check();await page.locator('#cost-source-retry').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);assert.equal(writes().at(-1).body,original);
-  await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE paused 4');mode='pause';await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/refused/);await captureState(page,width,'first-paused');
+  await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSERINVOICEPAUSED4'.padEnd(80,'8'));mode='pause';await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/refused/);await captureState(page,width,'first-paused');
   state=await server.packsmart.store.get(seed.workspace.id);assert.equal(state.economics[selector.sku].landed,'6.5000');assert.equal(state.costHistory.length,3);assert.equal(state.connectionWrites.length,0);assert.equal(state.approvals.length,0);assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   await page.locator('#cost-source-close').click();objectiveCase=prepareObjectiveSidecar(state);await server.packsmart.store.save(seed.workspace.id,state);
   await page.reload();await page.locator('#app-shell:not(.hidden)').waitFor();
@@ -305,13 +327,15 @@ try {
   await captureObjectiveSidecar(page,width);assert.equal(await page.locator('#objective-content-policy').textContent(),unchangedPolicy);assert.equal(JSON.stringify(objectiveContext.source),unchangedSource);assert.equal(objectiveContext.sourceRevision,unchangedRevision);
   assert.equal(calls.some(call=>call.path==='/api/objective-content/requests'),false);const finalState=await server.packsmart.store.get(seed.workspace.id);assert.equal(finalState.connectionWrites.length,0);assert.equal(finalState.approvals.length,0);assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
   const files=captures.filter(item=>item.width===width),totalBytes=files.reduce((sum,item)=>sum+item.bytes,0),groups=[];
-  for(const name of ['review','reconciliation','objective']) {
-   const group=files.filter(item=>artifactGroup(item.label)===name),bytes=group.reduce((sum,item)=>sum+item.bytes,0);assert.ok(group.length>0);assert.ok(bytes<32*1024*1024,`width ${width}, group ${name} must fit32MiB without truncation`);
+  for(const name of width===1200?['review','reconciliation-initial','reconciliation-retained','objective']:['review','reconciliation','objective']) {
+   const group=files.filter(item=>artifactGroup(item.label,width)===name),bytes=group.reduce((sum,item)=>sum+item.bytes,0);assert.ok(group.length>0);assert.ok(bytes<32*1024*1024,`width ${width}, group ${name} must fit32MiB without truncation`);
    const directory=path.join('/tmp/runvara-cost-source',String(width),name),manifest=path.join(directory,'manifest.json');
-   await fs.writeFile(manifest,JSON.stringify({width,group:name,bytes,states:[...new Set(group.map(item=>item.label))],scales:[100,200],screenshots:group.length,files:group,...(name==='review'?{datePixelReview:{status:'pending',requirement:'Inspect complete month/day/four-digit year text and enabled calendar affordance in draft/saved/correction/history at both text scales. Native pixel fit is not asserted by outer geometry.'}}:{})},null,2));groups.push({name,bytes,directory,manifest});
+   const content=JSON.stringify({width,group:name,bytes,states:[...new Set(group.map(item=>item.label))],scales:[100,200],screenshots:group.length,files:group,...(name==='review'?{datePixelReview:{status:'pending',requirement:'Inspect complete month/day/four-digit year text and enabled calendar affordance in draft/saved/correction/history at both text scales. Native pixel fit is not asserted by outer geometry.'}}:{})},null,2),manifestBytes=Buffer.byteLength(content);
+   assert.ok(bytes+manifestBytes<32*1024*1024,`width ${width}, group ${name}: screenshots and manifest must fit32MiB without truncation`);
+   await fs.writeFile(manifest,content);groups.push({name,bytes,manifestBytes,artifactBytes:bytes+manifestBytes,directory,manifest});
   }
-  await fs.writeFile(`/tmp/runvara-cost-source/${width}/manifest.json`,JSON.stringify({width,totalBytes,artifactGroups:groups,states:[...new Set(files.map(item=>item.label))],scales:[100,200],screenshots:files.length,files,checks:['exact source-only PUT','native keyboard close and focus return','blank/populated enabled/disabled dates: complete label and control captures for native pixel review','native date keyboard segments and calendar affordance retained','correction history retained','stale costs with action-scoped annotation status','unknown + close/reopen','same-ID retry','first pause versus unknown pause','normal motion','complete gap-free scroll coverage','no horizontal overflow','visible close/header','populated objective sidecar: matching/stale/unrecorded siblings','unchanged exact content-source digest and per-variant financial policy','zero provider/model writes']},null,2));
+  await fs.writeFile(`/tmp/runvara-cost-source/${width}/manifest.json`,JSON.stringify({width,totalBytes,artifactGroups:groups,states:[...new Set(files.map(item=>item.label))],scales:[100,200],screenshots:files.length,files,checks:['exact source-only PUT','native keyboard close and focus return','blank/populated enabled/disabled dates: complete label and control captures for native pixel review','native date keyboard segments and calendar affordance retained','exact wrapped disabled identifier text and every rendered line captured, including 80-character retained requests','correction history retained','stale costs with action-scoped annotation status','unknown + close/reopen','same-ID retry','first pause versus unknown pause','normal motion','complete gap-free scroll coverage','no horizontal overflow','visible close/header','populated objective sidecar: matching/stale/unrecorded siblings','unchanged exact content-source digest and per-variant financial policy','zero provider/model writes']},null,2));
   await context.close();
  }
- assert.equal(providerRequests,0);assert.equal(modelRequests,0);console.log(fixtureOnly?'Synthetic objective-sidecar fixture APIs passed for four widths with matching/stale/unrecorded variants and zero provider/model requests. Browser pixels were not run.':`Cost-source browser checks passed at320,390,430,1200 with nine states at100%/200% text and ${captures.length} visible scroll captures. Native date pixel review is still required. Four width manifests and12 width/group manifests contain hashes without truncation. Zero provider/model requests.`);
+ assert.equal(providerRequests,0);assert.equal(modelRequests,0);console.log(fixtureOnly?'Synthetic objective-sidecar fixture APIs passed for four widths with matching/stale/unrecorded variants and zero provider/model requests. Browser pixels were not run.':`Cost-source browser checks passed at320,390,430,1200 with nine states at100%/200% text and ${captures.length} visible scroll captures. Native date pixel review is still required. Four width manifests and13 width/group manifests contain hashes without truncation. Zero provider/model requests.`);
 } finally {await browser?.close();if(server.listening){await new Promise(resolve=>server.close(resolve));await server.packsmart.drain();}await fs.rm(directory,{recursive:true,force:true});}

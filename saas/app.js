@@ -1435,7 +1435,7 @@
     for (const key of ['currency','taxBasis','effectiveFrom','effectiveUntil']) $('#cost-source-' + key).value = basis[key] ?? '';
     $('#cost-source-fields').innerHTML = costSourceComponents.map(([component,label])=>{
       const source = basis.sources.find(row=>row.component === component), known = costSourceAmount(reviewedCosts[component]);
-      return '<fieldset class="cost-source-component" data-component="' + component + '"><legend>' + label + '</legend><p>Reviewed saved value: ' + escapeHtml(known ? String(reviewedCosts[component]) : 'Unknown; save an explicit cost first') + '</p><label class="check-label"><input type="checkbox" data-source-field="include"' + (source ? ' checked' : '') + '> Include this component</label><div class="cost-source-component-fields"><label>Source kind<select data-source-field="kind"><option value="invoice"' + (source?.kind === 'invoice' ? ' selected' : '') + '>Invoice</option><option value="statement"' + (source?.kind === 'statement' ? ' selected' : '') + '>Statement</option><option value="estimate"' + (!source || source.kind === 'estimate' ? ' selected' : '') + '>Estimate</option></select></label><label>Short identifier<input data-source-field="identifier" maxlength="80" autocomplete="off" value="' + escapeHtml(source?.identifier || '') + '"></label><label>Issue date, if known<input data-source-field="issuedOn" type="date" value="' + escapeHtml(source?.issuedOn || '') + '"></label></div></fieldset>';
+      return '<fieldset class="cost-source-component" data-component="' + component + '"><legend>' + label + '</legend><p>Reviewed saved value: ' + escapeHtml(known ? String(reviewedCosts[component]) : 'Unknown; save an explicit cost first') + '</p><label class="check-label"><input type="checkbox" data-source-field="include"' + (source ? ' checked' : '') + '> Include this component</label><div class="cost-source-component-fields"><label>Source kind<select data-source-field="kind"><option value="invoice"' + (source?.kind === 'invoice' ? ' selected' : '') + '>Invoice</option><option value="statement"' + (source?.kind === 'statement' ? ' selected' : '') + '>Statement</option><option value="estimate"' + (!source || source.kind === 'estimate' ? ' selected' : '') + '>Estimate</option></select></label><div><label>Short identifier<input data-source-field="identifier" maxlength="80" autocomplete="off" value="' + escapeHtml(source?.identifier || '') + '"></label><p class="hidden" data-source-identifier></p></div><label>Issue date, if known<input data-source-field="issuedOn" type="date" value="' + escapeHtml(source?.issuedOn || '') + '"></label></div></fieldset>';
     }).join('');
     $('#cost-source-target').textContent = (editor.attempt ? 'Original request target\n' : '') + 'Account: ' + reviewedTarget.account + '\nConnection: ' + reviewedTarget.connectionId + '\nProduct: ' + reviewedTarget.productId + '\nVariant: ' + reviewedTarget.variantId + '\nSKU: ' + reviewedTarget.sku + (canonicalContent(reviewedTarget) !== canonicalContent(value.target) ? '\nThe currently saved account or target differs. This request has not been rebased.' : '');
     $('#cost-source-notice').textContent = value.notice;
@@ -1453,13 +1453,19 @@
     const editor = costSourceUI.editor; if (!editor) return;
     const working = Boolean(costSourceUI.ticket), attempt = editor.attempt, unknown = attempt && !['saved','refused'].includes(attempt.phase), ready = editor.loaded && editor.loaded.writable && editor.loaded.producerEnabled && !editor.stale && !working;
     const editing = ready && editor.editing && !attempt;
+    const readOnlyBasis = attempt?.body.sourceReview.basis || (!editor.editing && editor.loaded?.current?.record.basis);
     for (const key of ['currency','taxBasis','effectiveFrom','effectiveUntil']) $('#cost-source-' + key).disabled = !editing;
     for (const row of $('#cost-source-fields').querySelectorAll('[data-component]')) {
-      const known = editor.loaded?.costs[row.dataset.component] !== null;
+      const known = attempt ? costSourceAmount(attempt.costSnapshot[row.dataset.component]) : editor.loaded?.costs[row.dataset.component] !== null;
       row.querySelector('[data-source-field=include]').disabled = !editing || !known;
       row.querySelector('[data-source-field=include]').closest('label').classList.toggle('hidden',!known);
       row.querySelector('.cost-source-component-fields').classList.toggle('hidden',!known || !row.querySelector('[data-source-field=include]').checked);
       for (const field of row.querySelectorAll('[data-source-field]:not([data-source-field=include])')) field.disabled = !editing || !known || !row.querySelector('[data-source-field=include]').checked;
+      const identifier = row.querySelector('[data-source-field=identifier]'), fullIdentifier = row.querySelector('[data-source-identifier]');
+      const identifierValue = readOnlyBasis ? readOnlyBasis.sources.find(source=>source.component === row.dataset.component)?.identifier || '' : identifier.value;
+      const showIdentifier = identifier.disabled && row.querySelector('[data-source-field=include]').checked && identifierValue !== '';
+      fullIdentifier.textContent = showIdentifier ? 'Full identifier: ' + identifierValue : '';
+      fullIdentifier.classList.toggle('hidden',!showIdentifier);
     }
     const unchanged = editor.loaded?.current && !editor.loaded.current.stale && canonicalContent(costSourceBasisFromForm()) === canonicalContent(editor.loaded.current.record.basis);
     const valid = editing && !unchanged && validCostSourceBasis(costSourceBasisFromForm(),editor.loaded.costs);

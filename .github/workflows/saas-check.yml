@@ -153,12 +153,19 @@ jobs:
           name: runvara-cost-source-1200-review
           path: /tmp/runvara-cost-source/1200/review/
           if-no-files-found: warn
-      - name: Upload cost source 1200px reconciliation qualification
+      - name: Upload cost source 1200px initial reconciliation qualification
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: runvara-cost-source-1200-reconciliation
-          path: /tmp/runvara-cost-source/1200/reconciliation/
+          name: runvara-cost-source-1200-reconciliation-initial
+          path: /tmp/runvara-cost-source/1200/reconciliation-initial/
+          if-no-files-found: warn
+      - name: Upload cost source 1200px retained reconciliation qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-1200-reconciliation-retained
+          path: /tmp/runvara-cost-source/1200/reconciliation-retained/
           if-no-files-found: warn
       - name: Upload cost source 1200px objective qualification
         if: always()
