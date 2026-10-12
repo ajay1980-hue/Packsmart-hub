@@ -12,6 +12,7 @@ import { assertShopifyOrderRecoveryCapability, authorizeShopifyOrderRecovery, cl
   checkpointShopifyOrderRecoveryPage, getShopifyOrderRecoveryStage, shopifyOrderRecoveryObservation, shopifyOrderRecoveryError } from './shopify-order-recovery.mjs';
 import { assertEbayReadAdmission, createEbayReadContext, ebayErrorCooldown, ebayReadCooldown, mergeEbayReadCooldown, parseEbayRetryAfter } from './ebay-read-cooldown.mjs';
 import { hasAmount, hasCataloguePrice } from './profit.mjs';
+import { inspectShopifyCataloguePage } from './shopify-catalogue-read.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
@@ -636,15 +637,18 @@ export class IntegrationService {
 
   async fetchShopifyProducts(config) {
     const products = [];
+    const seenProductIds = new Set(), seenVariantIds = new Set(), seenCursors = new Set();
     let after = null;
     for (let page = 0; page < 10; page += 1) {
       const data = await this.shopifyGraphql(SHOPIFY_PRODUCTS_QUERY, { first: 50, after }, config);
-      const connection = data?.products;
-      if ((connection?.nodes || []).some(product => product.variants?.pageInfo?.hasNextPage)) throw integrationError('Variant coverage is incomplete; existing catalogue retained', 502, 'SHOPIFY_VARIANT_COVERAGE_LIMIT');
-      products.push(...(connection?.nodes || []).map(mapAdminProduct));
-      if (!connection?.pageInfo?.hasNextPage) break;
+      const connection = inspectShopifyCataloguePage(data, { workspaceId: config.workspaceId, after, seenProductIds, seenVariantIds, seenCursors });
+      for (const id of connection.productIds) seenProductIds.add(id);
+      for (const id of connection.variantIds) seenVariantIds.add(id);
+      products.push(...connection.nodes.map(mapAdminProduct));
+      if (!connection.hasNextPage) break;
       if (page === 9) throw integrationError('Catalogue coverage limit reached; existing data retained', 502, 'SHOPIFY_PRODUCT_COVERAGE_LIMIT');
-      after = connection.pageInfo.endCursor;
+      after = connection.nextCursor;
+      seenCursors.add(after);
     }
     return products;
   }

@@ -210,14 +210,14 @@ for (const source of sources) {
       ['negative stock', '-2', -2, false], ['decimal stock', '42', 42, true]
     ];
     const rows = inventoryCases.map(([label, inventory], index) => ({
-      id: index === 0 ? undefined : 901 + index, sku: `INVENTORY-${index}`, title: label, price: ' ',
+      id: source === 'admin' ? `gid://shopify/ProductVariant/${901 + index}` : index === 0 ? undefined : 901 + index, sku: `INVENTORY-${index}`, title: label, price: ' ',
       inventoryQuantity: inventory, inventory_quantity: inventory,
       available: index === 0 ? false : index === 1 ? null : index === 2 ? 0 : true
     }));
-    const f = await fixture(t, source, rows, { productOverrides: { id: 701, inventory: '42', totalInventory: { value: '42' } } });
+    const f = await fixture(t, source, rows, { productOverrides: { id: source === 'admin' ? productId : 701, inventory: '42', totalInventory: { value: '42' } } });
     await f.service.syncShopify(f.state, { areas: catalogueAreas });
     const mappedProduct = f.state.products[0];
-    assert.equal(mappedProduct.id, source === 'public' ? productId : '701');
+    assert.equal(mappedProduct.id, source === 'snapshot' ? '701' : productId);
     assert.equal(mappedProduct.externalId, mappedProduct.id);
     assert.equal(mappedProduct.inventory, source === 'public' ? null : 42);
     for (const [index, mapped] of mappedProduct.variants.entries()) {
@@ -225,7 +225,7 @@ for (const source of sources) {
       assert.equal(mapped.price, null, label);
       assert.equal(mapped.inventory, source === 'public' ? null : expectedInventory, label);
       assert.equal(mapped.available, source === 'admin' ? expectedAdminAvailability : index !== 0, label);
-      const expectedId = index === 0 ? source === 'admin' ? 'undefined' : '701-INVENTORY-0'
+      const expectedId = source === 'admin' ? `gid://shopify/ProductVariant/${901 + index}` : index === 0 ? '701-INVENTORY-0'
         : source === 'public' ? `gid://shopify/ProductVariant/${901 + index}` : String(901 + index);
       assert.equal(mapped.id, expectedId, label);
       assert.equal(mapped.externalId, index === 0 && source !== 'admin' ? 'INVENTORY-0' : expectedId, label);

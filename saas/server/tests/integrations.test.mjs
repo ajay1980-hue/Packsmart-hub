@@ -100,7 +100,7 @@ test('Shopify Admin sync imports products, variants, inventory, images and order
             price: '3.49',
             inventoryQuantity: 42,
             media: { nodes: [] }
-          }] }
+          }], pageInfo: { hasNextPage: false } }
         }],
         pageInfo: { hasNextPage: false, endCursor: null }
       } } });
