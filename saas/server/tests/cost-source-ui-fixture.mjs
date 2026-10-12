@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { objectiveContentHarness, pause, until, deferred } from './objective-content-ui-fixture.mjs';
+import { costSourceReviewContext, prepareCostSourceReview } from '../lib/cost-source-review.mjs';
+export {pause,until,deferred};
+export const selector = {productId:'gid://shopify/Product/10',variantId:'gid://shopify/ProductVariant/11',sku:'SOURCE-SKU'};
+export const GET = '/api/economics/source-review?' + new URLSearchParams(selector).toString();
+export async function costSourceHarness(t, options = {}) {
+  const h = await objectiveContentHarness(t,options);
+  h.state.products[0].variants = [{id:selector.variantId,sku:selector.sku,title:'Saved variant',price:20,inventory:8}];
+  h.state.economics[selector.sku] = {landed:'4.2500',packing:0,delivery:2};
+  h.bootstrap.products = structuredClone(h.state.products);
+  h.bootstrap.economics[selector.sku] = structuredClone(h.state.economics[selector.sku]);
+  h.bootstrap.dashboard.productRows = [{...h.state.products[0].variants[0],productId:selector.productId,productTitle:'Source review product',productStatus:'active',provider:'shopify',status:'missing-costs'}];
+  h.actor = {workspaceId:h.state.workspace.id,userId:h.state.users[0].id,sessionVersion:1};
+  h.sourceEnabled = true;
+  h.contextCost = () => ({...costSourceReviewContext(h.state,selector,h.actor),producerEnabled:h.sourceEnabled});
+  h.saveCost = body => {
+    const result = prepareCostSourceReview(h.state,body.sourceReview,h.actor);
+    h.state.economics[body.sku] = result.economics;
+    if(result.historyEvent)h.state.costHistory.unshift(result.historyEvent);
+    return {schema:'runvara-cost-source-save/v1',target:result.record.target,requestId:body.sourceReview.requestId,record:result.record,current:result.current,duplicate:result.duplicate};
+  };
+  h.sourceRead = async()=>Response.json(h.contextCost());
+  h.sourcePut = async(_route,options)=>Response.json(h.saveCost(JSON.parse(options.body)));
+  h.explicitRoutes.set(GET,(route,options)=>h.sourceRead(route,options));
+  h.explicitRoutes.set('/api/economics',(route,options)=>h.sourcePut(route,options));
+  await h.controls.reload({migrate:false}); h.controls.setView('profit');
+  h.cs = id=>h.el('cost-source-'+id);
+  h.sourceWrites = ()=>h.calls.filter(call=>call.route === '/api/economics');
+  h.sourceReads = ()=>h.calls.filter(call=>call.route === GET);
+  h.sourceIdle = ()=>until(()=>h.cs('form').getAttribute('aria-busy') === 'false',()=>h.cs('status').textContent+' '+h.cs('error').textContent);
+  h.sourceOpen = async()=>{h.d.querySelector('.cost-source-open')?.click();await h.sourceIdle();};
+  h.sourceChange=(field,value)=>{const node=typeof field==='string'?h.cs(field):field;if(node.type==='checkbox')node.checked=value;else node.value=value;node.dispatchEvent(new h.w.Event('change',{bubbles:true}));};
+  h.component=(component,field)=>h.cs('fields').querySelector(`[data-component="${component}"] [data-source-field="${field}"]`);
+  h.fillSource=(identifier='INV 2026-42')=>{h.sourceChange(h.component('landed','include'),true);h.sourceChange(h.component('landed','kind'),'invoice');h.sourceChange(h.component('landed','identifier'),identifier);h.sourceChange('ack',true);};
+  h.sourceSubmit=()=>h.cs('form').dispatchEvent(new h.w.Event('submit',{bubbles:true,cancelable:true}));
+  h.waitWrite=async count=>{await until(()=>h.sourceWrites().length===count);await h.sourceIdle();};
+  t.after(()=>assert.equal(h.calls.some(call=>/source-review/.test(call.route)&&call.route !== GET),false,'source reads bind exact product + variant + SKU'));
+  return h;
+}

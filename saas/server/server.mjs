@@ -56,6 +56,8 @@ import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, 
   prepareObjectiveContentRequest, readObjectiveContentRequest } from './lib/connection-writes.mjs';
 import { createGovernedRecordStage, assertGovernedRecordCreation, GOVERNED_RECORDS_PAUSED_MESSAGE } from './lib/governed-record-stage.mjs';
 import { objectiveContentContext } from './lib/objective-content-source.mjs';
+import { costSourceReviewContext, prepareCostSourceReview, publicEconomicsSources, publicCostSourceHistory, productCostSourceReviews } from './lib/cost-source-review.mjs';
+import { createCostSourceStage, costSourceCreationEnabled, assertCostSourceCreation, COST_SOURCE_REVIEW_PAUSED_MESSAGE } from './lib/cost-source-stage.mjs';
 import { publicConnectionWrite, publicApproval } from './lib/action-display.mjs';
 
 import { launchMode, publicLaunch, issueInvite, validateInvite, requireLaunchAdmin } from './lib/launch.mjs';
@@ -352,6 +354,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const env = { ...customEnv };
   const startupPolicy = createStartupPolicy(env, STATIC_FILES.keys());
   const governedRecordStage = createGovernedRecordStage(env);
+  const costSourceStage = createCostSourceStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
   const orderRecovery = createOrderRecoveryRunner({store,integrations,env});
@@ -380,6 +383,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const connectionWriteLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 3600000, blockMs: 3600000 });
   const contentRequestReadLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 60000 });
   const objectiveContentLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 60000 });
+  const costSourceLimiter = new SlidingWindowLimiter({ limit: 20, windowMs: 60000, blockMs: 60000 });
   const automationArchiveLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const outcomeReadLimiter = new SlidingWindowLimiter({ limit: 10, windowMs: 60000, blockMs: 60000 });
   const outcomeDraftLimiter = new SlidingWindowLimiter({ limit: 5, windowMs: 60000, blockMs: 60000 });
@@ -539,7 +543,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       calculationVersion: OPERATIONS_CALCULATION_VERSION,
       products: state.products || [],
       orders: state.orders || [],
-      economics: state.economics || {},
+      economics: publicEconomicsSources(state.economics || {}),
       advertisingCosts: state.advertisingCosts || [],
       // Hash persisted inputs; computed snapshots include read-time timestamps.
       revenueEngine: state.revenueEngine || {},
@@ -600,9 +604,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       products: state.products || [],
       orders: operations.orderProfitability.map(({ profitability, ...order }) => order),
       orderDetailCoverage: operations.orderDetailCoverage,
-      economics: state.economics || {},
+      economics: publicEconomicsSources(state.economics || {}),
       suppliers: state.suppliers || [],
-      costHistory: state.costHistory || [],
+      costHistory: publicCostSourceHistory(state.costHistory || []),
       advertisingCosts: state.advertisingCosts || [],
       revenueEngine: revenueEngineSnapshot(state),
       hypergrowth: { businessState, opportunityQueue, growthCouncil, impact, learning, portfolio, executionPlan },
@@ -1585,11 +1589,61 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        if (req.method === 'GET' && pathname === '/api/economics/source-review') {
+          requireOwner(auth);
+          const keys = ['productId', 'variantId', 'sku'];
+          if ([...url.searchParams.keys()].length !== keys.length || keys.some(key => url.searchParams.getAll(key).length !== 1)) {
+            throw Object.assign(new Error('Choose one exact product, variant and SKU.'), { status: 400, code: 'COST_SOURCE_INPUT_INVALID' });
+          }
+          if (!costSourceLimiter.check(rateKey).allowed) throw Object.assign(new Error('Source review limit reached. Wait before checking again.'), { status: 429, code: 'COST_SOURCE_RATE_LIMITED' });
+          costSourceLimiter.fail(rateKey);
+          const context = costSourceReviewContext(auth.state, Object.fromEntries(keys.map(key => [key, url.searchParams.get(key)])),
+            { userId: auth.user.id, sessionVersion: auth.session.sessionVersion, workspaceId: auth.session.workspaceId });
+          send(res, 200, { ...context, producerEnabled: costSourceCreationEnabled(costSourceStage) }); return;
+        }
+
         if (req.method === 'PUT' && pathname === '/api/economics') {
           requireOwner(auth);
           const body = await jsonBody(req, 32768);
           const sku = text(body.sku, 160);
           if (!sku) throw Object.assign(new Error('SKU is required'), { status: 400, code: 'VALIDATION_FAILED' });
+          if (Object.hasOwn(body, 'sourceReview')) {
+            if (Object.keys(body).some(key => !['sku', 'sourceReview'].includes(key)) || body.sku !== sku
+              || !body.sourceReview || body.sourceReview.sku !== sku) throw Object.assign(
+              new Error('Record sources for the exact saved costs in a separate request.'), { status: 400, code: 'COST_SOURCE_INPUT_INVALID' });
+            if (!costSourceLimiter.check(rateKey).allowed) throw Object.assign(new Error('Source review limit reached. Wait before checking again.'), { status: 429, code: 'COST_SOURCE_RATE_LIMITED' });
+            costSourceLimiter.fail(rateKey);
+            const result = await mutate(auth, async state => {
+              const actor = { userId: auth.user.id, sessionVersion: auth.session.sessionVersion, workspaceId: auth.session.workspaceId };
+              const plan = prepareCostSourceReview(state, body.sourceReview, actor);
+              if (!plan.duplicate) {
+                assertCostSourceCreation(costSourceStage);
+                state.economics[sku] = plan.economics;
+                state.costHistory = [plan.historyEvent, ...(state.costHistory || [])];
+                addAudit(state, { type: 'cost_source_review_recorded', actor: auth.user.id,
+                  detail: { reviewId: plan.record.id, sku, attested: true, financialAuthority: false } });
+                const verifyCurrent = snapshot => {
+                  const retained = prepareCostSourceReview(snapshot, body.sourceReview, actor);
+                  if (!retained.duplicate || !retained.current || retained.record.id !== plan.record.id
+                    || retained.record.requestDigest !== plan.record.requestDigest) throw Object.assign(
+                    new Error('The reviewed saved costs changed before this source review was committed.'), { status: 409, code: 'COST_SOURCE_STALE' });
+                };
+                const previousRevision = state._revision;
+                const saved = await store.save(auth.session.workspaceId, state, { ownedSnapshot: true,
+                  beforeCommit: snapshot => { verifyCurrent(state); if (snapshot !== state) verifyCurrent(snapshot); } });
+                try {
+                  if (typeof state._revision !== 'string' || state._revision === previousRevision || saved?._revision !== state._revision) throw new Error('Unconfirmed revision');
+                  verifyCurrent(saved);
+                } catch {
+                  throw Object.assign(new Error('Check this exact request in saved source history before trying again.'),
+                    { status: 503, code: 'COST_SOURCE_SAVE_UNCONFIRMED' });
+                }
+              }
+              return { schema: 'runvara-cost-source-save/v1', target: plan.record.target,
+                requestId: body.sourceReview.requestId, record: plan.record, current: plan.current, duplicate: plan.duplicate };
+            }, { persist: false });
+            send(res, 200, result); return;
+          }
           const incoming = cleanEconomics(body.economics);
           const economics = await mutate(auth, async state => {
             const before = { ...(state.economics[sku] || {}) };
@@ -1610,7 +1664,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             }
             return next;
           });
-          send(res, 200, { sku, economics });
+          send(res, 200, { sku, economics: publicEconomicsSources({ [sku]: economics })[sku] });
           return;
         }
 
@@ -2290,10 +2344,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (contextRead ? [...url.searchParams.keys()].length !== 2 || url.searchParams.getAll('jobId').length !== 1 || url.searchParams.getAll('opportunityId').length !== 1
             : [...url.searchParams.keys()].length !== 0) throw connectionError('Invalid exact source read options.', 'OBJECTIVE_CONTENT_INPUT_INVALID');
           const body = req.method === 'POST' ? await jsonBody(req, 24000) : null;
-          const result = await mutate(auth, state => contextRead
-            ? objectiveContentContext(state, url.searchParams.get('jobId'), url.searchParams.get('opportunityId'), session, loadJob)
-            : objectiveContentRead ? readObjectiveContentRequest(state, objectiveContentRead[1], session, loadJob)
-              : prepareObjectiveContentRequest(state, body, session, { loadJob, governedRecordStage, persist: options => store.save(session.workspaceId, state, options) }), { persist: false });
+          const result = await mutate(auth, async state => {
+            if (contextRead) {
+              const context = await objectiveContentContext(state, url.searchParams.get('jobId'), url.searchParams.get('opportunityId'), session, loadJob);
+              return { ...context, costSources: productCostSourceReviews(state, context.product.id, session) };
+            }
+            return objectiveContentRead ? readObjectiveContentRequest(state, objectiveContentRead[1], session, loadJob)
+              : prepareObjectiveContentRequest(state, body, session, { loadJob, governedRecordStage, persist: options => store.save(session.workspaceId, state, options) });
+          }, { persist: false });
           send(res, 200, result); return;
         }
         const contentRequestRead = pathname.match(/^\/api\/connections\/shopify\/content-requests\/([A-Za-z0-9_-]{16,100})$/);
@@ -2611,7 +2669,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const safe = sanitizeError(error);
       const path = String(req.url || '').split('?')[0].slice(0, 200);
       console.error(JSON.stringify({ event: 'request_error', requestId, method: req.method, path, status: safe.status, code: safe.code }));
-      if (!res.headersSent) send(res, safe.status, { error: safe.code === 'GOVERNED_RECORDS_PAUSED' ? GOVERNED_RECORDS_PAUSED_MESSAGE : safe.publicMessage, code: safe.code });
+      if (!res.headersSent) send(res, safe.status, { error: safe.code === 'GOVERNED_RECORDS_PAUSED' ? GOVERNED_RECORDS_PAUSED_MESSAGE
+        : safe.code === 'COST_SOURCE_REVIEW_PAUSED' ? COST_SOURCE_REVIEW_PAUSED_MESSAGE
+          : safe.code === 'COST_SOURCE_SAVE_UNCONFIRMED' ? 'The save could not be confirmed. Check this exact request in saved source history before trying again.' : safe.publicMessage, code: safe.code });
     }
   };
   const server = http.createServer((req, res) => {

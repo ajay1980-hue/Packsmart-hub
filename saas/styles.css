@@ -1824,3 +1824,36 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
 #orders-revenue, #orders-refunds-value, #orders-profit, #orders-profit-coverage { font-size: clamp(1rem, 2vw, 1.4rem); line-height: 1.35; }
 #analytics-coverage .coverage-item > div { flex-wrap: wrap; }
 #analytics-coverage .coverage-item { min-width: 0; overflow-wrap: anywhere; }
+
+/* Cost source review: native modal, independent source-only form and wrap-safe history. */
+#cost-source-dialog { width:min(880px,calc(100vw - 24px)); max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px); padding:0; overflow:hidden; }
+#cost-source-dialog .cost-source-shell { display:flex; flex-direction:column; max-height:calc(100dvh - 26px); min-width:0; }
+#cost-source-dialog .cost-source-heading { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:.75rem; padding:1rem; border-bottom:1px solid var(--line); flex:0 0 auto; }
+#cost-source-dialog h2 { margin:0; font-size:1.2rem; }
+#cost-source-dialog .cost-source-body { overflow-y:auto; min-height:0; min-width:0; padding:1rem; overscroll-behavior:contain; }
+#cost-source-dialog :is(p,h2,h3,h4,legend,label,li,summary,button) { overflow-wrap:anywhere; }
+#cost-source-dialog :is(p,li,label) { line-height:1.6; }
+#cost-source-dialog :is(button,input,select) { min-height:44px; max-width:100%; min-width:0; }
+#cost-source-dialog button { white-space:normal; }
+#cost-source-dialog label { display:grid; gap:.35rem; min-width:0; }
+#cost-source-dialog .check-label { display:flex; align-items:flex-start; gap:.65rem; }
+#cost-source-dialog input[type=checkbox] { width:1.2rem; min-width:1.2rem; height:1.2rem; min-height:1.2rem; margin-top:.3rem; flex:none; }
+#cost-source-dialog .cost-source-basis, #cost-source-dialog .cost-source-component-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+#cost-source-dialog .cost-source-component { min-width:0; margin:1rem 0; padding:1rem; border:1px solid var(--line); border-radius:var(--radius-sm); }
+#cost-source-dialog .cost-source-component-fields { margin-top:.75rem; }
+#cost-source-dialog .cost-source-notice { border-left:3px solid var(--gold); background:var(--surface-inset); padding:.75rem; }
+#cost-source-dialog .button-row { display:flex; flex-wrap:wrap; gap:.75rem; margin:1rem 0; }
+#cost-source-dialog .cost-source-ack { margin-top:1rem; }
+#cost-source-dialog .cost-source-history-section { margin-top:1.5rem; border-top:1px solid var(--line); padding-top:.75rem; }
+#cost-source-dialog summary { cursor:pointer; min-height:44px; padding:.5rem 0; }
+#cost-source-history { display:grid; gap:1rem; list-style:none; padding:0; }
+#cost-source-dialog .cost-source-record { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); padding:1rem; }
+#cost-source-dialog .cost-source-record ul { padding-left:1.25rem; }
+#cost-source-dialog .cost-source-record h4 { margin:0; }
+#objective-content-cost-sources { min-width:0; overflow-wrap:anywhere; }
+#objective-content-cost-sources li { margin:.6rem 0; }
+@media(max-width:600px) {
+  #cost-source-dialog .cost-source-basis, #cost-source-dialog .cost-source-component-fields { grid-template-columns:minmax(0,1fr); }
+  #cost-source-dialog .button-row { display:grid; grid-template-columns:minmax(0,1fr); }
+  #cost-source-dialog .cost-source-component { padding:.75rem; }
+}

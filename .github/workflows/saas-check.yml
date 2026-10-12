@@ -28,6 +28,10 @@ jobs:
         run: npm --prefix saas/server run check
       - name: Phase 1 safety and integration guards
         run: node saas/tests/saas-guard.test.cjs
+      - name: Fetch pinned pre-annotation reader for compatibility tests
+        run: |
+          git fetch --no-tags --depth=1 origin 601deebcc5c3fb86cd81bee85121368ff2643f05
+          test "$(git rev-parse 601deebcc5c3fb86cd81bee85121368ff2643f05^{tree})" = 846d356fe85f1689b8361fbb46ddf09f997dbc33
       - name: Phase 2 security and tenancy tests
         run: npm --prefix saas/server test
         env:
@@ -77,6 +81,92 @@ jobs:
         run: node saas/server/tests/quiet-startup-browser-check.mjs
       - name: Verify saved brief history and authenticated recovery
         run: node saas/server/tests/brief-history-browser-check.mjs
+      - name: Verify cost source review and retained uncertainty
+        run: node saas/server/tests/cost-source-browser-check.mjs
+      - name: Upload cost source 320px review qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-320-review
+          path: /tmp/runvara-cost-source/320/review/
+          if-no-files-found: warn
+      - name: Upload cost source 320px reconciliation qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-320-reconciliation
+          path: /tmp/runvara-cost-source/320/reconciliation/
+          if-no-files-found: warn
+      - name: Upload cost source 320px objective qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-320-objective
+          path: /tmp/runvara-cost-source/320/objective/
+          if-no-files-found: warn
+      - name: Upload cost source 390px review qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-390-review
+          path: /tmp/runvara-cost-source/390/review/
+          if-no-files-found: warn
+      - name: Upload cost source 390px reconciliation qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-390-reconciliation
+          path: /tmp/runvara-cost-source/390/reconciliation/
+          if-no-files-found: warn
+      - name: Upload cost source 390px objective qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-390-objective
+          path: /tmp/runvara-cost-source/390/objective/
+          if-no-files-found: warn
+      - name: Upload cost source 430px review qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-430-review
+          path: /tmp/runvara-cost-source/430/review/
+          if-no-files-found: warn
+      - name: Upload cost source 430px reconciliation qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-430-reconciliation
+          path: /tmp/runvara-cost-source/430/reconciliation/
+          if-no-files-found: warn
+      - name: Upload cost source 430px objective qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-430-objective
+          path: /tmp/runvara-cost-source/430/objective/
+          if-no-files-found: warn
+      - name: Upload cost source 1200px review qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-1200-review
+          path: /tmp/runvara-cost-source/1200/review/
+          if-no-files-found: warn
+      - name: Upload cost source 1200px reconciliation qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-1200-reconciliation
+          path: /tmp/runvara-cost-source/1200/reconciliation/
+          if-no-files-found: warn
+      - name: Upload cost source 1200px objective qualification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-cost-source-1200-objective
+          path: /tmp/runvara-cost-source/1200/objective/
+          if-no-files-found: warn
       - name: Upload saved brief history qualification
         if: always()
         uses: actions/upload-artifact@v4

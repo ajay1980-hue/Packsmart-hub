@@ -371,6 +371,7 @@
             <p>This is an owner-written request associated with a saved objective and diagnostic review. Commercial readiness, financial benefit and objective progress remain unverified.</p>
             <p id="objective-content-purpose" class="connection-exact-text"></p>
             <p id="objective-content-policy" role="status"></p>
+            <section id="objective-content-cost-sources" aria-label="Cost source diagnostics"></section>
             <form id="objective-content-form" class="record-form" aria-busy="false">
               <label class="wide">Confirm the exact destination account<select id="objective-content-account" required><option value="">Choose the destination Shopify account</option></select></label>
               <label class="wide">Confirm the retained product reference<select id="objective-content-product" required><option value="">Choose the exact product reference</option></select></label>
@@ -430,6 +431,7 @@
             </select>
             <select id="product-sort"><option value="product">Sort: product</option><option value="contribution-desc">Profit £ high-low</option><option value="margin-desc">Margin % high-low</option><option value="stock-asc">Stock low-high</option></select>
           </div>
+          <button id="cost-source-resume" class="secondary hidden" type="button" aria-haspopup="dialog" aria-controls="cost-source-dialog">Check unresolved source review</button>
           <div class="table-wrap"><table class="economics-table"><thead><tr><th>Product / SKU</th><th>Price</th><th>Stock</th><th>Supplier</th><th>Landed</th><th>Packing</th><th>Handling</th><th>Postage</th><th>Payment</th><th>Channel</th><th>Ads</th><th>Other</th><th>Total variable</th><th>Contribution</th><th>Margin</th><th>Status</th></tr></thead><tbody id="economics-body"></tbody></table></div>
         </article>
       </section>
@@ -610,6 +612,36 @@
   </div>
 
   <template id="empty-state"><div class="empty-state">No records to show.</div></template>
+  <dialog id="cost-source-dialog" aria-labelledby="cost-source-heading" aria-describedby="cost-source-description">
+    <div class="cost-source-shell">
+      <header class="cost-source-heading"><h2 id="cost-source-heading">Cost source review</h2><button id="cost-source-close" class="secondary" type="button">Close</button></header>
+      <div class="cost-source-body">
+        <p id="cost-source-description">Annotate costs already saved for this exact variant. Enter short source identifiers only. Do not enter files, URLs, invoice contents, personal data or credentials.</p>
+        <p id="cost-source-target" class="connection-exact-text"></p><p id="cost-source-notice" class="cost-source-notice"></p>
+        <p id="cost-source-current"></p><p id="cost-source-budget"></p>
+        <form id="cost-source-form" aria-busy="false">
+          <div class="cost-source-basis">
+            <label>Currency, if known<input id="cost-source-currency" maxlength="3" pattern="[A-Z]{3}" placeholder="Unknown" autocomplete="off"></label>
+            <label>Tax basis<select id="cost-source-taxBasis"><option value="unknown">Unknown</option><option value="net">Net</option><option value="gross">Gross</option><option value="mixed">Mixed</option></select></label>
+            <label>Effective from, if known<input id="cost-source-effectiveFrom" type="date"></label>
+            <label>Effective until, if known<input id="cost-source-effectiveUntil" type="date"></label>
+          </div>
+          <p>Identifiers may use letters, numbers, spaces and . _ / # ( ) - characters, up to 80 characters. Each selected component needs one identifier.</p>
+          <div id="cost-source-fields"></div>
+          <p id="cost-source-status" role="status"></p><p id="cost-source-request"></p><p id="cost-source-error" class="form-error" role="alert"></p>
+          <label class="check-label cost-source-ack"><input id="cost-source-ack" type="checkbox"> I reviewed this exact variant, saved costs and source identifiers. This is an unverified attestation; all existing financial and action holds remain.</label>
+          <div class="button-row">
+            <button id="cost-source-save" class="primary" type="submit">Save source annotation</button>
+            <button id="cost-source-check" class="secondary hidden" type="button">Check exact saved request</button>
+            <button id="cost-source-retry" class="secondary hidden" type="button">Retry same exact request</button>
+            <button id="cost-source-correct" class="secondary hidden" type="button">Review a correction</button>
+            <button id="cost-source-reload" class="secondary" type="button">Discard unsent draft and reload</button>
+          </div>
+        </form>
+        <details class="cost-source-history-section"><summary>Retained source history and corrections</summary><p id="cost-source-history-empty">No retained source reviews.</p><ol id="cost-source-history"></ol></details>
+      </div>
+    </div>
+  </dialog>
   <dialog id="workspace-search-dialog" class="workspace-search-dialog" aria-labelledby="workspace-search-title"><div class="search-heading"><div><p class="eyebrow">WORKSPACE NAVIGATION</p><h2 id="workspace-search-title">Where would you like to go?</h2></div><button id="close-workspace-search" class="secondary" type="button">Close</button></div><label for="workspace-search-input" class="muted tiny">Find a page by name or task</label><input id="workspace-search-input" type="search" placeholder="Try approvals, products or billing" autocomplete="off" maxlength="100" autofocus><p id="workspace-search-count" class="muted tiny" role="status"></p><div id="workspace-search-results" class="search-results"></div><p class="search-help muted tiny">↑ ↓ to move · Enter to open · Esc to close</p></dialog>
   <dialog id="connection-dialog" aria-labelledby="connection-dialog-title"><div class="connection-dialog-shell"><button id="connection-close" class="secondary connection-close" type="button" aria-label="Close connection details">Close</button><div id="connection-detail"></div></div></dialog>
   <dialog id="brief-history-dialog" aria-labelledby="brief-history-title" aria-describedby="brief-history-description">

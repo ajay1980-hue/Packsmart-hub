@@ -13,6 +13,7 @@
   };
   const objectiveUI = { epoch: 0, editor: null, read: null, mutation: null, snapshotContext: null, referenceCache: null, planningBaseline: '', needsReload: false, unknownSave: false };
   const objectiveContent = { editor:null, ticket:null, handoff:null, epoch:0, previous:null };
+  const costSourceUI = { editor:null, ticket:null, epoch:0, attempts:new Map() };
   const seoReviewUI = { epoch: 0, context: null };
   let invitationToken = '';
   let ownerActivationToken = '';
@@ -194,6 +195,7 @@
   }
 
   function showLogin() {
+    interruptCostSource();
     resetSeoReview();
     resetObjectiveEditing(true);
     resetBusinessGraph(true);
@@ -214,6 +216,7 @@
   }
 
   function showPasswordSetup() {
+    interruptCostSource();
     resetSeoReview();
     window.RunvaraConnections?.interruptContent('Password replacement required', true);
     resetObjectiveEditing(true);
@@ -257,6 +260,7 @@
   }
 
   async function loadBootstrap(options) {
+    interruptCostSource();
     window.RunvaraBriefHistory?.reset();
     resetSeoReview('Refreshing SEO review. Classification is unavailable until the current workspace snapshot loads.');
     const seoTicket = { epoch: seoReviewUI.epoch, session: state.session, signature: seoSessionSignature() };
@@ -304,7 +308,7 @@
   function setView(view) {
     if (view === 'issues') renderSeoReview();
     if (view !== state.view) window.RunvaraConnections?.interruptContent('Navigation changed');
-    if (view !== state.view) resetObjectiveEditing();
+    if (view !== state.view) { interruptCostSource(); resetObjectiveEditing(); }
     if (view !== 'overview') resetBusinessGraph(true);
     if (view !== state.view) { window.RunvaraOutcomes?.pause(); window.RunvaraActivity?.pause(); window.RunvaraBriefHistory?.pause(); }
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
@@ -737,9 +741,11 @@
       const image = item.productImage ? '<img src="' + escapeHtml(item.productImage) + '" alt="">' : '<span class="image-placeholder">PS</span>';
       const supplierOptions = '<option value="">No supplier mapped</option>' + suppliers.map(supplier => '<option value="' + escapeHtml(supplier.id) + '"' + (economics.supplierId === supplier.id ? ' selected' : '') + '>' + escapeHtml(supplier.name) + '</option>').join('');
       const missingTitle = item.missingFields && item.missingFields.length ? item.missingFields.join(', ') : 'Complete cost coverage';
-      return '<tr class="economics-row" data-sku="' + escapeHtml(item.sku) + '"><td><div class="product-cell">' + image + '<div><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.title) + ' · ' + escapeHtml(item.sku || 'No SKU') + '</small><small>Order attribution unverified · sales and stock cover unavailable</small></div></div></td><td class="numeric">' + money(item.price) + '</td><td class="numeric ' + (item.inventory !== null && item.inventory <= lowStockThreshold ? 'warn' : '') + '">' + (item.inventory == null ? '—' : escapeHtml(item.inventory)) + '</td><td><select class="econ-input compact-select" data-field="supplierId" aria-label="Supplier for ' + escapeHtml(item.sku) + '">' + supplierOptions + '</select></td><td>' + moneyInput('landed', 'Landed cost for ' + item.sku, economics) + '</td><td>' + moneyInput('packing', 'Packing cost for ' + item.sku, economics) + '</td><td>' + moneyInput('handling', 'Handling cost for ' + item.sku, economics) + '</td><td>' + moneyInput('delivery', 'Actual postage cost for ' + item.sku, economics) + '</td><td>' + moneyInput('paymentFee', 'Payment fee for ' + item.sku, economics) + '</td><td>' + moneyInput('channelFee', 'Channel fee for ' + item.sku, economics) + '</td><td>' + moneyInput('advertising', 'Advertising allocation for ' + item.sku, economics) + '</td><td>' + moneyInput('otherVariable', 'Other variable cost for ' + item.sku, economics) + '</td><td class="numeric">' + money(item.totalVariableCost) + '</td><td class="numeric ' + statusClass(item.status) + '">' + money(item.contribution) + '</td><td class="numeric ' + statusClass(item.status) + '">' + percent(item.margin) + '</td><td><span class="tag ' + statusClass(item.status) + '" title="' + escapeHtml(missingTitle) + '">' + escapeHtml(statusLabel(item.status)) + '</span><div class="table-actions"><button class="text-button cost-details" type="button">Supplier detail</button><button class="primary small-button save-economics" type="button">Save</button></div></td></tr>' +
+      return '<tr class="economics-row" data-product-id="' + escapeHtml(item.productId) + '" data-variant-id="' + escapeHtml(item.id) + '" data-sku="' + escapeHtml(item.sku) + '"><td><div class="product-cell">' + image + '<div><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.title) + ' · ' + escapeHtml(item.sku || 'No SKU') + '</small><small>Order attribution unverified · sales and stock cover unavailable</small></div></div></td><td class="numeric">' + money(item.price) + '</td><td class="numeric ' + (item.inventory !== null && item.inventory <= lowStockThreshold ? 'warn' : '') + '">' + (item.inventory == null ? '—' : escapeHtml(item.inventory)) + '</td><td><select class="econ-input compact-select" data-field="supplierId" aria-label="Supplier for ' + escapeHtml(item.sku) + '">' + supplierOptions + '</select></td><td>' + moneyInput('landed', 'Landed cost for ' + item.sku, economics) + '</td><td>' + moneyInput('packing', 'Packing cost for ' + item.sku, economics) + '</td><td>' + moneyInput('handling', 'Handling cost for ' + item.sku, economics) + '</td><td>' + moneyInput('delivery', 'Actual postage cost for ' + item.sku, economics) + '</td><td>' + moneyInput('paymentFee', 'Payment fee for ' + item.sku, economics) + '</td><td>' + moneyInput('channelFee', 'Channel fee for ' + item.sku, economics) + '</td><td>' + moneyInput('advertising', 'Advertising allocation for ' + item.sku, economics) + '</td><td>' + moneyInput('otherVariable', 'Other variable cost for ' + item.sku, economics) + '</td><td class="numeric">' + money(item.totalVariableCost) + '</td><td class="numeric ' + statusClass(item.status) + '">' + money(item.contribution) + '</td><td class="numeric ' + statusClass(item.status) + '">' + percent(item.margin) + '</td><td><span class="tag ' + statusClass(item.status) + '" title="' + escapeHtml(missingTitle) + '">' + escapeHtml(statusLabel(item.status)) + '</span><div class="table-actions"><button class="text-button cost-details" type="button">Supplier detail</button>' + (costSourceAccess() ? '<button class="text-button cost-source-open" type="button" aria-haspopup="dialog" aria-controls="cost-source-dialog">Source review</button>' : '') + '<button class="primary small-button save-economics" type="button">Save</button></div></td></tr>' +
         '<tr class="cost-detail-row hidden" data-sku="' + escapeHtml(item.sku) + '"><td colspan="16"><div class="cost-detail-grid"><label>Supplier SKU<input class="econ-input" data-field="supplierSku" value="' + escapeHtml(inputValue(economics.supplierSku)) + '"></label><label>Box quantity<input class="econ-input" data-field="boxQuantity" type="number" min="0" step="1" value="' + escapeHtml(inputValue(economics.boxQuantity)) + '"></label><label>Box price (£)<input class="econ-input" data-field="boxPrice" type="number" min="0" step="0.01" value="' + escapeHtml(inputValue(economics.boxPrice)) + '"></label><label>Supplier unit cost (£)<input class="econ-input" data-field="supplierUnitCost" type="number" min="0" step="0.0001" value="' + escapeHtml(inputValue(economics.supplierUnitCost)) + '"></label><label>Delivery allocation / unit (£)<input class="econ-input" data-field="supplierDelivery" type="number" min="0" step="0.0001" value="' + escapeHtml(inputValue(economics.supplierDelivery)) + '"></label><label>Supplier VAT rate (%)<input class="econ-input" data-field="supplierVatRate" type="number" min="0" max="100" step="0.1" value="' + escapeHtml(inputValue(economics.supplierVatRate)) + '"></label><label>VAT recoverable<select class="econ-input" data-field="supplierVatRecoverable"><option value=""' + (economics.supplierVatRecoverable == null ? ' selected' : '') + '>Unknown</option><option value="true"' + (economics.supplierVatRecoverable === true ? ' selected' : '') + '>Yes</option><option value="false"' + (economics.supplierVatRecoverable === false ? ' selected' : '') + '>No</option></select></label><label>Margin floor (%)<input class="econ-input" data-field="marginFloor" type="number" min="0" max="100" step="0.1" value="' + escapeHtml(inputValue(economics.marginFloor)) + '"></label><label class="detail-notes">Notes<textarea class="econ-input" data-field="notes">' + escapeHtml(inputValue(economics.notes)) + '</textarea></label></div><p class="muted tiny">If landed cost is blank, it is derived only when unit/box cost, supplier delivery, VAT rate and VAT recovery treatment are all known.</p></td></tr>';
     }).join('') || '<tr><td colspan="16" class="empty-state">No products match this filter.</td></tr>';
+    $('#economics-body').querySelectorAll('.econ-input').forEach(field=>{field.dataset.savedValue = field.value;});
+    renderCostSourceRecovery();
   }
 
   function recordedOrderStatus(order) {
@@ -1332,6 +1338,249 @@
     catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
   }
 
+  // Source-only cost annotations are private diagnostic attestations. Their
+  // request identities survive interruptions in this page; they never save costs.
+  const costSourceComponents = [
+    ['supplierUnitCost','Supplier unit cost'],['supplierDelivery','Supplier delivery allocation'],['supplierVatRate','Supplier VAT rate'],
+    ['boxQuantity','Box quantity'],['boxPrice','Box price'],['landed','Landed cost'],['packing','Packing'],['handling','Handling'],
+    ['delivery','Actual postage'],['paymentFee','Payment fee'],['channelFee','Channel fee'],['advertising','Advertising allocation'],['otherVariable','Other variable cost']
+  ];
+  const costSourceKeys = costSourceComponents.map(([key]) => key);
+  const costSourceSchema = 'runvara-cost-source-review/v1';
+  const costSourcePaused = 'New cost source reviews are paused on this server. Saved reviews remain available to inspect and reconcile.';
+  const costSourceUUID = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+  const costSourceDigest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  const costSourceDate = value => value === null || typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString().slice(0,10) === value;
+  const costSourceIdentifier = value => typeof value === 'string' && value.length > 0 && value.length <= 80 && value === value.trim() && /^[A-Za-z0-9 ._/#()-]+$/.test(value) && /[A-Za-z0-9]/.test(value) && !/(?:www\.|[A-Za-z0-9-]+\.[A-Za-z]{2,}(?:\/|$))/i.test(value);
+  const costSourceAmount = value => (typeof value === 'number' || typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(value.trim())) && Number.isFinite(Number(value));
+  function costSourceAccess(context = objectiveContext()) {
+    return sameObjectiveSession(context) && ['owner','admin'].includes(state.session.user.role) && state.session.user.role === state.data.user.role;
+  }
+  function costSourceSelector(value) {
+    return value && /^gid:\/\/shopify\/Product\/[1-9][0-9]{0,29}$/.test(value.productId) && /^gid:\/\/shopify\/ProductVariant\/[1-9][0-9]{0,29}$/.test(value.variantId) &&
+      typeof value.sku === 'string' && value.sku.length > 0 && value.sku.length <= 160 && value.sku === value.sku.trim() && !/[\u0000-\u001f\u007f]/.test(value.sku);
+  }
+  function validCostSourceTarget(target, workspaceId) {
+    return exactContentKeys(target,['workspaceId','productId','variantId','sku','connectionId','account','accountId']) && costSourceSelector(target) && target.workspaceId === workspaceId && contentReference(target.connectionId) &&
+      typeof target.account === 'string' && target.account.length <= 253 && /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(target.account) &&
+      (target.accountId === null || contentReference(target.accountId) || typeof target.accountId === 'string' && /^gid:\/\/shopify\/Shop\/[1-9][0-9]{0,29}$/.test(target.accountId));
+  }
+  function validCostSourceBasis(basis, costs) {
+    return exactContentKeys(basis,['currency','taxBasis','effectiveFrom','effectiveUntil','sources']) && (basis.currency === null || typeof basis.currency === 'string' && /^[A-Z]{3}$/.test(basis.currency)) &&
+      ['unknown','net','gross','mixed'].includes(basis.taxBasis) && costSourceDate(basis.effectiveFrom) && costSourceDate(basis.effectiveUntil) && !(basis.effectiveFrom && basis.effectiveUntil && basis.effectiveFrom > basis.effectiveUntil) &&
+      Array.isArray(basis.sources) && basis.sources.length > 0 && basis.sources.length <= costSourceKeys.length && new Set(basis.sources.map(source=>source?.component)).size === basis.sources.length &&
+      basis.sources.every(source=>exactContentKeys(source,['component','kind','identifier','issuedOn']) && costSourceKeys.includes(source.component) && ['invoice','statement','estimate'].includes(source.kind) && costSourceIdentifier(source.identifier) && costSourceDate(source.issuedOn) && costSourceAmount(costs?.[source.component]));
+  }
+  function validCostSourceRawCosts(costs) {
+    return costs && typeof costs === 'object' && !Array.isArray(costs) && Object.keys(costs).length <= costSourceKeys.length + 1 && Object.entries(costs).every(([key,value])=>key === 'supplierVatRecoverable' ? [true,false,null,''].includes(value) : costSourceKeys.includes(key) && (value === null || typeof value === 'string' && value.length <= 128 || typeof value === 'number' && Number.isFinite(value)));
+  }
+  function validCostSourceRecord(record, workspaceId) {
+    return exactContentKeys(record,['schema','id','requestId','sourceRevision','requestDigest','target','costs','basis','actor','previousId','recordedAt']) && record.schema === costSourceSchema && costSourceUUID(record.requestId) && record.id === 'cost_source_' + record.requestId &&
+      costSourceDigest(record.sourceRevision) && costSourceDigest(record.requestDigest) && validCostSourceTarget(record.target,workspaceId) &&
+      (record.previousId === null || typeof record.previousId === 'string' && record.previousId.startsWith('cost_source_') && costSourceUUID(record.previousId.slice(12))) &&
+      typeof record.recordedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record.recordedAt) && Number.isFinite(Date.parse(record.recordedAt)) &&
+      exactContentKeys(record.actor,['workspaceId','userId','sessionVersion','role']) && record.actor.workspaceId === workspaceId && contentReference(record.actor.userId) && Number.isSafeInteger(record.actor.sessionVersion) && record.actor.sessionVersion > 0 && ['owner','admin'].includes(record.actor.role) &&
+      validCostSourceRawCosts(record.costs) &&
+      validCostSourceBasis(record.basis,record.costs) && new TextEncoder().encode(JSON.stringify(record)).length <= 2048;
+  }
+  function validCostSourceContext(value, editor) {
+    const budget = value?.budget, current = value?.current;
+    return exactContentKeys(value,['schema','target','sourceRevision','writable','costs','costSnapshot','current','history','budget','notice','producerEnabled']) && value.schema === costSourceSchema && validCostSourceTarget(value.target,editor.context.workspaceId) &&
+      ['productId','variantId','sku'].every(key=>value.target[key] === editor.selector[key]) && typeof value.writable === 'boolean' && (value.writable ? costSourceDigest(value.sourceRevision) : value.sourceRevision === null) &&
+      (value.writable ? validCostSourceRawCosts(value.costSnapshot) && canonicalContent(value.costs) === canonicalContent(Object.fromEntries(costSourceKeys.map(key=>[key,costSourceAmount(value.costSnapshot[key]) ? Number(value.costSnapshot[key]) : null]))) : value.costSnapshot === null && Object.values(value.costs || {}).every(amount=>amount === null)) && exactContentKeys(value.costs,costSourceKeys) && Object.values(value.costs).every(amount=>amount === null || typeof amount === 'number' && Number.isFinite(amount)) &&
+      Array.isArray(value.history) && value.history.length <= 5000 && value.history.every(record=>validCostSourceRecord(record,editor.context.workspaceId) && record.target.sku === editor.selector.sku) && new Set(value.history.map(record=>record.requestId)).size === value.history.length &&
+      (current === null ? value.history.length === 0 : exactContentKeys(current,['record','stale','staleReasons']) && validCostSourceRecord(current.record,editor.context.workspaceId) && typeof current.stale === 'boolean' && Array.isArray(current.staleReasons) && current.staleReasons.every(reason=>['saved_target_changed','saved_costs_changed','target_unavailable'].includes(reason)) && current.stale === (current.staleReasons.length > 0) && canonicalContent(current.record) === canonicalContent(value.history[0])) &&
+      exactContentKeys(budget,['reviewMaxBytes','retainedMaxBytes','retainedBytes','remainingBytes']) && budget.reviewMaxBytes === 2048 && budget.retainedMaxBytes === 65536 && Number.isSafeInteger(budget.retainedBytes) && budget.retainedBytes >= 0 && budget.remainingBytes === budget.retainedMaxBytes - budget.retainedBytes && budget.remainingBytes >= 0 &&
+      typeof value.notice === 'string' && value.notice.length <= 2000 && typeof value.producerEnabled === 'boolean';
+  }
+  function costSourceKey(selector) { return canonicalContent([state.session?.user?.id,state.data?.workspace?.id,selector.productId,selector.variantId,selector.sku]); }
+  function costSourceLocalKey(selector) {
+    return canonicalContent([state.data?.dashboard?.productRows?.filter(row=>row.productId === selector.productId && row.id === selector.variantId),state.data?.economics?.[selector.sku],state.data?.connections]);
+  }
+  function costSourceDirty(selector) {
+    return Array.from($('#economics-body').querySelectorAll('tr')).filter(row=>row.dataset.sku === selector.sku).some(row=>Array.from(row.querySelectorAll('.econ-input')).some(field=>field.value !== field.dataset.savedValue));
+  }
+  function pendingCostSourceReviews() {
+    return costSourceAccess() ? [...costSourceUI.attempts.entries()].filter(([,attempt])=>attempt.userId === state.session.user.id && attempt.target.workspaceId === state.data.workspace.id && !['saved','refused'].includes(attempt.phase)) : [];
+  }
+  function renderCostSourceRecovery() { $('#cost-source-resume')?.classList.toggle('hidden',pendingCostSourceReviews().length === 0); }
+  function interruptCostSource() {
+    costSourceUI.epoch++;
+    const ticket = costSourceUI.ticket; costSourceUI.ticket = null; ticket?.controller.abort();
+    const editor = costSourceUI.editor, attempt = editor?.attempt;
+    if (attempt && !['saved','refused'].includes(attempt.phase)) { attempt.phase = 'unknown'; attempt.hadUnknown = true; attempt.retryReady = false; }
+    costSourceUI.editor = null;
+    const dialog = $('#cost-source-dialog'); if (!dialog) return;
+    $('#cost-source-form').reset(); $('#cost-source-form').setAttribute('aria-busy','false'); $('#cost-source-fields').replaceChildren(); $('#cost-source-history').replaceChildren();
+    for (const id of ['target','current','status','error','budget','notice','request']) $('#cost-source-' + id).textContent = '';
+    if (dialog.open) dialog.close();
+    renderCostSourceRecovery();
+    if (editor?.opener?.isConnected && costSourceAccess(editor.context)) editor.opener.focus();
+  }
+  function currentCostSource(ticket) {
+    if (costSourceUI.ticket !== ticket || costSourceUI.editor !== ticket.editor || ticket.epoch !== costSourceUI.epoch) return false;
+    if (!costSourceAccess(ticket.editor.context) || state.view !== 'profit' || document.hidden || !$('#cost-source-dialog').open) { interruptCostSource(); return false; }
+    if (ticket.localKey !== costSourceLocalKey(ticket.editor.selector)) { interruptCostSource(); showMessage('Saved costs or account identity changed. Reopen Source review to check the retained request.','error'); return false; }
+    return true;
+  }
+  function costSourceTicket(editor, kind) {
+    const ticket = {editor,kind,epoch:costSourceUI.epoch,localKey:costSourceLocalKey(editor.selector),controller:new AbortController()};
+    costSourceUI.ticket = ticket; return ticket;
+  }
+  function costSourceHistoryMarkup(records) {
+    return records.map(record=>'<li class="cost-source-record"><h4>' + escapeHtml(date(record.recordedAt)) + '</h4><p>Record: ' + escapeHtml(record.id) + '<br>Request: ' + escapeHtml(record.requestId) + '<br>Recorded by: ' + escapeHtml(record.actor.userId) + ' (' + escapeHtml(record.actor.role) + ')</p><p>Account: ' + escapeHtml(record.target.account) + '<br>Product: ' + escapeHtml(record.target.productId) + '<br>Variant: ' + escapeHtml(record.target.variantId) + '<br>SKU: ' + escapeHtml(record.target.sku) + '</p><p>Currency: ' + escapeHtml(record.basis.currency || 'Unknown') + ' · Tax basis: ' + escapeHtml(statusLabel(record.basis.taxBasis)) + '<br>Effective: ' + escapeHtml(record.basis.effectiveFrom || 'Unknown start') + ' to ' + escapeHtml(record.basis.effectiveUntil || 'Unknown end') + '</p><ul>' + record.basis.sources.map(source=>'<li>' + escapeHtml(costSourceComponents.find(([key])=>key === source.component)[1]) + ': ' + escapeHtml(String(record.costs[source.component])) + ' recorded · ' + escapeHtml(source.kind) + ' · ' + escapeHtml(source.identifier) + ' · issued ' + escapeHtml(source.issuedOn || 'Unknown') + '</li>').join('') + '</ul><p>' + (record.previousId ? 'Corrects: ' + escapeHtml(record.previousId) : 'First retained source review') + '</p></li>').join('');
+  }
+  function fillCostSource(editor) {
+    const value = editor.loaded, reviewedCosts = editor.attempt?.costSnapshot || value.costSnapshot || value.costs, reviewedTarget = editor.attempt?.target || value.target, basis = editor.attempt?.body.sourceReview.basis || value.current?.record.basis || {currency:null,taxBasis:'unknown',effectiveFrom:null,effectiveUntil:null,sources:[]};
+    for (const key of ['currency','taxBasis','effectiveFrom','effectiveUntil']) $('#cost-source-' + key).value = basis[key] ?? '';
+    $('#cost-source-fields').innerHTML = costSourceComponents.map(([component,label])=>{
+      const source = basis.sources.find(row=>row.component === component), known = costSourceAmount(reviewedCosts[component]);
+      return '<fieldset class="cost-source-component" data-component="' + component + '"><legend>' + label + '</legend><p>Reviewed saved value: ' + escapeHtml(known ? String(reviewedCosts[component]) : 'Unknown; save an explicit cost first') + '</p><label class="check-label"><input type="checkbox" data-source-field="include"' + (source ? ' checked' : '') + '> Include this component</label><div class="cost-source-component-fields"><label>Source kind<select data-source-field="kind"><option value="invoice"' + (source?.kind === 'invoice' ? ' selected' : '') + '>Invoice</option><option value="statement"' + (source?.kind === 'statement' ? ' selected' : '') + '>Statement</option><option value="estimate"' + (!source || source.kind === 'estimate' ? ' selected' : '') + '>Estimate</option></select></label><label>Short identifier<input data-source-field="identifier" maxlength="80" autocomplete="off" value="' + escapeHtml(source?.identifier || '') + '"></label><label>Issue date, if known<input data-source-field="issuedOn" type="date" value="' + escapeHtml(source?.issuedOn || '') + '"></label></div></fieldset>';
+    }).join('');
+    $('#cost-source-target').textContent = (editor.attempt ? 'Original request target\n' : '') + 'Account: ' + reviewedTarget.account + '\nConnection: ' + reviewedTarget.connectionId + '\nProduct: ' + reviewedTarget.productId + '\nVariant: ' + reviewedTarget.variantId + '\nSKU: ' + reviewedTarget.sku + (canonicalContent(reviewedTarget) !== canonicalContent(value.target) ? '\nThe currently saved account or target differs. This request has not been rebased.' : '');
+    $('#cost-source-notice').textContent = value.notice;
+    $('#cost-source-budget').textContent = 'Each review: up to 2 KiB. Last checked retained source history: ' + value.budget.retainedBytes + ' / 65536 bytes. Corrections retain earlier records.';
+    $('#cost-source-current').textContent = value.current ? (value.current.stale ? 'The latest attestation is stale: ' + value.current.staleReasons.map(reason=>reason === 'saved_target_changed' ? 'saved target changed' : reason === 'target_unavailable' ? 'target unavailable' : 'saved costs changed').join('; ') + '. Review a correction against the current saved values.' : 'Latest saved attestation matches the current saved costs and target. It remains unverified.') : 'No saved source attestation for this SKU. Unknown facts remain unknown.';
+    $('#cost-source-history').innerHTML = costSourceHistoryMarkup(value.history);
+    $('#cost-source-history-empty').classList.toggle('hidden',value.history.length > 0);
+  }
+  function costSourceBasisFromForm() {
+    return {currency:$('#cost-source-currency').value || null,taxBasis:$('#cost-source-taxBasis').value,effectiveFrom:$('#cost-source-effectiveFrom').value || null,effectiveUntil:$('#cost-source-effectiveUntil').value || null,
+      sources:Array.from($('#cost-source-fields').querySelectorAll('[data-component]')).filter(row=>row.querySelector('[data-source-field=include]').checked).map(row=>({component:row.dataset.component,kind:row.querySelector('[data-source-field=kind]').value,identifier:row.querySelector('[data-source-field=identifier]').value,issuedOn:row.querySelector('[data-source-field=issuedOn]').value || null}))};
+  }
+  function renderCostSource() {
+    renderCostSourceRecovery();
+    const editor = costSourceUI.editor; if (!editor) return;
+    const working = Boolean(costSourceUI.ticket), attempt = editor.attempt, unknown = attempt && !['saved','refused'].includes(attempt.phase), ready = editor.loaded && editor.loaded.writable && editor.loaded.producerEnabled && !editor.stale && !working;
+    const editing = ready && editor.editing && !attempt;
+    for (const key of ['currency','taxBasis','effectiveFrom','effectiveUntil']) $('#cost-source-' + key).disabled = !editing;
+    for (const row of $('#cost-source-fields').querySelectorAll('[data-component]')) {
+      const known = editor.loaded?.costs[row.dataset.component] !== null;
+      row.querySelector('[data-source-field=include]').disabled = !editing || !known;
+      row.querySelector('[data-source-field=include]').closest('label').classList.toggle('hidden',!known);
+      row.querySelector('.cost-source-component-fields').classList.toggle('hidden',!known || !row.querySelector('[data-source-field=include]').checked);
+      for (const field of row.querySelectorAll('[data-source-field]:not([data-source-field=include])')) field.disabled = !editing || !known || !row.querySelector('[data-source-field=include]').checked;
+    }
+    const unchanged = editor.loaded?.current && !editor.loaded.current.stale && canonicalContent(costSourceBasisFromForm()) === canonicalContent(editor.loaded.current.record.basis);
+    const valid = editing && !unchanged && validCostSourceBasis(costSourceBasisFromForm(),editor.loaded.costs);
+    const acknowledge = valid || ready && unknown && attempt.retryReady;
+    $('#cost-source-ack').disabled = !acknowledge;
+    if (!editor.ackKey) $('#cost-source-ack').checked = false;
+    const acknowledged = $('#cost-source-ack').checked && editor.ackKey === canonicalContent(costSourceBasisFromForm());
+    $('#cost-source-save').classList.toggle('hidden',Boolean(attempt) || !editor.editing); $('#cost-source-save').disabled = !valid || !acknowledged;
+    $('#cost-source-check').classList.toggle('hidden',!unknown); $('#cost-source-check').disabled = working;
+    $('#cost-source-retry').classList.toggle('hidden',!unknown || !attempt.retryReady); $('#cost-source-retry').disabled = !ready || !acknowledged;
+    $('#cost-source-reload').classList.toggle('hidden',Boolean(unknown)); $('#cost-source-reload').disabled = working;
+    $('#cost-source-correct').classList.toggle('hidden',(!editor.loaded?.current && attempt?.phase !== 'saved') || editor.editing || Boolean(unknown)); $('#cost-source-correct').disabled = working || !editor.loaded?.writable;
+    $('#cost-source-form').setAttribute('aria-busy',String(working));
+    $('#cost-source-request').textContent = editor.loaded && attempt ? 'Retained request: ' + attempt.body.sourceReview.requestId : '';
+    $('#cost-source-status').textContent = working ? (costSourceUI.ticket.kind === 'save' ? 'Saving this exact source annotation…' : 'Checking saved source reviews…') : unknown ? 'The save outcome is unknown. Check this exact request before starting another. Closing does not cancel a save.' : attempt?.phase === 'saved' ? (attempt.duplicate ? 'Existing identical source annotation confirmed. No correction was added; all financial holds are unchanged.' : 'Exact source annotation found in saved history. Costs and all financial holds are unchanged.') : attempt?.phase === 'refused' ? 'The annotation was refused. Reload saved costs before another review.' : !editor.loaded ? 'Source review is unavailable until the exact saved variant has been read.' : !editor.loaded.writable ? 'The saved target is unavailable. Retained history can be inspected; new annotations are blocked.' : !editor.loaded.producerEnabled ? costSourcePaused : editor.stale ? 'Saved costs or account identity changed. Reload before reviewing another annotation.' : editor.editing ? (unchanged ? 'Change at least one source detail to save a correction. The existing annotation is retained.' : 'Annotate explicitly saved components only. Blank currency and dates stay unknown.') : 'Inspect the saved attestation or start an explicit correction.';
+  }
+  function costSourceRecordMatchesCosts(record, costs) {
+    return canonicalContent(record.costs) === canonicalContent(costs);
+  }
+  function matchingCostSourceRecord(record, attempt) {
+    const input = attempt.body.sourceReview;
+    return costSourceRecordMatchesCosts(record,attempt.costSnapshot) && record.requestId === input.requestId && record.sourceRevision === input.sourceRevision && record.actor.userId === attempt.userId && canonicalContent(record.target) === canonicalContent(attempt.target) && canonicalContent(record.basis) === canonicalContent(input.basis);
+  }
+  async function loadCostSource(editor, correction = false) {
+    if (costSourceUI.editor !== editor || costSourceUI.ticket || !costSourceAccess(editor.context)) return;
+    const ticket = costSourceTicket(editor,'read'); editor.ackKey = null; $('#cost-source-error').textContent = ''; renderCostSource();
+    try {
+      const query = new URLSearchParams(editor.selector).toString();
+      const value = await request('/api/economics/source-review?' + query,{signal:ticket.controller.signal,isCurrent:()=>currentCostSource(ticket)});
+      if (!currentCostSource(ticket)) return;
+      if (!validCostSourceContext(value,editor)) throw new Error('The response did not match the exact saved variant or safe source-review format.');
+      editor.loaded = freezeObjective(objectiveCopy(value)); editor.stale = false; editor.localKey = ticket.localKey;
+      const attempt = editor.attempt;
+      if (attempt && !['saved','refused'].includes(attempt.phase)) {
+        const record = value.history.find(row=>matchingCostSourceRecord(row,attempt));
+        if (record) { attempt.phase = 'saved'; attempt.record = record; attempt.retryReady = false; }
+        else {
+          attempt.phase = 'unknown'; attempt.hadUnknown = true;
+          attempt.retryReady = value.writable && value.producerEnabled && value.sourceRevision === attempt.body.sourceReview.sourceRevision && canonicalContent(value.target) === canonicalContent(attempt.target) && !costSourceDirty(editor.selector);
+          $('#cost-source-error').textContent = 'No matching request was found in this checked snapshot. The original save could still commit. ' + (attempt.retryReady ? 'A retry needs a fresh acknowledgement and reuses the original exact request.' : 'Keep checking the retained request; it cannot be replaced or rebased.');
+        }
+      } else if (correction || attempt?.phase === 'refused') { costSourceUI.attempts.delete(editor.key); editor.attempt = null; }
+      editor.editing = !editor.attempt && (correction || !value.current); fillCostSource(editor);
+    } catch (error) {
+      if (!currentCostSource(ticket)) return;
+      if (error.status === 401 || error.status === 403 && ['ROLE_DENIED','PASSWORD_CHANGE_REQUIRED','CSRF_INVALID','COST_SOURCE_ACTOR_CHANGED'].includes(error.code)) { interruptCostSource(); return; }
+      editor.stale = true;
+      if (editor.attempt && !['saved','refused'].includes(editor.attempt.phase)) { editor.attempt.phase = 'unknown'; editor.attempt.hadUnknown = true; editor.attempt.retryReady = false; }
+      $('#cost-source-error').textContent = error.message;
+    } finally { if (costSourceUI.ticket === ticket) { costSourceUI.ticket = null; renderCostSource(); } }
+  }
+  function openCostSource(button) {
+    if (!costSourceAccess() || state.view !== 'profit' || document.hidden) return;
+    const row = button.closest('.economics-row'), selector = {productId:row?.dataset.productId,variantId:row?.dataset.variantId,sku:row?.dataset.sku};
+    const matches = state.data.dashboard?.productRows?.filter(item=>item.productId === selector.productId && item.id === selector.variantId && item.sku === selector.sku) || [];
+    if (!costSourceSelector(selector) || matches.length !== 1) { showMessage('An exact saved Shopify product, variant and unique SKU are required.','error'); return; }
+    if (costSourceDirty(selector)) { showMessage('Save or discard the unsaved cost-row edits before opening Source review.','error'); return; }
+    const unresolved = pendingCostSourceReviews().find(([key,attempt])=>attempt.target.sku === selector.sku && key !== costSourceKey(selector));
+    if (unresolved) { showMessage('An earlier source annotation for this SKU is unresolved. Use Check unresolved source review before starting another.','error'); return; }
+    openCostSourceSelector(selector,button);
+  }
+  function openCostSourceSelector(selector,button) {
+    interruptCostSource();
+    const key = costSourceKey(selector), editor = {selector,key,context:objectiveContext(),opener:button,loaded:null,attempt:costSourceUI.attempts.get(key) || null,editing:false,stale:false,ackKey:null};
+    costSourceUI.editor = editor; $('#cost-source-dialog').showModal(); $('#cost-source-close').focus(); loadCostSource(editor);
+  }
+  async function saveCostSource(retry = false) {
+    const editor = costSourceUI.editor;
+    if (!editor || costSourceUI.ticket) return;
+    if (!costSourceAccess(editor.context) || !$('#cost-source-dialog').open || document.hidden || state.view !== 'profit') { interruptCostSource(); return; }
+    if (editor.localKey !== costSourceLocalKey(editor.selector) || costSourceDirty(editor.selector)) { editor.stale = true; editor.ackKey = null; $('#cost-source-error').textContent = 'Saved or unsaved costs changed. Save or discard cost edits, then reload this review.'; renderCostSource(); return; }
+    if (editor.stale || !editor.loaded?.writable || !editor.loaded?.producerEnabled || !$('#cost-source-ack').checked || editor.ackKey !== canonicalContent(costSourceBasisFromForm())) return;
+    let attempt = editor.attempt;
+    if (retry) {
+      if (!attempt?.retryReady || canonicalContent(costSourceBasisFromForm()) !== canonicalContent(attempt.body.sourceReview.basis)) return;
+    } else {
+      const basis = costSourceBasisFromForm();
+      if (attempt || !editor.editing || !validCostSourceBasis(basis,editor.loaded.costs) || editor.loaded.current && !editor.loaded.current.stale && canonicalContent(basis) === canonicalContent(editor.loaded.current.record.basis)) return;
+      attempt = {body:freezeObjective({sku:editor.selector.sku,sourceReview:{...editor.selector,sourceRevision:editor.loaded.sourceRevision,requestId:crypto.randomUUID(),basis}}),target:editor.loaded.target,costSnapshot:editor.loaded.costSnapshot,userId:editor.context.userId,phase:'saving',hadUnknown:false,retryReady:false};
+      editor.attempt = attempt; costSourceUI.attempts.set(editor.key,attempt);
+    }
+    attempt.phase = 'saving'; attempt.retryReady = false; editor.ackKey = null;
+    const ticket = costSourceTicket(editor,'save'); $('#cost-source-error').textContent = ''; renderCostSource();
+    try {
+      const value = await request('/api/economics',{method:'PUT',body:JSON.stringify(attempt.body),signal:ticket.controller.signal,isCurrent:()=>currentCostSource(ticket)});
+      if (!currentCostSource(ticket)) return;
+      const duplicate = value?.duplicate === true && editor.loaded.current && canonicalContent(value.record) === canonicalContent(editor.loaded.current.record) && canonicalContent(value.record.basis) === canonicalContent(attempt.body.sourceReview.basis);
+      if (!exactContentKeys(value,['schema','target','requestId','record','current','duplicate']) || value.schema !== 'runvara-cost-source-save/v1' || value.requestId !== attempt.body.sourceReview.requestId || canonicalContent(value.target) !== canonicalContent(attempt.target) || typeof value.current !== 'boolean' || typeof value.duplicate !== 'boolean' || !validCostSourceRecord(value.record,editor.context.workspaceId) || !costSourceRecordMatchesCosts(value.record,attempt.costSnapshot) || !(matchingCostSourceRecord(value.record,attempt) || duplicate)) throw new Error('The response did not confirm this exact source annotation.');
+      attempt.phase = 'saved'; attempt.duplicate = duplicate; attempt.record = freezeObjective(objectiveCopy(value.record)); editor.editing = false;
+      $('#cost-source-history').innerHTML = costSourceHistoryMarkup([value.record,...editor.loaded.history.filter(row=>row.id !== value.record.id)]); $('#cost-source-history-empty').classList.add('hidden');
+      $('#cost-source-current').textContent = value.current ? 'Saved attestation for these costs. Source identifiers remain unverified.' : 'The exact annotation was saved, but it is no longer the current attestation.';
+      // Keep the checked source unchanged. A correction deliberately reads a new
+      // source revision; a successful save never updates numeric editor values.
+      $('#cost-source-correct').classList.remove('hidden');
+    } catch (error) {
+      if (!currentCostSource(ticket)) return;
+      const paused = error.status === 503 && error.code === 'COST_SOURCE_REVIEW_PAUSED';
+      const uncertain = attempt.hadUnknown || !error.status || error.status >= 500 && !paused || error.code === 'STATE_CONFLICT';
+      attempt.phase = uncertain ? 'unknown' : 'refused'; attempt.hadUnknown ||= uncertain; editor.stale = true;
+      $('#cost-source-error').textContent = paused ? costSourcePaused : error.message;
+      if (error.status === 401 || error.status === 403 && ['ROLE_DENIED','PASSWORD_CHANGE_REQUIRED','CSRF_INVALID','COST_SOURCE_ACTOR_CHANGED'].includes(error.code)) { interruptCostSource(); return; }
+    } finally { if (costSourceUI.ticket === ticket) { costSourceUI.ticket = null; renderCostSource(); } }
+  }
+  $('#cost-source-form').addEventListener('submit',event=>{event.preventDefault();saveCostSource();});
+  $('#cost-source-resume').addEventListener('click',()=>{
+    if (!costSourceAccess() || state.view !== 'profit' || document.hidden) return;
+    const pending = pendingCostSourceReviews()[0]; if (!pending) return;
+    const {productId,variantId,sku} = pending[1].body.sourceReview; openCostSourceSelector({productId,variantId,sku},$('#cost-source-resume'));
+  });
+  $('#cost-source-close').addEventListener('click',interruptCostSource);
+  $('#cost-source-dialog').addEventListener('cancel',event=>{event.preventDefault();interruptCostSource();});
+  $('#cost-source-dialog').addEventListener('close',()=>{if(costSourceUI.editor)interruptCostSource();});
+  $('#cost-source-check').addEventListener('click',()=>{const editor=costSourceUI.editor;if(editor && editor.attempt && !['saved','refused'].includes(editor.attempt.phase))loadCostSource(editor);});
+  $('#cost-source-retry').addEventListener('click',()=>saveCostSource(true));
+  for (const id of ['reload','correct']) $('#cost-source-' + id).addEventListener('click',()=>{const editor=costSourceUI.editor;if(editor && (!editor.attempt || ['saved','refused'].includes(editor.attempt.phase)))loadCostSource(editor,id === 'correct');});
+  for (const type of ['input','change']) $('#cost-source-form').addEventListener(type,event=>{
+    const editor = costSourceUI.editor; if (!editor || costSourceUI.ticket) return;
+    if (!costSourceAccess(editor.context)) { interruptCostSource(); return; }
+    editor.ackKey = event.target.id === 'cost-source-ack' && event.target.checked ? canonicalContent(costSourceBasisFromForm()) : null; renderCostSource();
+  });
+
   async function saveOrderCosts(button) {
     const card = button.closest('[data-order-id]'); const costs = {};
     card.querySelectorAll('.order-cost-input').forEach(input => { costs[input.dataset.field] = input.value; });
@@ -1568,6 +1817,7 @@
     if (clear || !sameObjectiveContentOwner(editor.context)) {
       objectiveContent.editor = null; objectiveContent.previous = null;
       $('#objective-content-form').reset();
+      $('#objective-content-cost-sources').replaceChildren();
       for (const id of ['purpose','policy','baseline','status','exact','error']) $('#objective-content-' + id).textContent = '';
       for (const id of ['account','product']) $('#objective-content-' + id).replaceChildren();
       $('#resume-objective-content').classList.add('hidden'); $('#objective-content-editor').classList.add('hidden'); return;
@@ -1643,16 +1893,45 @@
       Number.isSafeInteger(source.actorSessionVersion) && source.actorSessionVersion > 0 && /^gid:\/\/shopify\/Product\/\d+$/.test(source.productId) &&
       /^[a-f0-9]{32}$/.test(source.inputFingerprint) && ['objectiveDigest','payloadDigest','resultDigest','jobIdentityDigest','opportunityDigest','productDigest','approvalSourceDigest'].every(key => /^[a-f0-9]{64}$/.test(source[key]));
   }
+  function validObjectiveCostSources(value, productId) {
+    if (!value || !exactContentKeys(value,['schema','available','productId','reviews','notice',...(Object.hasOwn(value,'code') ? ['code'] : [])]) || value.schema !== 'runvara-product-cost-sources/v1' || value.productId !== productId || typeof value.available !== 'boolean' || typeof value.notice !== 'string' || value.notice.length > 2000 || !Array.isArray(value.reviews) || value.reviews.length > 100 || (!value.available && value.reviews.length !== 0) || (value.code !== undefined && !contentReference(value.code)) || new TextEncoder().encode(JSON.stringify(value)).length > 16384) return false;
+    const variants = new Set();
+    return value.reviews.every(row=>{
+      if (!costSourceSelector(row) || row.productId !== productId || variants.has(row.variantId) || !['unrecorded','current','stale','unavailable'].includes(row.status) || row.current !== (row.status === 'current')) return false;
+      variants.add(row.variantId);
+      const keys = ['productId','variantId','sku','status','current'];
+      if (row.status === 'unrecorded') return exactContentKeys(row,keys);
+      if (row.status === 'unavailable') return exactContentKeys(row,[...keys,'code']) && contentReference(row.code);
+      return exactContentKeys(row,[...keys,'recordId','staleReasons','basis','reviewer','recordedAt']) && typeof row.recordId === 'string' && row.recordId.startsWith('cost_source_') && costSourceUUID(row.recordId.slice(12)) && Array.isArray(row.staleReasons) && row.staleReasons.every(reason=>['saved_costs_changed','saved_target_changed','target_unavailable'].includes(reason)) && (row.status === 'stale') === (row.staleReasons.length > 0) &&
+        validCostSourceBasis(row.basis,Object.fromEntries(costSourceKeys.map(key=>[key,0]))) && exactContentKeys(row.reviewer,['workspaceId','userId','sessionVersion','role']) && row.reviewer.workspaceId === state.data?.workspace?.id && contentReference(row.reviewer.userId) && Number.isSafeInteger(row.reviewer.sessionVersion) && row.reviewer.sessionVersion > 0 && ['owner','admin'].includes(row.reviewer.role) && typeof row.recordedAt === 'string' && Number.isFinite(Date.parse(row.recordedAt));
+    });
+  }
+  function renderObjectiveCostSources(value) {
+    const root = $('#objective-content-cost-sources'); root.replaceChildren();
+    if (!value) return;
+    const heading = document.createElement('h4'); heading.textContent = 'Saved cost source attestations by variant'; root.append(heading);
+    const notice = document.createElement('p'); notice.textContent = value.notice + ' Effective dates are operator-attested and do not establish evidence freshness. Every variant remains subject to its existing financial conditions.'; root.append(notice);
+    if (!value.available) { const note = document.createElement('p'); note.textContent = 'Cost source diagnostics unavailable. Every variant still requires qualified financial evidence.'; root.append(note); return; }
+    const list = document.createElement('ul');
+    for (const row of value.reviews) {
+      const item = document.createElement('li'); item.textContent = row.sku + ' · ' + row.variantId + ': ' + ({current:'Matches saved costs and target',stale:'Saved costs or target changed',unrecorded:'No saved attestation',unavailable:'Attestation unavailable'}[row.status]) + '. Financial qualification remains unavailable for this variant.';
+      if (row.basis) {
+        const detail = document.createElement('p'); detail.textContent = 'Currency: ' + (row.basis.currency || 'Unknown') + ' · Tax basis: ' + statusLabel(row.basis.taxBasis) + '\nEffective: ' + (row.basis.effectiveFrom || 'Unknown start') + ' to ' + (row.basis.effectiveUntil || 'Unknown end') + '\nAttested by: ' + row.reviewer.userId + ' · ' + date(row.recordedAt) + '\n' + row.basis.sources.map(source=>source.component + ': ' + source.kind + ' · ' + source.identifier + ' · issued ' + (source.issuedOn || 'Unknown')).join('\n'); item.append(detail);
+      }
+      list.append(item);
+    }
+    root.append(list);
+  }
   function validObjectiveContentContext(value, editor) {
     const target = value?.target;
-    return exactContentKeys(value,['schema','workspaceId','requestedBy','source','sourceRevision','target','objective','candidate','product','policy','notice']) && value.schema === 'runvara-objective-content-context/v1' &&
+    return exactContentKeys(value,['schema','workspaceId','requestedBy','source','sourceRevision','target','objective','candidate','product','policy','notice',...(Object.hasOwn(value || {},'costSources') ? ['costSources'] : [])]) && value.schema === 'runvara-objective-content-context/v1' &&
       value.workspaceId === editor.context.workspaceId && value.requestedBy === editor.context.userId && /^[a-f0-9]{64}$/.test(value.sourceRevision) && validObjectiveContentSource(value.source,editor) &&
       exactContentKeys(target,['schema','connectionId','account','settingsRevision']) && target.schema === 'runvara-manual-content-target/v1' && contentReference(target.connectionId) &&
       typeof target.account === 'string' && target.account.length <= 253 && /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(target.account) && Number.isSafeInteger(target.settingsRevision) && target.settingsRevision >= 0 &&
       value.objective?.id === value.source.objectiveId && value.objective.revision === value.source.objectiveRevision && typeof value.objective.title === 'string' &&
       value.candidate?.opportunityId === value.source.opportunityId && ['Thin product title','Thin product description'].includes(value.candidate.issue) &&
       value.product?.id === value.source.productId && value.product.provenance === 'unverified' && typeof value.product.title === 'string' && typeof value.product.description === 'string' &&
-      typeof value.policy?.allowed === 'boolean' && Array.isArray(value.policy.blockers) && value.policy.blockers.length <= 100 && typeof value.notice === 'string';
+      (!Object.hasOwn(value,'costSources') || validObjectiveCostSources(value.costSources,value.source.productId)) && typeof value.policy?.allowed === 'boolean' && Array.isArray(value.policy.blockers) && value.policy.blockers.length <= 100 && typeof value.notice === 'string';
   }
   async function loadObjectiveContent(editor) {
     if (!checkObjectiveContentIdentity() || objectiveContent.ticket || editor !== objectiveContent.editor || (editor.attempt && editor.attempt.phase !== 'refused')) return;
@@ -1673,6 +1952,7 @@
       $('#objective-content-baseline').textContent = 'Retained title: ' + value.product.title + '\nRetained description:\n' + value.product.description;
       $('#objective-content-policy').textContent = (value.policy.allowed ? 'No financial qualification is claimed. Other safeguards and exact approval still apply.' : 'Execution is blocked by the saved conditions: ' + value.policy.blockers.map(row => typeof row === 'string' ? row : row.message || row.code || 'Unresolved condition').join(' · ')) +
         ' Profit-first and any financial or stock limit, including an explicit zero, require evidence this content request does not supply. Preparation does not remove those limits.';
+      renderObjectiveCostSources(value.costSources);
       $('#objective-content-account').focus();
     } catch(error) {
       if (!currentObjectiveContent(ticket)) return;
@@ -2077,6 +2357,7 @@
   objectivePanel.addEventListener('toggle', () => { if (!objectivePanel.open) resetObjectiveEditing(); });
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) return;
+    interruptCostSource();
     interruptObjectiveContent('The tab was hidden');
     const editor = objectiveUI.editor;
     if (!editor || editor.busy === 'save' || !sameObjectiveSession(editor.context, true)) { resetObjectiveEditing(); return; }
@@ -2087,8 +2368,8 @@
     objectiveUI.editor = paused;
     staleRestriction(paused, 'The tab was hidden. Your unsent choices remain visible. Discard the draft and reload/review the saved objective before saving.');
   });
-  window.addEventListener('popstate', () => resetObjectiveEditing());
-  window.addEventListener('pagehide', () => resetObjectiveEditing());
+  window.addEventListener('popstate', () => { interruptCostSource(); resetObjectiveEditing(); });
+  window.addEventListener('pagehide', () => { interruptCostSource(); resetObjectiveEditing(); });
 
   function resetObjectiveForm() {
     const form = $('#business-objective-form');
@@ -2615,6 +2896,7 @@
   });
 
   $('#economics-body').addEventListener('click', event => {
+    const source = event.target.closest('.cost-source-open'); if (source) { openCostSource(source); return; }
     const detail = event.target.closest('.cost-details');
     if (detail) { const row = detail.closest('tr'); const next = row.nextElementSibling; if (next && next.classList.contains('cost-detail-row')) next.classList.toggle('hidden'); return; }
     const save = event.target.closest('.save-economics'); if (save) saveEconomics(save);
