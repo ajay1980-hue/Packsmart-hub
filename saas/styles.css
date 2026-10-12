@@ -1857,3 +1857,8 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
   #cost-source-dialog .button-row { display:grid; grid-template-columns:minmax(0,1fr); }
   #cost-source-dialog .cost-source-component { padding:.75rem; }
 }
+@media(max-width:360px) {
+  /* Leave room for all native date segments and the calendar at 200% text. */
+  #cost-source-dialog .cost-source-component { padding-inline:.25rem; }
+  #cost-source-dialog input[type=date] { padding-inline:.25rem; }
+}

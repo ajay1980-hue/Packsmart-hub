@@ -45,6 +45,29 @@ test('saved costs changed after preview block a new write before network',async 
  const h=await harness(t);await h.sourceOpen();h.fillSource();h.currentBootstrap.economics[selector.sku].landed='9';h.sourceSubmit();assert.equal(h.sourceWrites().length,0);assert.match(h.cs('error').textContent,/costs changed/);
 });
 
+for(const lostReply of [false,true])test('saved annotation message remains truthful after later costs change'+(lostReply?' and exact reconciliation':''),async t=>{
+ const h=await harness(t);await h.sourceOpen();h.fillSource();
+ if(lostReply)h.sourcePut=async(_route,options)=>{h.saveCost(JSON.parse(options.body));throw new Error('Lost saved reply');};
+ h.sourceSubmit();await h.waitWrite(1);h.cs('close').click();h.state.economics[selector.sku].landed='9';await h.sourceOpen();
+ assert.match(h.cs('current').textContent,/attestation is stale: saved costs changed/);
+ assert.match(h.cs('status').textContent,/Exact source annotation found in saved history\. This annotation did not change saved costs or remove financial or action holds\./);
+ assert.doesNotMatch(h.cs('status').textContent,/Costs and all financial holds are unchanged/);
+ assert.equal(h.state.economics[selector.sku].landed,'9');assert.equal(h.state.costHistory.length,1);assert.equal(h.sourceWrites().length,1);assert.equal(h.cs('save').disabled,true);
+});
+
+test('blank and populated native dates keep their values when source review becomes read-only',async t=>{
+ const h=await harness(t);await h.sourceOpen();h.fillSource();
+ const dateFields=()=>[h.cs('effectiveFrom'),h.cs('effectiveUntil'),h.component('landed','issuedOn')];
+ for(const field of dateFields()){assert.equal(field.type,'date');assert.equal(field.disabled,false);assert.equal(field.value,'');}
+ h.sourceSubmit();await h.waitWrite(1);
+ for(const field of dateFields()){assert.equal(field.disabled,true);assert.equal(field.value,'');}
+ h.cs('correct').click();await h.sourceIdle();
+ for(const field of dateFields()){assert.equal(field.disabled,false);h.sourceChange(field,'2026-09-17');}
+ h.sourceChange('ack',true);h.sourceSubmit();await h.waitWrite(2);
+ for(const field of dateFields()){assert.equal(field.type,'date');assert.equal(field.disabled,true);assert.equal(field.value,'2026-09-17');}
+ const saved=h.state.economics[selector.sku].sourceBasis.basis;assert.equal(saved.effectiveFrom,'2026-09-17');assert.equal(saved.effectiveUntil,'2026-09-17');assert.equal(saved.sources[0].issuedOn,'2026-09-17');
+});
+
 test('unknown request cannot be rebased when saved costs or saved account change',async t=>{
  const h=await harness(t);await h.sourceOpen();h.fillSource();h.sourcePut=async()=>{throw new Error('unknown');};h.sourceSubmit();await h.waitWrite(1);const original=h.sourceWrites()[0].body;h.state.economics[selector.sku].landed='9';h.cs('check').click();await h.sourceIdle();assert.match(h.cs('status').textContent,/outcome is unknown/);assert.equal(h.cs('retry').classList.contains('hidden'),true);assert.match(h.cs('request').textContent,new RegExp(JSON.parse(original).sourceReview.requestId));h.cs('reload').click();h.sourceSubmit();assert.equal(h.sourceWrites().length,1);
 });

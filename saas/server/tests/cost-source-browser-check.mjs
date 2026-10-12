@@ -28,22 +28,72 @@ const captures=[];
 const artifactGroup=label=>label==='objective-sidecar'?'objective':['draft','saved','correction','history'].includes(label)?'review':'reconciliation';
 const capturePath=(width,label,scale,index)=>path.join('/tmp/runvara-cost-source',String(width),artifactGroup(label),`runvara-cost-source-${width}-${label}-${scale}pct-${String(index).padStart(2,'0')}.png`);
 const waitIdle=page=>page.waitForFunction(()=>document.querySelector('#cost-source-form').getAttribute('aria-busy')==='false');
+async function checkNativeDates(page,width,label,scale) {
+ const expected={draft:{disabled:false,value:''},saved:{disabled:true,value:''},correction:{disabled:false,value:'2026-09-17'},history:{disabled:true,value:'2026-09-17'}}[label];
+ if(!expected)return [];
+ const dates=page.locator('#cost-source-dialog input[type=date]:visible');assert.equal(await dates.count(),3);
+ const original=await dates.evaluateAll(nodes=>nodes.map(node=>({value:node.value,inline:node.getAttribute('style')})));
+ for(let index=0;index<await dates.count();index++) {
+  const field=dates.nth(index);assert.equal(await field.isDisabled(),expected.disabled);assert.equal(await field.inputValue(),expected.value);
+  if(expected.disabled){await page.locator('#cost-source-close').focus();assert.equal(await field.evaluate(node=>{node.focus();return document.activeElement===node;}),false);}
+ }
+ if(!expected.disabled) {
+  const issue=page.locator('[data-component="landed"] [data-source-field="issuedOn"]');
+  await page.locator('[data-component="landed"] [data-source-field="identifier"]').focus();await page.keyboard.press('Tab');
+  assert.equal(await issue.evaluate(node=>document.activeElement===node),true,'Tab reaches the native issue date');
+  await issue.fill('2026-09-17');await issue.press('ArrowUp');assert.notEqual(await issue.inputValue(),'2026-09-17','native keyboard changes a date segment');
+  assert.match(await issue.inputValue(),/^\d{4}-\d{2}-\d{2}$/);await issue.fill(expected.value);
+ }
+ const metrics=await dates.evaluateAll(nodes=>nodes.map(node=>{
+  const style=getComputedStyle(node),picker=getComputedStyle(node,'::-webkit-calendar-picker-indicator'),probe=node.cloneNode();
+  // The real input's scrollWidth does not expose clipped native date segments.
+  // Measure an unconstrained native twin at the same computed typography. It
+  // is removed before capturing; no live field is resized or restyled here.
+  probe.removeAttribute('id');probe.setAttribute('aria-hidden','true');probe.tabIndex=-1;
+  for(const name of style)probe.style.setProperty(name,style.getPropertyValue(name));
+  Object.assign(probe.style,{position:'fixed',left:'0',top:'0',visibility:'hidden',pointerEvents:'none',width:'max-content',minWidth:'0',maxWidth:'none'});
+  document.body.append(probe);let intrinsicWidth;
+  try {intrinsicWidth=probe.getBoundingClientRect().width;}finally{probe.remove();}
+  return {field:node.id||node.dataset.sourceField,value:node.value,disabled:node.disabled,width:node.getBoundingClientRect().width,intrinsicWidth,fontSize:style.fontSize,
+   appearance:style.appearance,showPicker:typeof node.showPicker==='function',pickerDisplay:picker.display,pickerVisibility:picker.visibility,pickerOpacity:picker.opacity};
+ }));
+ for(const metric of metrics) {
+  assert.ok(metric.intrinsicWidth>0&&metric.width+1>=metric.intrinsicWidth,`${width}/${label}/${scale}: complete native date segments and calendar fit ${metric.field}: ${JSON.stringify(metric)}`);
+  assert.ok(metric.appearance!=='none'&&metric.showPicker,`${width}/${label}/${scale}: native date control retained ${metric.field}`);
+  // Chromium can hide its picker when disabled; only editable dates must keep
+  // the calendar affordance. Disabled native fields were checked unfocusable.
+  if(!metric.disabled)assert.ok(metric.pickerDisplay!=='none'&&metric.pickerVisibility!=='hidden'&&Number(metric.pickerOpacity)>0,`${width}/${label}/${scale}: native calendar affordance retained ${metric.field}`);
+ }
+ assert.deepEqual(await dates.evaluateAll(nodes=>nodes.map(node=>({value:node.value,inline:node.getAttribute('style')}))),original,'date keyboard and sizing checks preserve values and inline styles');
+ return metrics;
+}
 async function captureState(page,width,label) {
  const panel=page.locator('#cost-source-dialog'),session=await panel.evaluateHandle(createRestrictionTypographySession);
  async function images(scale) {
   await page.locator('.cost-source-history-section').evaluate(node=>{node.open=true;});
   const body=page.locator('#cost-source-dialog .cost-source-body');
   await panel.evaluate(async node=>{await document.fonts.ready;await Promise.allSettled(node.getAnimations({subtree:true}).filter(animation=>animation.playbackRate!==0&&Number.isFinite(animation.effect?.getComputedTiming().endTime)).map(animation=>animation.finished));});
+  const nativeDates=await checkNativeDates(page,width,label,scale),datesCaptured=new Set();
   let covered=0,index=0,last=-1;
   while(true) {
-   const requested=await body.evaluate((node,covered)=>Math.min(Math.max(0,node.scrollHeight-node.clientHeight),Math.max(0,covered-24)),covered);
+   const requested=await body.evaluate((node,covered)=>{
+    let next=Math.max(0,covered-24);const rect=node.getBoundingClientRect();
+    // Reuse this gap-free pass for the four native date states. If a date label
+    // was split across the previous edge, keep its whole label and input in
+    // the next capture instead of adding another full-dialog screenshot set.
+    for(const input of node.querySelectorAll('input[type=date]'))if(input.getClientRects().length){
+     const label=input.closest('label').getBoundingClientRect(),top=label.top-rect.top+node.scrollTop,bottom=label.bottom-rect.top+node.scrollTop;
+     if(top<next&&bottom>next)next=Math.max(0,top);
+    }
+    return Math.min(Math.max(0,node.scrollHeight-node.clientHeight),next);
+   },covered);
    await body.evaluate((node,top)=>{node.scrollTop=top;},requested);
    await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
    const geometry=await panel.evaluate(node=>{
     const body=node.querySelector('.cost-source-body'),close=document.getElementById('cost-source-close'),heading=node.querySelector('.cost-source-heading');
     const rect=node.getBoundingClientRect(),b=body.getBoundingClientRect(),c=close.getBoundingClientRect(),h=heading.getBoundingClientRect(),hit=document.elementFromPoint(c.x+c.width/2,c.y+c.height/2);
     return {modal:rect.toJSON(),body:b.toJSON(),close:c.toJSON(),heading:h.toJSON(),modalClient:node.clientWidth,modalScroll:node.scrollWidth,client:body.clientWidth,scroll:body.scrollWidth,top:body.scrollTop,height:body.clientHeight,total:body.scrollHeight,closeHit:hit===close||close.contains(hit),viewport:innerHeight,
-     controls:[...node.querySelectorAll('button,input,select')].filter(control=>control.getClientRects().length).map(control=>({id:control.id,width:control.clientWidth,scroll:control.scrollWidth,height:control.clientHeight,scrollHeight:control.scrollHeight,bounds:control.getBoundingClientRect().toJSON()}))};
+     controls:[...node.querySelectorAll('button,input,select')].filter(control=>control.getClientRects().length).map(control=>({id:control.id,type:control.type,field:control.dataset.sourceField,width:control.clientWidth,scroll:control.scrollWidth,height:control.clientHeight,scrollHeight:control.scrollHeight,bounds:control.getBoundingClientRect().toJSON(),labelBounds:control.type==='date'?control.closest('label').getBoundingClientRect().toJSON():null}))};
    });
    assert.ok(geometry.modal.x>=0&&geometry.modal.right<=width+1&&geometry.modal.y>=0&&geometry.modal.bottom<=geometry.viewport+1,`${width}/${label}/${scale}: modal in viewport`);
    assert.ok(geometry.modalScroll<=geometry.modalClient+1&&geometry.scroll<=geometry.client+1,`${width}/${label}/${scale}: no horizontal overflow`);
@@ -51,6 +101,7 @@ async function captureState(page,width,label) {
    for(const control of geometry.controls) {
     assert.ok(control.bounds.x>=geometry.modal.x&&control.bounds.right<=geometry.modal.right+1,`${width}/${label}/${scale}: control stays within dialog ${control.id}`);
     if(control.id&&control.id!=='cost-source-ack'&&!['cost-source-currency','cost-source-effectiveFrom','cost-source-effectiveUntil','cost-source-taxBasis'].includes(control.id)) assert.ok(control.scroll<=control.width+1&&control.scrollHeight<=control.height+1,`${width}/${label}/${scale}: complete control label ${control.id}`);
+    if(control.type==='date'&&control.labelBounds.top>=geometry.body.top-1&&control.labelBounds.bottom<=geometry.body.bottom+1)datesCaptured.add(control.id||control.field);
    }
    assert.ok(geometry.top<=covered+1&&geometry.top+geometry.height>covered,`${width}/${label}/${scale}: gap-free scroll coverage`);
    assert.ok(geometry.top>last,`${width}/${label}/${scale}: scrolling advances`);last=geometry.top;
@@ -59,9 +110,10 @@ async function captureState(page,width,label) {
    // Keep native caret behavior: Playwright's default hiding leaves empty style
    // attributes on inputs, which would change the exact typography baseline.
    await page.screenshot({path:filename,fullPage:false,animations:'allow',caret:'initial',scale:'css'});
-   const bytes=await fs.readFile(filename);captures.push({width,label,scale,filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),geometry});
+   const bytes=await fs.readFile(filename);captures.push({width,label,scale,filename,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex'),geometry,...(index===1&&nativeDates.length?{nativeDates}:{})});
    covered=geometry.top+geometry.height;if(covered>=geometry.total-1)break;
   }
+  for(const date of nativeDates)assert.ok(datesCaptured.has(date.field),`${width}/${label}/${scale}: whole native date and label captured ${date.field}`);
  }
  try {await session.evaluate(s=>s.assertBaseline());await images(100);await session.evaluate(s=>s.begin());try{await session.evaluate(s=>s.enlarge());await images(200);}finally{await session.evaluate(s=>s.restore());}await session.evaluate(s=>s.assertBaseline());}
  finally {await session.dispose();}
@@ -176,7 +228,7 @@ try {
   seed.economics={[selector.sku]:{landed:'4.2500',packing:0,delivery:2}};seed.costHistory=[];seed.connectionWrites=[];seed.approvals=[];await server.packsmart.store.save(seed.workspace.id,seed);
   const token=createSessionToken({userId:seed.users[0].id,workspaceId:seed.workspace.id,email:seed.users[0].email,role:'owner',sessionVersion:1},secret);
   if(fixtureOnly){await checkObjectiveFixture(seed,token);continue;}
-  const context=await browser.newContext({viewport:{width,height:900}});
+  const context=await browser.newContext({viewport:{width,height:900},locale:'en-US'});
   await context.addCookies([{name:'packsmart_session',value:token,url:base,httpOnly:true,sameSite:'Strict'}]);const page=await context.newPage(),calls=[],errors=[],external=[];let mode='normal',objectiveCase=null,objectiveContext=null;
   page.on('pageerror',error=>errors.push(error.message));
   await page.route('**/*',async route=>{
@@ -206,8 +258,8 @@ try {
   const fill=async identifier=>{await field('landed','include').check();await field('landed','kind').selectOption('invoice');await field('landed','identifier').fill(identifier);await ack.check();};
   await open();assert.equal(await page.evaluate(()=>document.activeElement.id),'cost-source-close');await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>Boolean(document.activeElement.closest('#cost-source-dialog'))),true);await page.keyboard.press('Shift+Tab');await page.keyboard.press('Escape');assert.equal(await page.locator('#cost-source-dialog').evaluate(node=>node.open),false);assert.equal(await page.evaluate(()=>document.activeElement.classList.contains('cost-source-open')),true);
   await open();await fill('BROWSER INVOICE 1');await captureState(page,width,'draft');await ack.check();await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);await captureState(page,width,'saved');assert.equal(writes().length,1);
-  await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE correction 2');await captureState(page,width,'correction');await ack.check();await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);assert.match(await page.locator('#cost-source-history').textContent(),/BROWSER INVOICE 1/);assert.match(await page.locator('#cost-source-history').textContent(),/correction 2/);await captureState(page,width,'history');
-  await page.locator('#cost-source-close').click();let state=await server.packsmart.store.get(seed.workspace.id);state.economics[selector.sku].landed='6.5000';await server.packsmart.store.save(seed.workspace.id,state);await open();assert.match(await page.locator('#cost-source-current').textContent(),/saved costs changed/);await captureState(page,width,'stale');
+  await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE correction 2');for(const date of [page.locator('#cost-source-effectiveFrom'),page.locator('#cost-source-effectiveUntil'),field('landed','issuedOn')])await date.fill('2026-09-17');await captureState(page,width,'correction');await ack.check();await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);assert.match(await page.locator('#cost-source-history').textContent(),/BROWSER INVOICE 1/);assert.match(await page.locator('#cost-source-history').textContent(),/correction 2/);await captureState(page,width,'history');
+  await page.locator('#cost-source-close').click();let state=await server.packsmart.store.get(seed.workspace.id);state.economics[selector.sku].landed='6.5000';await server.packsmart.store.save(seed.workspace.id,state);await open();assert.match(await page.locator('#cost-source-current').textContent(),/saved costs changed/);assert.match(await status.textContent(),/This annotation did not change saved costs or remove financial or action holds/);assert.doesNotMatch(await status.textContent(),/Costs and all financial holds are unchanged/);await captureState(page,width,'stale');
   await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE unknown 3');mode='lose-before-save';await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/outcome is unknown/);const original=writes().at(-1).body;await captureState(page,width,'unknown');await page.locator('#cost-source-close').click();await open();assert.match(await status.textContent(),/outcome is unknown/);await ack.check();mode='pause';await page.locator('#cost-source-retry').click();await waitIdle(page);assert.equal(writes().at(-1).body,original);assert.match(await status.textContent(),/outcome is unknown/);await captureState(page,width,'unknown-paused');
   await page.locator('#cost-source-check').click();await waitIdle(page);await ack.check();await page.locator('#cost-source-retry').click();await waitIdle(page);assert.match(await status.textContent(),/Exact source annotation found/);assert.equal(writes().at(-1).body,original);
   await page.locator('#cost-source-correct').click();await waitIdle(page);await fill('BROWSER INVOICE paused 4');mode='pause';await page.locator('#cost-source-save').click();await waitIdle(page);assert.match(await status.textContent(),/refused/);await captureState(page,width,'first-paused');
@@ -229,7 +281,7 @@ try {
    const directory=path.join('/tmp/runvara-cost-source',String(width),name),manifest=path.join(directory,'manifest.json');
    await fs.writeFile(manifest,JSON.stringify({width,group:name,bytes,states:[...new Set(group.map(item=>item.label))],scales:[100,200],screenshots:group.length,files:group},null,2));groups.push({name,bytes,directory,manifest});
   }
-  await fs.writeFile(`/tmp/runvara-cost-source/${width}/manifest.json`,JSON.stringify({width,totalBytes,artifactGroups:groups,states:[...new Set(files.map(item=>item.label))],scales:[100,200],screenshots:files.length,files,checks:['exact source-only PUT','native keyboard close and focus return','correction history retained','stale costs','unknown + close/reopen','same-ID retry','first pause versus unknown pause','normal motion','complete gap-free scroll coverage','no horizontal overflow','visible close/header','populated objective sidecar: matching/stale/unrecorded siblings','unchanged exact content-source digest and per-variant financial policy','zero provider/model writes']},null,2));
+  await fs.writeFile(`/tmp/runvara-cost-source/${width}/manifest.json`,JSON.stringify({width,totalBytes,artifactGroups:groups,states:[...new Set(files.map(item=>item.label))],scales:[100,200],screenshots:files.length,files,checks:['exact source-only PUT','native keyboard close and focus return','blank/populated enabled/disabled dates: native intrinsic fit and complete label capture','native date keyboard segments and calendar affordance retained','correction history retained','stale costs with action-scoped annotation status','unknown + close/reopen','same-ID retry','first pause versus unknown pause','normal motion','complete gap-free scroll coverage','no horizontal overflow','visible close/header','populated objective sidecar: matching/stale/unrecorded siblings','unchanged exact content-source digest and per-variant financial policy','zero provider/model writes']},null,2));
   await context.close();
  }
  assert.equal(providerRequests,0);assert.equal(modelRequests,0);console.log(fixtureOnly?'Synthetic objective-sidecar fixture APIs passed for four widths with matching/stale/unrecorded variants and zero provider/model requests. Browser pixels were not run.':`Cost-source browser checks passed at320,390,430,1200 with nine states at100%/200% text and ${captures.length} visible scroll captures. Four width manifests and12 width/group manifests contain hashes without truncation. Zero provider/model requests.`);
