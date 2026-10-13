@@ -28,6 +28,7 @@ function fixture(t, { store: overrides = {}, withWorkspaceLock = async (_id, act
   creativeCycle, enabled = false, rules = ['marketingCreativeWorker'], integrations = {} } = {}) {
   const state = seedWorkspaceState({}, { workspaceId: 'scheduler-lifecycle' });
   ensureControl(state);
+  state.marketing.campaigns = [{ id: 'eligible-lifecycle-fixture', status: 'draft', creativeRequests: [{ provider: 'runway', status: 'pending' }] }];
   state.autopilot.enabled = true;
   for (const key of Object.keys(state.automations)) state.automations[key] = rules.includes(key);
   const events = [], saved = [];

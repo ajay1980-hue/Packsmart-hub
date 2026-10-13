@@ -17,6 +17,7 @@ test.beforeEach(t => {
 function setup(creativeCycle, rules = ['marketingCreativeWorker'], provider = 'file') {
   const state = seedWorkspaceState({}, { workspaceId: 'creative-effects-fixture' });
   ensureControl(state);
+  state.marketing.campaigns = [{ id: 'eligible-effects-fixture', status: 'draft', creativeRequests: [{ provider: 'runway', status: 'pending' }] }];
   state.autopilot.enabled = true;
   for (const key of Object.keys(state.automations)) state.automations[key] = rules.includes(key);
   const saved = [];
@@ -74,9 +75,13 @@ for (const reason of ['CREATIVE_STATUS_READ_FAILED', 'CREATIVE_PROVIDER_JOB_FAIL
       const effects = unknownEffects({ providerReads: 1, historicalExposureUnknown: true });
       const request = { provider, status: reason === 'CREATIVE_PROVIDER_JOB_FAILED' ? 'failed' : 'in_progress',
         ...(provider === 'canva' ? { stage: 'export', jobId: 'existing-canva-job' } : { stage: 'generation', taskId: 'existing-runway-task' }) };
-      const campaign = { id: `existing-${provider}-campaign`, creativeRequests: [request] };
-      const fixture = setup(async () => ({ advanced: 0, reason, campaign, effects }));
+      const campaign = { id: `existing-${provider}-campaign`, status: 'creative_attention', creativeRequests: [request] };
+      const fixture = setup(async state => {
+        state.marketing.campaigns[0].creativeRequests[0].status = request.status;
+        return { advanced: 0, reason, campaign, effects };
+      });
       fixture.state.marketing.campaigns = [structuredClone(campaign)];
+      fixture.state.marketing.campaigns[0].creativeRequests[0].status = 'in_progress';
       const run = assertRecorded(fixture, await fixture.run(), effects);
       assert.equal(run.status, 'FAILED');
       assert.equal(run.errorCode, reason);
@@ -95,7 +100,7 @@ for (const reason of ['CREATIVE_STATUS_READ_FAILED', 'CREATIVE_PROVIDER_JOB_FAIL
 test('CREATIVE_PROVIDER_NOT_AVAILABLE finishes blocked without inventing submission attempts', async () => {
   const effects = unknownEffects({ historicalExposureUnknown: true });
   const request = { provider: 'runway', status: 'in_progress', stage: 'generation', taskId: 'existing-runway-task' };
-  const campaign = { id: 'unavailable-provider-campaign', creativeRequests: [request] };
+  const campaign = { id: 'unavailable-provider-campaign', status: 'creative_attention', creativeRequests: [request] };
   const fixture = setup(async () => ({ advanced: 0, reason: 'CREATIVE_PROVIDER_NOT_AVAILABLE', campaign, effects }));
   fixture.state.marketing.campaigns = [structuredClone(campaign)];
   const run = assertRecorded(fixture, await fixture.run(), effects);
@@ -107,7 +112,7 @@ test('CREATIVE_PROVIDER_NOT_AVAILABLE finishes blocked without inventing submiss
   assert.equal(run.effects.blockedSubmissions, 0);
 });
 
-test('AUTO_CREATIVE_OFF and NO_CREATIVE_WORK remain normal completed no-work results', async () => {
+test('execution-time AUTO_CREATIVE_OFF and NO_CREATIVE_WORK remain normal completed no-work results', async () => {
   for (const reason of ['AUTO_CREATIVE_OFF', 'NO_CREATIVE_WORK']) {
     const fixture = setup(async () => ({ advanced: 0, reason, effects: noEffects() }));
     const run = assertRecorded(fixture, await fixture.run(), noEffects());

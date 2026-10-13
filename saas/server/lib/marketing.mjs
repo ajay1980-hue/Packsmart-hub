@@ -284,23 +284,44 @@ export async function saveCanvaTemplate(state, brandTemplateId, env, options = {
   return result;
 }
 
-export async function marketingCreativeCycle(state, { env = process.env, persist, durableStore = false,
-  authorizePhase, campaignId = null, fetchImpl = fetch, now = Date.now } = {}) {
-  const effects = createCreativeEffects();
-  ensureMarketing(state);
-  const noWork = reason => ({ advanced: 0, campaign: null, reason, effects: summarizeCreativeEffects(effects) });
-  if (!state.marketing.settings.enabled || !state.marketing.settings.autoCreative) return noWork('AUTO_CREATIVE_OFF');
-  const campaigns = state.marketing.campaigns;
-  const previousIndex = campaigns.findIndex(item => item.id === state.marketing.creativeCampaignCursor);
+function creativeCandidates(marketing, campaignId) {
+  const campaigns = marketing.campaigns;
+  const previousIndex = campaigns.findIndex(item => item.id === marketing.creativeCampaignCursor);
   const nextIndex = previousIndex < 0 ? 0 : (previousIndex + 1) % campaigns.length;
   // Rotate a separate worklist, never the saved campaign array. A campaign
   // whose upstream job stays RUNNING or whose GET keeps failing must share the
   // existing one-campaign cycle with other accepted jobs.
   const ordered = campaignId ? campaigns : [...campaigns.slice(nextIndex), ...campaigns.slice(0, nextIndex)];
-  const candidates = ordered.filter(item => (!campaignId || item.id === campaignId)
+  return ordered.filter(item => (!campaignId || item.id === campaignId)
     && ['draft', 'creative_generation', 'creative_attention'].includes(item.status)
     && (item.creativeRequests || []).some(request => ['pending', 'in_progress'].includes(request.status)));
-  if (!candidates.length) return noWork('NO_CREATIVE_WORK');
+}
+
+// Read only the same defaults and candidate eligibility used by the worker.
+// This is not provider admission: pending requests and accepted jobs still need
+// the worker's allowance, identity, credentials and persistence safeguards.
+export function marketingCreativeReadiness(state, { campaignId = null } = {}) {
+  if (!state || typeof state !== 'object') return 'CREATIVE_WORK_UNKNOWN';
+  try {
+    // Normalize a private projection, never the caller's state. Sharing the
+    // normalizer also preserves failures from malformed settings.
+    const marketing = ensureMarketing({ marketing: state.marketing, settings: state.settings });
+    if (!marketing.settings.enabled || !marketing.settings.autoCreative) return 'AUTO_CREATIVE_OFF';
+    return creativeCandidates(marketing, campaignId).length ? 'CREATIVE_WORK_READY' : 'NO_CREATIVE_WORK';
+  } catch {
+    // Malformed state must retain the existing claimed execution/error path.
+    return 'CREATIVE_WORK_UNKNOWN';
+  }
+}
+
+export async function marketingCreativeCycle(state, { env = process.env, persist, durableStore = false,
+  authorizePhase, campaignId = null, fetchImpl = fetch, now = Date.now } = {}) {
+  const effects = createCreativeEffects();
+  ensureMarketing(state);
+  const noWork = reason => ({ advanced: 0, campaign: null, reason, effects: summarizeCreativeEffects(effects) });
+  const readiness = marketingCreativeReadiness(state, { campaignId });
+  if (readiness === 'AUTO_CREATIVE_OFF' || readiness === 'NO_CREATIVE_WORK') return noWork(readiness);
+  const candidates = creativeCandidates(state.marketing, campaignId);
   // A newly blocked draft must not starve observation of older accepted jobs.
   const canObserve = (request, runtime, providers) => {
     if (!knownCreativeJob(request)) return false;

@@ -2,7 +2,7 @@ import { claimAutomation, detectExceptions, detectOpportunities, dueRules, ensur
 import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
 import { automaticConnectionAreas, beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, pendingConnectionReadExhausted, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, isShopifyOrderReadAdmissionCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
-import { marketingCreativeCycle, marketingPlannerCycle } from './marketing.mjs';
+import { marketingCreativeCycle, marketingCreativeReadiness, marketingPlannerCycle } from './marketing.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
 import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, ebayReadDeferred, mergeEbayReadCooldown } from './ebay-read-cooldown.mjs';
@@ -148,6 +148,12 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
         finishAutomation(state, run, { errorCode: 'WORKER_INTERRUPTED', blocked: true, evidence: [{ type: 'expired_lease', id: run.id, detail: 'No completion evidence before the worker lease expired.', ...(effects ? { effects: { ...effects } } : {}) }] });
       }
       let rules = dueRules(state, now, integrations);
+      if (!manual && rules.some(rule => rule.id === 'marketingCreativeWorker')) {
+        const readiness = marketingCreativeReadiness(state);
+        if (readiness === 'AUTO_CREATIVE_OFF' || readiness === 'NO_CREATIVE_WORK') {
+          rules = rules.filter(rule => rule.id !== 'marketingCreativeWorker');
+        }
+      }
       const providers = [];
       if (rules.some(rule => rule.id === 'channelSync')) {
         for (const provider of Object.keys(CONNECTORS)) {

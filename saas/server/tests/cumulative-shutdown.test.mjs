@@ -31,6 +31,7 @@ const noEffects = { providerReads: 0, submissionAttempts: 0, confirmedSubmission
 
 function schedulerFixture(t) {
   const state = seedWorkspaceState({}, { workspaceId: 'shutdown-protection-fixture' });
+  state.marketing.campaigns = [{ id: 'eligible-shutdown-fixture', status: 'draft', creativeRequests: [{ provider: 'runway', status: 'pending' }] }];
   const before = new Date(Date.now() - 86400000).toISOString();
   state.connections = [
     { id: 'shopify-fixture', provider: 'shopify', encryptedCredentials: 'synthetic-marker', status: 'connected', lastCheckedAt: before,

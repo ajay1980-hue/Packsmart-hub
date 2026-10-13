@@ -44,6 +44,7 @@ test('empty or disabled marketRadar work is completed no-work and invokes no pro
 });
 test('mixed creative/read-only cycles cannot hide marketRadar historical uncertainty', async () => {
   const f = setup({ prior: true, rules: ['marketRadar', 'marketingCreativeWorker', 'seoChecks'] });
+  f.state.marketing.campaigns = [{ id: 'eligible-mixed-fixture', status: 'draft', creativeRequests: [{ provider: 'runway', status: 'pending' }] }];
   const result = await f.run(); assert.equal(result.spend, null); assert.equal(result.costStatus, 'unknown');
   assert.equal(result.runs.find(r => r.ruleId === 'marketRadar').status, 'BLOCKED');
   assert.equal(result.runs.find(r => r.ruleId === 'marketingCreativeWorker').status, 'COMPLETED');
