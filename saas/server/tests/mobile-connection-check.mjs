@@ -2,9 +2,10 @@ import { chromium } from 'playwright';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { assertConnectionToolbar } from './connection-toolbar-layout.mjs';
 
 const cooldownReport = { schema: 'runvara-ebay-cooldown-browser-evidence/v1', status: 'running',
-  fixture: 'release connection UI with synthetic saved cooldown evidence', captures: [], widths: [], factLayouts: [] };
+  fixture: 'release connection UI with synthetic saved cooldown evidence', captures: [], widths: [], factLayouts: [], toolbarLayouts: [] };
 async function assertCooldownFacts(panel, width, mode, textScale) {
   const facts = await panel.locator('.connection-facts').evaluate(list => {
     const box = list.getBoundingClientRect();
@@ -40,6 +41,7 @@ async function assertCooldownFacts(panel, width, mode, textScale) {
 async function captureCooldown(page, width, mode, surface) {
   const management = surface === 'management';
   const panel = page.locator(management ? '#connection-detail' : '[data-channel-card="ebay"]');
+  if (management) cooldownReport.toolbarLayouts.push(...await assertConnectionToolbar(page, { width, mode }));
   const typography = await panel.evaluateHandle((root, management) => {
     // Enlarge exactly the affected cooldown copy and schedule, preserving the
     // unrelated card badges, controls and management form typography.
@@ -192,7 +194,7 @@ try {
     page = undefined;
   }
   cooldownReport.status = 'passed';
-  cooldownReport.note = 'Real viewport slices of the card and management notice/toolbar at normal and exact 200% affected text. Synthetic saved evidence only; no provider reads. Downloaded images still require pixel review.';
+  cooldownReport.note = 'Real viewport slices of the card and management notice/toolbar at normal and exact 200% affected text. Separate toolbar geometry, touch-target and keyboard assertions also enlarge the actual button text to 200%. Synthetic saved evidence only; no provider reads. Downloaded images still require pixel review.';
 } catch (error) {
   cooldownReport.status = 'failed';
   if (page) await page.screenshot({ path: '/tmp/runvara-onboarding-mobile.png', fullPage: true }).catch(() => {});
