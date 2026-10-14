@@ -1,7 +1,8 @@
 /**
  * INACTIVE preparation: a pure translation seam for the existing operator brief.
  * Only trusted server evidence may enter this DTO. Verification flags are not
- * authentication. No runtime imports this module; selection is never admission.
+ * authentication. The dormant routing-bound provider may consume this decision;
+ * production still uses its existing constructor. Selection is never admission.
  */
 import { AI_MODEL_CATALOG } from './ai-economics.mjs';
 import { PROVIDER_ROUTING_LIMITS, ADAPTER_CAPABILITY_REGISTRY, routeProviderWork } from './provider-router.mjs';

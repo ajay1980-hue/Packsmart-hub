@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { AI_MODEL_CATALOG } from './ai-economics.mjs';
+import { routeOperatorBrief } from './operator-brief-routing.mjs';
 import { OPERATOR_BRIEF_ADAPTER, OPERATOR_BRIEF_SHAPE, OPERATOR_BRIEF_ENDPOINT,
   briefDigest, briefSafeCode, briefUsageReceipt, briefExecutionAllowed, operatorBriefPolicy, validBriefJob } from './operator-brief-policy.mjs';
 
@@ -58,7 +59,32 @@ async function responseJson(response) {
   } finally { reader.releaseLock(); }
 }
 
-export function createAiProvider({ env = process.env, store, fetchImpl = fetch, now = Date.now } = {}) {
+// Only the separate dormant constructor installs this trusted reader. Neither a
+// job payload nor a precomputed routing decision can supply admission authority.
+async function readBriefRouting(read, { economics, workspaceId, jobId, route, config, accountDigest, now }) {
+  try {
+    const governance = economics.governance, provider = governance.providers.openai;
+    const adapter = provider.adapters[OPERATOR_BRIEF_ADAPTER];
+    const policySnapshot = structuredClone({ version: governance.version, enabled: governance.enabled, currency: governance.currency,
+      configuredAt: governance.configuredAt, accountingStartAt: governance.accountingStartAt, tenantLimits: governance.tenantLimits,
+      monthlyCostLimitUsd: economics.monthlyCostLimitUsd ?? null,
+      provider: { enabled: provider.enabled, allowedAdapters: provider.allowedAdapters, allowedModels: provider.allowedModels,
+        limits: provider.limits, pricing: provider.pricing },
+      adapter: { enabled: adapter.enabled, atomicUsageCutoverAt: adapter.atomicUsageCutoverAt }, modelProof: adapter.models[route.model] });
+    const source = await read(Object.freeze({ workspaceId, jobId, provider: 'openai', adapterId: OPERATOR_BRIEF_ADAPTER,
+      modelId: route.model, requestShape: OPERATOR_BRIEF_SHAPE, endpoint: config.endpoint, credentialDigest: accountDigest }));
+    if (!source || ![Object.prototype, null].includes(Object.getPrototypeOf(source)) || Reflect.ownKeys(source).length !== 2
+      || ['accountId', 'evidence'].some(key => {
+        const descriptor = Object.getOwnPropertyDescriptor(source, key);
+        return !descriptor?.enumerable || !Object.hasOwn(descriptor, 'value');
+      })) throw new Error('Invalid trusted routing source');
+    return routeOperatorBrief({ now: now(), workspaceId, selectedRoute: { provider: route.provider, model: route.model },
+      endpoint: config.endpoint, credentialDigest: accountDigest, accountId: source.accountId, outputTokens: config.outputTokens,
+      policySnapshot, evidence: source.evidence });
+  } catch { return { status: 'blocked', reason: 'AI_ROUTING_EVIDENCE_UNAVAILABLE' }; }
+}
+
+function createProvider({ env = process.env, store, fetchImpl = fetch, now = Date.now } = {}, readRoutingEvidence = null) {
   const configuration = () => {
     const apiKey = String(env.OPENAI_API_KEY || '').trim();
     return { apiKey, enabled: truthy(env.RUNVARA_OPENAI_ENABLED) && apiKey.length >= 20,
@@ -86,14 +112,22 @@ export function createAiProvider({ env = process.env, store, fetchImpl = fetch, 
     const policy = operatorBriefPolicy({ state, workspaceId, model: route.model, outputTokens: config.outputTokens, endpoint: config.endpoint, now: now() });
     if (!policy.allowed) return result(policy.reason);
     if (Date.parse(job.createdAt) < policy.jobNotBefore) return result('AI_LEGACY_JOB_DISPATCH_UNVERIFIED');
-    const deadline = Math.min(policy.validUntil, Date.parse(job.leaseUntil));
+    let deadline = Math.min(policy.validUntil, Date.parse(job.leaseUntil));
     const body = requestBody(workspaceId, route, command, run, config.outputTokens);
     if (Buffer.byteLength(body) > 65536) return result('AI_REQUEST_BYTES_EXCEEDED');
     const accountDigest = briefDigest(config.apiKey);
+    const routing = readRoutingEvidence ? await readBriefRouting(readRoutingEvidence, {
+      economics: state.aiEconomics, workspaceId, jobId, route, config, accountDigest, now }) : null;
+    if (routing && routing.status !== 'selected') return result(briefSafeCode(routing.reason, 'AI_ROUTING_EVIDENCE_UNAVAILABLE'));
+    if (routing) {
+      deadline = Math.min(deadline, routing.validUntil);
+      if (now() >= deadline) return result('AI_ADMISSION_EVIDENCE_EXPIRED');
+    }
     const requestFingerprint = briefDigest({ workspaceId, jobId, shape: OPERATOR_BRIEF_SHAPE, provider: 'openai',
       adapterId: OPERATOR_BRIEF_ADAPTER, model: route.model, endpoint: config.endpoint, accountDigest,
       bodyDigest: briefDigest(body), policyFingerprint: policy.fingerprint,
-      inputTokenBound: policy.inputTokenBound, outputTokenBound: policy.outputTokenBound });
+      inputTokenBound: policy.inputTokenBound, outputTokenBound: policy.outputTokenBound,
+      ...(routing ? { routingFingerprint: routing.bindingFingerprint } : {}) });
     const reservationInput = Object.freeze({ jobId, workerId: job.workerId, jobAttempt: job.attempt,
       callKey: `${jobId}:${OPERATOR_BRIEF_SHAPE}`, requestFingerprint, provider: 'openai', adapterId: OPERATOR_BRIEF_ADAPTER,
       model: route.model, inputTokenBound: policy.inputTokenBound, outputTokenBound: policy.outputTokenBound,
@@ -121,6 +155,7 @@ export function createAiProvider({ env = process.env, store, fetchImpl = fetch, 
       && reservation.reservedInputTokens === policy.inputTokenBound && reservation.reservedOutputTokens === policy.outputTokenBound
       && reservation.reservedTotalTokens === policy.inputTokenBound + policy.outputTokenBound
       && Number.isSafeInteger(reservation.reservedCostMicros) && reservation.reservedCostMicros >= 0
+      && (!routing || reservation.reservedCostMicros === routing.routingDecision.estimatedRequestBudget.costMicros)
       && typeof reservation.windowStart === 'string' && /^[0-9]{4}-(?:0[1-9]|1[0-2])-01$/.test(reservation.windowStart)
       && reservation.pricingVersion === policy.pricingVersion;
     Object.assign(outcome, { reservationId: validAck ? reservation.reservationId : null, usageStatus: 'held', costStatus: 'unknown', accountedCostMicros: null });
@@ -143,6 +178,16 @@ export function createAiProvider({ env = process.env, store, fetchImpl = fetch, 
     if (!current.enabled || !livePolicy.allowed || livePolicy.fingerprint !== policy.fingerprint
       || current.endpoint !== config.endpoint || briefDigest(current.apiKey) !== accountDigest
       || requestBody(workspaceId, route, command, run, current.outputTokens) !== body) return result('AI_ADMISSION_CONTEXT_CHANGED');
+    if (routing) {
+      const liveRouting = await readBriefRouting(readRoutingEvidence, {
+        economics: context.aiEconomics, workspaceId, jobId, route, config: current, accountDigest, now });
+      if (liveRouting.status !== 'selected' || liveRouting.bindingFingerprint !== routing.bindingFingerprint) return result('AI_ROUTING_EVIDENCE_CHANGED');
+      // The trusted evidence read is asynchronous. It must not conceal a local
+      // credential, configuration or payload change while it was pending.
+      const final = configuration();
+      if (!final.enabled || final.endpoint !== config.endpoint || briefDigest(final.apiKey) !== accountDigest
+        || requestBody(workspaceId, route, command, run, final.outputTokens) !== body) return result('AI_ADMISSION_CONTEXT_CHANGED');
+    }
     const settleUncertain = async reason => {
       outcome.uncertainSubmissions = 1; outcome.usageStatus = 'uncertain';
       try { await store.settleProviderUsage(workspaceId, { reservationId, requestFingerprint, outcome: 'uncertain', receipt: { jobId, errorCode: reason } }); }
@@ -177,4 +222,14 @@ export function createAiProvider({ env = process.env, store, fetchImpl = fetch, 
     return { used: true, route, summary, usage, requestId: receipt.providerRequestId, effects: { ...outcome } };
   }
   return { get enabled() { return configuration().enabled; }, enhanceCommander, monthlyUsage };
+}
+
+// Existing production callers retain their current contract and fingerprint.
+export const createAiProvider = options => createProvider(options);
+
+// Prepared integration only: no production caller, environment flag, issuer,
+// budget, credential or accounting boundary is installed by this constructor.
+export function createRoutingBoundAiProvider({ readRoutingEvidence, ...options } = {}) {
+  if (typeof readRoutingEvidence !== 'function') throw Object.assign(new Error('AI_ROUTING_READER_REQUIRED'), { code: 'AI_ROUTING_READER_REQUIRED' });
+  return createProvider(options, readRoutingEvidence);
 }

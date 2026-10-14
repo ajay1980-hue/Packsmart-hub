@@ -2,7 +2,7 @@
 
 ## Status and boundary
 
-`server/lib/operator-brief-routing.mjs` prepares one pure translation seam between the existing operator-brief policy and `routeProviderWork`. No production caller imports it. `enhanceCommander`, existing provider execution, deterministic Commander, settings, accounting RPCs, schema, permissions and deployments are unchanged. No provider was queried or verified; unit fixtures are wholly synthetic. This is not the original Runvara OS runtime router cutover or permission to activate one.
+`server/lib/operator-brief-routing.mjs` prepares one pure translation seam between the existing operator-brief policy and `routeProviderWork`. The separately constructed dormant integration below now binds it to existing atomic admission. Production entry points still construct `createAiProvider`, whose behavior and reservation fingerprint remain unchanged. Deterministic Commander, settings, accounting RPCs, schema, permissions and deployments are unchanged. No provider was queried or verified; fixtures are wholly synthetic. This is not the original Runvara OS runtime router cutover or permission to activate one.
 
 The entrypoint, `routeOperatorBrief(input)`, evaluates the already selected OpenAI model. It cannot choose another provider, model, endpoint or adapter. Catalog membership is checked against the existing `AI_MODEL_CATALOG`; catalog display prices never supply authoritative pricing. The only route is `openai` / `openai-responses` / `https://api.openai.com/v1/responses`, request shape `operator-brief:v1`.
 
@@ -86,7 +86,7 @@ Results are deeply frozen and bounded. They include `status`, safe `reason`/`rea
 
 Pre-routing, malformed-input or failed-account checks return `routingDecision: null`. Blocked results never carry a selected route, fingerprint or deadline. Unknown exceptions are replaced by one static input-invalid reason; arbitrary messages, stacks and caller values are not retained.
 
-For selection, `validUntil` is the earliest router evidence deadline, account deadline, and existing model-proof/pricing-policy deadline. It does not include a job lease because this pure seam does not accept a job. Future runtime wiring must also bind the original job lease and recheck all deadlines immediately before POST.
+For selection, `validUntil` is the earliest router evidence deadline, account deadline, and existing model-proof/pricing-policy deadline. It does not include a job lease because this pure seam does not accept a job. The dormant integration below additionally binds the original job lease and rechecks that deadline immediately before POST.
 
 `bindingFingerprint` is SHA-256 over the normalized expected subject, full policy snapshot, existing policy fingerprint, complete normalized evidence, fixed task requirements and effective router policy. `now`/`evaluatedAt` are excluded; advancing the evaluation clock does not change the fingerprint while evidence remains identical. Evidence refreshes, account/credential changes, exact model, proof, pricing, authoritative limits or output-cap changes do change it.
 
@@ -97,14 +97,68 @@ The fingerprint is an opaque server-only binding, not a signature, credential, a
 1. Obtain actual, fresh, exact-route account/credential, capability/context, health and quality/reliability/latency evidence from an authenticated trusted platform path. Define and review how each metric and attestation is established. This slice does not implement or authorize evidence collection, configuration or recurring polling.
 2. Explicitly decide whether to activate the stricter routing eligibility. Current paid policy does not require these additional proofs. Missing evidence must block any future gated path; a paid fallback would bypass it. Compatibility with every previously allowed enhancement cannot be claimed.
 3. Preserve the public-settings boundary in `agent-ops.mjs`: `workspaceSnapshot` and `configureWorkspace` now use `publicAiSettings` to return only routing mode, monthly cost cap, pricing date and valid bounded update metadata. Governance and unknown fields remain in server configuration and are excluded from these responses. This response hardening does not implement or authorize private routing/account evidence collection or persistence. Never persist synthetic fixture evidence as production configuration.
-4. Review and implement the runtime boundary separately: evaluate immediately after existing policy; require the exact selected route; add the stable routing fingerprint to the existing request fingerprint; bind the earliest routing/proof/pricing/job-lease deadline; preserve `${jobId}:operator-brief:v1` and existing RPC inputs; compare acknowledged bounds and exact cost; rebuild evidence after the bounded final context read; compare immutable bindings; recheck the original deadline immediately before POST.
+4. Review and accept the dormant runtime boundary below before any production wiring. It evaluates after existing policy, binds the exact route and routing fingerprint, preserves the logical call key/RPC contract, checks acknowledged bounds and cost, rebuilds evidence after the final context read, and checks the original deadline before POST. It does not install the source reader or activate the stricter path.
 5. Keep deterministic results and durable held/unknown exposure on every uncertain or denied step. Never reroute, mint another call key, reopen a reservation, or restore an ungoverned paid fallback. No new adapter, endpoint, model or permission is implied.
 6. Retain the accounting activation requirements in [operator-brief-cutover.md](operator-brief-cutover.md): verified billing/token semantics and finite allowance, retirement of old dispatchers, real clean baseline and reconciliation, plus isolated concurrency/transport tests. This slice supplies none of that operational evidence or permission.
-7. Test missing/stale/cross-tenant/wrong-account evidence with zero new POSTs; evidence or credentials changing during admission; reads crossing TTL, lease or month boundaries; SQL denial after selection; lost acknowledgments; immutable-key retries; cost projection; deterministic compatibility; and private-data exclusion. The existing SQL does not atomically validate new routing metadata. Future bounded revalidation must not be described as instantaneous revocation.
+7. Obtain real isolated database/concurrency and transport acceptance for the exact integrated tree. Synthetic tests cover missing/stale/cross-tenant/wrong-account evidence, changes during admission, deadlines, denied/lost admission, uncertain responses, immutable-key retries, cost projection and privacy. The existing SQL does not atomically validate new routing metadata. Bounded revalidation is not instantaneous revocation.
+
+## Dormant routing-bound admission
+
+`createRoutingBoundAiProvider({readRoutingEvidence, ...existingProviderOptions})`
+in `ai-provider.mjs` is an internal, separately selected constructor. No production
+entry point uses it, and no environment switch is added. Supplying a reader to
+ordinary `createAiProvider` or placing routing data in a job does not select it.
+The constructor requires a server-owned function; it accepts no precomputed
+decision or caller-supplied authority as a replacement.
+
+The reader receives a frozen exact workspace/job/provider/adapter/model/request
+shape/endpoint/credential-digest subject. It must obtain bounded authenticated
+platform evidence and return only `{accountId, evidence}` under the existing pure
+contract. It must not poll paid providers or invent missing evidence. No such
+production source reader is installed here. Account IDs and credential digests
+remain private, and exceptions from the source are sanitized.
+
+The policy snapshot is derived from existing trusted economics configuration,
+not the reader's response. The constructor captures it before awaiting source
+evidence, evaluates the actual pure router, then adds its stable binding to the
+existing request fingerprint. Admission still uses the same job lease, call key,
+atomic reservation RPC, immutable pricing and finite policy limits. The earliest
+original evidence/proof/pricing/job-lease deadline is supplied to that RPC.
+No new ledger, operation-specific ceiling or customer accounting rule is added.
+
+An acknowledgment must match existing request and token bounds and the exact
+router-computed micro-cost upper bound. Mismatches or lost acknowledgments do not
+dispatch or refund. After the existing bounded context read, the constructor
+rebuilds routing evidence and compares the immutable binding. Local credential,
+settings and body changes during the asynchronous evidence read are checked again.
+The original job identity and deadline are checked immediately before HTTP.
+
+Once admitted, every pre-send failure retains the existing hold. Provider timeout,
+unverified receipt or provisional usage settles as uncertain through the existing
+RPC. A lost settlement acknowledgment remains unknown. Neither path cancels,
+releases, retries, switches providers or creates a replacement logical key.
+Completed/overrun accounting continues to use the existing receipt and settlement
+contract, including exact cost strings. Repeated settlement can acknowledge the
+same recorded result idempotently; it must not consume allowance twice.
+
+The new synthetic integration suite uses the real store parameter/response
+validators with an in-memory service simulating the existing RPC contract. Two
+concurrent instances receive one admission, make one provider submission and
+consume once; receipt replay is idempotent and altered identity/receipts fail.
+These tests do not replace the existing PostgreSQL concurrency suite or prove
+live financial correctness. Strict instantaneous revocation still requires a
+separately reviewed database/provider-boundary contract.
+
+The remaining owner decision is whether to activate this stricter eligibility
+for operator briefs once its authenticated source, real billing semantics,
+finite approved allowance, clean accounting boundary and isolated acceptance are
+ready. Missing source evidence must block that path. This checkpoint makes no
+activation or accounting-policy decision and does not extend allowances to
+creative generation, scraping, advertising or commerce actions.
 
 ## Verification for this preparation
 
-`server/tests/operator-brief-routing.test.mjs` exercises the actual router through this seam using synthetic data only. It covers exact identity, missing/stale/bound evidence, all deadlines, existing policy and catalog constraints, required reasoning/context, pricing-category maximum, per-component rounding, large/zero/malformed limits, exact owner-cap conversion, stable binding, stale duplicate price rows, policy-attestation mixing, hostile thrown/revoked proxies, privacy, immutability and absence of runtime wiring/network calls.
+`server/tests/operator-brief-routing.test.mjs` exercises the actual pure router using synthetic data only. It covers exact identity, missing/stale/bound evidence, all deadlines, existing policy and catalog constraints, required reasoning/context, pricing-category maximum, per-component rounding, large/zero/malformed limits, exact owner-cap conversion, stable binding, stale duplicate price rows, policy-attestation mixing, hostile thrown/revoked proxies, privacy, immutability and absence of production construction. `operator-brief-admission.test.mjs` adds the dormant admission/dispatch/settlement integration cases above.
 
 Run from the repository root with Node 22:
 

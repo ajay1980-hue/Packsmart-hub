@@ -363,5 +363,9 @@ test('pure calls never mutate, freeze or retain caller-owned objects and never f
   assert.doesNotMatch(source, /\b(?:fetch|writeFile|appendFile|exec|spawn|setTimeout|setInterval)\s*\(/);
   assert.doesNotMatch(source, /process\.env|Date\.now|new Date|Math\.random|createAiProvider|reserveProviderUsage|settleProviderUsage/);
   const production = await readFile(new URL('../lib/ai-provider.mjs', import.meta.url), 'utf8');
-  assert.doesNotMatch(production, /operator-brief-routing|routeOperatorBrief/);
+  assert.match(production, /export const createAiProvider = options => createProvider\(options\)/);
+  for (const file of ['server.mjs', 'lib/scheduler.mjs']) {
+    const consumer = await readFile(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(consumer, /createRoutingBoundAiProvider|readRoutingEvidence/);
+  }
 });
