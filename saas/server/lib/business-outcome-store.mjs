@@ -5,6 +5,7 @@ import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcom
 import { assessExperimentOutcomeMeasurement, digestMeasurementValue, validateExperimentOutcomeMeasurement } from './experiment-measurements.mjs';
 import { governedRecordCreationEnabled, assertGovernedRecordCreation } from './governed-record-stage.mjs';
 import { evidenceInWorkspace } from './business-evidence-scope.mjs';
+import { createHistoricalFinancialEvidenceReader } from './historical-financial-evidence.mjs';
 
 export const OUTCOME_CURRENT_LIMIT = 50;
 export const OUTCOME_READ_BYTES = 2 * 1024 * 1024;
@@ -602,7 +603,15 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
       return combined;
     } catch { throw failure('OUTCOME_REVIEW_INVALID'); }
   }
-  return { publish, current, one, evidence, review };
+  // Dormant internal reader: no HTTP route, scheduler, financial gate or write.
+  // Only this authenticated RPC path supplies source material to the producer;
+  // a serialized public review cannot supply the private receipt capability.
+  const financialEvidence = createHistoricalFinancialEvidenceReader({ now,
+    read: async (workspaceId, experimentId, actor, receipt) => {
+      const snapshot = await review(workspaceId, experimentId, actor, { receipt, requireReceiptContract: true });
+      return { review: snapshot, receiptEvidence: selectedProtectedReceiptEvidence(snapshot) };
+    } });
+  return { publish, current, one, evidence, review, financialEvidence };
 }
 
 // Keep evidence() private and complete for same-outcome correction/reuse. Only
