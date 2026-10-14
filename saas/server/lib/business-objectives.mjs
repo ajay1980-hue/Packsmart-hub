@@ -37,6 +37,28 @@ function numeric(value, name, { min = 0, max = Number.MAX_SAFE_INTEGER, integer 
   if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) throw invalid(`${name} must be a finite ${integer ? 'integer' : 'number'} between ${min} and ${max}`);
   return value;
 }
+
+// Compare the decimal spellings of the existing, already validated Number
+// inputs. Binary addition can exceed an exact decimal cap or erase an overrun.
+// This cannot recover precision lost before those inputs were recorded, and is
+// not source verification, currency conversion or a minor-unit rounding policy.
+function recordedBudgetComparison(spent, planned, limit) {
+  const parts = value => {
+    const [mantissa, exponent = '0'] = String(value).split('e');
+    const [integer, fraction = ''] = mantissa.split('.');
+    const places = fraction.length - Number(exponent);
+    return { units: BigInt(integer + fraction) * 10n ** BigInt(Math.max(0, -places)), scale: Math.max(0, places) };
+  };
+  const values = [spent, planned, limit].map(parts);
+  // Finite nonnegative inputs <= MAX_SAFE_INTEGER need at most 324 places;
+  // three operands keep the BigInt work and exact diagnostic string bounded.
+  const scale = Math.max(...values.map(value => value.scale));
+  const [a, b, cap] = values.map(value => value.units * 10n ** BigInt(scale - value.scale));
+  const total = a + b;
+  const digits = total.toString().padStart(scale + 1, '0');
+  const exact = scale ? `${digits.slice(0, -scale)}.${digits.slice(-scale)}`.replace(/\.?0+$/, '') : digits;
+  return { total: Number(exact), actualExact: exact, limitExact: String(limit), passed: total <= cap };
+}
 function text(value, name, maximum) {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > maximum || /[\u0000-\u001f\u007f]/.test(value)) throw invalid(`${name} must be nonempty text of at most ${maximum} characters`);
   return value.trim();
@@ -281,10 +303,10 @@ export function evaluateObjectivePlan(state, input, options = {}) {
     if (!startsAt || !endsAt || evidence.adSpendMonth !== startsAt.slice(0, 7) || evidence.adSpendMonth !== endsAt.slice(0, 7) || evidence.adSpendMonth !== now.slice(0, 7)) block('AD_SPEND_PERIOD_UNKNOWN', 'evidence.adSpendMonth', 'The budget comparison requires a single current calendar month');
     if (!evidence.observedAt || evidence.observedAt.slice(0, 7) !== evidence.adSpendMonth) block('AD_SPEND_EVIDENCE_PERIOD_MISMATCH', 'evidence.observedAt', 'Month-to-date spend must have been observed in the budget month');
     if (evidence.monthToDateAdSpend !== null && evidence.plannedAdSpend !== null) {
-      const total = evidence.monthToDateAdSpend + evidence.plannedAdSpend;
-      const passed = Number.isSafeInteger(Math.trunc(total)) && total <= policy.maxMonthlyAdBudget;
-      check('monthlyAdSpend', total, policy.maxMonthlyAdBudget, passed);
-      if (!passed) block('AD_BUDGET_EXCEEDED', 'evidence.plannedAdSpend', 'Month-to-date plus planned advertising spend exceeds the monthly limit');
+      const comparison = recordedBudgetComparison(evidence.monthToDateAdSpend, evidence.plannedAdSpend, policy.maxMonthlyAdBudget);
+      check('monthlyAdSpend', comparison.total, policy.maxMonthlyAdBudget, comparison.passed);
+      Object.assign(checks.at(-1), { actualExact: comparison.actualExact, limitExact: comparison.limitExact, comparisonBasis: 'recorded_decimal' });
+      if (!comparison.passed) block('AD_BUDGET_EXCEEDED', 'evidence.plannedAdSpend', 'Month-to-date plus planned advertising spend exceeds the monthly limit');
     }
   }
   if (policy.minStockCoverDays !== null) {

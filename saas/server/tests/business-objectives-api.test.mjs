@@ -52,6 +52,32 @@ test('objectives are owner-only, revision protected, audited and tenant isolated
   const evaluated=await request('/api/business-objectives/evaluate',{method:'POST',body:{objectiveId:objective.id,kind:'prepare_report',mode:'internal_preparation',evidence:{}}});
   assert.equal(evaluated.status,200);assert.equal(evaluated.body.readyForPreparation,false);assert.equal(evaluated.body.safeguards.externalExecutionAllowed,false);
   assert.equal(writes,before,'evaluation never saves or executes');
+  let currentRevision = updated.body.objective.revision;
+  for (const [spent, planned, cap, passed, exact] of [
+    [0.1, 0.2, 0.3, true, '0.3'],
+    [Number.MAX_SAFE_INTEGER, 0.25, Number.MAX_SAFE_INTEGER, false, '9007199254740991.25']
+  ]) {
+    const configured = await request('/api/business-objectives', { method: 'PUT', body: {
+      id: objective.id, revision: currentRevision, limits: { maxMonthlyAdBudget: cap }
+    } });
+    assert.equal(configured.status, 200);
+    currentRevision = configured.body.objective.revision;
+    const savedBefore = await server.packsmart.store.get('alpha'), writesBefore = writes;
+    const comparison = await request('/api/business-objectives/evaluate', { method: 'POST', body: {
+      objectiveId: objective.id, kind: 'prepare_report', mode: 'internal_preparation',
+      evidence: { monthToDateAdSpend: spent, plannedAdSpend: planned, currency: 'GBP' }
+    } });
+    assert.equal(comparison.status, 200);
+    const check = comparison.body.checks.find(item => item.field === 'monthlyAdSpend');
+    assert.equal(check.passed, passed);
+    assert.equal(check.actualExact, exact);
+    assert.equal(comparison.body.safeguards.externalExecutionAllowed, false);
+    assert.equal(comparison.body.sourceReferencesResolved, false);
+    assert.equal(comparison.body.readyForPreparation, false);
+    assert.ok(comparison.body.approvalRequiredKinds.includes('advertising_spend'));
+    assert.equal(writes, writesBefore, 'exact comparisons do not save, reserve budget or execute');
+    assert.deepEqual(await server.packsmart.store.get('alpha'), savedBefore);
+  }
   assert.equal((await request('/api/business-objectives/evaluate',{id:'member',method:'POST',body:{}})).status,403);
 });
 

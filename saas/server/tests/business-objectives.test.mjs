@@ -29,6 +29,86 @@ function plan(row, overrides = {}) {
 }
 const codes = result => result.blockers.map(item => item.code);
 const validation = fn => assert.throws(fn, error => error.status === 400 && error.code === 'VALIDATION_FAILED');
+
+for (const [spent, planned, limit, within, exact] of [
+  [0.1, 0.2, 0.3, true, '0.3'],
+  [0.3, 0.6, 0.9, true, '0.9'],
+  [1e-7, 2e-7, 3e-7, true, '0.0000003'],
+  [Number.MAX_SAFE_INTEGER, 0.25, Number.MAX_SAFE_INTEGER, false, '9007199254740991.25'],
+  [2 ** 52, 0.25, 2 ** 52, false, '4503599627370496.25'],
+  [Number.MAX_SAFE_INTEGER, Number.MIN_VALUE, Number.MAX_SAFE_INTEGER, false, '9007199254740991.' + '0'.repeat(323) + '5'],
+  [Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, false, '18014398509481982'],
+  [0, Number.MIN_VALUE, 0, false, '0.' + '0'.repeat(323) + '5'],
+  [0.30000000000000004, 0, 0.3, false, '0.30000000000000004'],
+  [0, -0, 0, true, '0'],
+  [0.1, 0, 0.1, true, '0.1']
+]) test(`decimal budget comparison preserves recorded values: ${spent} + ${planned} <= ${limit}`, () => {
+  const { tenant, row } = fixture({ limits: { maxMonthlyAdBudget: limit, currency: 'GBP', profitFirst: false } });
+  const input = plan(row);
+  Object.assign(input.evidence, { monthToDateAdSpend: spent, plannedAdSpend: planned });
+  const before = structuredClone(tenant);
+  const result = evaluateObjectivePlan(deepFreeze(tenant), deepFreeze(input), OPTIONS);
+  const check = result.checks.find(item => item.field === 'monthlyAdSpend');
+  assert.equal(check.passed, within, 'decimal total, not a rounded binary sum, determines the comparison');
+  assert.equal(codes(result).includes('AD_BUDGET_EXCEEDED'), !within);
+  assert.equal(check.actualExact, exact);
+  assert.equal(check.limitExact, String(limit));
+  assert.equal(check.comparisonBasis, 'recorded_decimal');
+  assert.equal(check.basis, 'supplied_evidence');
+  assert.equal(check.actual, Number(exact), 'legacy numeric display is only a projection of the exact comparison');
+  assert.equal(result.evidence.provenance, 'supplied_unverified');
+  assert.equal(result.evidence.providerVerified, false);
+  assert.equal(result.sourceReferencesResolved, false);
+  assert.equal(result.safeguards.externalExecutionAllowed, false);
+  if (planned > 0) {
+    assert.equal(result.readyForPreparation, false);
+    assert.ok(result.approvalRequiredKinds.includes('advertising_spend'));
+  }
+  assert.deepEqual(tenant, before);
+});
+
+test('decimal budget comparisons agree with an independent integer-cent oracle', () => {
+  const { tenant, row } = fixture({ limits: { maxMonthlyAdBudget: 0.3, currency: 'GBP', profitFirst: false } });
+  deepFreeze(tenant);
+  for (let spentCents = 0; spentCents <= 30; spentCents++) {
+    for (let plannedCents = 0; plannedCents <= 30; plannedCents++) {
+      const input = plan(row);
+      Object.assign(input.evidence, { monthToDateAdSpend: spentCents / 100, plannedAdSpend: plannedCents / 100 });
+      const result = evaluateObjectivePlan(tenant, input, OPTIONS);
+      const check = result.checks.find(item => item.field === 'monthlyAdSpend');
+      assert.equal(check.passed, spentCents + plannedCents <= 30, `${spentCents} + ${plannedCents} cents`);
+      assert.equal(check.actualExact, String((spentCents + plannedCents) / 100));
+      assert.equal(result.safeguards.spendCommitted, false);
+    }
+  }
+});
+
+test('decimal budget comparison cannot replace missing evidence or clear other preparation holds', () => {
+  const { tenant, row } = fixture({ limits: { maxMonthlyAdBudget: 0.3, currency: 'GBP', profitFirst: true } });
+  const input = plan(row);
+  Object.assign(input.evidence, { monthToDateAdSpend: 0.1, plannedAdSpend: 0.2 });
+  for (const field of ['monthToDateAdSpend', 'plannedAdSpend']) {
+    const result = evaluateObjectivePlan(tenant, { ...input, evidence: { ...input.evidence, [field]: null } }, OPTIONS);
+    assert.ok(codes(result).includes('AD_SPEND_UNKNOWN'));
+    assert.equal(result.checks.some(item => item.field === 'monthlyAdSpend'), false);
+    for (const invalid of ['', '0.2', false, [], {}, NaN, Infinity, -0.01, Number.MAX_SAFE_INTEGER + 1]) {
+      validation(() => evaluateObjectivePlan(tenant, { ...input, evidence: { ...input.evidence, [field]: invalid } }, OPTIONS));
+    }
+  }
+  for (const [patch, code] of [
+    [{ currency: 'USD' }, 'CURRENCY_MISMATCH'], [{ currency: null }, 'CURRENCY_UNKNOWN'],
+    [{ observedAt: null }, 'EVIDENCE_TIME_UNKNOWN'], [{ costsComplete: false }, 'COST_EVIDENCE_INCOMPLETE'],
+    [{ adSpendMonth: '2026-09' }, 'AD_SPEND_PERIOD_UNKNOWN'], [{ sourceRefs: [] }, 'EVIDENCE_SOURCE_UNKNOWN'],
+    [{ contributionProfitDelta: null }, 'PROFIT_IMPACT_UNKNOWN'], [{ contributionProfitDelta: -0.01 }, 'PROFIT_FIRST_LIMIT']
+  ]) {
+    const result = evaluateObjectivePlan(tenant, { ...input, evidence: { ...input.evidence, ...patch } }, OPTIONS);
+    assert.ok(codes(result).includes(code));
+    assert.equal(result.readyForPreparation, false);
+    assert.equal(result.checks.find(item => item.field === 'monthlyAdSpend').passed, true);
+    assert.equal(result.safeguards.externalExecutionAllowed, false);
+  }
+});
+
 function deepFreeze(value) {
   if (value && typeof value === 'object') { Object.freeze(value); for (const child of Object.values(value)) deepFreeze(child); }
   return value;
