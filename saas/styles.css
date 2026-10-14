@@ -824,6 +824,9 @@ tbody tr:hover { background: rgba(216, 181, 91, .025); }
 .filters-wide input { flex: 1 1 260px; }
 .filters-wide select { flex: 0 1 210px; }
 .economics-table { min-width: 2180px; }
+.cost-entry-guide { margin: .75rem 0 1rem; padding: .65rem .8rem; border: 1px solid var(--line); border-radius: 10px; }
+.cost-entry-guide summary { cursor: pointer; padding: .5rem 0; }
+.cost-entry-guide p { max-width: 72ch; line-height: 1.55; }
 .compact-select { width: 155px; min-height: 36px; padding: .35rem .45rem; }
 .table-actions { display: flex; align-items: center; gap: .35rem; margin-top: .35rem; }
 .small-button { min-height: 34px; padding: .42rem .65rem; font-size: .68rem; }

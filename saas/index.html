@@ -424,6 +424,14 @@
             <div><p class="eyebrow">TRUE PRODUCT ECONOMICS</p><h2>Products &amp; Profit</h2><p class="muted">Contribution = selling price minus landed, packing, delivery and channel costs. Handling, payment, advertising and other variable costs are also required; unknowns are never treated as zero. This is operating contribution, not statutory accounting profit.</p></div>
             <div class="button-row"><a class="secondary button-link" href="/api/reports/accounting.csv">Export recorded evidence CSV</a></div>
           </div>
+          <p id="cost-entry-basis" class="muted">Enter each cost for one saleable SKU / variant unit, on the same basis as its displayed price. If the SKU sells as a pack, enter the cost for that pack.</p>
+          <details class="cost-entry-guide">
+            <summary>Which unit should I use?</summary>
+            <p>Supplier cartons, individual items and retail packs can have different quantities. There is no automatic pack conversion here. Do not multiply a cost again if it already covers one saleable SKU unit.</p>
+            <p>For the box price helper, use the box price and the number of saleable SKU units covered by that same price. <strong>Fictional example:</strong> a carton of 120 items makes 20 saleable packs of 6; the helper quantity would be 20. Confirm the billed quantity as well as the supplier's pricing quantity.</p>
+            <p>Allocate order or batch charges, including inbound delivery and customer postage, to one saleable SKU unit using a confirmed basis. Leave unconfirmed new costs blank; enter zero only for a confirmed zero cost. Review existing entries with an unknown basis before relying on them.</p>
+            <p>Confirm supplier VAT rate and recovery treatment separately. This guidance does not change saved costs, tax settings or financial approval requirements.</p>
+          </details>
           <div class="filters filters-wide">
             <input id="product-search" type="search" placeholder="Search product, variant or SKU">
             <select id="product-status">
