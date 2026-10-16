@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { deriveOperations } from './operations.mjs';
-import { hasCataloguePrice } from './profit.mjs';
+import { contributionMeetsMargin, hasCataloguePrice } from './profit.mjs';
 import { advanceCampaignCreatives, testMarketingProvider } from './marketing-providers.mjs';
 import { canvaOAuthReady, readCanvaCredentials, refreshCanvaCredentials } from './marketing-oauth.mjs';
 import { decryptCredentials, encryptCredentials } from './security.mjs';
@@ -102,7 +102,8 @@ function eligibleProducts(state) {
     .filter(item => item.available !== false)
     .filter(item => item.inventory == null || item.inventory >= minInventory)
     .filter(item => item.complete && hasCataloguePrice(item.price) &&
-      Number.isFinite(item.contribution) && Number.isFinite(item.margin) && item.margin >= minMargin)
+      Number.isFinite(item.contribution) && Number.isFinite(item.margin) &&
+      contributionMeetsMargin(item.price, state.economics?.[item.sku] || state.economics?.[item.id] || {}, minMargin))
     .filter(item => item.productImage || item.image)
     .sort((a, b) => {
       return Number(b.contribution || 0) - Number(a.contribution || 0);

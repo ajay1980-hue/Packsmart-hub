@@ -146,7 +146,9 @@ function cleanEconomics(value = {}) {
       if (!Number.isFinite(number) || number < 0 || number > maximum) {
         throw Object.assign(new Error(`Invalid ${field} value`), { status: 400, code: 'VALIDATION_FAILED' });
       }
-      clean[field] = Number(number.toFixed(4));
+      // Unit inputs can contain sub-penny source costs. Keep the admitted
+      // number; rounding each unit here changes later quantity aggregates.
+      clean[field] = number;
     }
   }
   for (const field of ECONOMICS_TEXT_FIELDS) {

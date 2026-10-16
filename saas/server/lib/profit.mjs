@@ -53,6 +53,83 @@ function rounded(value, places = 2) {
   return Math.round((value + Number.EPSILON) * multiplier) / multiplier;
 }
 
+// Policy decisions use source numbers before any supplier arithmetic or display
+// rounding. Rational division also retains repeating box allocations exactly.
+// Input normalization still uses Number; precision already lost at ingestion or
+// in historical records cannot be recovered by these comparisons.
+function fraction(n, d = 1n) {
+  if (d < 0n) { n = -n; d = -d; }
+  let a = n < 0n ? -n : n, b = d;
+  while (b) [a, b] = [b, a % b];
+  return { n: n / a, d: d / a };
+}
+
+function decimalNumber(value) {
+  const [mantissa, exponent = '0'] = String(value).split('e');
+  const [whole, decimals = ''] = mantissa.split('.');
+  const n = BigInt(whole + decimals), scale = decimals.length - Number(exponent);
+  return scale >= 0 ? fraction(n, 10n ** BigInt(scale)) : fraction(n * 10n ** BigInt(-scale));
+}
+
+const add = (a, b) => fraction(a.n * b.d + b.n * a.d, a.d * b.d);
+const subtract = (a, b) => fraction(a.n * b.d - b.n * a.d, a.d * b.d);
+const multiply = (a, b) => fraction(a.n * b.n, a.d * b.d);
+const divide = (a, b) => fraction(a.n * b.d, a.d * b.n);
+const sourceAmount = value => hasAmount(value) ? decimalNumber(Number(value)) : null;
+
+function exactLandedCost(record) {
+  const landed = sourceAmount(record.landed);
+  if (landed) return landed;
+  let unit = sourceAmount(record.supplierUnitCost);
+  if (!unit) {
+    const box = sourceAmount(record.boxPrice), quantity = sourceAmount(record.boxQuantity);
+    if (box && quantity?.n > 0n) unit = divide(box, quantity);
+  }
+  const delivery = sourceAmount(record.supplierDelivery), rate = sourceAmount(record.supplierVatRate);
+  if (!unit || !delivery || !rate || typeof record.supplierVatRecoverable !== 'boolean') return null;
+  const vat = record.supplierVatRecoverable ? fraction(0n) : divide(multiply(unit, rate), fraction(100n));
+  return add(add(unit, delivery), vat);
+}
+
+function exactVariableCost(record = {}) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+  if (!deriveLandedCost(record).complete) return null;
+  const values = [exactLandedCost(record), ...REQUIRED_UNIT_COSTS.slice(1).map(field => sourceAmount(record[field.id]))];
+  return values.every(Boolean) ? values.reduce(add, fraction(0n)) : null;
+}
+
+function exactContribution(price, record) {
+  const cost = exactVariableCost(record);
+  if (!Number.isFinite(price) || !cost) return null;
+  const revenue = decimalNumber(price);
+  return { price: revenue, value: subtract(revenue, cost) };
+}
+
+// Pass the original economics record, never the derived/displayed costs.
+export function contributionMeetsMargin(price, record, minimumPercent) {
+  if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(minimumPercent)) return false;
+  const contribution = exactContribution(price, record);
+  if (!contribution) return false;
+  const floor = decimalNumber(minimumPercent);
+  return contribution.value.n * 100n * floor.d * contribution.price.d >=
+    contribution.price.n * floor.n * contribution.value.d;
+}
+
+// GBP catalogue proposals settle to pennies only after source-cost division.
+// Withhold a proposal if it cannot be represented and verified safely.
+export function minimumPriceForMargin(record, minimumPercent) {
+  if (!Number.isFinite(minimumPercent) || minimumPercent >= 100) return null;
+  const cost = exactVariableCost(record);
+  if (!cost) return null;
+  const retainedPercent = subtract(fraction(100n), decimalNumber(minimumPercent));
+  const cents = divide(multiply(cost, fraction(10000n)), retainedPercent);
+  const ceiling = cents.n <= 0n ? 1n : (cents.n + cents.d - 1n) / cents.d;
+  if (ceiling > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  const price = Number(ceiling) / 100, represented = decimalNumber(price);
+  if (represented.n * 100n !== ceiling * represented.d) return null;
+  return contributionMeetsMargin(price, record, minimumPercent) ? price : null;
+}
+
 export function deriveLandedCost(record = {}) {
   if (hasAmount(record.landed)) {
     return { value: amount(record.landed), source: 'recorded', complete: true, missing: [] };
@@ -76,8 +153,11 @@ export function deriveLandedCost(record = {}) {
   if (missing.length) return { value: null, source: 'unknown', complete: false, missing };
 
   const vat = record.supplierVatRecoverable ? 0 : unitCost * amount(record.supplierVatRate) / 100;
+  const value = unitCost + amount(record.supplierDelivery) + vat;
+  if (!Number.isFinite(value)) return { value: null, source: 'unknown', complete: false, missing: ['supplier landed cost within supported range'] };
   return {
-    value: rounded(unitCost + amount(record.supplierDelivery) + vat, 4),
+    // Keep sub-penny unit precision until the caller aggregates or displays it.
+    value,
     source: unitSource,
     complete: true,
     missing: []
@@ -107,15 +187,16 @@ export function unitEconomics(item = {}, record = {}, options = {}) {
   const contribution = complete && price !== null ? price - totalVariableCost : null;
   const margin = contribution !== null && price > 0 ? contribution / price * 100 : null;
   const configuredFloor = hasAmount(record.marginFloor) ? amount(record.marginFloor) : hasAmount(options.marginFloor) ? amount(options.marginFloor) : 20;
+  const preciseContribution = complete && price !== null ? exactContribution(price, record) : null;
   const status = !complete
     ? 'missing-costs'
     : price === null
       ? 'missing-price'
-      : Number.isFinite(contribution) && contribution < 0
+      : preciseContribution && preciseContribution.value.n < 0n
         ? 'loss-making'
         : !Number.isFinite(margin)
           ? 'margin-unavailable'
-          : margin < configuredFloor
+          : !contributionMeetsMargin(price, record, configuredFloor)
             ? 'below-floor'
             : 'profitable';
 

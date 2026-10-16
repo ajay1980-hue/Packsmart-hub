@@ -4,6 +4,24 @@ import { costSourceHarness, selector, until } from './cost-source-ui-fixture.mjs
 
 const values = h => Object.fromEntries([...h.d.querySelectorAll('#economics-body .econ-input')].map(field => [field.dataset.field, field.value]));
 
+test('sub-penny saved unit inputs display and resubmit without two-decimal truncation', async t => {
+  const h = await costSourceHarness(t);
+  Object.assign(h.bootstrap.economics[selector.sku], { landed: 0.02029, packing: 0.00001 });
+  await h.controls.reload({ migrate: false });
+  assert.equal(values(h).landed, '0.02029');
+  assert.equal(values(h).packing, '0.00001');
+  h.sourcePut = async (_route, options) => {
+    const body = JSON.parse(options.body);
+    assert.equal(body.economics.landed, '0.02029');
+    assert.equal(body.economics.packing, '0.00001');
+    return Response.json({ ok: true });
+  };
+  h.d.querySelector('.save-economics').click();
+  await until(() => h.sourceWrites().length === 1);
+  await until(() => !h.d.querySelector('.save-economics').disabled);
+  assert.equal(values(h).landed, '0.02029');
+});
+
 test('cost basis help is available beside the table without changing recorded costs or authority', async t => {
   const h = await costSourceHarness(t);
   const before = { values: values(h), state: structuredClone(h.state), calls: h.calls.length };

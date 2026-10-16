@@ -20,7 +20,7 @@ import { fakeSupabase } from './fake-supabase.mjs';
 const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
 const priorVersion = 'imported-order-analytics/v3';
-const nextVersion = 'catalogue-recorded-costs/v1';
+const nextVersion = 'catalogue-margin-thresholds/v2';
 const costs = (packing = 0, landed = 9) => ({ landed, packing, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 });
 // Exact prior signature, deliberately independent of the current implementation/version.
 function priorSignature(state) {

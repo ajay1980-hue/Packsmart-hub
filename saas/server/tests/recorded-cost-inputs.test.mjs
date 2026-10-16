@@ -6,9 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
-import { seedWorkspaceState } from '../lib/store.mjs';
+import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { createSessionToken } from '../lib/security.mjs';
-import { ECONOMICS_FIELDS } from '../lib/profit.mjs';
+import { ECONOMICS_FIELDS, deriveLandedCost, unitEconomics } from '../lib/profit.mjs';
 
 const orderFields = ['actualShippingCost', 'paymentFees', 'channelFees', 'advertisingCost', 'otherVariableCosts'];
 const invalid = [' ', '\t\n', false, true, [], [null], [0], ['1'], {}, { value: 0 }, { toString: null, valueOf: 0 }, '0x10', '0b10', '0o10', 'Infinity', 'NaN', '1e309', '1,000', '£1', '1 GBP'];
@@ -40,6 +40,7 @@ async function fixture(t, workspaceId = 'packsmart-solutions') {
     return { status: response.status, payload: await response.json() };
   };
   return { store, state, request, counters: () => ({ saves, providerCalls }), save,
+    coldSnapshot: () => createStore({ SAAS_STATE_FILE: path.join(directory, 'state.json') }).get(workspaceId),
     snapshot: () => store.get(workspaceId), foreign: () => store.get(foreign.workspace.id) };
 }
 
@@ -79,16 +80,16 @@ test('advertising spend and optional attributed revenue share the recorded decim
   assert.equal(f.counters().providerCalls, 0);
 });
 
-test('valid decimals, explicit zero, clear values, rounding and independent field limits remain available', async t => {
+test('valid unit decimals retain precision while order/ad rounding and field limits remain available', async t => {
   const f = await fixture(t);
   for (const value of [0, '0', '-0', ' .0 ', '+0e2', '1.', '.25', ' 2.50 ', '+3e-1']) {
     const catalogue = await f.request('/api/economics', { sku: 'A', economics: { landed: value } });
-    assert.equal(catalogue.status, 200); assert.equal(catalogue.payload.economics.landed, Number(Number(value).toFixed(4)) || 0);
+    assert.equal(catalogue.status, 200); assert.equal(catalogue.payload.economics.landed, Number(value) || 0);
     const order = await f.request('/api/orders/order-one/economics', { actualShippingCost: value });
     assert.equal(order.status, 200); assert.equal(order.payload.order.actualShippingCost, Number(Number(value).toFixed(4)) || 0);
   }
   const rounded = await f.request('/api/economics', { sku: 'A', economics: { landed: '1.23456', supplierVatRecoverable: false } });
-  assert.equal(rounded.payload.economics.landed, 1.2346); assert.equal(rounded.payload.economics.supplierVatRecoverable, false);
+  assert.equal(rounded.payload.economics.landed, 1.23456); assert.equal(rounded.payload.economics.supplierVatRecoverable, false);
   const ad = await f.request('/api/advertising-costs', { channel: 'meta', spend: '1.234', attributableRevenue: '+2e1' });
   assert.equal(ad.payload.record.spend, 1.23); assert.equal(ad.payload.record.attributableRevenue, 20);
   for (const value of ['', null]) {
@@ -106,6 +107,75 @@ test('valid decimals, explicit zero, clear values, rounding and independent fiel
   assert.equal((await f.snapshot()).economics.A.notes, 'Retain this record'); assert.equal(f.counters().providerCalls, 0);
 });
 
+test('invoice unit costs survive save, cold store read, bootstrap and inventory aggregation', async t => {
+  const f = await fixture(t);
+  const initial = await f.snapshot();
+  initial.products = [{ id: 'p', title: 'Synthetic individual item', status: 'active', variants: [{ id: 'v', sku: 'A', price: 0.1, inventory: 1000 }] }];
+  initial.costHistory = [{ id: 'retained-history', sku: 'A', before: { landed: 6 }, after: { landed: 7 }, createdAt: '2026-09-01T00:00:00Z' }];
+  await f.save(initial.workspace.id, initial);
+  const before = await f.coldSnapshot();
+  // Invoice gross already includes its recorded VAT: do not add VAT again.
+  const derived = deriveLandedCost({ boxPrice: 20.29, boxQuantity: 1000, supplierDelivery: 0, supplierVatRate: 0, supplierVatRecoverable: false });
+  assert.equal(derived.value, 0.02029);
+  const result = await f.request('/api/economics', { sku: 'A', economics: { landed: String(derived.value), packing: '0.00001' } });
+  assert.equal(result.status, 200);
+  assert.equal(result.payload.economics.landed, 0.02029);
+  assert.equal(result.payload.economics.packing, 0.00001);
+  const saved = await f.coldSnapshot();
+  assert.equal(saved.economics.A.landed, 0.02029);
+  assert.equal(saved.economics.A.packing, 0.00001);
+  assert.equal(saved.economics.A.notes, before.economics.A.notes);
+  assert.equal(saved.costHistory[0].before.landed, 7);
+  assert.equal(saved.costHistory[0].after.landed, 0.02029);
+  assert.deepEqual(saved.costHistory.slice(1), before.costHistory);
+  assert.deepEqual(saved.approvals, before.approvals);
+  const boot = await f.request('/api/bootstrap', undefined, { method: 'GET' });
+  assert.equal(boot.status, 200);
+  assert.equal(boot.payload.economics.A.landed, 0.02029);
+  assert.equal(Math.round(boot.payload.economics.A.landed * 1000 * 100), 2029);
+  assert.equal(boot.payload.dashboard.stockValue, 20.29);
+  assert.equal(unitEconomics({ price: 0.1 }, saved.economics.A).contribution, null);
+  assert.equal(boot.payload.dashboard.last30d.operatingProfit, null);
+  assert.equal((await f.foreign()).economics.A.landed, 99);
+  assert.equal(f.counters().providerCalls, 0);
+});
+
+test('pack material plus one outer retains five decimals and unknown costs stay blocked', async t => {
+  const f = await fixture(t);
+  // Integer source oracle: 2029 pence per 1000 physical items = 2029 units of 1e-5 GBP each.
+  const physical = 2029n, product = physical * 50n, outer = physical;
+  const decimal5 = value => `${value / 100000n}.${String(value % 100000n).padStart(5, '0')}`;
+  const response = await f.request('/api/economics', { sku: 'A', economics: { landed: decimal5(product), packing: decimal5(outer) } });
+  assert.equal(response.status, 200);
+  const record = (await f.coldSnapshot()).economics.A;
+  assert.equal(record.landed, 1.0145);
+  assert.equal(record.packing, 0.02029);
+  // 1000 packs each using 50 items plus one outer: settle only after aggregation.
+  assert.equal(Math.round((record.landed + record.packing) * 1000 * 100), Number((product + outer) * 1000n / 1000n));
+  assert.equal(Math.round((record.landed + record.packing) * 1000 * 100), 103479);
+  const incomplete = unitEconomics({ price: 2.55 }, record);
+  assert.equal(incomplete.complete, false);
+  assert.equal(incomplete.contribution, null);
+  assert.equal(incomplete.margin, null);
+  assert.equal(incomplete.missingFields.length, 6);
+  assert.equal(f.counters().providerCalls, 0);
+});
+
+test('saved tiny supplier quantity retains its source but an overflowing derivation stays incomplete', async t => {
+  const f = await fixture(t);
+  const response = await f.request('/api/economics', { sku: 'A', economics: { landed: '', boxPrice: 1000000,
+    boxQuantity: '1e-320', supplierDelivery: 0, supplierVatRate: 0, supplierVatRecoverable: false,
+    packing: 0, handling: 0, delivery: 0, paymentFee: 0, channelFee: 0, advertising: 0, otherVariable: 0 } });
+  assert.equal(response.status, 200);
+  const record = (await f.coldSnapshot()).economics.A;
+  assert.equal(record.boxQuantity, 1e-320);
+  const row = unitEconomics({ price: 1 }, record);
+  assert.equal(row.complete, false);
+  assert.equal(row.contribution, null);
+  assert.equal(row.margin, null);
+  assert.equal(f.counters().providerCalls, 0);
+});
+
 test('pilot import validates all costs and rolls back the whole request when a later record is malformed', async t => {
   const f = await fixture(t); const before = await f.snapshot();
   for (const value of invalid) {
@@ -117,7 +187,7 @@ test('pilot import validates all costs and rolls back the whole request when a l
   const accepted = await f.request('/api/migrate-pilot', { migrationId: 'cost-validation', economics: { FIRST: { landed: '+.0' }, A: { landed: 0, packing: '2.34567' } } });
   assert.equal(accepted.status, 200);
   const after = await f.snapshot(); assert.equal(after.economics.FIRST.landed, 0); assert.equal(after.economics.A.landed, 7, 'Existing recorded amount is not replaced');
-  assert.equal(after.economics.A.packing, 2.3457); assert.ok(after.migrations['cost-validation']);
+  assert.equal(after.economics.A.packing, 2.34567); assert.ok(after.migrations['cost-validation']);
 });
 
 test('cost validation preserves role, CSRF, tenant, session reread and CAS protections', async t => {
