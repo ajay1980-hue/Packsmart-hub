@@ -102,6 +102,15 @@ test('supplier decimal addition, box division and VAT use source precision at th
   }
 });
 
+test('derived supplier values retain exact decimal results and supported extreme ratios', () => {
+  const supplier = fields => ({ supplierDelivery: 0, supplierVatRate: 0, supplierVatRecoverable: false, ...fields });
+  assert.equal(deriveLandedCost(supplier({ boxPrice: -120, boxQuantity: 100, supplierDelivery: 0.1, supplierVatRate: 20 })).value, -1.34);
+  assert.equal(deriveLandedCost(supplier({ supplierUnitCost: 0.1, supplierDelivery: 0.2 })).value, 0.3);
+  assert.equal(deriveLandedCost(supplier({ supplierUnitCost: 0.02029 })).value, 0.02029);
+  assert.equal(deriveLandedCost(supplier({ supplierUnitCost: 1e-320 })).value, 1e-320);
+  assert.equal(deriveLandedCost(supplier({ boxPrice: 1e308, boxQuantity: 3 })).value, 1e308 / 3);
+});
+
 test('tiny losses create one high-severity exception and retain its identity on reconciliation', () => {
   const state = Object.assign(seedWorkspaceState({}), fixture(1, costs(1.000001), 0));
   detectExceptions(state);

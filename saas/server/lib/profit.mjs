@@ -153,7 +153,14 @@ export function deriveLandedCost(record = {}) {
   if (missing.length) return { value: null, source: 'unknown', complete: false, missing };
 
   const vat = record.supplierVatRecoverable ? 0 : unitCost * amount(record.supplierVatRate) / 100;
-  const value = unitCost + amount(record.supplierDelivery) + vat;
+  const exact = exactLandedCost(record);
+  const numerator = Number(exact.n), denominator = Number(exact.d);
+  // Convert after the source arithmetic, without rounding away sub-penny costs.
+  // Extreme rational operands can exceed Number even when their ratio is finite;
+  // retain the existing numeric derivation in that case and apply its range guard.
+  const value = Number.isFinite(numerator) && Number.isFinite(denominator)
+    ? numerator / denominator
+    : unitCost + amount(record.supplierDelivery) + vat;
   if (!Number.isFinite(value)) return { value: null, source: 'unknown', complete: false, missing: ['supplier landed cost within supported range'] };
   return {
     // Keep sub-penny unit precision until the caller aggregates or displays it.
