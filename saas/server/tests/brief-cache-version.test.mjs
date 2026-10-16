@@ -31,7 +31,7 @@ function legacySignature(state, calculationVersion) {
   })).digest('hex').slice(0, 32);
 }
 
-for (const calculationVersion of ['catalogue-financial-eligibility/v1', 'imported-order-analytics/v2'])
+for (const calculationVersion of ['catalogue-financial-eligibility/v1', 'imported-order-analytics/v2', 'catalogue-recorded-costs/v1'])
 for (const storage of ['file', 'mock-supabase']) test(`${storage}: bootstrap invalidates ${calculationVersion} analysis once while retaining source orders, owner evidence and history`, async t => {
   const signature = state => legacySignature(state, calculationVersion);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runvara-brief-version-'));
@@ -111,7 +111,7 @@ for (const storage of ['file', 'mock-supabase']) test(`${storage}: bootstrap inv
   assert.notEqual(first.brief.id, preservedBrief.id, 'Changed calculation semantics must invalidate a same-day cache');
   assert.equal(first.dashboard.lowMargin, 0);
   assert.equal(first.brief.lowMargin, 0);
-  assert.equal(first.brief.calculationVersion, 'catalogue-recorded-costs/v1');
+  assert.equal(first.brief.calculationVersion, 'catalogue-margin-thresholds/v2');
   assert.equal(first.dashboard.refundedOrders30d, 0, 'derived legacy amounts cannot survive as refund review counts');
   assert.equal(first.dashboard.customerServiceIssues, 0);
   assert.doesNotMatch(first.brief.summary, /below their contribution-margin floor|below its contribution-margin floor/);

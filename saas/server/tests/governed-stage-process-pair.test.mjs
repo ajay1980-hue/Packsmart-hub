@@ -86,7 +86,7 @@ test('actual cold open→closed→open configuration pair preserves governed rec
   const rollback = await start(t, disk, 'closed');
   assert.notEqual(rollback.ready.pid, forward.ready.pid); assert.deepEqual(rollback.ready.runtime, forward.ready.runtime);
   assert.equal(rollback.ready.node, forward.ready.node); assert.equal(rollback.ready.nodeExecutableSha256, forward.ready.nodeExecutableSha256);
-  assert.equal(rollback.ready.calculationVersion, 'catalogue-recorded-costs/v1');
+  assert.equal(rollback.ready.calculationVersion, 'catalogue-margin-thresholds/v2');
   const config = { ...forward.ready.configuration }; delete config.GOVERNED_RECORD_PRODUCER_CONTRACT;
   assert.deepEqual(rollback.ready.configuration, config, 'Only producer admission changes; receipt/recovery capability settings are unchanged');
   assert.deepEqual(states(await rollback.command('snapshot')), baseline, 'Cold successor sees original retained bytes');

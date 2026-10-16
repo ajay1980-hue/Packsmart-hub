@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { requiresApproval } from './security.mjs';
 import {
   amount,
+  contributionMeetsMargin,
   deriveLandedCost,
   hasAmount,
   hasCataloguePrice,
@@ -17,7 +18,7 @@ try { ebayCommercial = require('../../../ebay-manager/strategy.js'); } catch {}
 
 // Bump when deterministic reporting/detection semantics change, even if the
 // persisted source records are unchanged. Historical reports keep their version.
-export const OPERATIONS_CALCULATION_VERSION = 'catalogue-recorded-costs/v1';
+export const OPERATIONS_CALCULATION_VERSION = 'catalogue-margin-thresholds/v2';
 
 export const SOCIAL_COMMERCE_CHANNELS = Object.freeze([
   { id: 'meta', name: 'Facebook & Instagram Shops', kind: 'social-commerce', capabilities: ['catalogue', 'listings', 'orders', 'ads'] },
@@ -145,8 +146,8 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   const contributionKnown = covered.filter(item => hasCataloguePrice(item.price) && Number.isFinite(item.contribution));
   const marginKnown = contributionKnown.filter(item => Number.isFinite(item.margin));
   const missingCosts = productRows.filter(item => !item.complete);
-  const lowMargin = marginKnown.filter(item => item.margin < item.marginFloor);
-  const negativeMargin = contributionKnown.filter(item => item.contribution < 0);
+  const lowMargin = marginKnown.filter(item => !contributionMeetsMargin(item.price, economics[item.sku] || economics[item.id] || {}, item.marginFloor));
+  const negativeMargin = contributionKnown.filter(item => item.status === 'loss-making');
   const stockRisks = productRows.filter(item =>
     String(item.productStatus).toLowerCase() === 'active' &&
     ((item.inventory !== null && item.inventory <= lowStockThreshold) || item.available === false)

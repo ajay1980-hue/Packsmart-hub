@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { minimumPriceForMargin } from './profit.mjs';
 import { connectionDue, CONNECTORS } from './connection-centre.mjs';
 import { AUTOMATION_DEFINITIONS, deriveOperations, ebayComparisonAvailable, integrationMatrix, normalizeApprovalRequest } from './operations.mjs';
 import { addAudit, recordWork } from './events.mjs';
@@ -128,7 +129,7 @@ export function detectExceptions(state, actor = 'system', options = {}) {
   for (const item of d.stockRiskItems) candidates.push({ kind: 'stock', reference: item.sku, severity: item.available === false || item.inventory === 0 ? 'high' : 'medium',
     title: `Stock attention: ${item.sku}`, businessImpact: 'Orders may be delayed if stock is unavailable.', rootCause: item.inventory === null ? 'Source reports unavailable; exact inventory is unknown.' : `Recorded quantity: ${item.inventory}`,
     recommendedAction: 'Verify stock and prepare replenishment for owner approval.', owner: 'stock', evidence: [{ type: 'variant', id: item.externalId || item.id, detail: item.productTitle }] });
-  for (const item of [...d.negativeMarginItems, ...d.lowMarginItems.filter(item => item.contribution >= 0)]) candidates.push({ kind: 'margin', reference: item.sku, severity: item.contribution < 0 ? 'high' : 'medium',
+  for (const item of [...d.negativeMarginItems, ...d.lowMarginItems.filter(item => item.status !== 'loss-making')]) candidates.push({ kind: 'margin', reference: item.sku, severity: item.status === 'loss-making' ? 'high' : 'medium',
     title: `Margin attention: ${item.sku}`, businessImpact: 'Current recorded costs leave less contribution than the configured target.', rootCause: `${item.margin}% margin; target ${item.marginFloor}%.`,
     recommendedAction: 'Review source costs and prepare a price proposal for approval.', owner: 'pricing', evidence: [{ type: 'economics', id: item.sku, detail: `Price ${item.price}; variable cost ${item.totalVariableCost}.` }] });
   for (const item of d.customerServiceItems) candidates.push({ kind: 'order', reference: item.id, severity: 'medium', title: `Review order ${item.name || item.id}`,
@@ -155,7 +156,9 @@ export function detectOpportunities(state, actor = 'system', options = {}) {
   const rejected = new Set(state.decisions.filter(item => item.status === 'active' && item.category === 'rejected_idea').map(item => item.target));
   for (const item of d.lowMarginItems) {
     if (exclusions.has(item.sku) || !item.complete || item.marginFloor >= 100 || item.price === null) continue;
-    const targetPrice = Math.ceil(item.totalVariableCost / (1 - item.marginFloor / 100) * 100) / 100;
+    const record = state.economics?.[item.sku] || state.economics?.[item.id] || {};
+    const targetPrice = minimumPriceForMargin(record, item.marginFloor);
+    if (targetPrice === null) continue;
     candidates.push({ kind: 'pricing', reference: item.sku, title: `Review the selling price of ${item.sku}`, evidence: [{ type: 'economics', id: item.sku, detail: `Recorded cost ${item.totalVariableCost}; price ${item.price}; margin target ${item.marginFloor}%.` }],
       estimatedImpact: { basis: 'ESTIMATED VALUE', amount: Math.round((targetPrice - item.price) * 100) / 100, unit: 'GBP per unit at unchanged costs', assumptions: 'Demand and sales volume are unknown. This is not earned revenue.' },
       effort: 'low', risk: 'high', confidence: 0.85, requiredAction: 'major_price_change', recommendedNextStep: `Review a price of £${targetPrice.toFixed(2)} and request approval before publishing.`, owner: 'pricing' });
