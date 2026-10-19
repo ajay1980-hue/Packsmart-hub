@@ -50,6 +50,22 @@ test.beforeEach(t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('Lifecycle tests cannot make live provider calls'));
 });
 
+test('unavailable full eBay comparison remains a recorded block without claiming OAuth or monitor failure', async t => {
+  const f = fixture(t, { rules: ['channelMismatchAlerts'] });
+  f.state.ebay = { source: 'ebay-oauth-readonly', coverage: { catalogueScope: 'inventory_api_only', fullCatalogueAvailable: false }, health: null };
+  const result = await f.run({ manual: true });
+  const run = result.runs.find(row => row.ruleId === 'channelMismatchAlerts');
+  assert.equal(run.status, 'BLOCKED');
+  assert.equal(run.errorCode, 'COVERAGE_UNAVAILABLE');
+  assert.equal(run.reason, 'COVERAGE_UNAVAILABLE');
+  assert.equal(run.evidence[0].type, 'channel_coverage');
+  assert.equal(run.evidence[0].available, false);
+  assert.equal(f.events.filter(event => event === 'provider').length, 0);
+  assert.equal(f.saved.length, 2, 'claim and terminal evidence remain durable');
+  assert.ok(f.state.audit.some(row => row.type === 'automation_finished'));
+  assert.deepEqual(await f.run({ manual: true }), { skipped: true, reason: 'FREQUENCY_OR_PERMISSION_LIMIT' });
+});
+
 test('manual work remains available without starting the background scheduler and respects frequency', async t => {
   const f = fixture(t);
   const result = await f.run({ manual: true });

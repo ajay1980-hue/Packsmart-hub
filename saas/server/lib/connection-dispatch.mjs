@@ -7,12 +7,16 @@ const denied = () => Object.assign(new Error('A verified connection-write dispat
 export function createConnectionDispatch(check) {
   if (typeof check !== 'function') throw denied();
   const capability = Object.freeze({});
-  capabilities.set(capability, { check, phases: new Set(), sent: 0 });
+  capabilities.set(capability, { check, phases: new Set(), submitted: new Set(), sent: 0 });
   return capability;
 }
 
 export function connectionDispatchCount(capability) {
   return capabilities.get(capability)?.sent || 0;
+}
+
+export function connectionDispatchPhaseSent(capability, phase) {
+  return capabilities.get(capability)?.submitted.has(phase) === true;
 }
 
 export async function dispatchConnectionMutation(capability, request, submit) {
@@ -23,5 +27,6 @@ export async function dispatchConnectionMutation(capability, request, submit) {
   const prepared = Object.freeze({ ...request });
   await entry.check(prepared);
   entry.sent++;
+  entry.submitted.add(request.phase);
   return submit();
 }

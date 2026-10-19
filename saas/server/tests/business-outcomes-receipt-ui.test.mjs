@@ -7,6 +7,7 @@ import { receiptUiFixture } from './business-outcomes-receipt-ui-fixture.mjs';
 import { objectivePublicationFixture } from './objective-publication-fixture.mjs';
 import { fixture as apiFixture, EXPERIMENT as API_EXPERIMENT } from './business-outcomes-api-fixture.mjs';
 import { protectedReceiptFixture } from './protected-receipt-source-fixture.mjs';
+import { descriptionFixture, descriptionInput } from './description-edit-fixture.mjs';
 const html = await fs.readFile(new URL('../../index.html', import.meta.url), 'utf8');
 const script = await fs.readFile(new URL('../../outcomes-ui.js', import.meta.url), 'utf8');
 const clone = structuredClone;
@@ -37,6 +38,22 @@ async function harness(t, { fixture = receiptUiFixture(), role = 'owner' } = {})
   h.receiptReads = () => h.calls.filter(c => c.path.endsWith('/content-sources'));
   await h.open(); await h.load(); return h;
 }
+
+test('description-only protected history displays complete escaped HTML with compatible v3 readers', async t => {
+  const f = await descriptionFixture(); await f.run();
+  const source = f.receiptCommits[1].receipt.source;
+  const fixture = receiptUiFixture({ workspaceId: f.state.workspace.id, sourceFixture: { source } });
+  const detail = fixture.detail;
+  fixture.detail = (...args) => ({ ...detail(...args), actionLinkContract: 'runvara-reviewed-action/v3' });
+  const h = await harness(t, { fixture }); h.select(); await h.preview();
+  const shown = h.$('business-outcomes-action-details');
+  // HTML parsing normalizes CRLF for display; request/receipt byte assertions
+  // are separate and remain exact. No rendered content is reused as authority.
+  for (const key of ['baselineHtml','paragraphHtml','replacementText','descriptionHtml']) assert.ok(shown.textContent.includes(descriptionInput()[key].replaceAll('\r\n', '\n')), key);
+  assert.equal(shown.querySelector('img,script,.product-copy'), null);
+  assert.doesNotMatch(shown.textContent, /Product title|undefined/);
+  await h.save(); assert.equal(h.writes().length, 1);
+});
 
 test('explicit receipt selection previews one bounded source and saves only three selection assertions', async t => {
   const h = await harness(t), first = h.f.sources[0];

@@ -1,5 +1,6 @@
 // These are display projections, never signed proposals or execution authority.
 // Keep every level allowlisted: stored records may acquire private fields later.
+import { DESCRIPTION_EDIT_SCHEMA, DESCRIPTION_EDIT_KEYS } from './description-edit.mjs';
 export const OBJECTIVE_CONTENT_DISPLAY_SCHEMA = 'runvara-objective-content-display/v1';
 
 function field(value, key) {
@@ -56,7 +57,7 @@ function publicInput(provider, input) {
   if (provider === 'shopify') {
     if (!['product_content', 'internal_note', 'product_tags_add', 'product_tags_remove'].includes(operation)) return result;
     copy(result, input, ['operation', 'productId']);
-    if (operation === 'product_content') copy(result, input, ['title', 'description']);
+    if (operation === 'product_content') copy(result, input, field(input, 'schema') === DESCRIPTION_EDIT_SCHEMA ? DESCRIPTION_EDIT_KEYS : ['title', 'description']);
     else if (operation === 'internal_note') copy(result, input, ['note']);
     else for (const key of ['tags', 'expectedTags']) {
       const values = stringArray(field(input, key));
@@ -123,7 +124,13 @@ export function publicConnectionWrite(write) {
   const storedResult = field(write, 'result');
   if (storedResult && typeof storedResult === 'object' && !Array.isArray(storedResult)) {
     result.result = copy({}, storedResult, ['externalId', 'recovery'], nullableString);
-    copy(result.result, storedResult, ['confirmed'], boolean);
+    copy(result.result, storedResult, ['confirmed', 'simulated'], boolean);
+  }
+  if (field(write, 'marketingPublication')) {
+    result.observationHistoryAvailable = field(field(write, 'marketingPublication'), 'receiptContract') === 'runvara-synthetic-meta-receipts/v1';
+    result.publishingEnabled = false;
+    result.executedExternally = false;
+    result.simulationOnly = true;
   }
   const display = sourceDisplay(write);
   if (display) result.sourceDisplay = display;
@@ -146,6 +153,32 @@ export function publicApproval(approval) {
   copy(result, approval, ['executedExternally'], boolean);
   const payload = field(approval, 'payload');
   result.payload = copy({}, payload, ['connectionWriteId', 'opportunityId', 'experimentId', 'marketingCampaignId'], nullableString);
+  const publication = field(payload, 'publication');
+  if (field(approval, 'type') === 'protected_meta_production_publication' && field(payload, 'contract') === 'runvara-meta-publication-ledger/production-v1') {
+    result.payload.metaProduction = copy({}, field(payload, 'binding'), ['campaignId', 'requestId']);
+  }
+  if (field(publication, 'schema') === 'runvara-meta-campaign-publication/v1') {
+    copy(result.payload, payload, ['marketingPublicationDigest'], nullableString);
+    result.payload.publication = copy({}, publication, ['schema', 'dispatchIdentitySchema', 'campaignId', 'operation', 'caption', 'sourceRevision', 'digest']);
+    result.payload.publication.target = copy({}, field(publication, 'target'), ['connectionId', 'account', 'pageId', 'instagramId']);
+    copy(result.payload.publication.target, field(publication, 'target'), ['settingsRevision'], integer);
+    result.payload.publication.asset = copy({}, field(publication, 'asset'), ['creativeRequestId', 'provider', 'jobId', 'completedAt', 'url', 'referenceDigest']);
+    result.payload.publication.asset.bytesVerified = false;
+    const local = field(field(publication, 'asset'), 'localSnapshot');
+    if (['runvara-local-publication-asset/v1', 'runvara-local-publication-asset/v2'].includes(field(local, 'schema'))) {
+      const snapshot = copy({}, local, ['schema', 'sha256', 'mediaType', 'mimeEvidence']);
+      copy(snapshot, local, ['byteLength', 'width', 'height'], integer);
+      snapshot.decoded = false; snapshot.providerDeliveryVerified = false;
+      if (field(local, 'schema') === 'runvara-local-publication-asset/v2') {
+        copy(snapshot, local, ['pixelSha256', 'decoder']);
+        copy(snapshot, local, ['pixelByteLength', 'colorType'], integer);
+        snapshot.decoded = field(local, 'decoded') === true && field(local, 'decoder') === 'png8-noninterlaced-basic/v1';
+      }
+      snapshot.context = copy({}, field(local, 'context'), ['workspaceId', 'campaignId', 'creativeRequestId', 'provider', 'jobId', 'completedAt', 'url', 'referenceDigest']);
+      result.payload.publication.asset.localSnapshot = snapshot;
+    }
+    result.payload.publication.publishingEnabled = false;
+  }
   copy(result.payload, payload, ['verifiedExperiment', 'legacyReviewRecorded'], boolean);
   result.evidence = rows(field(approval, 'evidence'), publicEvidence);
   result.history = rows(field(approval, 'history'), publicHistory);

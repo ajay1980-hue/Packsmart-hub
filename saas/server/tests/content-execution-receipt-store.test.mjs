@@ -96,7 +96,7 @@ test('closed startup producer stage refuses retained reserve descriptors before 
 
 test('default capability is private and disabled; missing, unknown, invalid baseline and FileStore fail before I/O', async () => {
   const f = fixture();
-  for (const marker of [undefined, null, '', false, 0, 'runvara-content-execution-receipts/v2']) {
+  for (const marker of [undefined, null, '', false, 0, 'runvara-content-execution-receipts/v3']) {
     let calls = 0;
     const store = createStore({ ...env, CONTENT_EXECUTION_RECEIPT_CONTRACT: marker }, { fetchImpl: async () => { calls++; throw new Error('Unexpected I/O'); } });
     assert.equal(store.contentExecutionReceiptCapability, marker ?? null);

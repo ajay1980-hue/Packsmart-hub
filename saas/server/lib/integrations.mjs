@@ -16,6 +16,17 @@ import { inspectShopifyCataloguePage } from './shopify-catalogue-read.mjs';
 
 const CUSTOMER_ZERO_WORKSPACE = 'packsmart-solutions';
 
+// Reusing an unavailable optional surface is not a new provider failure. Never
+// backdate a later historical failure from a selected older diagnostic, either.
+// A cooldown-deferred read did not reach eBay. Per-surface at remains the exact
+// recorded observation; legacy aggregate times cannot be repaired without proof.
+function ebayReadFailureAt(diagnostics, previous) {
+  const times = Object.values(diagnostics).filter(item => !item.deferred && typeof item.at === 'string'
+    && Number.isFinite(Date.parse(item.at))).map(item => item.at);
+  if (typeof previous === 'string' && Number.isFinite(Date.parse(previous))) times.push(previous);
+  return times.sort((a, b) => Date.parse(b) - Date.parse(a))[0] || previous || null;
+}
+
 export const EBAY_READONLY_SCOPES = Object.freeze([
   'https://api.ebay.com/oauth/api_scope/commerce.identity.readonly',
   'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
@@ -1261,7 +1272,7 @@ export class IntegrationService {
     ]);
     if (marketing.adFailures?.length) {
       readErrors.marketing = 'EBAY_MARKETING_ADS_PARTIAL';
-      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures.some(item=>item.httpStatus === 429) ? 429 : marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus) || item.errorIds?.map(String).includes('35077')), ...mergeEbayReadCooldown([marketing, ...marketing.adFailures]) };
+      readDiagnostics.marketing = { code: 'EBAY_MARKETING_ADS_PARTIAL', stage:'ads', httpStatus:marketing.adFailures.some(item=>item.httpStatus === 429) ? 429 : marketing.adFailures[0].httpStatus, errorIds:[...new Set(marketing.adFailures.flatMap(item=>item.errorIds))], failedCampaigns:marketing.adFailures, at:now, automaticRetryBlocked:marketing.adFailures.some(item=>[401,403].includes(item.httpStatus) || item.errorIds?.map(String).includes('35077')), ...mergeEbayReadCooldown([marketing, ...marketing.adFailures]), ...(marketing.adFailures.every(item=>item.deferred === true) ? { deferred: true } : {}) };
     }
     const offerPairs = readErrors.inventory
       ? []
@@ -1335,7 +1346,7 @@ export class IntegrationService {
       mismatchCount: null,
       lastSyncAt: now,
       lastError: readWarning,
-      lastFailureAt: readWarning ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
+      lastFailureAt: ebayReadFailureAt(state.ebay.coverage.readDiagnostics, state.integrationStatus?.ebay?.lastFailureAt),
       degradedSurfaces: unavailable,
       failedAreas: areas.filter(area => unavailable.includes(area === 'orders' ? 'orders' : area === 'promotions' ? 'marketing' : 'inventory') || ['products','inventory','prices'].includes(area) && unavailable.includes('offers')),
       ...mergeEbayReadCooldown([ebayReadCooldown(state), readContext.cooldown, ...Object.values(readDiagnostics)]),
@@ -1448,7 +1459,7 @@ export class IntegrationService {
       mismatchCount: missingOnEbay.length + staleOnEbay.length,
       lastSyncAt: now,
       lastError: readErrors.length ? 'EBAY_PARTIAL_READ' : null,
-      lastFailureAt: readErrors.length ? now : (state.integrationStatus?.ebay?.lastFailureAt || null),
+      lastFailureAt: ebayReadFailureAt(state.ebay.coverage.readDiagnostics, state.integrationStatus?.ebay?.lastFailureAt),
       degradedSurfaces: readErrors,
       failedAreas: areas.filter(area => area === 'orders' ? readErrors.some(surface => ['orders','fees'].includes(surface)) : area === 'promotions' ? readErrors.includes('promotions') : readErrors.some(surface => ['listings','drafts'].includes(surface))),
       ...mergeEbayReadCooldown([ebayReadCooldown(state), readContext.cooldown, ...Object.values(readDiagnostics)]),

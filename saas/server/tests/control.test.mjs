@@ -19,6 +19,39 @@ function business() {
   return state;
 }
 
+test('expected coverage blocks retain their exception identity, dismissal, run and audit evidence', () => {
+  const state = business(), run = claimAutomation(state, 'channelMismatchAlerts');
+  finishAutomation(state, run, { errorCode: 'COVERAGE_UNAVAILABLE', blocked: true,
+    evidence: [{ type: 'channel_coverage', id: 'ebay', available: false }] });
+  // Simulate the existing warning produced before coverage classification.
+  run.status = 'FAILED'; detectExceptions(state);
+  const warning = state.exceptions.find(item => item.kind === 'automation' && item.reference === run.ruleId);
+  const id = warning.id, fingerprint = warning.fingerprint;
+  assert.equal(warning.severity, 'high');
+  run.status = 'BLOCKED';
+  const recordedRun = structuredClone(run), terminalAudits = state.audit.filter(item => item.type === 'automation_finished');
+  detectExceptions(state);
+  assert.equal(warning.id, id); assert.equal(warning.fingerprint, fingerprint);
+  assert.equal(warning.severity, 'medium'); assert.equal(warning.title, 'Catalogue comparison unavailable');
+  assert.match(warning.recommendedAction, /does not establish an OAuth or sync failure/);
+  setExceptionStatus(state, warning.id, { status: 'dismissed', note: 'Expected Inventory API coverage' }, 'owner');
+  const history = structuredClone(warning.history), auditCount = state.audit.length;
+  detectExceptions(state); detectExceptions(state);
+  assert.equal(warning.status, 'dismissed'); assert.deepEqual(warning.history, history);
+  assert.equal(state.audit.length, auditCount); assert.deepEqual(run, recordedRun);
+  assert.deepEqual(state.audit.filter(item => item.type === 'automation_finished'), terminalAudits);
+  assert.equal(state.exceptions.filter(item => item.fingerprint === fingerprint).length, 1);
+  run.status = 'COMPLETED'; run.errorCode = null; detectExceptions(state); assert.equal(warning.present, false);
+});
+
+test('coverage classification does not downgrade actual failures or unrelated blocked rules', () => {
+  for (const [ruleId, status] of [['channelMismatchAlerts', 'FAILED'], ['channelSync', 'BLOCKED']]) {
+    const state = business(); state.automationRuns = [{ id: 'run', ruleId, status, errorCode: 'COVERAGE_UNAVAILABLE' }];
+    detectExceptions(state);
+    assert.equal(state.exceptions.find(item => item.kind === 'automation').severity, 'high');
+  }
+});
+
 test('exceptions deduplicate, retain dismissal evidence and reopen only after recurrence', () => {
   const state = business();
   detectExceptions(state); const count = state.exceptions.length;

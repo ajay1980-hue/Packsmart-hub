@@ -3,6 +3,7 @@ import { businessObjectivesSnapshot, OBJECTIVE_STATUSES } from './business-objec
 import { objectiveCanonicalDigest, OBJECTIVE_CONTENT_PROPOSAL_SCHEMA, OBJECTIVE_DISPATCH_PROPOSAL_SCHEMA,
   OBJECTIVE_DISPATCH_PROPOSAL_MAX_BYTES } from './objective-dispatch-policy.mjs';
 import { validateObjectiveContentSource, objectiveContentApprovalDigest } from './objective-content-source.mjs';
+import { isDescriptionEdit, descriptionEditPreimage } from './description-edit.mjs';
 
 // Only retained data is inspected here. Never reconstruct a review, load a job,
 // inspect credentials/owners, evaluate policy, or call a current-source validator.
@@ -125,7 +126,9 @@ function proposal(write, workspaceId) {
       || envelope.requestedBy !== write.requestedBy || !id(write.requestedBy) || envelope.approvalKind !== 'customer_facing_publish'
       || envelope.evidenceQualification !== 'no_financial_execution_evidence' || write.requiresApproval !== true
       || envelope.origin !== (v2 ? 'owner_objective_content' : 'owner_manual') || !Array.isArray(envelope.policies) || !envelope.policies.length) throw invalid();
-    if (!exact(write.input, ['productId', 'operation', 'title', 'description']) || typeof write.input.productId !== 'string'
+    if (isDescriptionEdit(write.input)) {
+      if (v2 || digestInput(descriptionEditPreimage(write.input)) !== write.digest) throw invalid();
+    } else if (!exact(write.input, ['productId', 'operation', 'title', 'description']) || typeof write.input.productId !== 'string'
       || !/^gid:\/\/shopify\/Product\/\d+$/.test(write.input.productId) || typeof write.input.title !== 'string' || !write.input.title.trim()
       || write.input.title !== write.input.title.trim() || write.input.title.length > 200 || typeof write.input.description !== 'string'
       || write.input.description.length > 10000 || digestInput({ productId: write.input.productId, operation: 'product_content', title: write.input.title,

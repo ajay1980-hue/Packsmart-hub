@@ -57,6 +57,8 @@
   }
   const ACTION_CONTRACT = 'runvara-reviewed-action/v1';
   const OBJECTIVE_ACTION_CONTRACT = 'runvara-reviewed-action/v2';
+  const DESCRIPTION_ACTION_CONTRACT = 'runvara-reviewed-action/v3';
+  const objectiveActionSupport = marker => [OBJECTIVE_ACTION_CONTRACT, DESCRIPTION_ACTION_CONTRACT].includes(marker);
   const OBJECTIVE_ASSOCIATION = 'runvara-owner-action-association/v2';
   const RECEIPT_CONTRACT = 'runvara-protected-content-source/v1';
   const protectedMeasurement = m => m?.schema === 'runvara-experiment-measurement/v4';
@@ -123,13 +125,13 @@
       + (objectiveOrigin(a) ? '<p class="muted tiny">The objective reference was captured with the action. It does not establish the current objective definition, objective progress or goal attainment.</p>' : '') + '</section>';
   }
   function actionChoices(detail) {
-    if (![ACTION_CONTRACT, OBJECTIVE_ACTION_CONTRACT].includes(detail?.actionLinkContract) || !Array.isArray(detail.actionChoices) || detail.actionChoices.length > LIMIT) return null;
+    if (![ACTION_CONTRACT, OBJECTIVE_ACTION_CONTRACT, DESCRIPTION_ACTION_CONTRACT].includes(detail?.actionLinkContract) || !Array.isArray(detail.actionChoices) || detail.actionChoices.length > LIMIT) return null;
     try { if (new TextEncoder().encode(canonical(detail.actionChoices)).length > 16384) return null; } catch { return null; }
     const ids = new Set();
     for (const choice of detail.actionChoices) {
       const objective = Object.hasOwn(choice || {}, 'origin');
       if (!exact(choice, ['id', 'account', 'productId', 'title', 'completedAt', 'digest', ...(objective ? ['origin', 'originatingObjective'] : [])]) || !identifier(choice.id)
-        || (objective && (detail.actionLinkContract !== OBJECTIVE_ACTION_CONTRACT || !objectiveOrigin(choice) || !actionRef(choice.originatingObjective)))
+        || (objective && (!objectiveActionSupport(detail.actionLinkContract) || !objectiveOrigin(choice) || !actionRef(choice.originatingObjective)))
         || ids.has(choice.id) || !accountIdentifier(choice.account) || !productIdentifier(choice.productId)
         || !recordedText(choice.title, 200) || !timestamp(choice.completedAt) || !hash(choice.digest)) return null;
       ids.add(choice.id);
@@ -138,7 +140,7 @@
   }
   function currentAssociation(detail) {
     const value = detail?.currentActionAssociation, p = detail?.currentPublication;
-    return p && validAssociation(value, p.version.links) && (!objectiveOrigin(value) || detail.actionLinkContract === OBJECTIVE_ACTION_CONTRACT) ? value : null;
+    return p && validAssociation(value, p.version.links) && (!objectiveOrigin(value) || objectiveActionSupport(detail.actionLinkContract)) ? value : null;
   }
   function currentReceiptReference(detail) {
     const m = detail?.measurement, p = detail?.currentPublication;
@@ -147,7 +149,7 @@
   }
   function checkActionCapability(detail) {
     if ((detail?.measurement?.schema === 'runvara-experiment-measurement/v3' || (protectedMeasurement(detail?.measurement) && objectiveOrigin(detail.measurement.intervention)) || detail?.currentActionAssociation?.schema === OBJECTIVE_ASSOCIATION)
-      && detail.actionLinkContract !== OBJECTIVE_ACTION_CONTRACT) throw new Error('Objective action storage is unavailable');
+      && !objectiveActionSupport(detail.actionLinkContract)) throw new Error('Objective action storage is unavailable');
   }
   function receiptChoices(detail) {
     if (detail?.receiptLinkContract !== RECEIPT_CONTRACT || !actionChoices(detail) || !Array.isArray(detail.receiptChoices) || detail.receiptChoices.length > LIMIT) return null;
@@ -159,7 +161,7 @@
         if (!exact(c, ['receiptSource', 'actionId', 'account', 'productId', 'title', 'completedAt', 'origin', 'originatingObjective'])
           || !receiptRef(c.receiptSource) || !identifier(c.actionId) || !accountIdentifier(c.account) || !productIdentifier(c.productId)
           || !recordedText(c.title, 200) || !c.title.trim() || c.title !== c.title.trim() || !timestamp(c.completedAt)
-          || !(objectiveOrigin(c) ? detail.actionLinkContract === OBJECTIVE_ACTION_CONTRACT && actionRef(c.originatingObjective) : c.origin === 'owner_manual' && c.originatingObjective === null)
+          || !(objectiveOrigin(c) ? objectiveActionSupport(detail.actionLinkContract) && actionRef(c.originatingObjective) : c.origin === 'owner_manual' && c.originatingObjective === null)
           || (previous && c.receiptSource.attemptId <= previous)) return null;
         previous = c.receiptSource.attemptId;
       }
@@ -347,6 +349,13 @@
     const refs = [['Action snapshot reference', source.action.digest], ['Approval decision reference', source.approval.digest], ['Approved by', d.decidedBy], ['Recorded approval (UTC)', d.decidedAt]];
     return `${associationFacts(association)}<h4>Exact recorded action input</h4><p class="muted tiny">Historical snapshot retained with this outcome version. Current status was not checked. The server validated the complete private action snapshot before returning this public view. This browser checks the public references and measurement hashes; it cannot recompute the private action snapshot digest. Provider authentication is not established.</p><dl class="outcome-facts"><div><dt>Product title</dt><dd class="outcome-description">${esc(i.title)}</dd></div><div><dt>Product description</dt><dd class="outcome-description">${esc(i.description)}</dd></div>${refs.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl><h4>Captured objective policy references</h4><ul>${source.policies.map(p => `<li>${esc(p.objectiveId)} · revision ${esc(p.revision)} · ${esc(p.digest)}</li>`).join('')}</ul>`;
   }
+  function descriptionEditDisplay(input) {
+    return exact(input, ['schema','productId','operation','baselineHtml','baselineUpdatedAt','paragraphHtml','replacementText','descriptionHtml'])
+      && input.schema === 'runvara-description-edit/v1' && input.operation === 'product_content' && productIdentifier(input.productId)
+      && ['baselineHtml','descriptionHtml','paragraphHtml'].every(key => recordedText(input[key], 12000))
+      && recordedText(input.replacementText, 4000) && input.replacementText.trim().length > 0
+      && typeof input.baselineUpdatedAt === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/.test(input.baselineUpdatedAt);
+  }
   function protectedSourceMarkup(source, association = null, ref = null) {
     if (!exact(source, ['schema', 'receiptSource', 'action', 'approval', 'origin', 'originatingObjective', 'account', 'productId', 'completedAt', 'input', 'decision', 'policies', 'validation'])
       || source.schema !== 'runvara-protected-content-source-display/v1' || !withinBytes(source, 36 * 1024)
@@ -358,8 +367,9 @@
       || objectiveOrigin(source) !== objectiveOrigin(association) || (objectiveOrigin(source) && !sameRef(source.originatingObjective, association.originatingObjective))
       || ['account', 'productId', 'completedAt'].some(k => source[k] !== association[k]))) throw new Error('Protected source association mismatch');
     const i = source.input, d = source.decision, v = source.validation;
-    if (!exact(i, ['productId', 'operation', 'title', 'description']) || i.productId !== source.productId || i.operation !== 'product_content'
-      || !recordedText(i.title, 200) || !i.title.trim() || i.title !== i.title.trim() || !recordedText(i.description, 10000)
+    if (i.productId !== source.productId || i.operation !== 'product_content'
+      || (i.schema === 'runvara-description-edit/v1' ? source.origin !== 'owner_manual' || !descriptionEditDisplay(i)
+        : !exact(i, ['productId','operation','title','description']) || !recordedText(i.title, 200) || !i.title.trim() || i.title !== i.title.trim() || !recordedText(i.description, 10000))
       || !exact(d, ['status', 'decidedBy', 'decidedAt']) || d.status !== 'approved' || !identifier(d.decidedBy) || !timestamp(d.decidedAt) || d.decidedAt > source.completedAt
       || !Array.isArray(source.policies) || source.policies.length > 50
       || source.policies.some(p => !exact(p, ['objectiveId', 'revision', 'digest']) || !identifier(p.objectiveId) || !positiveRevision(p.revision) || !hash(p.digest))
@@ -368,7 +378,7 @@
       || !exact(v, ['protection', 'currentStatus', 'providerAuthentication', 'causalAttribution']) || v.protection !== 'completion_workspace_commit'
       || v.currentStatus !== 'not_checked' || v.providerAuthentication !== 'not_established' || v.causalAttribution !== 'not_established') throw new Error('Invalid protected source details');
     const refs = [['Action snapshot reference', source.action.digest], ['Approval decision reference', source.approval.digest], ['Approved by', d.decidedBy], ['Recorded approval (UTC)', d.decidedAt]];
-    return `<h4>Exact protected action input</h4><p class="muted tiny">The server validated this protected source before returning this display. Browser checks of public references do not authenticate the provider or establish current eligibility, causality or financial qualification.</p><dl class="outcome-facts"><div><dt>Product title</dt><dd class="outcome-description">${esc(i.title)}</dd></div><div><dt>Product description</dt><dd class="outcome-description">${esc(i.description)}</dd></div>${refs.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`
+    return `<h4>Exact protected action input</h4><p class="muted tiny">The server validated this protected source before returning this display. Browser checks of public references do not authenticate the provider or establish current eligibility, causality or financial qualification.</p><dl class="outcome-facts">${(descriptionEditDisplay(i) ? [["Baseline HTML", i.baselineHtml], ["Selected paragraph HTML", i.paragraphHtml], ["Replacement text", i.replacementText], ["Result HTML", i.descriptionHtml], ["Baseline observed (UTC)", i.baselineUpdatedAt]] : [["Product title", i.title], ["Product description", i.description]]).map(([label, value]) => `<div><dt>${esc(label)}</dt><dd class="outcome-description">${esc(value)}</dd></div>`).join('')}${refs.map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join('')}</dl>`
       + (source.policies.length ? `<h4>Captured policy references</h4><ul>${source.policies.map(p => `<li>${esc(p.objectiveId)} · revision ${esc(p.revision)} · ${esc(p.digest)}</li>`).join('')}</ul>` : '')
       + (objectiveOrigin(source) ? '' : '<p class="muted tiny">Manual action. Any captured policy references describe restrictions; they do not establish an originating objective.</p>');
   }
@@ -388,7 +398,7 @@
     const markup = protectedSourceMarkup(source, association, ref);
     if (expectedReceipt) {
       const c = receiptChoices(selected)?.find(row => sameReceipt(row.receiptSource, ref));
-      if (c && (c.actionId !== source.action.id || c.origin !== source.origin || c.title !== source.input.title || ['account', 'productId', 'completedAt'].some(k => c[k] !== source[k])
+      if (c && (c.actionId !== source.action.id || c.origin !== source.origin || c.title !== (descriptionEditDisplay(source.input) ? 'Shopify description change' : source.input.title) || ['account', 'productId', 'completedAt'].some(k => c[k] !== source[k])
         || (objectiveOrigin(c) && !sameRef(c.originatingObjective, source.originatingObjective)))) throw new Error('Receipt preview changed the selected choice');
     }
     return { source, markup };

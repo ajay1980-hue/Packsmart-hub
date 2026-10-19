@@ -12,6 +12,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { canonical, hash, actionFixture } from './business-outcome-postgres-fixture.mjs';
 import { objectivePublicationFixture } from './objective-publication-fixture.mjs';
 import { runContentReceiptDispatcherPgTests } from './content-execution-receipt-pg-dispatch.mjs';
+import { runDescriptionEditPgProof } from './description-edit-pg-proof.mjs';
+import { runMetaPublicationPgProof } from './marketing-publication-pg-proof.mjs';
 
 assert.equal(process.env.OUTCOME_ALLOW_DISPOSABLE_TEST_DB, '1', 'Explicit disposable database opt-in required');
 const baseConnectionString = process.env.OUTCOME_TEST_DATABASE_URL;
@@ -34,6 +36,9 @@ const RPC = {
   lookup: 'public.runvara_read_content_receipt(text,text,text,text,text,bigint)'
 };
 const clients = new Set();
+test('Meta publication uses native JSONB and CAS with synthetic provider transport', async t => {
+  await runMetaPublicationPgProof({ t, admin, withService: fn => using('service_role', fn) });
+});
 const rawHash = text => createHash('sha256').update(text).digest('hex');
 const withoutDigest = value => Object.fromEntries(Object.entries(value).filter(([key]) => key !== 'digest'));
 const sign = value => ({ ...withoutDigest(value), digest: hash(withoutDigest(value)) });
@@ -299,6 +304,10 @@ before(async () => {
   await admin.query(migration);
   // Forward consumer installation must preserve the entire frozen capture contract.
   await admin.query(await readFile(new URL('../supabase/migrations/20261008163558_receipt_outcome_consumer.sql', import.meta.url), 'utf8'));
+  // The separate dormant Meta ledger must preserve all existing Shopify
+  // capture, read, role, overwrite and native dispatcher contracts.
+  await admin.query(await readFile(new URL('../supabase/prepared/synthetic-meta-receipts.sql', import.meta.url), 'utf8'));
+  await admin.query(await readFile(new URL('../supabase/prepared/synthetic-meta-observations.sql', import.meta.url), 'utf8'));
   securityBefore = await assertSecurity();
   assert.deepEqual(await roles(), roleStateBefore, 'Receipt migration never creates/expands roles');
   console.log('CONTENT_RECEIPT_SAFETY=' + JSON.stringify({ ...info, host: admin.connection.stream.remoteAddress,
@@ -831,6 +840,10 @@ test('paused rollout denies new admissions while preserving exact reconciliation
     assert.deepEqual(await lookup(f, 'finalize', finish), expectedAck(f, 'finalize', finish, true));
     assert.deepEqual(await retainedRows(pending), { admissions: 0, receipts: 0 });
   } finally { await admin.query("UPDATE public.runvara_content_receipt_control SET mode='enforced' WHERE id"); }
+});
+
+test('prepared description contract preserves historical bytes and verifies description dispatch in the disposable database', async () => {
+  await runDescriptionEditPgProof({ admin, withService: fn => using('service_role', fn) });
 });
 
 test('tenant last-slot concurrency enforces 256 attempts without admitting a 257th claim', async () => {

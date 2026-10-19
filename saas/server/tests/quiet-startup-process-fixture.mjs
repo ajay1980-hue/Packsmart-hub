@@ -85,7 +85,8 @@ async function sourceManifest() {
   await walk(path.join(root, 'saas/server/lib'));
   entries.push(path.join(root, 'saas/server/server.mjs'), path.join(root, 'saas/app.js'));
   const files = [];
-  for (const file of entries.sort()) files.push({ path: path.relative(root, file), sha256: createHash('sha256').update(await fs.readFile(file)).digest('hex') });
+  for (const file of entries) files.push({ path: path.relative(root, file).split(path.sep).join('/'), sha256: createHash('sha256').update(await fs.readFile(file)).digest('hex') });
+  files.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
   return { files, sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex') };
 }
 const runtime = await sourceManifest();

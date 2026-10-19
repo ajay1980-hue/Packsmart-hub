@@ -335,16 +335,16 @@ $$;
 do $$
 declare t text; f record;
 begin
-  foreach t in array array['runvara_order_recovery_control','runvara_order_recovery_quota','runvara_order_recovery_stages','runvara_order_recovery_pages','runvara_order_recovery_receipts'] loop
+  foreach t in array array['runvara_order_recovery_control','runvara_order_recovery_quota','runvara_order_recovery_stages','runvara_order_recovery_pages','runvara_order_recovery_receipts','runvara_meta_receipt_control','runvara_meta_receipt_events','runvara_meta_observation_control','runvara_meta_observations'] loop
     if to_regclass('public.'||t) is not null then
       execute format('revoke all on table public.%I from public,anon,authenticated,service_role',t);
       execute format('alter table public.%I enable row level security',t);
     end if;
   end loop;
   for f in select p.oid::regprocedure as signature,p.proname from pg_proc p join pg_namespace n on n.oid=p.pronamespace
-    where n.nspname='public' and (p.proname like 'runvara_recovery_%' or p.proname in ('runvara_reserve_order_recovery','runvara_append_order_recovery','runvara_finalize_order_recovery','runvara_read_order_recovery','runvara_lookup_order_recovery')) loop
+    where n.nspname='public' and (p.proname like 'runvara_recovery_%' or p.proname like 'runvara_meta_%' or p.proname in ('runvara_commit_meta_receipt','runvara_lookup_meta_receipt','runvara_read_meta_receipt','runvara_read_meta_observations','runvara_append_meta_observation','runvara_reserve_order_recovery','runvara_append_order_recovery','runvara_finalize_order_recovery','runvara_read_order_recovery','runvara_lookup_order_recovery')) loop
     execute format('revoke all on function %s from public,anon,authenticated,service_role',f.signature);
-    if f.proname in ('runvara_reserve_order_recovery','runvara_append_order_recovery','runvara_finalize_order_recovery','runvara_read_order_recovery','runvara_lookup_order_recovery') then
+    if f.proname in ('runvara_commit_meta_receipt','runvara_lookup_meta_receipt','runvara_read_meta_receipt','runvara_read_meta_observations','runvara_append_meta_observation','runvara_reserve_order_recovery','runvara_append_order_recovery','runvara_finalize_order_recovery','runvara_read_order_recovery','runvara_lookup_order_recovery') then
       execute format('grant execute on function %s to service_role',f.signature);
     end if;
   end loop;

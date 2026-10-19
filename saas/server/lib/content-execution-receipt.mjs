@@ -2,12 +2,20 @@ import { createHash } from 'node:crypto';
 import { canonicalReviewedActionJson, digestReviewedActionValue, createRecordedActionContext,
   sourceActionFromRecordedContext, validateReviewedSourceAction, REVIEWED_ACTION_MAX_BYTES,
   REVIEWED_ACTION_JSONB_MAX_BYTES } from './reviewed-action-evidence.mjs';
+import { isDescriptionEdit } from './description-edit.mjs';
 
 // Prospective, server-only storage contract. Neither a workspace field nor a
 // browser request can select this capability. The database owns activation.
 export const CONTENT_EXECUTION_RECEIPT_CONTRACT = 'runvara-content-execution-receipts/v1';
 export const CONTENT_EXECUTION_ADMISSION_SCHEMA = 'runvara-content-execution-admission/v1';
 export const CONTENT_EXECUTION_RECEIPT_SCHEMA = 'runvara-content-execution-receipt/v1';
+export const DESCRIPTION_EXECUTION_RECEIPT_CONTRACT = 'runvara-content-execution-receipts/v2';
+export const DESCRIPTION_EXECUTION_ADMISSION_SCHEMA = 'runvara-content-execution-admission/v2';
+export const DESCRIPTION_EXECUTION_RECEIPT_SCHEMA = 'runvara-content-execution-receipt/v2';
+export const contentReceiptContractForAdmission = admission => admission?.schema === DESCRIPTION_EXECUTION_ADMISSION_SCHEMA
+  ? DESCRIPTION_EXECUTION_RECEIPT_CONTRACT : CONTENT_EXECUTION_RECEIPT_CONTRACT;
+const receiptSchema = admission => admission?.schema === DESCRIPTION_EXECUTION_ADMISSION_SCHEMA
+  ? DESCRIPTION_EXECUTION_RECEIPT_SCHEMA : CONTENT_EXECUTION_RECEIPT_SCHEMA;
 export const CONTENT_EXECUTION_RECEIPT_ACK_SCHEMA = 'runvara-content-execution-commit-ack/v1';
 export const CONTENT_EXECUTION_RESERVED_BYTES = 40960;
 export const CONTENT_EXECUTION_ADMISSION_MAX_BYTES = 4096;
@@ -39,7 +47,7 @@ function stamp(value) {
 
 export function contentExecutionReceiptRequired(capability) {
   if (capability === undefined || capability === null || capability === '') return false;
-  if (capability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) throw fail('CONTENT_RECEIPT_UNAVAILABLE', 503);
+  if (![CONTENT_EXECUTION_RECEIPT_CONTRACT, DESCRIPTION_EXECUTION_RECEIPT_CONTRACT].includes(capability)) throw fail('CONTENT_RECEIPT_UNAVAILABLE', 503);
   return true;
 }
 
@@ -62,7 +70,7 @@ export function contentExecutionSourceIntent(source) {
 
 function checkedAdmission(admission) {
   canonicalReviewedActionJson(admission);
-  if (!exact(admission, admissionKeys) || admission.schema !== CONTENT_EXECUTION_ADMISSION_SCHEMA
+  if (!exact(admission, admissionKeys) || ![CONTENT_EXECUTION_ADMISSION_SCHEMA, DESCRIPTION_EXECUTION_ADMISSION_SCHEMA].includes(admission.schema)
     || admission.phase !== 'shopify_mutation' || admission.reservedBytes !== CONTENT_EXECUTION_RESERVED_BYTES
     || !Number.isSafeInteger(admission.actorSessionVersion) || admission.actorSessionVersion < 1
     || !stamp(admission.admittedAt) || typeof admission.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(admission.requestId)
@@ -78,6 +86,7 @@ function checkedAdmission(admission) {
 function checkedSource(source, admission, { template = false } = {}) {
   validateReviewedSourceAction(source, { workspaceId: admission.workspaceId });
   const c = source.context;
+  if ((admission.schema === DESCRIPTION_EXECUTION_ADMISSION_SCHEMA) !== isDescriptionEdit(source.input)) throw fail();
   if (c.writeId !== admission.writeId || c.requestId !== admission.requestId || c.claimId !== admission.claimId
     || c.claimIdentity !== admission.claimIdentity || c.executedBy !== admission.actorId
     || c.dispatchRequestDigest !== admission.dispatchRequestDigest || c.phase !== admission.phase
@@ -89,7 +98,7 @@ function checkedSource(source, admission, { template = false } = {}) {
 }
 
 function receiptForSource(admission, source) {
-  const body = { schema: CONTENT_EXECUTION_RECEIPT_SCHEMA, workspaceId: admission.workspaceId,
+  const body = { schema: receiptSchema(admission), workspaceId: admission.workspaceId,
     attemptId: admission.attemptId, admissionDigest: admission.digest, intentDigest: admission.intentDigest,
     observation: 'provider_confirmed', source };
   const receipt = { ...body, digest: digestReviewedActionValue(body) };
@@ -101,7 +110,7 @@ export function validateContentExecutionCommit(descriptor) {
   canonicalReviewedActionJson(descriptor);
   if (!['reserve','finalize'].includes(descriptor?.kind)
     || !exact(descriptor, ['contract','kind','admission',descriptor.kind === 'reserve' ? 'sourceTemplate' : 'receipt'])
-    || descriptor.contract !== CONTENT_EXECUTION_RECEIPT_CONTRACT) throw fail();
+    || descriptor.contract !== contentReceiptContractForAdmission(descriptor.admission)) throw fail();
   const admission = descriptor.admission;
   checkedAdmission(admission);
   if (descriptor.kind === 'reserve') {
@@ -110,7 +119,7 @@ export function validateContentExecutionCommit(descriptor) {
     receiptForSource(admission, descriptor.sourceTemplate);
   } else {
     const receipt = descriptor.receipt;
-    if (!exact(receipt, receiptKeys) || receipt.schema !== CONTENT_EXECUTION_RECEIPT_SCHEMA
+    if (!exact(receipt, receiptKeys) || receipt.schema !== receiptSchema(admission)
       || receipt.workspaceId !== admission.workspaceId || receipt.attemptId !== admission.attemptId
       || receipt.admissionDigest !== admission.digest || receipt.intentDigest !== admission.intentDigest
       || receipt.observation !== 'provider_confirmed'
@@ -130,12 +139,12 @@ export function prepareContentExecutionAdmission({ state, write, preparedInput, 
     const context = createRecordedActionContext({ state: { workspace: { id: state.workspace.id } }, write: previewWrite,
       preparedInput, actor, approval, objectivePolicy, approvedProposal, dispatchRequestDigest, claimId, claimIdentity, apiVersion });
     const sourceTemplate = sourceActionFromRecordedContext({ input: preparedInput, recordedActionContext: context }, state.workspace.id);
-    const body = { schema: CONTENT_EXECUTION_ADMISSION_SCHEMA, workspaceId: state.workspace.id,
+    const body = { schema: isDescriptionEdit(preparedInput) ? DESCRIPTION_EXECUTION_ADMISSION_SCHEMA : CONTENT_EXECUTION_ADMISSION_SCHEMA, workspaceId: state.workspace.id,
       attemptId: `content_attempt_${digestReviewedActionValue([state.workspace.id, claimId, 'shopify_mutation'])}`,
       writeId: write.id, requestId: write.requestId, claimId, claimIdentity, authorityDigest, actorId: actor,
       actorSessionVersion: actorSession.sessionVersion, phase: 'shopify_mutation', dispatchRequestDigest,
       intentDigest: contentExecutionSourceIntent(sourceTemplate), admittedAt: phaseAt, reservedBytes: CONTENT_EXECUTION_RESERVED_BYTES };
-    const descriptor = { contract: CONTENT_EXECUTION_RECEIPT_CONTRACT, kind: 'reserve',
+    const descriptor = { contract: contentReceiptContractForAdmission(body), kind: 'reserve',
       admission: { ...body, digest: digestReviewedActionValue(body) }, sourceTemplate };
     validateContentExecutionCommit(descriptor);
     return freeze(JSON.parse(canonicalReviewedActionJson(descriptor)));
@@ -153,7 +162,7 @@ export function completeContentExecutionReceipt(reservation, { completedAt, resu
   const { digest: _digest, ...body } = reservation.sourceTemplate;
   const completed = { ...body, context: { ...body.context, completedAt } };
   const source = { ...completed, digest: digestReviewedActionValue(completed) };
-  const descriptor = { contract: CONTENT_EXECUTION_RECEIPT_CONTRACT, kind: 'finalize', admission: reservation.admission,
+  const descriptor = { contract: reservation.contract, kind: 'finalize', admission: reservation.admission,
     receipt: receiptForSource(reservation.admission, source) };
   validateContentExecutionCommit(descriptor);
   return freeze(JSON.parse(canonicalReviewedActionJson(descriptor)));

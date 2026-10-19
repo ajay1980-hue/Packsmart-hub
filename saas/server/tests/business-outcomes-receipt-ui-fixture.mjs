@@ -25,7 +25,7 @@ export function receiptUiFixture({ workspaceId = 'receipt-ui', sourceFixture = n
     const receipt = protectedReceiptFixture({ fixture }), resolved = resolveProtectedReceiptEvidence(receipt.evidence, { workspaceId });
     const display = publicProtectedReceiptSource(resolved.source, { workspaceId, receiptSource: resolved.receiptSource });
     return { ...receipt, ...resolved, display, choice: { receiptSource: resolved.receiptSource, actionId: display.action.id, account: display.account,
-      productId: display.productId, title: display.input.title, completedAt: display.completedAt, origin: display.origin, originatingObjective: display.originatingObjective } };
+      productId: display.productId, title: display.input.schema === 'runvara-description-edit/v1' ? 'Shopify description change' : display.input.title, completedAt: display.completedAt, origin: display.origin, originatingObjective: display.originatingObjective } };
   }).sort((a, b) => a.selector.attemptId.localeCompare(b.selector.attemptId));
   const input = { expectedRevision: 0, amount: '12.5', currency: 'GBP', window: { startsAt: '2026-10-01T00:00:00.000Z', endsAt: '2026-10-07T00:00:00.000Z' },
     coverage: { status: 'complete', observedCount: 2, expectedCount: 2 }, method: { kind: 'reconciled_manual' }, observedAt: '2026-10-07T12:00:00.000Z',

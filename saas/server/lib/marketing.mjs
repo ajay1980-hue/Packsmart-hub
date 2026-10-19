@@ -92,19 +92,26 @@ export function updateMarketingSettings(state, body = {}, actor = 'system') {
   return next;
 }
 
+// Shared by drafting and the observational campaign review. Keep the recorded
+// stock fallback and exact source-cost comparison identical in both paths.
+export function marketingProductChecks(state, item, settings) {
+  return {
+    active: String(item.productStatus || '').toLowerCase() === 'active',
+    available: item.available !== false,
+    stock: item.inventory == null || item.inventory >= settings.minInventory,
+    costs: item.complete === true,
+    price: hasCataloguePrice(item.price) && Number(item.price) > 0,
+    margin: Number.isFinite(item.contribution) && Number.isFinite(item.margin) &&
+      contributionMeetsMargin(item.price, state.economics?.[item.sku] || state.economics?.[item.id] || {}, settings.minMarginPercent),
+    image: Boolean(item.productImage || item.image)
+  };
+}
+
 function eligibleProducts(state) {
   const marketing = ensureMarketing(state);
   const metrics = deriveOperations(state);
-  const minMargin = marketing.settings.minMarginPercent;
-  const minInventory = marketing.settings.minInventory;
   return metrics.productRows
-    .filter(item => String(item.productStatus || '').toLowerCase() === 'active')
-    .filter(item => item.available !== false)
-    .filter(item => item.inventory == null || item.inventory >= minInventory)
-    .filter(item => item.complete && hasCataloguePrice(item.price) &&
-      Number.isFinite(item.contribution) && Number.isFinite(item.margin) &&
-      contributionMeetsMargin(item.price, state.economics?.[item.sku] || state.economics?.[item.id] || {}, minMargin))
-    .filter(item => item.productImage || item.image)
+    .filter(item => Object.values(marketingProductChecks(state, item, marketing.settings)).every(Boolean))
     .sort((a, b) => {
       return Number(b.contribution || 0) - Number(a.contribution || 0);
     });

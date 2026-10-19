@@ -194,7 +194,13 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
             const findings = detectOpportunities(state, 'autopilot');
             evidence = [{ type: 'opportunity_scan', id: run.id, detail: `${findings.detected} evidence-backed opportunities; ${findings.created} new records.` }];
           } else if (run.ruleId === 'channelMismatchAlerts') {
-            if (!ebayComparisonAvailable(state.ebay)) throw Object.assign(new Error('Full marketplace coverage unavailable'), { code: 'COVERAGE_UNAVAILABLE' });
+            if (!ebayComparisonAvailable(state.ebay)) {
+              run.reason = 'COVERAGE_UNAVAILABLE';
+              finishAutomation(state, run, { errorCode: 'COVERAGE_UNAVAILABLE', blocked: true,
+                evidence: [{ type: 'channel_coverage', id: 'ebay', available: false,
+                  detail: 'Full marketplace comparison is unavailable from the current read surface; no mismatch result was produced. This does not establish an OAuth or sync failure.' }] });
+              continue;
+            }
             evidence = [{ type: 'channel_comparison', id: 'ebay', detail: JSON.stringify(Object.fromEntries(Object.entries(state.ebay.health).map(([key, value]) => [key, Array.isArray(value) ? value.length : value]))) }];
           } else if (run.ruleId === 'marketingPlanner') {
             const result = marketingPlannerCycle(state, { now, source: 'autopilot' });

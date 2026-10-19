@@ -3,6 +3,53 @@ import test from 'node:test';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 
+test('workspace heartbeat keeps primary CAS writes but mirrors only genuine metadata changes', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-19T12:00:00Z') });
+  const fake = fakeSupabase(), store = createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test-only' }, { fetchImpl: fake.fetchImpl });
+  const state = seedWorkspaceState(), id = state.workspace.id;
+  const writes = () => fake.calls.filter(call => call.method === 'POST' && call.url.pathname.endsWith('/workspaces'));
+  await store.save(id, state);
+  const originalTime = state.workspace.updatedAt, revision = state._revision, before = fake.calls.length;
+  t.mock.timers.tick(60000); await store.save(id, state);
+  assert.equal(writes().length, 1, 'heartbeat does not upsert unchanged workspace metadata');
+  assert.notEqual(state._revision, revision);
+  assert.notEqual(fake.states.get(id).workspace.updatedAt, originalTime);
+  assert.equal(fake.states.get(id).workspace.updatedAt, new Date().toISOString());
+  const primary = fake.calls.slice(before).find(call => call.method === 'PATCH' && call.url.pathname.endsWith('/saas_workspace_state'));
+  assert.ok(primary.url.href.includes(revision), 'authoritative save still uses the predecessor revision');
+  assert.ok(fake.calls.slice(before).some(call => call.url.pathname.endsWith('/runvara_commit_reporting_status')), 'reporting CAS remains');
+  for (const [field, value] of [['name', 'Revised workspace'], ['slug', 'revised-workspace']]) {
+    t.mock.timers.tick(60000); state.workspace[field] = value; const count = writes().length;
+    await store.save(id, state); assert.equal(writes().length, count + 1);
+    assert.equal(fake.tables.get('workspaces').find(row => row.id === id)[field], value);
+    assert.equal(fake.tables.get('workspaces').find(row => row.id === id).updated_at, fake.states.get(id).workspace.updatedAt);
+  }
+  // Seed a historical reporting schema; the next ordinary save must restore the current schema.
+  await store.mirrorNormalized(id, { ...state, schemaVersion: 'historical-test-schema' });
+  const schemaWrites = writes().length; await store.save(id, state);
+  assert.equal(writes().length, schemaWrites + 1);
+  assert.equal(fake.tables.get('workspaces').find(row => row.id === id).settings.schemaVersion, state.schemaVersion);
+  const other = seedWorkspaceState({}, { workspaceId: 'other-tenant', email: 'other@example.test' }); await store.save(other.workspace.id, other);
+  assert.equal(fake.tables.get('workspaces').length, 2);
+  assert.equal(fake.tables.get('workspaces').find(row => row.id === id).name, 'Revised workspace');
+});
+
+test('failed workspace metadata writes retry and another replica invalidates cached metadata', async t => {
+  let fail = false;
+  const fake = fakeSupabase({ fault: ({ table, method }) => fail && table === 'workspaces' && method === 'POST' ? { status: 503, code: 'PGRST000' } : null });
+  const makeStore = () => createStore({ SUPABASE_URL: 'https://test.supabase.co', SUPABASE_SERVICE_ROLE_KEY: 'test-only' }, { fetchImpl: fake.fetchImpl });
+  const store = makeStore(), state = seedWorkspaceState(), id = state.workspace.id;
+  t.mock.method(console, 'warn', () => {});
+  await store.save(id, state); const originalName = state.workspace.name;
+  state.workspace.name = 'Changed'; fail = true; await store.save(id, state);
+  assert.equal(fake.states.get(id).workspace.name, 'Changed');
+  assert.equal(fake.tables.get('workspaces')[0].name, originalName);
+  fail = false; await store.save(id, state); assert.equal(fake.tables.get('workspaces')[0].name, 'Changed');
+  const replica = makeStore(), newer = await replica.get(id); newer.workspace.name = 'Other replica'; await replica.save(id, newer);
+  const current = await store.get(id); current.workspace.name = 'Changed'; await store.save(id, current);
+  assert.equal(fake.tables.get('workspaces')[0].name, 'Changed', 'old process digest cannot skip restoration after another replica changes metadata');
+});
+
 test('mirror failure preserves authoritative state and emits only safe diagnostics', async () => {
   const warnings = [];
   const originalWarn = console.warn;

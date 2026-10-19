@@ -40,6 +40,8 @@ function data(value, key) {
 // whether an admitted record supplies any valid authority.
 export function hasGovernedConnectionWriteMarkers(write, approval) {
   if (types.isProxy(write) || types.isProxy(approval)) return true;
+  const input = data(write, 'input');
+  if (types.isProxy(input) || data(write, 'provider') === 'shopify' && data(input, 'operation') === 'product_content' && own(input, 'schema')) return true;
   if (['objectivePolicyProposal', 'objectiveRef', 'policyBinding', 'executionPolicy', 'financialEvidence']
     .some(key => own(write, key))) return true;
   const payload = data(approval, 'payload');

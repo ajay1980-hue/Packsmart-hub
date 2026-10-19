@@ -11,6 +11,7 @@ import { IntegrationService } from '../lib/integrations.mjs';
 import { objectiveContentSeed, objectiveContentJob, objectiveContentBody, approveObjectiveContent,
   CONTENT_WORKSPACE, CONTENT_PRODUCT, CONTENT_ACCOUNT } from './objective-content-fixture.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
+import { isDescriptionEdit, descriptionEditMutation } from '../lib/description-edit.mjs';
 
 const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
@@ -55,7 +56,7 @@ export function originalContentPreimages(state, write) {
       decidedBy: approval.decidedBy, decidedAt: approval.decidedAt, payload: approval.payload } };
   const escape = value => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   const request = { provider: 'shopify', phase: 'shopify_mutation', method: 'POST',
-    url: `https://${CONTENT_ACCOUNT}/admin/api/2026-07/graphql.json`, body: JSON.stringify({
+    url: `https://${CONTENT_ACCOUNT}/admin/api/2026-07/graphql.json`, body: JSON.stringify(isDescriptionEdit(write.input) ? descriptionEditMutation(write.input) : {
       query: 'mutation RunvaraProductContent($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id title } userErrors { field message } } }',
       variables: { product: { id: write.input.productId, title: write.input.title,
         descriptionHtml: `<p>${escape(write.input.description).replace(/\n/g, '<br>')}</p>` } }
@@ -72,7 +73,7 @@ export function originalContentPreimages(state, write) {
 // adapter's real primary storage response only acknowledges workspace_id.
 export async function contentJsonbFixture({ family = 'manual', consent = 'absent', reorder = jsonbOrder,
   cold = true, storageOrder = true, ackOrder = false, privateOrder = false,
-  preparePrivateOrder = false, prepareAckOrder = false, seedChange, initialChange } = {}) {
+  preparePrivateOrder = false, prepareAckOrder = false, seedChange, initialChange, contentInput = {}, prepareOptions } = {}) {
   assert.ok(CONTENT_FAMILIES.includes(family));
   assert.ok([...CONTENT_CONSENTS, 'producer'].includes(consent));
   const initial = objectiveContentSeed();
@@ -111,7 +112,7 @@ export async function contentJsonbFixture({ family = 'manual', consent = 'absent
   const preparation = { privateChecks: 0, saves: 0 };
   if (job) {
     context = await objectiveContentContext(state, job.id, 'opportunity-content', initial.session, loadJob);
-    body = { ...objectiveContentBody(context, 'content-jsonb-request-0001'), title: CONTENT_TITLE, description: CONTENT_DESCRIPTION };
+    body = { ...objectiveContentBody(context, 'content-jsonb-request-0001'), title: CONTENT_TITLE, description: CONTENT_DESCRIPTION, ...contentInput };
     await prepareObjectiveContentRequest(state, body, initial.session, { governedRecordStage, loadJob,
       persist: async options => {
         preparation.saves++;
@@ -123,8 +124,9 @@ export async function contentJsonbFixture({ family = 'manual', consent = 'absent
       } });
   } else {
     body = { operation: 'product_content', requestId: 'content-jsonb-request-0001', productId: CONTENT_PRODUCT,
-      title: CONTENT_TITLE, description: CONTENT_DESCRIPTION, target: resolveManualContentTarget(state).target };
-    proposeConnectionWrite(state, 'shopify', body, initial.session.userId, { governedRecordStage });
+      title: CONTENT_TITLE, description: CONTENT_DESCRIPTION, target: resolveManualContentTarget(state).target, ...contentInput };
+    if (isDescriptionEdit(contentInput)) { delete body.title; delete body.description; }
+    proposeConnectionWrite(state, 'shopify', body, initial.session.userId, prepareOptions?.(state, body) ?? { governedRecordStage });
   }
   approveObjectiveContent(state, state.connectionWrites[0]);
   await initialChange?.(state);
