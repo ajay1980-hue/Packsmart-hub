@@ -964,6 +964,8 @@
       const cached = key ? automationHistory.cache.get(key) : null, pending = key ? automationHistory.pending.has(key) : false;
       const title = historyText(definitions.find(rule => rule.id === run.ruleId)?.name, 160) || 'Recorded check';
       const label = ['IN PROGRESS','COMPLETED','FAILED','BLOCKED'].includes(run.status) ? ({'IN PROGRESS':'In progress',COMPLETED:'Completed',FAILED:'Failed',BLOCKED:'Blocked'})[run.status] : 'Unknown status';
+      const syncError = run.ruleId === 'channelSync' && ['BLOCKED','FAILED'].includes(run.status) && typeof run.errorCode === 'string' && /^[A-Z0-9_]{1,80}$/.test(run.errorCode) ? run.errorCode : null;
+      const syncReason = syncError ? '<p class="muted tiny">Recorded error: ' + escapeHtml(syncError) + (syncError === 'SOURCE_COVERAGE_INCOMPLETE' ? '. Some channel data was incomplete in this recorded run. A connected status does not mean the sync completed.' : '.') + '</p>' : '';
       let evidence;
       if (ref) {
         evidence = '<p class="muted">' + run.evidenceCount + ' evidence ' + (run.evidenceCount === 1 ? 'item retained' : 'items retained') + '. ' + (cached ? 'Archived evidence was read for this view.' : 'Evidence has not been loaded in this view.') + '</p>' +
@@ -974,7 +976,7 @@
       } else {
         evidence = (Object.hasOwn(run, 'archive') || Object.hasOwn(run, 'evidenceCount') ? '<p class="muted">Archived evidence is unavailable because its reference could not be verified.</p>' : '') + automationHistoryEvidence(run.evidence, index, open.has(String(index)));
       }
-      return '<article class="automation-history-record" aria-busy="' + pending + '"><div class="automation-history-heading"><h3>' + escapeHtml(title) + '</h3><span class="tag neutral">' + label + '</span></div><p class="muted tiny">Started ' + escapeHtml(historyTimestamp(run.startedAt) ? date(run.startedAt) : 'Unknown') + (run.completedAt ? ' · Finished ' + escapeHtml(historyTimestamp(run.completedAt) ? date(run.completedAt) : 'Unknown') : '') + '</p>' + evidence + '</article>';
+      return '<article class="automation-history-record" aria-busy="' + pending + '"><div class="automation-history-heading"><h3>' + escapeHtml(title) + '</h3><span class="tag neutral">' + label + '</span></div><p class="muted tiny">Started ' + escapeHtml(historyTimestamp(run.startedAt) ? date(run.startedAt) : 'Unknown') + (run.completedAt ? ' · Finished ' + escapeHtml(historyTimestamp(run.completedAt) ? date(run.completedAt) : 'Unknown') : '') + '</p>' + syncReason + evidence + '</article>';
     }).join('') || '<p class="muted">No recent check history is available in this workspace snapshot.</p>';
   }
   $('#automation-history-list').addEventListener('click', async event => {

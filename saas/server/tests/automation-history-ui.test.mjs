@@ -99,6 +99,22 @@ test('history is collapsed and renders active/full evidence from the snapshot wi
   assert.equal(h.archiveCalls().length, 0); assert.equal(h.calls.every(call => call.method === 'GET'), true);
 });
 
+test('channel sync history shows the retained block reason while preserving legacy connected evidence', async t => {
+  const historical={...fixtures().failed,id:'historical-channel-sync',ruleId:'channelSync',status:'BLOCKED',errorCode:'SOURCE_COVERAGE_INCOMPLETE',evidence:['shopify','ebay','meta'].map(id=>({type:'integration_read',id,detail:'connected'}))};
+  const runs=[historical,{...historical,id:'legacy-no-error',errorCode:null},{...historical,id:'hostile-error',errorCode:'<img src=x onerror="window.historyInjected=true">'}];
+  const before=JSON.stringify(runs),h=await harness(t,{runs});h.open();
+  const rows=h.root.querySelectorAll('.automation-history-record');
+  assert.match(rows[0].textContent,/Recorded error: SOURCE_COVERAGE_INCOMPLETE/);
+  assert.match(rows[0].textContent,/A connected status does not mean the sync completed/);
+  assert.equal([...rows[0].querySelectorAll('.automation-history-evidence p')].filter(p=>p.textContent==='connected').length,3);
+  assert.doesNotMatch(rows[1].textContent,/Recorded error|SOURCE_COVERAGE_INCOMPLETE/);
+  assert.doesNotMatch(rows[2].textContent,/Recorded error|historyInjected/);
+  assert.equal(h.root.querySelector('img,[onerror]'),null);
+  assert.equal(JSON.stringify(runs),before);
+  assert.equal(JSON.stringify(h.bootstrap.automationRuns),before);
+  assert.ok(h.calls.every(call=>call.method==='GET'));
+});
+
 test('explicit archive reads use only encoded run/ref fields, coalesce, and cache verified evidence for the snapshot', async t => {
   const h = await harness(t); h.open(); const pending = deferred(); h.archiveHandler = () => pending.promise;
   const button = h.button(); button.click(); button.click(); button.dispatchEvent(new h.w.MouseEvent('click', { bubbles: true }));

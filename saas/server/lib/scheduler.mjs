@@ -182,7 +182,14 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
           if (run.ruleId === 'channelSync') {
             if (!providers.length) { finishAutomation(state, run, { evidence: [{ type: 'sync_schedule', id: run.id, detail: 'No channel is due; individual sync settings were respected.' }] }); continue; }
             const outcomes = await Promise.allSettled(providers.map(provider => monitoredSync(state, integrations, provider, { automatic: !manual, run: syncRuns.get(provider) })));
-            evidence = outcomes.map((result, index) => ({ type: 'integration_read', id: providers[index], detail: result.status === 'fulfilled' ? result.value.status : safeCode(result.reason), at: new Date().toISOString() }));
+            evidence = outcomes.map((result, index) => {
+              const fulfilled = result.status === 'fulfilled';
+              const outcome = !fulfilled ? 'failed' : result.value.lastError || ['degraded', 'error', 'auth_expired'].includes(result.value.status) ? 'partial' : 'completed';
+              const connectionStatus = fulfilled && typeof result.value.status === 'string' && /^[a-z_]{1,40}$/.test(result.value.status) ? result.value.status : null;
+              const errorCode = fulfilled ? (result.value.lastError ? safeCode({ code: result.value.lastError }) : null) : safeCode(result.reason);
+              return { type: 'integration_read', id: providers[index], outcome, connectionStatus, errorCode,
+                detail: `Sync ${outcome}; connection ${connectionStatus || 'unreported'}${errorCode ? '; recorded error ' + errorCode : ''}.`, at: new Date().toISOString() };
+            });
             const failed = outcomes.find(result => result.status === 'rejected');
             if (failed) { finishAutomation(state, run, { evidence, errorCode: safeCode(failed.reason), blocked: authFailure(failed.reason) }); continue; }
             const partial = outcomes.find(result => result.status === 'fulfilled' && (result.value.lastError || ['degraded', 'error', 'auth_expired'].includes(result.value.status)));

@@ -502,7 +502,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
     });
   }
 
-  async function process(job, epoch) {
+  async function processJob(job, epoch) {
     if (!admitted(epoch)) { retainClaim(); return; }
     if (job?.type === 'objective_prepare') return processObjective(job, epoch);
     if (!await admitClaim(job)) return;
@@ -588,7 +588,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
         status.emptyPolls++;
         status.backoffMs = Math.min(maxBackoffMs, status.backoffMs * 2);
       }
-      const outcomes = await Promise.allSettled((jobs || []).map(job => process(job, epoch)));
+      const outcomes = await Promise.allSettled((jobs || []).map(job => processJob(job, epoch)));
       for (const outcome of outcomes) if (outcome.status === 'rejected') retainClaim(outcome.reason || objectiveError('AGENT_JOB_COMPLETION_UNCONFIRMED'));
       status.lastTickAt = new Date(now()).toISOString();
     } catch (error) {
@@ -675,7 +675,7 @@ export function createAgentOperations({ store, integrations, withWorkspaceLock, 
       if (!state) continue;
       const snapshot = await workspaceSnapshot(workspaceId, state);
       const connectionStates = Object.values(state.integrationStatus || {});
-      const unhealthyConnections = connectionStates.filter(item => ['degraded','error','auth_expired'].includes(item?.status)).length;
+      const unhealthyConnections = connectionStates.filter(item => ['error','failed','auth_expired','degraded'].includes(item?.status) || item?.lastError).length;
       const planValue=planMonthlyValueGbp(state);
       workspaces.push({
         workspaceId,

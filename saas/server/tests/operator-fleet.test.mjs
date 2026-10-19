@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createStore, seedWorkspaceState } from '../lib/store.mjs';
 import { createAgentOperations } from '../lib/agent-ops.mjs';
+import { deriveOperations } from '../lib/operations.mjs';
 import { normalizeAiUsage } from '../lib/ai-economics.mjs';
 import { legacyAiUsagePage, legacyAiUsageUnknown } from '../lib/legacy-ai-usage.mjs';
 
@@ -48,6 +49,21 @@ test('operator fleet snapshot exposes health metadata but not customer job paylo
   assert.equal(tenant.planMonthlyValueGbp,79);
   assert.equal(tenant.planValueSource,'indicative_list_price');
 });
+
+for (const health of [{ status:'connected', lastError:'EBAY_PARTIAL_READ' }, { status:'failed' }]) {
+  test(`fleet counts ${health.lastError ? 'connected with a retained error' : 'failed'} consistently with Command Centre`, async t => {
+    const {store,ops}=await setup(t);
+    const state=await store.get('tenant-two');
+    state.integrationStatus={shopify:{status:'connected'},ebay:health,meta:{status:'connected',lastError:null}};
+    await store.save('tenant-two',state);
+    const fleet=await ops.fleetSnapshot(), tenant=fleet.workspaces.find(row=>row.workspaceId==='tenant-two');
+    assert.equal(tenant.unhealthyConnections,1);
+    assert.equal(tenant.unhealthyConnections,deriveOperations(state).integrationIssues);
+    assert.equal(fleet.workspaces.find(row=>row.workspaceId==='packsmart-solutions').unhealthyConnections,0);
+    assert.equal(fleet.totals.unhealthyConnections,1);
+    assert.deepEqual((await store.get('tenant-two')).integrationStatus,state.integrationStatus);
+  });
+}
 
 test('operator controls can pause a selected workspace without changing another tenant', async t => {
   const {ops}=await setup(t);
