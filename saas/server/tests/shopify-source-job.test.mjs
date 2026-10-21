@@ -229,9 +229,12 @@ for (const cold of [false, true]) for (const code of SOURCE_CODES) {
     assert.equal(metrics.groups.job.requests, 2);
     const mirrorTables = f.database.calls.filter(call => call.method === 'POST' && MIRRORS.includes(call.url.pathname.split('/').pop()))
       .map(call => call.url.pathname.split('/').pop());
-    assert.deepEqual(mirrorTables, cold ? MIRRORS : ['workspaces', 'connections', 'audit_events']);
-    assert.equal(metrics.groups.mirror.requests, cold ? 14 : 4, 'normal mirrors include one variant identity GET');
-    assert.equal(metrics.requests, cold ? 19 : 9);
+    assert.deepEqual(mirrorTables, cold ? MIRRORS : ['connections', 'audit_events'], 'warm metadata heartbeats add no workspace upsert; changed connection and audit evidence still persist');
+    const variantReads = f.database.calls.filter(call => call.method === 'GET' && call.url.pathname.endsWith('/variants'));
+    assert.equal(variantReads.length, 1);
+    assert.equal(variantReads[0].url.searchParams.get('workspace_id'), `eq.${WORKSPACE}`);
+    assert.equal(metrics.groups.mirror.requests, cold ? 14 : 3, 'normal mirrors retain the tenant-scoped variant identity GET');
+    assert.equal(metrics.requests, cold ? 19 : 8);
     assert.equal(metrics.bodyBytes, Object.values(metrics.groups).reduce((sum, group) => sum + group.bodyBytes, 0));
     t.diagnostic(JSON.stringify({ fixture: 'one product/variant/economics/order/supplier, retained audit, normal default mirrors',
       scope: 'one worker tick; seeded workspace and queued job already exist', cache: cold ? 'cold' : 'warm', code, ...metrics }));

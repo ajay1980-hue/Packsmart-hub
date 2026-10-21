@@ -1119,6 +1119,17 @@ td { border-color: var(--line); }
 tr:hover td { background: #79b8ff08; }
 dialog { color: var(--text); background: var(--panel); border-radius: var(--radius-lg); border: 1px solid var(--line-bright); max-height: calc(100dvh - 2rem); overflow-y: auto; overscroll-behavior: contain; }
 dialog::backdrop { background: #020912bb; backdrop-filter: blur(4px); }
+/* Exact production review must stay readable without horizontal scrolling. */
+#meta-production-dialog { width: min(48rem, calc(100vw - 2rem)); max-width: calc(100vw - 2rem); padding: clamp(.75rem, 3vw, 1.5rem); overflow-wrap: anywhere; }
+#meta-production-dialog section, #meta-production-dialog form { display: grid; gap: .9rem; min-width: 0; }
+#meta-production-dialog section > *, #meta-production-dialog form > * { min-width: 0; max-width: 100%; }
+#meta-production-dialog section > p, #meta-production-dialog section > pre, #meta-production-dialog section > h3 { margin: 0; }
+#meta-production-dialog section > img { display: block; max-width: 100%; height: auto; }
+#meta-production-dialog form > label { display: grid; gap: .5rem; }
+#meta-production-dialog input, #meta-production-dialog select { min-width: 0; max-width: 100%; }
+#meta-production-dialog section > label { display: flex; align-items: flex-start; gap: .65rem; min-height: 44px; line-height: 1.5; cursor: pointer; }
+#meta-production-dialog input[type="checkbox"] { flex: 0 0 20px; width: 20px; height: 20px; min-height: 20px; padding: 0; margin: .2em 0 0; }
+#meta-production-dialog button { min-height: 44px; max-width: 100%; white-space: normal; }
 .empty-state { color: var(--muted); padding: var(--space-4); border: 1px dashed var(--line-bright); border-radius: var(--radius-md); background: var(--panel); }
 .auth-card { background: linear-gradient(155deg, #102c4ef2, #040c18fa 75%); border-color: #3891c2; border-top-color: var(--cyan); box-shadow: var(--shadow), 0 0 55px #267bdb30, inset 0 1px #76baff25; backdrop-filter: blur(12px); }
 .auth-screen { background: radial-gradient(ellipse at 15% 20%, #0a68942b, transparent 50%), radial-gradient(ellipse at 85% 85%, #473dbf24, transparent 50%), var(--bg); min-height: 100dvh; overflow: auto; }

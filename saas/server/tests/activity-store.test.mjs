@@ -74,15 +74,31 @@ test('job transition observations require a matched successful fenced update and
   const result=store.activitySnapshot(WS);assert.equal(result.db.attempted,2);assert.equal(result.jobs.blocked,1);assert.equal(result.jobs.dead_letter,0);
 });
 
-test('normal saves retain original request volume and report reporting/archive writes only in their trusted scope',async()=>{
+test('normal saves measure exact request sequences without redundant workspace heartbeat writes',async()=>{
   const fake=fakeSupabase(),store=storeFor(fake.fetchImpl),s=seeded();delete s._revision;
   await store.save(WS,s);
   const result=store.activitySnapshot(WS);
   assert.equal(result.db.attempted,fake.calls.length);assert.equal(result.db.operations.state_commit,1);assert.equal(result.db.operations.reporting_commit,1);
   assert.ok(result.db.operations.reporting_write>0);assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted,0);
   assert.equal(result.db.requestBody.bytes,fake.calls.reduce((n,c)=>n+Buffer.byteLength(c.body),0));
-  const before=fake.calls.length;await store.save(WS,s);
-  assert.equal(fake.calls.length-before,3,'Unchanged save remains one primary CAS, one narrow reporting CAS and one existing variants read, with no meter writes');
+  const before=fake.calls.length, previous=s._revision;await store.save(WS,s);
+  const sequence=calls=>calls.map(call=>[call.method,call.url.pathname.split('/').pop()]);
+  const empty=fake.calls.slice(before);
+  assert.deepEqual(sequence(empty),[['PATCH','saas_workspace_state'],['POST','runvara_commit_reporting_status']], 'Empty unchanged saves retain both CAS calls without a metadata upsert or variants read');
+  assert.equal(empty[0].url.searchParams.get('state->>_revision'),`eq.${previous}`);
+  assert.equal(JSON.parse(empty[1].body).p_expected_revision,JSON.parse(empty[0].body).state._revision);
+  s.products=[{id:'product-one',title:'Synthetic product',variants:[{id:'variant-one',externalId:'source-one',sku:'SKU-1',price:10,inventory:1}]}];
+  await store.save(WS,s);
+  const populatedBefore=fake.calls.length, populatedRevision=s._revision;await store.save(WS,s);
+  const populated=fake.calls.slice(populatedBefore);
+  assert.deepEqual(sequence(populated),[['PATCH','saas_workspace_state'],['GET','variants'],['POST','runvara_commit_reporting_status']], 'Populated unchanged saves retain the variant identity lookup and both CAS calls without metadata or meter writes');
+  assert.equal(populated[0].url.searchParams.get('state->>_revision'),`eq.${populatedRevision}`);
+  assert.equal(populated[1].url.searchParams.get('workspace_id'),`eq.${WS}`);
+  assert.equal(JSON.parse(populated[2].body).p_expected_revision,JSON.parse(populated[0].body).state._revision);
+  const final=store.activitySnapshot(WS);
+  assert.equal(final.db.attempted,fake.calls.length);
+  assert.equal(final.db.requestBody.bytes,fake.calls.reduce((n,c)=>n+Buffer.byteLength(c.body),0));
+  assert.equal(store.activityMeter.instanceSnapshot().unattributed.db.attempted,0);
   assert.equal(store.activitySnapshot(OTHER).db.attempted,null);
 });
 

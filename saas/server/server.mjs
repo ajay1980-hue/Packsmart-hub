@@ -1,5 +1,7 @@
 import { inspectOrderPeriod, orderFinancialView, editorOrderRecord, FINANCIAL_QUALIFICATION_REASON } from './lib/order-analytics.mjs';
 import crypto from 'node:crypto';
+import { createMetaProductionController } from './lib/meta-production.mjs';
+import { assertLocalDraftStorage, localDraftContext, saveLocalDraft, readLocalDraft } from './lib/marketing-local-draft.mjs';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import { isIP } from 'node:net';
@@ -55,6 +57,8 @@ import { CONNECTORS, connector, connectionCentre, connectionSettings, connection
 import { proposeConnectionWrite, executeConnectionWrite, previewShopifyTagTest, readManualContentRequest,
   prepareObjectiveContentRequest, readObjectiveContentRequest } from './lib/connection-writes.mjs';
 import { createGovernedRecordStage, assertGovernedRecordCreation, GOVERNED_RECORDS_PAUSED_MESSAGE } from './lib/governed-record-stage.mjs';
+import { assertContentPilotConfiguration, assertContentProducerAdmission } from './lib/content-pilot.mjs';
+import { isDescriptionEdit } from './lib/description-edit.mjs';
 import { objectiveContentContext } from './lib/objective-content-source.mjs';
 import { costSourceReviewContext, prepareCostSourceReview, publicEconomicsSources, publicCostSourceHistory, productCostSourceReviews } from './lib/cost-source-review.mjs';
 import { createCostSourceStage, costSourceCreationEnabled, assertCostSourceCreation, COST_SOURCE_REVIEW_PAUSED_MESSAGE } from './lib/cost-source-stage.mjs';
@@ -65,6 +69,10 @@ import { onboardingJourney, saveOnboardingJourney } from './lib/onboarding.mjs';
 import { intelligentConnections, providerReadiness, doctorNotifications, recommendations } from './lib/connection-intelligence.mjs';
 import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { disconnectMarketingProvider, draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, marketingRuntimeEnv, saveCanvaTemplate, saveMarketingProvider, testStoredMarketingProvider, updateMarketingSettings } from './lib/marketing.mjs';
+import { reviewMetaMarketingCampaign } from './lib/marketing-campaign-review.mjs';
+import { previewMetaMarketingPublication, prepareMetaMarketingPublication, readMetaMarketingPublication, metaPublicationChoices } from './lib/marketing-publication.mjs';
+import { metaPublicationObservations, assertMetaObservationSimulation } from './lib/meta-publication-observation.mjs';
+import { assertMetaContainerObserverMock, previewMetaContainerObserver, runMetaContainerObserver } from './lib/meta-container-observer.mjs';
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
 import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
@@ -98,6 +106,7 @@ const STATIC_FILES = new Map([
   ['/activity-ui.js', ['saas/activity-ui.js', 'text/javascript; charset=utf-8']],
   ['/brief-history-ui.js', ['saas/brief-history-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
+  ['/meta-production-ui.js', ['saas/meta-production-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
 ]);
@@ -356,14 +365,26 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const env = { ...customEnv };
   const startupPolicy = createStartupPolicy(env, STATIC_FILES.keys());
   const governedRecordStage = createGovernedRecordStage(env);
+  // No production issuer/config parser is installed. Only trusted composition
+  // can supply a reviewed opaque pilot; broad producer admission must stay off.
+  const contentPilot = options.contentPilot ?? null;
+  const metaObservationSimulation = options.metaObservationSimulation ?? null;
+  if (metaObservationSimulation !== null) assertMetaObservationSimulation(metaObservationSimulation);
+  if (contentPilot !== null) assertContentPilotConfiguration(contentPilot, governedRecordStage);
   const costSourceStage = createCostSourceStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
+  const metaContainerObserverMock = options.metaContainerObserverMock ?? null;
+  if (metaContainerObserverMock !== null) assertMetaContainerObserverMock(metaContainerObserverMock,store,env);
+  const localDraftStorage = options.localDraftStorage ?? null;
+  if (localDraftStorage !== null) assertLocalDraftStorage(localDraftStorage, store, env, repoRoot);
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
   const orderRecovery = createOrderRecoveryRunner({store,integrations,env});
   const aiProvider = options.aiProvider || createAiProvider({ env, store, fetchImpl: options.fetchImpl || fetch });
   const isProduction = env.NODE_ENV === 'production';
   const secureCookies = isProduction || String(env.APP_PUBLIC_URL || '').startsWith('https://');
   const publicUrl = env.APP_PUBLIC_URL || (secureCookies ? 'https://packsmart-ops.onrender.com' : 'http://localhost:8787');
+  const metaProduction = createMetaProductionController({env, store, integrations});
+  const metaAssetLimiter = new SlidingWindowLimiter({limit: 30, windowMs: 60000, blockMs: 60000});
   const allowBearer = truthy(env.ALLOW_BEARER_AUTH);
   const loginLimiter = new SlidingWindowLimiter({
     limit: clamp(env.LOGIN_ATTEMPT_LIMIT, 3, 30, 8),
@@ -1143,6 +1164,21 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
       if (isProduction && pathname.startsWith('/api/') && store.provider !== 'supabase') throw Object.assign(new Error('Durable persistence must be configured before using production'), { status: 503, code: 'PERSISTENCE_REQUIRED' });
 
+      if (pathname.startsWith('/api/meta-publication-assets/')) {
+        const match = pathname.match(/^\/api\/meta-publication-assets\/production-v1\/([a-f0-9]{64})\/([a-f0-9]{64})\.jpg$/);
+        const key = requestIp(req), allowed = metaAssetLimiter.check(key).allowed;
+        metaAssetLimiter.fail(key);
+        if (req.method !== 'GET' || !match || url.search || !allowed || !metaProduction.enabled) {
+          send(res, 404, {error: 'Asset unavailable', code: 'NOT_FOUND'}); return;
+        }
+        try {
+          const response = await metaProduction.deliver(match[1], match[2]);
+          res.writeHead(200, {...headers(), ...Object.fromEntries(response.headers)});
+          res.end(Buffer.from(await response.arrayBuffer()));
+        } catch {send(res, 404, {error: 'Asset unavailable', code: 'NOT_FOUND'});}
+        return;
+      }
+
       if ((req.method === 'OPTIONS' || req.method === 'POST') && pathname === '/api/public/support') {
         const origin = String(req.headers.origin || '');
         const allowedOrigins = new Set([
@@ -1231,6 +1267,27 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
           limiter.fail(rateKey);
         };
+
+        if (pathname.startsWith('/api/meta-production/')) {
+          requireApprover(auth);
+          if (url.search) throw Object.assign(new Error('Publication requests do not accept query overrides'), {status: 400, code: 'META_PRODUCTION_INPUT_INVALID'});
+          const match = pathname.match(/^\/api\/meta-production\/campaigns\/([A-Za-z0-9][A-Za-z0-9_.:-]{0,159})\/(context|proposals|requests\/([A-Za-z0-9_-]{16,100})(?:\/(image|decision|execute))?)$/);
+          if (!match) {send(res, 404, {error: 'Publication request not found', code: 'NOT_FOUND'}); return;}
+          const session = {workspaceId: auth.session.workspaceId, userId: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1)};
+          const [, campaignId, route, savedRequestId, action] = match;
+          let result;
+          if (req.method === 'GET' && route === 'context') result = await metaProduction.context(campaignId, session);
+          else if (req.method === 'GET' && savedRequestId && !action) result = await metaProduction.read(campaignId, savedRequestId, session);
+          else if (req.method === 'GET' && savedRequestId && action === 'image') result = await metaProduction.image(campaignId, savedRequestId, session);
+          else if (req.method === 'POST' && route === 'proposals') {
+            const body = await jsonBody(req, 2900000);
+            result = await withWorkspaceLock(session.workspaceId, () => metaProduction.prepare(campaignId, body, session));
+          } else if (req.method === 'POST' && savedRequestId && ['decision', 'execute'].includes(action)) {
+            const body = await jsonBody(req, 20000);
+            result = await withWorkspaceLock(session.workspaceId, () => metaProduction[action === 'decision' ? 'decide' : 'execute'](campaignId, savedRequestId, body, session));
+          } else {send(res, 405, {error: 'Method not allowed', code: 'METHOD_NOT_ALLOWED'}); return;}
+          send(res, 200, result); return;
+        }
 
         if (pathname === '/api/business-outcomes' || pathname.startsWith('/api/business-outcomes/')) {
           const workspaceId = auth.session.workspaceId;
@@ -1793,6 +1850,93 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        const marketingReviewMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/review\/meta$/);
+        if (req.method === 'GET' && marketingReviewMatch) {
+          requireOwner(auth);
+          if (url.searchParams.size) throw Object.assign(new Error('Campaign review accepts no scope or authority overrides'), { status: 400, code: 'VALIDATION_FAILED' });
+          send(res, 200, reviewMetaMarketingCampaign(auth.state, marketingReviewMatch[1]));
+          return;
+        }
+
+        const containerObserverMatch = pathname.match(/^\/api\/connection-writes\/(write_[a-f0-9-]{36})\/meta-container-status$/);
+        if (containerObserverMatch && ['GET','POST'].includes(req.method)) {
+          requireOwner(auth);
+          if (url.searchParams.size) throw connectionError('Observer scope overrides are not supported.','META_CONTAINER_OBSERVER_INPUT_INVALID');
+          if (!metaContainerObserverMock) throw connectionError('Live container observation is closed.','META_CONTAINER_OBSERVER_CLOSED',409);
+          const session = {workspaceId:auth.session.workspaceId,userId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion||1)};
+          const value = req.method==='GET'
+            ? await previewMetaContainerObserver(metaContainerObserverMock,containerObserverMatch[1],session)
+            : await runMetaContainerObserver(metaContainerObserverMock,containerObserverMatch[1],session,await jsonBody(req,256));
+          send(res,200,value);return;
+        }
+        const metaObservationMatch = pathname.match(/^\/api\/connection-writes\/(write_[a-f0-9-]{36})\/meta-observations$/);
+        if (metaObservationMatch && ['GET','POST'].includes(req.method)) {
+          requireOwner(auth);
+          if (url.searchParams.size) throw connectionError('Observation scope overrides are not supported.', 'META_OBSERVATION_INPUT_INVALID');
+          let requestId = null;
+          if (req.method === 'POST') {
+            const input = await jsonBody(req, 256);
+            if (!input || Object.keys(input).length !== 1 || typeof input.requestId !== 'string') throw connectionError('One observation request reference is required.', 'META_OBSERVATION_INPUT_INVALID');
+            requestId = input.requestId;
+          }
+          const session = { workspaceId: auth.session.workspaceId, userId: auth.user.id, sessionVersion: Number(auth.session.sessionVersion || 1) };
+          send(res, 200, await metaPublicationObservations(store, metaObservationMatch[1], session,
+            { capability: metaObservationSimulation, requestId })); return;
+        }
+
+        const localDraftMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/local-review-drafts(?:\/(context|requests\/([A-Za-z0-9_-]+)(\/image)?))?$/);
+        if (localDraftMatch && ['GET','POST'].includes(req.method)) {
+          requireApprover(auth);
+          const session = { workspaceId:auth.session.workspaceId,userId:auth.user.id,sessionVersion:Number(auth.session.sessionVersion || 1) };
+          if (!localDraftStorage) {
+            if (req.method==='GET' && localDraftMatch[2]==='context' && !url.searchParams.size) {
+              send(res,200,{available:false,publishingEnabled:false,notice:'Local JPEG review storage is not configured. Production image storage and posting remain closed.'});return;
+            }
+            throw connectionError('Local review storage is unavailable.','LOCAL_DRAFT_STORAGE_CLOSED');
+          }
+          if (req.method==='GET' && localDraftMatch[2]==='context' && (url.searchParams.size===0
+            || url.searchParams.size===1 && url.searchParams.getAll('pageId').length===1)) {
+            send(res,200,{available:true,...await localDraftContext(localDraftStorage,localDraftMatch[1],url.searchParams.get('pageId'),session)});return;
+          }
+          if (req.method==='GET' && localDraftMatch[3] && !url.searchParams.size) {
+            const result=await readLocalDraft(localDraftStorage,localDraftMatch[1],localDraftMatch[3],session,{image:Boolean(localDraftMatch[4])});
+            if(localDraftMatch[4] && result.bytes) send(res,200,{mediaType:'image/jpeg',base64:result.bytes.toString('base64')});
+            else send(res,result.found===false?404:200,result);
+            return;
+          }
+          if (req.method==='POST' && !localDraftMatch[2] && !url.searchParams.size) {
+            const body=await jsonBody(req,2800000);
+            send(res,200,await saveLocalDraft(localDraftStorage,localDraftMatch[1],body,session));return;
+          }
+          throw connectionError('Unsupported local draft request.','LOCAL_DRAFT_INPUT_INVALID');
+        }
+
+        const metaPublicationMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/publication\/meta(?:\/(preview|choices|requests\/([A-Za-z0-9_-]+)))?$/);
+        if (metaPublicationMatch && ['GET', 'POST'].includes(req.method)) {
+          requireApprover(auth);
+          const session = { workspaceId: auth.session.workspaceId, userId: auth.user.id,
+            sessionVersion: Number(auth.session.sessionVersion || 1) };
+          if (req.method === 'GET' && metaPublicationMatch[2] === 'choices' && !url.searchParams.size) {
+            send(res, 200, metaPublicationChoices(auth.state, metaPublicationMatch[1], session)); return;
+          }
+          if (req.method === 'GET' && metaPublicationMatch[2] === 'preview') {
+            const keys = ['pageId', 'creativeRequestId', 'assetUrl'];
+            if (url.searchParams.size !== keys.length || !keys.every(key => url.searchParams.getAll(key).length === 1)) throw connectionError('Select one exact Page and creative asset.', 'META_PUBLICATION_INPUT_INVALID');
+            send(res, 200, previewMetaMarketingPublication(auth.state, metaPublicationMatch[1],
+              Object.fromEntries(keys.map(key => [key, url.searchParams.get(key)])), session)); return;
+          }
+          if (req.method === 'GET' && metaPublicationMatch[3] && !url.searchParams.size) {
+            send(res, 200, readMetaMarketingPublication(auth.state, metaPublicationMatch[1], metaPublicationMatch[3], session)); return;
+          }
+          if (req.method === 'POST' && !metaPublicationMatch[2] && !url.searchParams.size) {
+            const body = await jsonBody(req, 32768);
+            const result = await mutate(auth, state => prepareMetaMarketingPublication(state, metaPublicationMatch[1], body, session,
+              { persist: options => store.save(session.workspaceId, state, options), durableStore: store.provider === 'supabase' }), { persist: false });
+            send(res, 200, result); return;
+          }
+          throw connectionError('Unsupported publication request or query override.', 'META_PUBLICATION_INPUT_INVALID');
+        }
+
         if (req.method === 'PUT' && pathname === '/api/marketing/settings') {
           requireOwner(auth);
           const body = await jsonBody(req, 32768);
@@ -1977,10 +2121,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const result = await mutate(auth, async state => {
             const approval = (state.approvals || []).find(item => item.id === approvalMatch[1]);
             if (!approval) throw Object.assign(new Error('Approval request not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
+            if (approval.type === 'protected_meta_production_publication') throw Object.assign(new Error('Review the exact retained image, caption and destination in the publication panel'), {status: 409, code: 'META_PRODUCTION_EXACT_CONSENT_REQUIRED'});
             if (approval.status !== 'pending') throw Object.assign(new Error('Approval already decided'), { status: 409, code: 'APPROVAL_ALREADY_DECIDED' });
             if ((body.revision ?? 1) !== (approval.revision || 1)) throw Object.assign(new Error('Approval changed; review its current revision'), { status: 409, code: 'APPROVAL_CONFLICT' });
             const connectionWrite = (state.connectionWrites || []).find(item => item.id === approval.payload?.connectionWriteId && item.approvalId === approval.id && item.digest === approval.payload?.digest && item.status === 'pending_approval' && (approval.revision || 1) === 1);
-            if (decision === 'approved' && governedApproval(state, approval)) {
+            if (decision === 'approved' && connectionWrite && (contentPilot !== null || isDescriptionEdit(connectionWrite.input))) {
+              assertContentProducerAdmission(governedRecordStage, contentPilot, state, connectionWrite);
+            } else if (decision === 'approved' && governedApproval(state, approval)) {
               assertGovernedRecordCreation(governedRecordStage);
             }
             approval.status = decision;
@@ -2197,7 +2344,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'PATCH' && modifyMatch) {
           requireApprover(auth);
           const body = await jsonBody(req, 32768);
-          const approval = await mutate(auth, async state => modifyApproval(state, modifyMatch[1], body, auth.user.id, { governedRecordStage }));
+          const approval = await mutate(auth, async state => {
+            if ((state.approvals || []).some(a => a.id === modifyMatch[1] && a.type === 'protected_meta_production_publication')) {
+              throw Object.assign(new Error('Retained publication proposals cannot be rewritten'), {status: 409, code: 'META_PRODUCTION_APPROVAL_PROTECTED'});
+            }
+            return modifyApproval(state, modifyMatch[1], body, auth.user.id, { governedRecordStage });
+          });
           send(res, 200, { approval: publicApproval(approval), executedExternally: false }); return;
         }
 
@@ -2428,7 +2580,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             if (action === 'writes') {
               if (provider === 'shopify' && body.operation === 'product_content' && state.workspace?.id !== auth.session.workspaceId) throw connectionError('Workspace identity changed. Sign in and review the request again.', 'WORKSPACE_MISMATCH', 403);
               const retainedWrites = new Set(state.connectionWrites || []);
-              const write = proposeConnectionWrite(state, provider, body, auth.user.id, { governedRecordStage });
+              const write = proposeConnectionWrite(state, provider, body, auth.user.id, { governedRecordStage, contentPilot });
               // Exact reconciliation returns the retained object. Only a new
               // request creates approval/audit state and needs a workspace save.
               const created = !retainedWrites.has(write);
@@ -2481,7 +2633,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           if (!executionRate.allowed) throw Object.assign(new Error('Connection execution frequency limit reached; try again later'), { status: 429, code: 'WRITE_EXECUTION_RATE_LIMITED' });
           connectionWriteLimiter.fail(auth.session.workspaceId);
           const write = await mutate(auth, state => executeConnectionWrite(state, executeWrite[1], auth.user.id, integrations, options => store.save(auth.session.workspaceId, state, options), { loadFreshState: context => store.getConnectionWriteContext(auth.session.workspaceId, context), loadObjectiveJob: jobId => store.getAgentJob(auth.session.workspaceId, jobId, { includeReport: true }), durableStore: store.provider === 'supabase',
-            protectedContentReceipts: store.contentExecutionReceiptCapability, governedRecordStage,
+            protectedContentReceipts: store.contentExecutionReceiptCapability, governedRecordStage, contentPilot,
             actorSession: { workspaceId: auth.session.workspaceId, userId: auth.session.sub, sessionVersion: Number(auth.session.sessionVersion || 1) } }), { persist: false });
           send(res, 200, { write: publicConnectionWrite(write), executedExternally: write.status === 'completed' }); return;
         }
@@ -2669,7 +2821,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       send(res, 404, { error: 'Not found', code: 'NOT_FOUND' });
     } catch (error) {
       const safe = sanitizeError(error);
-      const path = String(req.url || '').split('?')[0].slice(0, 200);
+      const rawPath = String(req.url || '').split('?')[0];
+      const path = rawPath.startsWith('/api/meta-publication-assets/') ? '/api/meta-publication-assets/[redacted]' : rawPath.slice(0, 200);
       console.error(JSON.stringify({ event: 'request_error', requestId, method: req.method, path, status: safe.status, code: safe.code }));
       if (!res.headersSent) send(res, safe.status, { error: safe.code === 'GOVERNED_RECORDS_PAUSED' ? GOVERNED_RECORDS_PAUSED_MESSAGE
         : safe.code === 'COST_SOURCE_REVIEW_PAUSED' ? COST_SOURCE_REVIEW_PAUSED_MESSAGE

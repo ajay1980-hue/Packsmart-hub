@@ -1,19 +1,25 @@
 import { createHash } from 'node:crypto';
 import { prepareObjectiveDispatchProposal, OBJECTIVE_CONTENT_PROPOSAL_SCHEMA, OBJECTIVE_DISPATCH_PROPOSAL_MAX_BYTES } from './objective-dispatch-policy.mjs';
 import { validateObjectiveContentSource } from './objective-content-source.mjs';
-import { contentWritePreimage } from './content-write-identity.mjs';
+import { contentWritePreimage, contentInputPreimage } from './content-write-identity.mjs';
+import { isDescriptionEdit, descriptionEditMutation } from './description-edit.mjs';
 
 // Mutable prospective application observations. Immutability starts only when
 // the fixed-purpose outcome publisher commits the owner's reviewed snapshot.
 export const REVIEWED_ACTION_CONTRACT = 'runvara-reviewed-action/v1';
 export const REVIEWED_OBJECTIVE_ACTION_CONTRACT = 'runvara-reviewed-action/v2';
+export const REVIEWED_DESCRIPTION_ACTION_CONTRACT = 'runvara-reviewed-action/v3';
+export const RECORDED_DESCRIPTION_ACTION_CONTEXT_SCHEMA = 'runvara-recorded-action-context/v3';
+export const REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA = 'runvara-reviewed-source-action/v3';
 export const RECORDED_OBJECTIVE_ACTION_CONTEXT_SCHEMA = 'runvara-recorded-action-context/v2';
 export const REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA = 'runvara-reviewed-source-action/v2';
 export const REVIEWED_OBJECTIVE_SOURCE_ACTION_DISPLAY_SCHEMA = 'runvara-reviewed-source-action-display/v2';
 export const REVIEWED_STABLE_APPROVAL_MAX_BYTES = 8192;
-export const supportsReviewedActions = marker => [REVIEWED_ACTION_CONTRACT, REVIEWED_OBJECTIVE_ACTION_CONTRACT].includes(marker);
+export const supportsReviewedActions = marker => [REVIEWED_ACTION_CONTRACT, REVIEWED_OBJECTIVE_ACTION_CONTRACT, REVIEWED_DESCRIPTION_ACTION_CONTRACT].includes(marker);
+export const supportsObjectiveReviewedActions = marker => [REVIEWED_OBJECTIVE_ACTION_CONTRACT, REVIEWED_DESCRIPTION_ACTION_CONTRACT].includes(marker);
 export const supportsReviewedActionSource = (marker, source) => source?.schema === REVIEWED_SOURCE_ACTION_SCHEMA
-  ? supportsReviewedActions(marker) : source?.schema === REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA && marker === REVIEWED_OBJECTIVE_ACTION_CONTRACT;
+  ? supportsReviewedActions(marker) : source?.schema === REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA ? supportsObjectiveReviewedActions(marker)
+    : source?.schema === REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA && marker === REVIEWED_DESCRIPTION_ACTION_CONTRACT;
 export const RECORDED_ACTION_CONTEXT_SCHEMA = 'runvara-recorded-action-context/v1';
 export const REVIEWED_SOURCE_ACTION_SCHEMA = 'runvara-reviewed-source-action/v1';
 export const REVIEWED_ACTION_MAX_BYTES = 24576;
@@ -80,6 +86,8 @@ export function recordedApprovalDecision(approval, workspaceId) {
   return { ...body, digest: digestReviewedActionValue(body) };
 }
 export function reviewedActionDispatchRequest(input, account, apiVersion) {
+  if (isDescriptionEdit(input)) return { provider: 'shopify', phase: 'shopify_mutation', method: 'POST',
+    url: `https://${account}/admin/api/${apiVersion}/graphql.json`, body: JSON.stringify(descriptionEditMutation(input)) };
   const escape = v => v.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
   const query = 'mutation RunvaraProductContent($product: ProductUpdateInput!) { productUpdate(product: $product) { product { id title } userErrors { field message } } }';
   const variables = { product: { id: input.productId, title: input.title, descriptionHtml: `<p>${escape(input.description).replace(/\n/g, '<br>')}</p>` } };
@@ -89,7 +97,7 @@ export function reviewedActionDispatchRequest(input, account, apiVersion) {
 // This never changes an existing dispatcher fingerprint. Nonmatching older
 // layouts simply cannot use this optional typed snapshot contract.
 export function reviewedActionClaimIdentity(input, c) {
-  const orderedInput = { productId: input.productId, operation: input.operation, title: input.title, description: input.description };
+  const orderedInput = isDescriptionEdit(input) ? contentInputPreimage(input) : { productId: input.productId, operation: input.operation, title: input.title, description: input.description };
   const p = c.proposal;
   if (p?.schema === OBJECTIVE_CONTENT_PROPOSAL_SCHEMA) return fingerprint(contentWritePreimage({ id: c.writeId, requestId: c.requestId,
     provider: c.provider, input: orderedInput, digest: c.inputDigest, connectionId: c.connectionId, account: c.account,
@@ -152,19 +160,26 @@ export function validateReviewedSourceAction(source, { workspaceId }) {
   exact(source, ['schema','revision','context','input','digest']); const encoded = canonicalReviewedActionJson(source);
   if (Buffer.byteLength(encoded) > REVIEWED_ACTION_MAX_BYTES) throw fail('OUTCOME_ACTION_TOO_LARGE', 413);
   const objective = source.schema === REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA;
-  if (![REVIEWED_SOURCE_ACTION_SCHEMA, REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA].includes(source.schema) || source.revision !== 1 || source.digest !== digestReviewedActionValue(without(source, 'digest'))) throw fail();
+  const description = source.schema === REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA;
+  if (![REVIEWED_SOURCE_ACTION_SCHEMA, REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA, REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA].includes(source.schema) || source.revision !== 1 || source.digest !== digestReviewedActionValue(without(source, 'digest'))) throw fail();
   const c = source.context, input = source.input; exact(c, objective ? [...CONTEXT_FIELDS, 'stableApproval'] : CONTEXT_FIELDS); scope(source, workspaceId);
-  if (c.workspaceId !== workspaceId || c.schema !== (objective ? RECORDED_OBJECTIVE_ACTION_CONTEXT_SCHEMA : RECORDED_ACTION_CONTEXT_SCHEMA) || c.provider !== 'shopify' || c.operation !== 'product_content'
+  if (c.workspaceId !== workspaceId || c.schema !== (objective ? RECORDED_OBJECTIVE_ACTION_CONTEXT_SCHEMA : description ? RECORDED_DESCRIPTION_ACTION_CONTEXT_SCHEMA : RECORDED_ACTION_CONTEXT_SCHEMA) || c.provider !== 'shopify' || c.operation !== 'product_content'
     || c.phase !== 'shopify_mutation' || c.origin !== (objective ? 'owner_objective_content' : 'owner_manual')
     || !objective && c.originatingObjective !== null || typeof c.account !== 'string'
     || !ACCOUNT.test(c.account) || c.account.length > 253 || !API.test(c.apiVersion)) throw fail();
   for (const k of ['writeId','claimId','connectionId','requestedBy','executedBy']) identifier(c[k]);
   if (!/^[a-zA-Z0-9_-]{16,100}$/.test(c.requestId || '')) throw fail();
-  digest(c.inputDigest); digest(c.dispatchRequestDigest); digest(c.claimIdentity); stamp(c.completedAt); exact(input, ['productId','operation','title','description']);
-  if ((!PRODUCT.test(input.productId) || input.productId.length > 160) || input.operation !== 'product_content' || typeof input.title !== 'string' || !input.title.trim()
+  digest(c.inputDigest); digest(c.dispatchRequestDigest); digest(c.claimIdentity); stamp(c.completedAt);
+  if (description) {
+    if (!isDescriptionEdit(input) || c.inputDigest !== fingerprint(contentInputPreimage(input))) throw fail();
+  } else {
+    exact(input, ['productId','operation','title','description']);
+    if ((!PRODUCT.test(input.productId) || input.productId.length > 160) || input.operation !== 'product_content' || typeof input.title !== 'string' || !input.title.trim()
     || input.title !== input.title.trim() || input.title.length > 200 || typeof input.description !== 'string' || input.description.length > 10000
     || c.resultId !== input.productId || c.inputDigest !== fingerprint({ productId: input.productId, operation: input.operation, title: input.title, description: input.description })
     || c.dispatchRequestDigest !== fingerprint(reviewedActionDispatchRequest(input, c.account, c.apiVersion))) throw fail();
+  }
+  if (c.resultId !== input.productId || c.dispatchRequestDigest !== fingerprint(reviewedActionDispatchRequest(input, c.account, c.apiVersion))) throw fail();
   const a = c.approval; exact(a, ['workspaceId','id','revision','status','decidedBy','decidedAt','payload','digest']);
   if (a.workspaceId !== workspaceId || a.revision !== 1 || a.status !== 'approved' || a.digest !== digestReviewedActionValue(without(a, 'digest'))) throw fail();
   identifier(a.id); identifier(a.decidedBy); stamp(a.decidedAt); if (a.decidedAt > c.completedAt) throw fail();
@@ -199,19 +214,22 @@ export function validateReviewedSourceAction(source, { workspaceId }) {
 }
 export function sourceActionFromRecordedContext(write, workspaceId) {
   const objective = Object.getOwnPropertyDescriptor(write.recordedActionContext || {}, 'schema')?.value === RECORDED_OBJECTIVE_ACTION_CONTEXT_SCHEMA;
+  const description = Object.getOwnPropertyDescriptor(write.recordedActionContext || {}, 'schema')?.value === RECORDED_DESCRIPTION_ACTION_CONTEXT_SCHEMA;
   exact(write.recordedActionContext, [...CONTEXT_FIELDS, ...(objective ? ['stableApproval'] : []), 'snapshotDigest']); const { snapshotDigest, ...context } = write.recordedActionContext;
-  return validateReviewedSourceAction({ schema: objective ? REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA : REVIEWED_SOURCE_ACTION_SCHEMA, revision: 1, context, input: write.input, digest: snapshotDigest }, { workspaceId });
+  return validateReviewedSourceAction({ schema: objective ? REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA : description ? REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA : REVIEWED_SOURCE_ACTION_SCHEMA, revision: 1, context, input: write.input, digest: snapshotDigest }, { workspaceId });
 }
 export function createRecordedActionContext({ state, write, preparedInput, actor, approval, objectivePolicy, dispatchRequestDigest, claimId, claimIdentity, apiVersion, approvedProposal = null }) {
   const workspaceId = state.workspace.id, objective = approvedProposal?.schema === OBJECTIVE_CONTENT_PROPOSAL_SCHEMA;
+  const description = isDescriptionEdit(preparedInput);
+  if (description && objective) throw fail();
   const proposal = objective ? structuredClone(approvedProposal) : prepareObjectiveDispatchProposal(write, objectivePolicy);
-  const context = { schema: objective ? RECORDED_OBJECTIVE_ACTION_CONTEXT_SCHEMA : RECORDED_ACTION_CONTEXT_SCHEMA, workspaceId, writeId: write.id, requestId: write.requestId, claimId, claimIdentity, provider: 'shopify', operation: 'product_content',
+  const context = { schema: objective ? RECORDED_OBJECTIVE_ACTION_CONTEXT_SCHEMA : description ? RECORDED_DESCRIPTION_ACTION_CONTEXT_SCHEMA : RECORDED_ACTION_CONTEXT_SCHEMA, workspaceId, writeId: write.id, requestId: write.requestId, claimId, claimIdentity, provider: 'shopify', operation: 'product_content',
     connectionId: write.connectionId, account: write.account, apiVersion, requestedBy: write.requestedBy, executedBy: actor, inputDigest: write.digest, phase: 'shopify_mutation',
     dispatchRequestDigest, resultId: write.result.externalId, completedAt: write.completedAt, origin: objective ? 'owner_objective_content' : 'owner_manual',
     originatingObjective: objective ? { workspaceId, id: proposal.source.objectiveId, revision: proposal.source.objectiveRevision, digest: proposal.source.objectiveDigest } : null,
     approval: recordedApprovalDecision(approval, workspaceId), proposal, policies: proposal?.policies || [],
     ...(objective ? { stableApproval: recordedStableApproval(approval) } : {}) };
-  const body = { schema: objective ? REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA : REVIEWED_SOURCE_ACTION_SCHEMA, revision: 1, context, input: preparedInput };
+  const body = { schema: objective ? REVIEWED_OBJECTIVE_SOURCE_ACTION_SCHEMA : description ? REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA : REVIEWED_SOURCE_ACTION_SCHEMA, revision: 1, context, input: preparedInput };
   const source = validateReviewedSourceAction({ ...body, digest: digestReviewedActionValue(body) }, { workspaceId });
   return { ...source.context, snapshotDigest: source.digest };
 }
@@ -283,7 +301,7 @@ export function validateProtectedReceiptSelector(v) {
 // correction reuse. Only the server can validate the omitted private material.
 export function publicReviewedSourceAction(source, { workspaceId }) {
   const validated = validateReviewedSourceAction(source, { workspaceId });
-  if (validated.schema === REVIEWED_SOURCE_ACTION_SCHEMA) return validated;
+  if ([REVIEWED_SOURCE_ACTION_SCHEMA, REVIEWED_DESCRIPTION_SOURCE_ACTION_SCHEMA].includes(validated.schema)) return validated;
   const c = validated.context, association = actionIntervention(validated);
   const view = { schema: REVIEWED_OBJECTIVE_SOURCE_ACTION_DISPLAY_SCHEMA,
     action: association.action, approval: association.approval, origin: c.origin, originatingObjective: c.originatingObjective,

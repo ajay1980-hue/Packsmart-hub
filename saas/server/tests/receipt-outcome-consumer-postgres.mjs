@@ -11,6 +11,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { canonical, hash, actionFixture, linkedMeasurement, sourceMeasurement, resign, request, parameters, callSql } from './business-outcome-postgres-fixture.mjs';
 import { BUSINESS_OUTCOME_CURRENCIES } from '../lib/business-outcomes.mjs';
 import { objectivePublicationFixture } from './objective-publication-fixture.mjs';
+import { runDescriptionLifecyclePgProof } from './description-edit-pg-lifecycle.mjs';
+import { runDescriptionProcessPgProof } from './description-edit-pg-process.mjs';
 
 assert.equal(process.env.OUTCOME_ALLOW_DISPOSABLE_TEST_DB, '1', 'Explicit disposable database opt-in required');
 const baseConnectionString = process.env.OUTCOME_TEST_DATABASE_URL;
@@ -232,6 +234,9 @@ before(async () => {
   securityBefore = await assertSecurity();
   consumerMigration = await readFile(new URL('../supabase/migrations/20261008163558_receipt_outcome_consumer.sql', import.meta.url), 'utf8');
   await admin.query(consumerMigration);
+  if (process.env.RUNVARA_DESCRIPTION_UPGRADE_PROOF === '1') {
+    await admin.query(await readFile(new URL('../supabase/prepared/description-edit-contract.sql', import.meta.url), 'utf8'));
+  }
   assert.deepEqual(await assertSecurity(), securityBefore);
   assert.equal((await admin.query('SELECT mode FROM public.runvara_content_receipt_control WHERE id')).rows[0].mode, 'prepared');
   await admin.query("UPDATE public.runvara_content_receipt_control SET mode='enforced' WHERE id");
@@ -314,6 +319,14 @@ test('new service reader has current authority and no direct ledger or helper ac
     for (const table of TABLES) await assert.rejects(c.query('SELECT * FROM public.' + table), rejected('42501'));
     await assert.rejects(c.query('SELECT public.runvara_outcome_content_evidence($1,$2)', ['w', {}]), rejected('42501'));
   });
+});
+
+if (process.env.RUNVARA_DESCRIPTION_UPGRADE_PROOF === '1') test('all retained families and v3 descriptions survive the full SQL outcome lifecycle and actual reader versions', { timeout: 60000 }, async () => {
+  await runDescriptionLifecyclePgProof({ admin, withService: fn => using('service_role', fn) });
+});
+
+if (process.env.RUNVARA_DESCRIPTION_UPGRADE_PROOF === '1') test('separate executors race and terminated executors restart across actual commit boundaries without replay', { timeout: 120000 }, async () => {
+  await runDescriptionProcessPgProof({ admin, connectionString });
 });
 
 test('protected review and publication survive missing optional context, approval, connection and >500 writes', async () => {

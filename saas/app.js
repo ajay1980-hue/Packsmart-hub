@@ -796,7 +796,21 @@
     }).join('') : '<div class="empty-state">No retained orders match this filter. An empty selection does not establish zero sales.</div>');
   }
 
+  function publicationApprovalDetails(item) {
+    const publication = item.payload?.publication;
+    if (publication?.schema !== 'runvara-meta-campaign-publication/v1') return '';
+    const target = publication.target || {}, asset = publication.asset || {}, local = asset.localSnapshot;
+    const row = (label, value) => '<div><dt>' + escapeHtml(label) + '</dt><dd class="connection-exact-text">' + escapeHtml(typeof value === 'string' || typeof value === 'number' ? value : 'Unavailable') + '</dd></div>';
+    const localEvidence = local ? '<details><summary>Local image evidence</summary><dl>' + row('Media type',local.mediaType) + row('Bytes',local.byteLength) + row('Width',local.width) + row('Height',local.height) + row('File SHA-256',local.sha256) + row('Pixel SHA-256',local.pixelSha256) + '</dl><p>' + (local.decoded === true ? 'Restricted PNG decoding checked locally.' : 'This historical snapshot does not establish decoded pixels.') + ' Provider format and delivered bytes remain unverified.</p></details>' : '';
+    return '<details class="publication-approval-details"><summary>Review exact Instagram proposal</summary><p class="warn">Local simulation only. Production publishing is closed.</p><dl>' + row('Exact caption',publication.caption) + row('Connection',target.connectionId) + row('Account',target.account) + row('Facebook Page',target.pageId) + row('Instagram account',target.instagramId) + row('Image reference — no remote preview fetched',asset.url) + '</dl>' + localEvidence + '<p>Approval records this exact proposal. It does not verify provider access or authorise a live post.</p></details>';
+  }
+
   function approvalCard(item) {
+    if (item.type === 'protected_meta_production_publication') {
+      const reference = item.payload?.metaProduction;
+      const action = reference && state.data.user?.role === 'owner' ? '<button class="secondary" data-meta-production-campaign="' + escapeHtml(reference.campaignId) + '" data-meta-production-request="' + escapeHtml(reference.requestId) + '">Review exact image, caption and destination</button>' : '';
+      return '<article class="approval-card"><h3>Instagram publication</h3><p>' + escapeHtml(statusLabel(item.status)) + '</p><p>' + escapeHtml(item.reason || '') + '</p><p>Approval and publishing are separate actions. Read the retained outcome in the exact review panel.</p>' + action + '</article>';
+    }
     const pending = item.status === 'pending';
     const write = (state.data.connectionWrites || []).find(write => write.approvalId === item.id);
     const affected = write ? (state.data.connectionCentre || []).find(channel => channel.id === write.provider)?.name || statusLabel(write.provider) : 'See proposal and supporting evidence';
@@ -805,9 +819,11 @@
       source ? (source.origin === 'owner_objective_content' ? 'Goal-associated source unavailable.' : 'Unsupported request origin. Saved source unavailable.') + ' This request must not be treated as a manual content request.' : '';
     const sourceDetail = source ? '<details><summary>' + (source.origin === 'owner_objective_content' ? 'Review full goal-associated content' : 'Review content with unsupported origin') + '</summary><p class="connection-exact-text">' + escapeHtml(sourceIdentity + '\nDestination: ' + (write.account || 'Unavailable saved target') + '\nConnection: ' + (write.connectionId || 'Unavailable saved reference') + (write.provider === 'shopify' && write.input?.operation === 'product_content' ? '\nProduct: ' + write.input.productId + '\nExact title: ' + write.input.title + '\nExact description:\n' + (write.input.description === '' ? 'Empty description: this clears the Shopify description.' : write.input.description) : '')) + '</p><p class="muted tiny">The retained product’s import account is unverified. Server-recorded history is not independently immutable proof. Saved financial and stock restrictions still apply; approval does not supply missing evidence. Applying the approved change is separate.</p></details>' : '';
 
-    const executionNote = item.executionStatus === 'ready' ? 'Ready to apply in the Connection Centre.' : item.executionStatus === 'completed' ? 'The channel confirmed the change.' : item.executionStatus === 'cancelled' ? 'No channel change made.' : 'External execution: disabled';
+    const simulation = window.RunvaraConnections.simulationOnly(write) || item.payload?.publication?.publishingEnabled === false;
+    const campaignReview = item.payload?.marketingCampaignId && !item.payload?.connectionWriteId ? '<p class="warn">Campaign-level review only. An exact destination and image still need separate approval. Publishing remains closed.</p>' : '';
+    const executionNote = simulation ? 'Local simulation only. No live post was made; production publishing is closed.' : item.executionStatus === 'ready' ? 'Ready to apply in the Connection Centre.' : item.executionStatus === 'completed' ? 'The channel confirmed the change.' : item.executionStatus === 'cancelled' ? 'No channel change made.' : 'External execution: disabled';
     const actions = pending && state.data.user?.role === 'owner' ? '<div class="approval-actions">' + (item.payload?.connectionWriteId ? '<button class="secondary" data-view-link="channels">Review exact change</button>' : '<button class="secondary" data-modify-approval="' + escapeHtml(item.id) + '">Modify</button>') + '<button class="secondary danger" data-approval="' + escapeHtml(item.id) + '" data-decision="rejected">Reject</button><button class="primary" data-approval="' + escapeHtml(item.id) + '" data-decision="approved">Approve</button></div>' : '<p class="decision-note">' + (pending ? 'Awaiting owner decision' : 'Decision recorded ' + date(item.decidedAt)) + ' · ' + escapeHtml(executionNote) + '</p>' + (item.executionStatus === 'ready' ? '<button class="secondary" data-view-link="channels">Open Connection Centre</button>' : '');
-    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Affected channel / scope</dt><dd>' + escapeHtml(affected) + '</dd></div><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Runvara') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + sourceDetail + actions + '</article>';
+    return '<article class="approval-card"><div class="approval-title"><div><span class="tag ' + (pending ? 'warn' : item.status === 'approved' ? 'good' : 'bad') + '">' + escapeHtml(statusLabel(item.status)) + '</span><h3>' + escapeHtml(item.action || statusLabel(item.type)) + '</h3></div><strong>' + (item.financialImpact == null ? 'Impact not quantified' : money(item.financialImpact)) + '</strong></div><dl><div><dt>Affected channel / scope</dt><dd>' + escapeHtml(affected) + '</dd></div><div><dt>Reason</dt><dd>' + escapeHtml(item.reason || '—') + '</dd></div><div><dt>Expected benefit</dt><dd>' + escapeHtml(item.expectedBenefit || '—') + '</dd></div><div><dt>Risk</dt><dd>' + escapeHtml(item.risk || '—') + '</dd></div><div><dt>Requested by</dt><dd>' + escapeHtml(item.requestedBy || 'system') + ' · ' + escapeHtml(item.source || 'Runvara') + ' · ' + date(item.createdAt) + '</dd></div><div><dt>Requesting agent</dt><dd>' + escapeHtml(item.agentId || item.requestedBy) + '</dd></div></dl>' + window.RunvaraControl.evidence(item.evidence) + window.RunvaraControl.history(item.history) + sourceDetail + publicationApprovalDetails(item) + campaignReview + actions + '</article>';
   }
 
   function renderApprovals() {
@@ -849,10 +865,30 @@
       const providerStates = (campaign.creativeRequests || []).map(item => item.provider + ': ' + item.status).join(' · ');
       const approvalButton = campaign.publish?.approvalId
         ? '<button class="secondary small-button" data-view-link="approvals">Open approval</button>'
-        : '<button class="secondary small-button" data-marketing-approval="' + escapeHtml(campaign.id) + '">Request publish approval</button>';
+        : '<button class="secondary small-button" data-marketing-approval="' + escapeHtml(campaign.id) + '">Request campaign review</button>';
       const creativeButton = (campaign.creativeRequests || []).some(item => ['pending', 'in_progress', 'failed'].includes(item.status)) ? '<button class="secondary small-button" data-marketing-creatives="' + escapeHtml(campaign.id) + '">Generate / refresh creatives</button>' : '';
-      return '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + creativeButton + approvalButton + '</div></article>';
+      return '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + creativeButton + approvalButton + (state.data.user?.role === 'owner' && campaign.channels?.includes('meta') ? '<button type="button" class="secondary small-button" data-publication-choices="' + escapeHtml(campaign.id) + '">Preview exact Instagram selection</button>' : '') + '</div><div class="publication-selection" role="status"></div></article>';
     }).join('') : '<div class="empty-state">No campaigns prepared yet. Runvara will only select active, in-stock products that meet the configured margin floor and have an image.</div>';
+  }
+
+  function renderLocalDraftEntryPoints() {
+    for (const preview of $('#marketing-campaign-list').querySelectorAll('[data-publication-choices]')) {
+      if (preview.parentElement.querySelector('[data-local-draft-open]')) continue;
+      const button=document.createElement('button');button.type='button';button.className='secondary small-button';
+      button.dataset.localDraftOpen=preview.dataset.publicationChoices;button.textContent='Review an existing JPEG locally';preview.after(button);
+    }
+    const context=objectiveContext();if(!sameObjectiveSession(context,true))return;
+    try {
+      for(let i=0;i<sessionStorage.length;i++) {
+        const key=sessionStorage.key(i);if(!key.startsWith('runvara-local-review-reference:'))continue;
+        const [workspaceId,userId,campaignId]=JSON.parse(key.slice('runvara-local-review-reference:'.length));
+        if(workspaceId!==context.workspaceId||userId!==context.userId||typeof campaignId!=='string'||campaignId.length>200)continue;
+        if([...$('#marketing-campaign-list').querySelectorAll('[data-local-draft-open]')].some(button=>button.dataset.localDraftOpen===campaignId))continue;
+        const article=document.createElement('article');article.className='opportunity-card';
+        const button=document.createElement('button');button.type='button';button.className='secondary';button.dataset.localDraftOpen=campaignId;button.textContent='Reopen retained local draft';
+        const panel=document.createElement('div');panel.className='publication-selection';panel.setAttribute('role','status');article.append(button,panel);$('#marketing-campaign-list').append(article);
+      }
+    }catch{}
   }
 
   function renderMarketRadar() {
@@ -928,6 +964,8 @@
       const cached = key ? automationHistory.cache.get(key) : null, pending = key ? automationHistory.pending.has(key) : false;
       const title = historyText(definitions.find(rule => rule.id === run.ruleId)?.name, 160) || 'Recorded check';
       const label = ['IN PROGRESS','COMPLETED','FAILED','BLOCKED'].includes(run.status) ? ({'IN PROGRESS':'In progress',COMPLETED:'Completed',FAILED:'Failed',BLOCKED:'Blocked'})[run.status] : 'Unknown status';
+      const syncError = run.ruleId === 'channelSync' && ['BLOCKED','FAILED'].includes(run.status) && typeof run.errorCode === 'string' && /^[A-Z0-9_]{1,80}$/.test(run.errorCode) ? run.errorCode : null;
+      const syncReason = syncError ? '<p class="muted tiny">Recorded error: ' + escapeHtml(syncError) + (syncError === 'SOURCE_COVERAGE_INCOMPLETE' ? '. Some channel data was incomplete in this recorded run. A connected status does not mean the sync completed.' : '.') + '</p>' : '';
       let evidence;
       if (ref) {
         evidence = '<p class="muted">' + run.evidenceCount + ' evidence ' + (run.evidenceCount === 1 ? 'item retained' : 'items retained') + '. ' + (cached ? 'Archived evidence was read for this view.' : 'Evidence has not been loaded in this view.') + '</p>' +
@@ -938,7 +976,7 @@
       } else {
         evidence = (Object.hasOwn(run, 'archive') || Object.hasOwn(run, 'evidenceCount') ? '<p class="muted">Archived evidence is unavailable because its reference could not be verified.</p>' : '') + automationHistoryEvidence(run.evidence, index, open.has(String(index)));
       }
-      return '<article class="automation-history-record" aria-busy="' + pending + '"><div class="automation-history-heading"><h3>' + escapeHtml(title) + '</h3><span class="tag neutral">' + label + '</span></div><p class="muted tiny">Started ' + escapeHtml(historyTimestamp(run.startedAt) ? date(run.startedAt) : 'Unknown') + (run.completedAt ? ' · Finished ' + escapeHtml(historyTimestamp(run.completedAt) ? date(run.completedAt) : 'Unknown') : '') + '</p>' + evidence + '</article>';
+      return '<article class="automation-history-record" aria-busy="' + pending + '"><div class="automation-history-heading"><h3>' + escapeHtml(title) + '</h3><span class="tag neutral">' + label + '</span></div><p class="muted tiny">Started ' + escapeHtml(historyTimestamp(run.startedAt) ? date(run.startedAt) : 'Unknown') + (run.completedAt ? ' · Finished ' + escapeHtml(historyTimestamp(run.completedAt) ? date(run.completedAt) : 'Unknown') : '') + '</p>' + syncReason + evidence + '</article>';
     }).join('') || '<p class="muted">No recent check history is available in this workspace snapshot.</p>';
   }
   $('#automation-history-list').addEventListener('click', async event => {
@@ -1310,8 +1348,9 @@
     const cloud = state.data.storage === 'supabase';
     $('#storage-badge').textContent = cloud ? 'Cloud persistent' : 'Server fallback';
     $('#storage-badge').className = 'tag ' + (cloud ? 'good' : 'warn');
-    renderOverview(); renderRevenueEngine(); renderAnalytics(); renderAiTeam(); renderMarketing(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
+    renderOverview(); renderRevenueEngine(); renderAnalytics(); renderAiTeam(); renderMarketing(); renderLocalDraftEntryPoints(); renderMarketRadar(); renderProducts(); renderOrders(); renderSuppliers(); renderApprovals(); renderAutomations(); renderChannels(); renderIssues(); renderAccount();
     window.RunvaraControl.render(state.data);
+    window.RunvaraMetaProduction?.render();
   }
 
   async function loadAudit() {
@@ -3081,7 +3120,137 @@
     finally { setBusy(button, false); }
   });
 
+  function localDraftReferenceKey(context,campaignId) {
+    return 'runvara-local-review-reference:' + JSON.stringify([context.workspaceId,context.userId,campaignId]);
+  }
+  function localDraftBlockers(codes) {
+    const labels={LOCAL_STORAGE_NOT_PRODUCTION_ACCEPTED:'Local storage has not been accepted for production.',PROVIDER_DELIVERY_UNVERIFIED:'Instagram has not verified these image bytes.',
+      EXACT_PUBLICATION_APPROVAL_REQUIRED:'A separate approval of the exact post is still required.',PUBLISHING_CLOSED:'Posting is closed.',PUBLISHER_NOT_IMPLEMENTED:'Posting is closed.',
+      PUBLISH_TARGET_AND_SCOPES_UNVERIFIED:'The live destination and permissions still need verification.',CURRENT_SOURCE_UNAVAILABLE:'The current campaign or destination is unavailable.',
+      MARKETING_CAMPAIGN_NOT_FOUND:'The current campaign is unavailable.',LOCAL_DRAFT_TARGET_UNAVAILABLE:'The current destination is unavailable.',
+      SOURCE_CHANGED_SINCE_SAVE:'The source changed after this draft was saved.',PRODUCT_NOT_ELIGIBLE:'Product costs, margin or stock do not meet the campaign checks.',
+      MARKETING_AUTOPILOT_OFF:'Marketing is switched off.',MARKETING_CHANNEL_DISABLED:'This marketing channel is switched off.',CAMPAIGN_CHANNEL_NOT_SELECTED:'Instagram is not selected for this campaign.',
+      META_NOT_CONNECTED:'The Meta connection is unavailable.',MARKETING_PRODUCT_NOT_FOUND:'The saved product is unavailable.',MARKETING_PRODUCT_AMBIGUOUS:'The saved product is ambiguous.',DRAFT_PRODUCT_CHANGED:'The product changed after the campaign was drafted.'};
+    return [...new Set((codes||[]).map(code=>labels[code]||'The current source needs review.'))].join(' ');
+  }
+  function localDraftDetails(record) {
+    return '<p class="warn">Local review draft only. No approval or post was created. This storage is not production accepted.</p>'
+      + '<dl><dt>Saved request reference</dt><dd>'+escapeHtml(record.requestId)+'</dd><dt>Exact caption</dt><dd class="connection-exact-text">'+escapeHtml(record.caption)+'</dd>'
+      + '<dt>Page / Instagram</dt><dd>'+escapeHtml(record.target.pageId)+' / '+escapeHtml(record.target.instagramId)+'</dd>'
+      + '<dt>JPEG SHA-256</dt><dd class="connection-exact-text">'+escapeHtml(record.asset.sha256)+'</dd></dl>'
+      + '<p>Owner-uploaded image; equality with a Canva export and provider delivery are unverified.</p>'
+      + (record.stale?'<p class="warn">The saved source has changed. This retained draft cannot be used for publication.</p>':'')
+      + '<p>'+escapeHtml(localDraftBlockers(record.blockers))+'</p>';
+  }
+  function localDraftCurrent(form,epoch) {
+    return form.isConnected && sameObjectiveSession(form.localDraftSession,true) && form.localDraftEpoch===epoch;
+  }
+  async function refreshLocalDraftContext(form,pageId) {
+    form.localDraftEpoch++;
+    const epoch=form.localDraftContextEpoch=(form.localDraftContextEpoch||0)+1;
+    const current=()=>form.isConnected&&sameObjectiveSession(form.localDraftSession,true)&&form.localDraftContextEpoch===epoch&&form.elements.page.value===pageId;
+    form.localDraftContext=null;form.querySelector('[data-local-draft-save]').disabled=true;
+    let result;try{result=await request(form.localDraftRoute+'/context'+(pageId?'?'+new URLSearchParams({pageId}):''));}catch(error){if(current())throw error;return;}
+    if(!current())return;
+    form.localDraftContext=result;
+    form.elements.page.innerHTML=result.pages.map(row=>'<option value="'+escapeHtml(row.pageId)+'"'+(row.pageId===result.target?.pageId?' selected':'')+'>Page '+escapeHtml(row.pageId)+' / Instagram '+escapeHtml(row.instagramId)+'</option>').join('');
+    form.querySelector('[data-local-draft-source]').textContent='Exact saved caption: '+result.caption+'\n'+localDraftBlockers(result.blockers)
+      +(result.eligibility.missingCostFields.length?'\nMissing costs: '+result.eligibility.missingCostFields.join(', '):'');
+    form.querySelector('[data-local-draft-save]').disabled=result.sourceAvailable===false;
+  }
   $('#marketing-campaign-list').addEventListener('click', async event => {
+    const opener=event.target.closest('[data-local-draft-open]');
+    if(opener) {
+      const session=objectiveContext();if(!sameObjectiveSession(session,true))return;
+      const campaignId=opener.dataset.localDraftOpen,panel=opener.closest('article').querySelector('.publication-selection');
+      const route='/api/marketing/campaigns/'+encodeURIComponent(campaignId)+'/local-review-drafts';
+      opener.disabled=true;
+      try {
+        const result=await request(route+'/context');
+        if(!panel.isConnected||!sameObjectiveSession(session,true))return;
+        if(!result.available){panel.textContent=result.notice;return;}
+        panel.innerHTML='<form data-local-draft-form><p>Save an existing JPEG as a local review draft. No generation, approval, upload to a provider or posting occurs.</p>'
+          +'<p>Supported: 1080 × 1080 baseline JFIF JPEG, at most 2 MiB, without EXIF, ICC or other metadata. Progressive JPEG and PNG are not accepted by this intake.</p>'
+          +'<label>Saved destination<select name="page"></select></label><p class="connection-exact-text" data-local-draft-source></p>'
+          +'<label>Existing JPEG<input name="image" type="file" accept="image/jpeg,.jpg,.jpeg"></label>'
+          +'<button type="submit" class="secondary" data-local-draft-save>Save local review draft</button>'
+          +'<label>Saved request reference<input name="reference" type="text" maxlength="100" autocomplete="off"></label>'
+          +'<button type="button" class="secondary" data-local-draft-reopen>Reopen saved draft</button>'
+          +'<div data-local-draft-result role="status"></div></form>';
+        const form=panel.querySelector('form');form.localDraftSession=session;form.localDraftEpoch=0;form.localDraftRoute=route;
+        form.localDraftReferenceKey=localDraftReferenceKey(session,campaignId);
+        try{form.elements.reference.value=sessionStorage.getItem(form.localDraftReferenceKey)||'';}catch{}
+        form.localDraftContext=result;
+        form.elements.page.innerHTML=result.pages.map(row=>'<option value="'+escapeHtml(row.pageId)+'"'+(row.pageId===result.target?.pageId?' selected':'')+'>Page '+escapeHtml(row.pageId)+' / Instagram '+escapeHtml(row.instagramId)+'</option>').join('');
+        form.querySelector('[data-local-draft-source]').textContent='Exact saved caption: '+result.caption+'\n'+localDraftBlockers(result.blockers)
+          +(result.eligibility.missingCostFields.length?'\nMissing costs: '+result.eligibility.missingCostFields.join(', '):'');
+        if(result.sourceAvailable===false){form.querySelector('[data-local-draft-source]').textContent=result.notice;form.elements.page.disabled=true;form.elements.image.disabled=true;form.querySelector('[data-local-draft-save]').disabled=true;}
+      }catch(error){if(panel.isConnected&&sameObjectiveSession(session,true))panel.textContent=error.message;}
+      finally{opener.disabled=false;}
+      return;
+    }
+    const reopen=event.target.closest('[data-local-draft-reopen]');if(!reopen)return;
+    const form=reopen.closest('form'),panel=form.querySelector('[data-local-draft-result]');
+    if(!sameObjectiveSession(form.localDraftSession,true))return;
+    const reference=form.elements.reference.value;
+    if(!/^[A-Za-z0-9_-]{16,100}$/.test(reference)){panel.textContent='Enter the saved request reference.';return;}
+    const epoch=++form.localDraftEpoch;reopen.disabled=true;
+    try {
+      const result=await request(form.localDraftRoute+'/requests/'+encodeURIComponent(reference));
+      if(!localDraftCurrent(form,epoch)||form.elements.reference.value!==reference)return;
+      panel.innerHTML=localDraftDetails(result.draft);
+      const image=await request(form.localDraftRoute+'/requests/'+encodeURIComponent(reference)+'/image');
+      if(!localDraftCurrent(form,epoch)||form.elements.reference.value!==reference)return;
+      if(image.mediaType!=='image/jpeg'||typeof image.base64!=='string'||image.base64.length>2796204||!/^[A-Za-z0-9+/]+={0,2}$/.test(image.base64))throw Error('Saved image unavailable.');
+      const picture=document.createElement('img');picture.src='data:image/jpeg;base64,'+image.base64;picture.alt='Exact retained local review JPEG';picture.width=270;picture.height=270;panel.append(picture);
+    }catch(error){if(localDraftCurrent(form,epoch))panel.textContent=error.message;}
+    finally{reopen.disabled=false;}
+  });
+  $('#marketing-campaign-list').addEventListener('change', async event=>{
+    const form=event.target.closest('[data-local-draft-form]');if(!form||!sameObjectiveSession(form.localDraftSession,true))return;
+    form.localDraftEpoch++;form.querySelector('[data-local-draft-result]').textContent='Selection changed.';
+    if(event.target.name==='page'&&!form.localDraftPending)try{await refreshLocalDraftContext(form,form.elements.page.value);}catch(error){if(form.isConnected&&sameObjectiveSession(form.localDraftSession,true))form.querySelector('[data-local-draft-result]').textContent=error.message;}
+  });
+  $('#marketing-campaign-list').addEventListener('submit',async event=>{
+    const form=event.target.closest('[data-local-draft-form]');if(!form)return;event.preventDefault();
+    if(!sameObjectiveSession(form.localDraftSession,true)||form.localDraftSaving)return;
+    const button=form.querySelector('[data-local-draft-save]'),panel=form.querySelector('[data-local-draft-result]');
+    const epoch=++form.localDraftEpoch;button.disabled=true;form.localDraftSaving=true;form.elements.reference.disabled=true;form.querySelector('[data-local-draft-reopen]').disabled=true;
+    try {
+      if(!form.localDraftPending) {
+        const file=form.elements.image.files[0],source=form.localDraftContext;
+        if(!file||file.type!=='image/jpeg'||file.size>2097152||!source||source.sourceAvailable===false||source.target.pageId!==form.elements.page.value)throw Error('Select a supported JPEG and current destination.');
+        const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('Image could not be read.'));reader.readAsDataURL(file);});
+        if(!localDraftCurrent(form,epoch))return;
+        const requestId=crypto.randomUUID();
+        form.localDraftPending=Object.freeze({requestId,sourceRevision:source.sourceRevision,pageId:source.target.pageId,jpegBase64:String(data).split(',')[1]});
+        form.elements.reference.value=requestId;try{sessionStorage.setItem(form.localDraftReferenceKey,requestId);}catch{}
+        form.elements.image.disabled=true;form.elements.page.disabled=true;
+      }
+      const result=await request(form.localDraftRoute,{method:'POST',body:JSON.stringify(form.localDraftPending)});
+      if(!localDraftCurrent(form,epoch))return;
+      panel.innerHTML=localDraftDetails(result);button.textContent='Saved locally';form.localDraftSaved=true;
+    }catch(error){if(localDraftCurrent(form,epoch)){panel.textContent=error.message+(form.localDraftPending?' The request reference is retained. Reopen it or retry the same save; a response failure does not prove that saving failed.':'');button.textContent=form.localDraftPending?'Retry same save':'Save local review draft';}}
+    finally{form.localDraftSaving=false;button.disabled=Boolean(form.localDraftSaved)||!form.localDraftContext||form.localDraftContext.sourceAvailable===false;form.elements.reference.disabled=false;form.querySelector('[data-local-draft-reopen]').disabled=false;}
+  });
+
+  $('#marketing-campaign-list').addEventListener('click', async event => {
+    const choicesButton = event.target.closest('[data-publication-choices]');
+    if (choicesButton) {
+      const context = objectiveContext(); if (!sameObjectiveSession(context, true)) return;
+      const campaignId = choicesButton.dataset.publicationChoices, panel = choicesButton.closest('article').querySelector('.publication-selection');
+      choicesButton.disabled = true;
+      try {
+        const result = await request('/api/marketing/campaigns/' + encodeURIComponent(campaignId) + '/publication/meta/choices');
+        if (!panel.isConnected || !sameObjectiveSession(context, true)) return;
+        if (!Array.isArray(result.pages) || !Array.isArray(result.assets) || result.pages.length > 100 || result.assets.length > 100) throw Error('Saved selections unavailable.');
+        panel.innerHTML = '<p>Preview only. Exact proposal creation remains closed while image delivery and provider acceptance are unfinished.</p>'
+          + (!result.pages.length || !result.assets.length ? '<p>No complete saved Page and creative pair is available.</p>' : '<form data-publication-preview="' + escapeHtml(campaignId) + '"><label>Saved Page and Instagram account<select name="page">' + result.pages.map((row,i)=>'<option value="'+i+'">Page '+escapeHtml(row.pageId)+' · Instagram '+escapeHtml(row.instagramId)+'</option>').join('') + '</select></label><label>Completed creative (saved URL only)<select name="asset">' + result.assets.map((row,i)=>'<option value="'+i+'">'+escapeHtml(row.assetUrl)+'</option>').join('') + '</select></label><button type="submit" class="secondary">Read exact preview</button><div class="publication-preview-result"></div></form>');
+        const form=panel.querySelector('form'); if(form) { form.publicationChoices=result; form.publicationEpoch=0; }
+      } catch(error) { if(panel.isConnected && sameObjectiveSession(context, true))panel.textContent=error.message; }
+      finally { choicesButton.disabled=false; }
+      return;
+    }
     const creativeButton = event.target.closest('[data-marketing-creatives]');
     if (creativeButton) {
       setBusy(creativeButton, true, 'Working…');
@@ -3101,9 +3270,32 @@
       await request('/api/marketing/campaigns/' + encodeURIComponent(button.dataset.marketingApproval) + '/request-publish-approval', { method: 'POST', body: '{}' });
       await loadBootstrap({ migrate: false });
       setView('approvals');
-      showMessage('Marketing publication approval added to the Approval Centre.');
+      showMessage('Campaign review added to the Approval Centre. Exact destination and image approval remain separate.');
     } catch (error) { showMessage(error.message, 'error'); }
     finally { setBusy(button, false); }
+  });
+
+  $('#marketing-campaign-list').addEventListener('change', event => {
+    const form=event.target.closest('[data-publication-preview]'); if(!form)return;
+    form.publicationEpoch=(form.publicationEpoch||0)+1;
+    form.querySelector('.publication-preview-result').textContent='Selection changed. Read a new exact preview.';
+  });
+  $('#marketing-campaign-list').addEventListener('submit', async event => {
+    const form=event.target.closest('[data-publication-preview]'); if(!form)return; event.preventDefault();
+    const context=objectiveContext();if(!sameObjectiveSession(context,true))return;
+    const page=form.publicationChoices?.pages[Number(form.elements.page.value)],asset=form.publicationChoices?.assets[Number(form.elements.asset.value)];
+    if(!page||!asset)return;
+    const panel=form.querySelector('.publication-preview-result'),button=form.querySelector('button[type="submit"]');
+    const epoch=++form.publicationEpoch,selection=JSON.stringify([form.elements.page.value,form.elements.asset.value]);
+    const current=()=>panel.isConnected&&sameObjectiveSession(context,true)&&form.publicationEpoch===epoch&&JSON.stringify([form.elements.page.value,form.elements.asset.value])===selection;
+    panel.textContent='Reading exact preview…';
+    button.disabled=true;
+    try {
+      const query=new URLSearchParams({pageId:page.pageId,creativeRequestId:asset.creativeRequestId,assetUrl:asset.assetUrl});
+      const preview=await request('/api/marketing/campaigns/'+encodeURIComponent(form.dataset.publicationPreview)+'/publication/meta/preview?'+query);
+      if(!current())return;
+      panel.innerHTML='<p class="warn">Preview only; no approval or post created. Asset bytes and provider delivery are unverified.</p><dl><dt>Exact caption</dt><dd class="connection-exact-text">'+escapeHtml(preview.caption)+'</dd><dt>Connection</dt><dd>'+escapeHtml(preview.target.connectionId)+'</dd><dt>Page / Instagram</dt><dd>'+escapeHtml(preview.target.pageId)+' / '+escapeHtml(preview.target.instagramId)+'</dd><dt>Saved image URL (not fetched)</dt><dd class="connection-exact-text">'+escapeHtml(preview.asset.url)+'</dd></dl>';
+    }catch(error){if(current())panel.textContent=error.message;}finally{button.disabled=false;}
   });
 
   $('#radar-target-form').addEventListener('submit', async event => {
@@ -3229,7 +3421,7 @@
 
   $('#approval-list').addEventListener('click', async event => {
     const button = event.target.closest('[data-approval]'); if (!button) return; setBusy(button, true, button.dataset.decision === 'approved' ? 'Approving…' : 'Rejecting…');
-    try { const payload = await request('/api/approvals/' + encodeURIComponent(button.dataset.approval) + '/decision', { method: 'POST', body: JSON.stringify({ decision: button.dataset.decision, revision: state.data.approvals.find(item => item.id === button.dataset.approval)?.revision || 1 }) }); const index = state.data.approvals.findIndex(item => item.id === payload.approval.id); if (index >= 0) state.data.approvals[index] = payload.approval; const write = state.data.connectionWrites?.find(item => item.approvalId === payload.approval.id); if (write && payload.approval.executionStatus === 'ready') write.status = 'ready'; if (write && payload.approval.status === 'rejected') write.status = 'rejected'; renderApprovals(); showMessage(payload.approval.executionStatus === 'ready' ? 'Approved. Review and apply the exact change in the Connection Centre.' : statusLabel(payload.approval.status) + ' recorded. No external action was executed.'); }
+    try { const payload = await request('/api/approvals/' + encodeURIComponent(button.dataset.approval) + '/decision', { method: 'POST', body: JSON.stringify({ decision: button.dataset.decision, revision: state.data.approvals.find(item => item.id === button.dataset.approval)?.revision || 1 }) }); const index = state.data.approvals.findIndex(item => item.id === payload.approval.id); if (index >= 0) state.data.approvals[index] = payload.approval; const write = state.data.connectionWrites?.find(item => item.approvalId === payload.approval.id); if (write && payload.approval.executionStatus === 'ready') write.status = 'ready'; if (write && payload.approval.status === 'rejected') write.status = 'rejected'; renderApprovals(); showMessage(window.RunvaraConnections.simulationOnly(write) ? statusLabel(payload.approval.status) + ' recorded for local simulation. Production publishing remains closed.' : payload.approval.executionStatus === 'ready' ? 'Approved. Review and apply the exact change in the Connection Centre.' : statusLabel(payload.approval.status) + ' recorded. No external action was executed.'); }
     catch (error) { showMessage(error.message, 'error'); setBusy(button, false); }
   });
 
@@ -3296,6 +3488,7 @@
     try{await request('/api/admin/invitations',{method:'DELETE',body:JSON.stringify({id:button.dataset.revokeInvite})});await loadLaunch();}catch(error){$('#launch-feedback').textContent=error.message;}
   });
 
+  window.RunvaraMetaProduction?.init({request, getContext: objectiveContext, isCurrent: context => sameObjectiveSession(context, true)});
   window.RunvaraOutcomes?.init({ request, getContext: () => ({ session: state.session, workspaceId: state.data?.workspace?.id, userId: state.session?.user?.id, role: state.data?.user?.role, view: state.view, experiments: state.data?.revenueEngine?.experiments || [] }) });
   window.RunvaraActivity?.init({ request, getContext: () => ({ session:state.session, workspaceId:state.data?.workspace?.id, role:state.data?.user?.role, view:state.view }) });
   window.RunvaraBriefHistory?.init({ request, getContext: () => ({ session: state.session, workspaceId: state.data?.workspace?.id, userId: state.data?.user?.id, role: state.data?.user?.role, view: state.view, generation: state.graphGeneration, csrf: state.csrf, sessionWorkspaceId: state.session?.workspace?.id, sessionUserId: state.session?.user?.id, sessionRole: state.session?.user?.role }) });

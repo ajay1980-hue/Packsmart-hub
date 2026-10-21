@@ -1,7 +1,8 @@
 import { actionIntervention, canonicalReviewedActionJson, validateReviewedSourceAction,
   validateRecordedObjectiveReference, validateProtectedReceiptSelector } from './reviewed-action-evidence.mjs';
-import { CONTENT_EXECUTION_RECEIPT_CONTRACT, validateContentExecutionCommit,
+import { contentReceiptContractForAdmission, validateContentExecutionCommit,
   contentReceiptJsonbBytes } from './content-execution-receipt.mjs';
+import { isDescriptionEdit, descriptionEditPreimage } from './description-edit.mjs';
 
 export { validateProtectedReceiptSelector } from './reviewed-action-evidence.mjs';
 export const PROTECTED_RECEIPT_SOURCE_SCHEMA = 'runvara-protected-content-source/v1';
@@ -68,7 +69,7 @@ export function resolveProtectedReceiptEvidence(evidence, { workspaceId, selecto
     exact(evidence, ['schema', 'admission', 'receipt', 'commitRevision']);
     bounded(evidence, PROTECTED_RECEIPT_PRIVATE_MAX_BYTES, true);
     if (evidence.schema !== PROTECTED_RECEIPT_PRIVATE_SCHEMA) throw fail();
-    const descriptor = validateContentExecutionCommit({ contract: CONTENT_EXECUTION_RECEIPT_CONTRACT,
+    const descriptor = validateContentExecutionCommit({ contract: contentReceiptContractForAdmission(evidence.admission),
       kind: 'finalize', admission: evidence.admission, receipt: evidence.receipt });
     const source = validateReviewedSourceAction(descriptor.receipt.source, { workspaceId: workspace(workspaceId) });
     const receiptSource = validateProtectedReceiptSource({ schema: PROTECTED_RECEIPT_SOURCE_SCHEMA,
@@ -112,7 +113,7 @@ export function publicProtectedReceiptSource(source, { workspaceId, receiptSourc
     return bounded({ schema: PROTECTED_RECEIPT_DISPLAY_SCHEMA, receiptSource: reference,
       action: association.action, approval: association.approval, origin: c.origin, originatingObjective: c.originatingObjective,
       account: c.account, productId: validated.input.productId, completedAt: c.completedAt,
-      input: { productId: validated.input.productId, operation: validated.input.operation, title: validated.input.title, description: validated.input.description },
+      input: isDescriptionEdit(validated.input) ? descriptionEditPreimage(validated.input) : { productId: validated.input.productId, operation: validated.input.operation, title: validated.input.title, description: validated.input.description },
       decision: { status: c.approval.status, decidedBy: c.approval.decidedBy, decidedAt: c.approval.decidedAt },
       policies: c.policies.map(row => ({ objectiveId: row.objectiveId, revision: row.revision, digest: row.digest })),
       validation: { protection: 'completion_workspace_commit', currentStatus: 'not_checked', providerAuthentication: 'not_established', causalAttribution: 'not_established' } },

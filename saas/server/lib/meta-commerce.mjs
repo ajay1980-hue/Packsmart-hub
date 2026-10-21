@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { boundedMetaContainerResponse, metaContainerError } from './meta-container-response.mjs';
 import { dispatchConnectionMutation } from './connection-dispatch.mjs';
 import { connectionError, connectionSettings, validateAreas } from './connection-centre.mjs';
 
@@ -69,14 +70,25 @@ export function prepareMetaWrite(state, body) {
   return input;
 }
 
+// Shared serialization for legacy dispatch and the inactive protected flow.
+// This creates no authority and performs no I/O.
+export function metaRequestEnvelope(path, token, secret, {method = 'GET', query = {}, body} = {}) {
+  if (!/^\/(?:me|debug_token|\d{1,32}(?:_\d{1,32})?)(?:\/[a-z_]+)?$/.test(path)) throw connectionError('This Meta operation is unavailable.', 'META_PATH_INVALID');
+  const url = new URL(`https://graph.facebook.com/${META_VERSION}${path}`);
+  url.search = new URLSearchParams({ ...query, appsecret_proof: crypto.createHmac('sha256', secret || '').update(token).digest('hex') }).toString();
+  if (method !== 'GET' && Object.keys(query).length) throw connectionError('Mutation query parameters are not approved.', 'WRITE_REQUEST_CHANGED', 409);
+  const serialized = body ? JSON.stringify(body) : undefined;
+  return {address: url.toString(), serialized, init: {method,
+    headers: {Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? {'Content-Type': 'application/json'} : {})},
+    ...(serialized ? {body: serialized} : {}), redirect: 'error'}};
+}
 export const metaMethods = {
-  async metaRequest(path, token, { method = 'GET', query = {}, body, dispatch, phase = 'meta_mutation' } = {}) {
-    if (!/^\/(?:me|debug_token|\d{1,32}(?:_\d{1,32})?)(?:\/[a-z_]+)?$/.test(path)) throw connectionError('This Meta operation is unavailable.', 'META_PATH_INVALID');
-    const url = new URL(`https://graph.facebook.com/${META_VERSION}${path}`);
-    url.search = new URLSearchParams({ ...query, appsecret_proof: crypto.createHmac('sha256', this.env.META_CLIENT_SECRET || '').update(token).digest('hex') }).toString();
-    if (method !== 'GET' && Object.keys(query).length) throw connectionError('Mutation query parameters are not approved.', 'WRITE_REQUEST_CHANGED', 409);
-    const address = url.toString(), serialized = body ? JSON.stringify(body) : undefined;
-    const submit = () => this.fetch(address, { method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) }, ...(serialized ? { body: serialized } : {}), redirect: 'error', signal: AbortSignal.timeout(20000) });
+  async metaRequest(path, token, { method = 'GET', query = {}, body, dispatch, phase = 'meta_mutation', containerStatusRead = false, readTimeoutMs = 5000 } = {}) {
+    if (containerStatusRead && (method!=='GET' || body!==undefined || !/^\/\d{1,32}$/.test(path)
+      || Object.keys(query).length!==1 || query.fields!=='id,status_code' || !Number.isInteger(readTimeoutMs) || readTimeoutMs<1 || readTimeoutMs>5000)) throw metaContainerError('REQUEST_INVALID',400);
+    const {address, serialized, init} = metaRequestEnvelope(path, token, this.env.META_CLIENT_SECRET, {method, query, body});
+    const submit = signal => this.fetch(address, {...init, signal: signal || AbortSignal.timeout(20000)});
+    if (containerStatusRead) return boundedMetaContainerResponse(submit,path.slice(1),readTimeoutMs);
     const response = method === 'GET' ? await submit() : await dispatchConnectionMutation(dispatch, { provider: 'meta', phase, method, path, body: serialized }, submit);
     let value; try { value = await response.json(); } catch { throw connectionError('Meta did not confirm the result. Check the channel before repeating a change.', 'META_RESULT_UNKNOWN', 422); }
     if (!response.ok || value.error) {

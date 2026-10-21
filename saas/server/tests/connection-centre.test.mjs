@@ -756,11 +756,56 @@ test('connection polling never overlaps slow status requests',async t=>{
   window.RunvaraConnections.endSession();
 });
 
-test('eBay eligibility recovery explains provider restriction without reconnect advice',()=>{
-  const recovery = recoveryFor('ebay', {status:'degraded'}, {readDiagnostics:{marketing:{httpStatus:409,errorIds:['35077'],stage:'ads'}}});
-  assert.match(recovery.message, /not currently eligible/);
-  assert.match(recovery.message, /Order imports can continue/);
+test('eBay marketing recovery distinguishes retained observations from current provider status',()=>{
+  const marketing = {httpStatus:409,errorIds:['35077'],stage:'ads',automaticRetryBlocked:true};
+  const recovery = recoveryFor('ebay', {status:'degraded'}, {readDiagnostics:{marketing}});
+  assert.match(recovery.message, /retained eBay marketing response/);
+  assert.match(recovery.message, /does not confirm.*current status/);
+  assert.match(recovery.message, /Automatic marketing retry is withheld/);
+  assert.match(recovery.message, /Other sync areas keep their own status/);
   assert.equal(recovery.action, 'sync');
+  delete marketing.automaticRetryBlocked;
+  assert.doesNotMatch(recoveryFor('ebay', {}, {readDiagnostics:{marketing}}).message, /retry is withheld/);
+});
+
+test('eBay support diagnostics render original observation time and explicit withheld retry', async t => {
+  const state = seedWorkspaceState(), at = '2026-10-16T12:00:00.000Z';
+  state.integrationStatus.ebay = {status:'connected',lastSyncAt:'2026-10-19T12:00:00.000Z'};
+  state.ebay = {listings:[], coverage:{fullCatalogueAvailable:false,readDiagnostics:{marketing:{
+    code:'EBAY_MARKETING_ADS_PARTIAL',httpStatus:409,errorIds:['35077'],stage:'ads',at,automaticRetryBlocked:true,
+    failedCampaigns:[{campaignId:'synthetic',status:'SYSTEM_PAUSED',httpStatus:409}]
+  }}}};
+  const channels = connectionCentre(state, {ebayConfigured:()=>true});
+  const channel = channels.find(item => item.id === 'ebay');
+  assert.equal(channel.readDiagnostics.marketing.at, at);
+  assert.equal(channel.readDiagnostics.marketing.automaticRetryBlocked, true);
+  const dom = new JSDOM(await fs.readFile(new URL('../../index.html',import.meta.url),'utf8'), {url:'https://runvara.example.test',runScripts:'outside-only'});
+  t.after(()=>dom.window.close()); const {window} = dom;
+  window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
+  window.eval(await fs.readFile(new URL('../../presentation.js',import.meta.url),'utf8'));
+  window.eval(await fs.readFile(new URL('../../connections-ui.js',import.meta.url),'utf8'));
+  window.RunvaraConnections.init({request:async()=>assert.fail('Rendering does not request a provider recheck'),escapeHtml:String,date:String,notify:()=>{},reload:async()=>{},setView:()=>{}});
+  window.RunvaraConnections.render({user:{role:'owner'},launchAdmin:true,connectionCentre:channels,connectionWrites:[]});
+  window.RunvaraConnections.open('ebay');
+  const section=[...window.document.querySelectorAll('.connection-section')].find(node=>node.querySelector('h3')?.textContent==='Connection health & access');
+  assert.match(section.textContent, /Recorded observation: 2026-10-16T12:00:00.000Z/);
+  assert.match(section.textContent, /Automatic retry withheld/);
+  assert.match(section.textContent, /does not confirm current provider status/);
+  assert.doesNotMatch(section.textContent, /2026-10-19T12:00:00/);
+  delete channel.readDiagnostics.marketing.at; channel.readDiagnostics.marketing.automaticRetryBlocked=false;
+  window.RunvaraConnections.render({user:{role:'owner'},launchAdmin:true,connectionCentre:channels,connectionWrites:[]});
+  const updated=[...window.document.querySelectorAll('.connection-section')].find(node=>node.querySelector('h3')?.textContent==='Connection health & access');
+  assert.match(updated.textContent, /Recorded observation: Time not recorded/);
+  assert.doesNotMatch(updated.textContent, /Automatic retry withheld/);
+  state.ebay.coverage.readDiagnostics.marketing.deferred = true;
+  const deferredChannels = connectionCentre(state, {ebayConfigured:()=>true});
+  assert.equal(deferredChannels.find(item=>item.id==='ebay').readDiagnostics.marketing.deferred, true);
+  window.RunvaraConnections.render({user:{role:'owner'},launchAdmin:true,connectionCentre:deferredChannels,connectionWrites:[]});
+  const deferredSection=[...window.document.querySelectorAll('.connection-section')].find(node=>node.querySelector('h3')?.textContent==='Connection health & access');
+  assert.match(deferredSection.textContent, /Deferred attempt: 2026-10-16T12:00:00.000Z/);
+  assert.match(deferredSection.textContent, /No new provider response was recorded/);
+  assert.doesNotMatch(deferredSection.textContent, /Recorded observation:/);
+  window.RunvaraConnections.endSession();
 });
 
 

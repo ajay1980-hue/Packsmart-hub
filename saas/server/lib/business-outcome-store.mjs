@@ -1,4 +1,5 @@
-import { REVIEWED_OBJECTIVE_ACTION_CONTRACT, supportsReviewedActions, supportsReviewedActionSource, publicReviewedSourceAction, validateRecordedObjectiveReference, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
+import { supportsObjectiveReviewedActions, supportsReviewedActions, supportsReviewedActionSource, publicReviewedSourceAction, validateRecordedObjectiveReference, validateReviewedSourceAction, validateActionIntervention, actionIntervention } from './reviewed-action-evidence.mjs';
+import { isDescriptionEdit } from './description-edit.mjs';
 import { validateProtectedReceiptSelector, validateProtectedReceiptSource, validateProtectedReceiptChoice, resolveProtectedReceiptEvidence, publicProtectedReceiptSource } from './protected-receipt-source.mjs';
 import { randomUUID } from 'node:crypto';
 import { aggregateBusinessOutcomes, assessBusinessOutcomeCandidate, createOutcomePublicationBoundary, validateBusinessOutcomePublication } from './business-outcomes.mjs';
@@ -503,7 +504,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
         actionChoices = result.actionChoices.map(row => {
           const objective = Object.hasOwn(row, 'origin');
           exact(row, ['id','account','productId','title','completedAt','digest', ...(objective ? ['origin','originatingObjective'] : [])]); identifier(row.id); hash(row.digest);
-          if (objective && (result.actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT || row.origin !== 'owner_objective_content')) throw failure('OUTCOME_REVIEW_INVALID');
+          if (objective && (!supportsObjectiveReviewedActions(result.actionLinkContract) || row.origin !== 'owner_objective_content')) throw failure('OUTCOME_REVIEW_INVALID');
           if (objective) validateRecordedObjectiveReference(row.originatingObjective, workspaceId);
           if (ids.has(row.id) || typeof row.account !== 'string' || row.account.length > 253 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(row.account)
             || typeof row.productId !== 'string' || row.productId.length > 160 || !/^gid:\/\/shopify\/Product\/\d+$/.test(row.productId)
@@ -518,7 +519,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
           if (!currentPublication || digestMeasurementValue(currentPublication.version.links) !== digestMeasurementValue({ action: currentActionAssociation.action, approval: currentActionAssociation.approval, objective: null, opportunity: null })) throw failure('OUTCOME_REVIEW_INVALID');
         } else if (currentPublication?.version.links.action !== null && currentPublication?.version.links.action !== undefined) throw failure('OUTCOME_REVIEW_INVALID');
       } else if (Object.hasOwn(result, 'actionChoices') || Object.hasOwn(result, 'currentActionAssociation') || measurement?.intervention || currentPublication?.version.links.action) throw failure('OUTCOME_REVIEW_INVALID');
-      if (actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT
+      if (!supportsObjectiveReviewedActions(actionLinkContract)
         && (measurement?.schema === 'runvara-experiment-measurement/v3' || measurement?.intervention?.schema === 'runvara-owner-action-association/v2' || currentActionAssociation?.schema === 'runvara-owner-action-association/v2')) throw failure('OUTCOME_REVIEW_INVALID');
       const review = { actionLinkContract, actionChoices, currentActionAssociation, workspaceId, workspaceRevision: result.workspaceRevision, experiment: { ...result.experiment }, measurement, assessment, currentPublication };
       return bounded({ ...review, relationships: projectValidatedSelectedReview(review, at) }, 128 * 1024);
@@ -570,7 +571,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
       const choices = result.receiptChoices.map(row => validateProtectedReceiptChoice(row, { workspaceId }));
       bounded(choices, 16384);
       if (choices.length && !supportsReviewedActions(parsed.actionLinkContract)
-        || choices.some(choice => choice.origin === 'owner_objective_content') && parsed.actionLinkContract !== REVIEWED_OBJECTIVE_ACTION_CONTRACT) throw failure('OUTCOME_REVIEW_INVALID');
+        || choices.some(choice => choice.origin === 'owner_objective_content') && !supportsObjectiveReviewedActions(parsed.actionLinkContract)) throw failure('OUTCOME_REVIEW_INVALID');
       let previous = selection.afterAttemptId;
       for (const choice of choices) {
         if (previous !== null && choice.receiptSource.attemptId <= previous) throw failure('OUTCOME_REVIEW_INVALID');
@@ -591,7 +592,7 @@ export function createBusinessOutcomePersistence({ request, invalidate = () => {
         const listed = choices.find(choice => choice.receiptSource.attemptId === resolved.receiptSource.attemptId);
         if (listed && digestMeasurementValue(listed) !== digestMeasurementValue({ receiptSource: resolved.receiptSource,
           actionId: resolved.source.context.writeId, account: resolved.source.context.account, productId: resolved.source.input.productId,
-          title: resolved.source.input.title, completedAt: resolved.source.context.completedAt, origin: resolved.source.context.origin,
+          title: isDescriptionEdit(resolved.source.input) ? 'Shopify description change' : resolved.source.input.title, completedAt: resolved.source.context.completedAt, origin: resolved.source.context.origin,
           originatingObjective: resolved.source.context.originatingObjective })) throw failure('OUTCOME_REVIEW_INVALID');
         privateEvidence = freezeRecorded(structuredClone(result.selectedEvidence));
       } else if (selection.receipt || !selection.afterAttemptId && parsed.measurement?.schema === PROTECTED_MEASUREMENT_SCHEMA

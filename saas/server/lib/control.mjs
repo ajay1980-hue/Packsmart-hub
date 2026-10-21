@@ -144,8 +144,15 @@ export function detectExceptions(state, actor = 'system', options = {}) {
   }
   const failures = new Map();
   for (const run of state.automationRuns) if (!failures.has(run.ruleId)) failures.set(run.ruleId, run);
-  for (const run of failures.values()) if (['FAILED', 'BLOCKED'].includes(run.status)) candidates.push({ kind: 'automation', reference: run.ruleId, severity: 'high', title: `Automation needs attention: ${run.ruleId}`,
-    businessImpact: 'Scheduled monitoring did not finish.', rootCause: run.errorCode || run.status, recommendedAction: 'Review its evidence and repair the source before retrying.', owner: 'operations', evidence: [{ type: 'automation_run', id: run.id, detail: run.status }] });
+  for (const run of failures.values()) if (['FAILED', 'BLOCKED'].includes(run.status)) {
+    const coverageUnavailable = run.ruleId === 'channelMismatchAlerts' && run.status === 'BLOCKED' && run.errorCode === 'COVERAGE_UNAVAILABLE';
+    candidates.push({ kind: 'automation', reference: run.ruleId, severity: coverageUnavailable ? 'medium' : 'high',
+      title: coverageUnavailable ? 'Catalogue comparison unavailable' : `Automation needs attention: ${run.ruleId}`,
+      businessImpact: coverageUnavailable ? 'The last scheduled comparison produced no mismatch result.' : 'Scheduled monitoring did not finish.',
+      rootCause: run.errorCode || run.status,
+      recommendedAction: coverageUnavailable ? 'Full marketplace coverage is required for this comparison. This blocked result does not establish an OAuth or sync failure.' : 'Review its evidence and repair the source before retrying.',
+      owner: 'operations', evidence: [{ type: 'automation_run', id: run.id, detail: run.status }] });
+  }
   return reconcile(state, 'exceptions', candidates, actor);
 }
 

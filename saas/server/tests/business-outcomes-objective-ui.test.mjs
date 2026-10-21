@@ -146,7 +146,7 @@ test('objective draft schemas, public hashes and captured origin reject future, 
     d => { d.measurement.report.description = 'Changed without a matching hash'; }, d => { d.measurement.future = 'PRIVATE-CANARY'; },
     d => { d.measurement.links.objective = d.measurement.intervention.originatingObjective; },
     d => { d.measurement.intervention.comparison = 'established'; }, d => { d.actionLinkContract = 'runvara-reviewed-action/v1'; },
-    d => { d.actionLinkContract = 'runvara-reviewed-action/v3'; }
+    d => { d.actionLinkContract = 'runvara-reviewed-action/v4'; }
   ];
   for (const mutate of mutations) {
     h.handler = async () => { const result = clone(detail); mutate(result); return result; };

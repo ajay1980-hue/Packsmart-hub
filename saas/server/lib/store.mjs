@@ -1,4 +1,10 @@
 import crypto from 'node:crypto';
+import { metaStrictJson } from './meta-publication-bounded.mjs';
+import { contentWriteSnapshot } from './content-write-identity.mjs';
+import { localFileTransaction } from './local-file-transaction.mjs';
+import { readMetaObservationHistory, appendMetaObservation } from './meta-publication-observation.mjs';
+import { validateMetaReceiptDescriptor, prepareMetaReceiptTransaction, commitMetaReceiptTransaction,
+  recordMetaReceiptAcknowledgement, readProtectedMetaReceipt, metaReceiptError } from './meta-publication-receipt.mjs';
 import { createActivityMeter } from './activity-meter.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -15,8 +21,9 @@ import { ensureWebIntelligence } from './web-intelligence.mjs';
 import { ensureRevenueEngine } from './revenue-engine.mjs';
 import { createBusinessOutcomePersistence } from './business-outcome-store.mjs';
 import { createGovernedRecordStage, assertGovernedRecordCreation } from './governed-record-stage.mjs';
-import { CONTENT_EXECUTION_RECEIPT_CONTRACT, validateContentExecutionCommit,
+import { CONTENT_EXECUTION_RECEIPT_CONTRACT, DESCRIPTION_EXECUTION_RECEIPT_CONTRACT, validateContentExecutionCommit,
   recordContentReceiptAcknowledgement } from './content-execution-receipt.mjs';
+import { assertContentReceiptProducer } from './content-pilot.mjs';
 import { prepareContentReceiptTransaction, commitContentReceiptTransaction } from './content-execution-receipt-store.mjs';
 import { ORDER_RECOVERY_CONTRACT, validateOrderRecoveryCommit, prepareOrderRecoveryTransaction, commitOrderRecoveryTransaction, readOrderRecovery, lookupOrderRecovery, getOrderRecoveryContext, recordOrderRecoveryAcknowledgement, orderRecoveryError } from './shopify-order-recovery-store.mjs';
 import { orderFinancialMirrorRow, orderReportingCurrency } from './shopify-order-source.mjs';
@@ -389,8 +396,58 @@ export function upgradeState(state, env = process.env) {
   return upgraded;
 }
 
+const localFileStores = new WeakSet();
+export function isLocalFileStore(store) { return localFileStores.has(store); }
+async function writeLocalFile(store, all, beforeRetry) {
+  const serialized = JSON.stringify(all);
+  const destination = store.filePath;
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  const temp = `${destination}.${crypto.randomUUID()}.tmp`;
+  const handle = await fs.open(temp, 'wx', 0o600);
+  try { await handle.writeFile(serialized); await handle.sync(); } finally { await handle.close(); }
+  // The caller retains the transaction lock. Retry only the same replacement,
+  // never recreate the temp or replay work after an uncertain acknowledgement.
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (attempt > 0) {
+      if (JSON.stringify(all) !== serialized) throw conflict();
+      beforeRetry?.();
+      if (JSON.stringify(all) !== serialized) throw conflict();
+    }
+    try { await fs.rename(temp, destination); return; }
+    catch (error) {
+      if (process.platform !== 'win32' || error.code !== 'EPERM' || attempt === 49) throw error;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+}
+// Isolated mock-observer admission uses the existing file and OS lock. The
+// synchronous callback can change only its ledger; it cannot save recursively.
+export async function updateLocalMetaObserver(store, workspaceId, update, expectedPath = path.resolve(store.filePath)) {
+  if (!isLocalFileStore(store)) throw Object.assign(new Error('Local observer unavailable'), { code:'META_CONTAINER_OBSERVER_CLOSED',status:409 });
+  if (path.resolve(store.filePath)!==expectedPath) throw Object.assign(new Error('Observer source changed'),{code:'META_CONTAINER_OBSERVER_SOURCE_CHANGED',status:409});
+  return localFileTransaction(expectedPath, async () => {
+    const all = JSON.parse(await fs.readFile(expectedPath,'utf8')), state = all[workspaceId];
+    assertWorkspace(workspaceId, state);
+    const peers = Object.values(all).map(row => structuredClone(row.integrationStatus?.meta?.containerObserver ?? null));
+    const result = update(structuredClone(state), peers);
+    if (result?.then) { Promise.resolve(result).catch(() => {}); throw new TypeError('Observer update must be synchronous'); }
+    if (result?.unchanged === true) return structuredClone(result.value);
+    if (!result || !Object.hasOwn(result,'ledger')) throw new TypeError('Observer ledger required');
+    contentWriteSnapshot(result.ledger);
+    if (Buffer.byteLength(JSON.stringify(result.ledger)) > 131072) throw Object.assign(new Error('Observer capacity exhausted'), { code:'META_CONTAINER_OBSERVER_CAPACITY',status:409 });
+    state.integrationStatus = { ...state.integrationStatus, meta:{...state.integrationStatus?.meta,containerObserver:structuredClone(result.ledger)} };
+    state._revision = crypto.randomUUID();
+    await writeLocalFile({filePath:expectedPath}, all);
+    return structuredClone(result.value);
+  });
+}
+export async function withLocalFileState(store, workspaceId, callback) {
+  if (!isLocalFileStore(store)) throw Object.assign(new Error('Local file storage required'), { code: 'LOCAL_DRAFT_STORAGE_CLOSED', status: 409 });
+  return localFileTransaction(path.resolve(store.filePath), async () => callback(await store.get(workspaceId)));
+}
 class FileStore {
   constructor(env, activityOptions = {}) {
+    localFileStores.add(this);
     Object.defineProperty(this, 'contentExecutionReceiptCapability', { value: env.CONTENT_EXECUTION_RECEIPT_CONTRACT ?? null });
     this.activityMeter = createActivityMeter({ ...activityOptions, dbAvailable: false });
     const defaultPath = fileURLToPath(new URL('../data/state.json', import.meta.url));
@@ -426,7 +483,8 @@ class FileStore {
     return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit } = {}) {
+    if (protectedMetaCommit !== undefined) throw metaReceiptError('UNAVAILABLE', 503);
     if (protectedOrderRecovery !== undefined) throw orderRecoveryError('UNAVAILABLE', 503);
     if (protectedContentCommit !== undefined) throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
     assertWorkspace(workspaceId, state);
@@ -435,7 +493,7 @@ class FileStore {
     const source = ownedSnapshot ? structuredClone(state) : state;
     const wasPersisted = Boolean(state[PERSISTED]);
     const previous = fileQueues.get(this.filePath) || Promise.resolve();
-    const write = previous.catch(() => {}).then(async () => {
+    const write = previous.catch(() => {}).then(() => localFileTransaction(path.resolve(this.filePath), async () => {
       const all = await this.readAll();
       const existing = all[workspaceId];
       if (existing && (!(wasPersisted || source._revision) || (existing._revision || null) !== (source._revision || null))) throw conflict();
@@ -443,18 +501,20 @@ class FileStore {
         throw Object.assign(new Error('An account already exists for this email'), { status: 409, code: 'ACCOUNT_EXISTS' });
       }
       const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: false };
+      // Ordinary saves cannot create, reset or replace read-admission debt.
+      const observer = existing?.integrationStatus?.meta?.containerObserver;
+      if (observer !== undefined || upgraded.integrationStatus?.meta?.containerObserver !== undefined) {
+        upgraded.integrationStatus = {...upgraded.integrationStatus,meta:{...upgraded.integrationStatus?.meta}};
+        if (observer === undefined) delete upgraded.integrationStatus.meta.containerObserver;
+        else upgraded.integrationStatus.meta.containerObserver = structuredClone(observer);
+      }
       all[workspaceId] = upgraded;
       assertCurrent(upgraded);
-      const serialized = JSON.stringify(all);
-      await fs.mkdir(path.dirname(this.filePath), { recursive: true });
-      const temp = `${this.filePath}.${crypto.randomUUID()}.tmp`;
-      const handle = await fs.open(temp, 'wx', 0o600);
-      try { await handle.writeFile(serialized); await handle.sync(); } finally { await handle.close(); }
-      await fs.rename(temp, this.filePath);
+      await writeLocalFile(this, all, () => assertCurrent(upgraded));
       state._revision = upgraded._revision;
       markPersisted(state);
       return markPersisted(upgraded);
-    });
+    }));
     fileQueues.set(this.filePath, write);
     try { return await write; } finally { if (fileQueues.get(this.filePath) === write) fileQueues.delete(this.filePath); }
   }
@@ -817,7 +877,7 @@ class SupabaseStore {
 
   async request(pathname, options = {}, observation = {}) {
     const method = String(options.method || 'GET').toUpperCase();
-    const { maxResponseBytes, includeResponseMetadata = false, ...fetchOptions } = options;
+    const { maxResponseBytes, includeResponseMetadata = false, strictJson = false, ...fetchOptions } = options;
     // Attribution is supplied only by trusted store call sites. Never infer it
     // from request URLs, payloads, headers or workspace-like client fields.
     const requestBodyBytes = typeof options.body === 'string' ? Buffer.byteLength(options.body)
@@ -877,7 +937,7 @@ class SupabaseStore {
         const permitsEmpty = method !== 'GET' && (prefer.split(',').some(value => value.trim() === 'return=minimal')
           || pathname.split('?')[0] === 'rpc/runvara_create_workspace');
         if (!text && !permitsEmpty) throw new Error('Missing JSON response');
-        if (text) data = JSON.parse(text);
+        if (text) data = strictJson ? metaStrictJson(Buffer.from(text)) : JSON.parse(text);
       } else responseBodyBytes = 0;
     } catch (cause) {
       // JSON parser/stream errors can embed upstream content. Keep only a fixed
@@ -899,6 +959,21 @@ class SupabaseStore {
     else this.telemetry.lastSuccessfulWriteAt = succeededAt;
     // Bounded readers receive cardinality only after the response has decoded.
     return includeResponseMetadata ? { data, contentRange: response.headers.get('content-range') } : data;
+  }
+
+  async metaProductionRpc(name, body, { signal, workspaceId } = {}) {
+    const allowed = new Set(['runvara_commit_meta_prod_ledger_v1', 'runvara_lookup_meta_prod_ledger_v1', 'runvara_read_meta_prod_ledger_v1',
+      'runvara_commit_meta_prod_asset_v1', 'runvara_read_meta_prod_asset_v1', 'runvara_deliver_meta_prod_asset_v1',
+      'runvara_commit_meta_prod_readiness_v1', 'runvara_read_meta_prod_readiness_v1']);
+    const invalid = () => { throw Object.assign(new Error('Invalid protected publication request'), { code: 'META_PRODUCTION_RPC_INVALID', status: 409 }); };
+    if (!allowed.has(name) || !body || Object.keys(body).join() !== 'p_request' || typeof body.p_request !== 'string'
+      || Buffer.byteLength(body.p_request) > 5100000) invalid();
+    const request = metaStrictJson(Buffer.from(body.p_request));
+    if (name === 'runvara_deliver_meta_prod_asset_v1') { if (workspaceId != null) invalid(); }
+    else if (typeof workspaceId !== 'string' || (request.workspaceId ?? request.descriptor?.workspaceId) !== workspaceId) invalid();
+    const value = await this.scopedRequest(workspaceId ?? null, 'other', 'rpc/' + name,
+      { method: 'POST', signal, strictJson: true, maxResponseBytes: 2900000, body: JSON.stringify(body) });
+    return Response.json(value);
   }
 
   async getIdentity(workspaceId) {
@@ -926,9 +1001,17 @@ class SupabaseStore {
     this.schedulerCache.delete(workspaceId);
   }
 
-  async get(workspaceId) {
-    const rows = await this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`);
+  async get(workspaceId, { exactSnapshot = false } = {}) {
+    const rows = await this.scopedRequest(workspaceId, 'state_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state&limit=1`,
+      exactSnapshot ? {strictJson: true, maxResponseBytes: 2200000} : {});
     if (!rows?.[0]?.state) { this.rememberSchedulerState(workspaceId, null); return null; }
+    // Protected production RPCs compare the complete persisted JSON under lock.
+    // Read-time upgrades/defaults are not an attestation of those stored bytes.
+    if (exactSnapshot) {
+      if (!Array.isArray(rows) || rows.length !== 1 || !rows[0].state || Array.isArray(rows[0].state)) throw Object.assign(new Error('Invalid workspace snapshot'), {code: 'META_PRODUCTION_SNAPSHOT_INVALID'});
+      assertWorkspace(workspaceId, rows[0].state);
+      return markPersisted(rows[0].state);
+    }
     const state = upgradeState(rows[0].state);
     state.storageReady = true;
     assertWorkspace(workspaceId, state);
@@ -1001,7 +1084,9 @@ class SupabaseStore {
         // These tables stamp mirror time on every save. It is not business data:
         // hashing it makes unchanged rows appear dirty and defeats incremental writes.
         // Source timestamps remain in source_updated_at / cost_data / financial_data.
-        const mirrorTimestampTables = new Set(['products', 'variants', 'economics', 'product_cost_profiles', 'automation_rules', 'orders', 'order_financials']);
+        // Workspace updated_at is also a save heartbeat; authoritative state
+        // retains it on every save. Mirror real metadata changes, not heartbeats.
+        const mirrorTimestampTables = new Set(['workspaces', 'products', 'variants', 'economics', 'product_cost_profiles', 'automation_rules', 'orders', 'order_financials']);
         const fingerprinted = rows.map(row => {
           const content = { ...row };
           if (mirrorTimestampTables.has(table)) delete content.updated_at;
@@ -1294,7 +1379,7 @@ class SupabaseStore {
     }, { primary: false });
   }
 
-  async commit(workspaceId, state, expectedRevision, existing, { primary = true, protectedContentCommit, protectedOrderRecovery } = {}) {
+  async commit(workspaceId, state, expectedRevision, existing, { primary = true, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
     try {
       const stateBytes = Buffer.byteLength(JSON.stringify(state));
       this.telemetry.stateBytes = stateBytes;
@@ -1310,17 +1395,24 @@ class SupabaseStore {
       }
       let protectedResult = null;
       const record = { workspace_id: workspaceId, state, updated_at: new Date().toISOString() };
-      if (protectedOrderRecovery) {
+      if (protectedMetaCommit) {
+        const transaction = prepareMetaReceiptTransaction(workspaceId, state, expectedRevision, protectedMetaCommit);
+        try { protectedResult = await commitMetaReceiptTransaction(transaction, (operation, path, settings) => this.scopedRequest(workspaceId, operation, path, settings)); }
+        finally { if (!protectedResult || protectedResult.recovered) { this.invalidateSchedulerCache(workspaceId); this.mirrorRevisions.delete(workspaceId); for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key); } }
+      } else if (protectedOrderRecovery) {
         if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT) throw orderRecoveryError('UNAVAILABLE',503);
         const transaction = prepareOrderRecoveryTransaction(workspaceId,state,expectedRevision,protectedOrderRecovery);
         try { protectedResult = await commitOrderRecoveryTransaction(transaction,(operation,path,settings)=>this.scopedRequest(workspaceId,operation,path,settings)); }
         finally { if (!protectedResult || protectedResult.recovered) { this.invalidateSchedulerCache(workspaceId); this.mirrorRevisions.delete(workspaceId); for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key); } }
       } else if (protectedContentCommit) {
-        if (this.contentExecutionReceiptCapability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) {
+        if (![CONTENT_EXECUTION_RECEIPT_CONTRACT, DESCRIPTION_EXECUTION_RECEIPT_CONTRACT].includes(this.contentExecutionReceiptCapability)) {
           throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
         }
         const transaction = prepareContentReceiptTransaction(workspaceId, state, expectedRevision, protectedContentCommit);
-        if (transaction.descriptor.kind === 'reserve') assertGovernedRecordCreation(this.governedRecordStage);
+        if (transaction.descriptor.contract === DESCRIPTION_EXECUTION_RECEIPT_CONTRACT && this.contentExecutionReceiptCapability !== DESCRIPTION_EXECUTION_RECEIPT_CONTRACT) {
+          throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
+        }
+        assertContentReceiptProducer(this.governedRecordStage, contentPilotPermit, state, transaction.descriptor);
         try {
           protectedResult = await commitContentReceiptTransaction(transaction, (operation, pathname, options, retryKind) =>
             this.scopedRequest(workspaceId, operation, pathname, options, retryKind));
@@ -1483,8 +1575,13 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
     assertWorkspace(workspaceId, state);
+    if (protectedMetaCommit !== undefined) {
+      if (protectedContentCommit !== undefined || protectedOrderRecovery !== undefined || contentPilotPermit !== undefined) throw metaReceiptError();
+      validateMetaReceiptDescriptor(protectedMetaCommit, { requireIssued: true });
+      ownedSnapshot = true;
+    }
     if (protectedOrderRecovery !== undefined) {
       if (this.orderRecoveryCapability !== ORDER_RECOVERY_CONTRACT || protectedContentCommit !== undefined) throw orderRecoveryError('UNAVAILABLE',503);
       protectedOrderRecovery = validateOrderRecoveryCommit(protectedOrderRecovery);
@@ -1492,12 +1589,15 @@ class SupabaseStore {
       ownedSnapshot = true;
     }
     if (protectedContentCommit !== undefined) {
-      if (this.contentExecutionReceiptCapability !== CONTENT_EXECUTION_RECEIPT_CONTRACT) {
+      if (![CONTENT_EXECUTION_RECEIPT_CONTRACT, DESCRIPTION_EXECUTION_RECEIPT_CONTRACT].includes(this.contentExecutionReceiptCapability)) {
         throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
       }
       // Detach both the descriptor and workspace before the first archive await.
       protectedContentCommit = validateContentExecutionCommit(protectedContentCommit);
-      if (protectedContentCommit.kind === 'reserve') assertGovernedRecordCreation(this.governedRecordStage);
+      if (protectedContentCommit.contract === DESCRIPTION_EXECUTION_RECEIPT_CONTRACT && this.contentExecutionReceiptCapability !== DESCRIPTION_EXECUTION_RECEIPT_CONTRACT) {
+        throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
+      }
+      assertContentReceiptProducer(this.governedRecordStage, contentPilotPermit, state, protectedContentCommit);
       if (protectedContentCommit.admission.workspaceId !== workspaceId) throw Object.assign(new Error('WORKSPACE_MISMATCH'), { code: 'WORKSPACE_MISMATCH', status: 403 });
       if (typeof state._revision !== 'string' || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(state._revision)) {
         throw Object.assign(new Error('CONTENT_RECEIPT_INVALID'), { code: 'CONTENT_RECEIPT_INVALID', status: 409 });
@@ -1581,7 +1681,7 @@ class SupabaseStore {
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     if (briefPlan?.candidates.length) assertBriefHistoryPlanCurrent(briefPlan);
     assertCurrent(upgraded);
-    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery });
+    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit });
     if (protectedResult?.recovered) {
       // The exact original primary transaction is proven, even if another
       // replica has since advanced the workspace. Never mirror or save this
@@ -1591,7 +1691,8 @@ class SupabaseStore {
       // observed elsewhere; its final fresh check still detects concurrent work.
       state._revision = upgraded._revision;
       const persisted = markPersisted(upgraded);
-      if (protectedOrderRecovery) recordOrderRecoveryAcknowledgement(persisted, protectedResult);
+      if (protectedMetaCommit) recordMetaReceiptAcknowledgement(persisted, protectedMetaCommit, protectedResult.ack);
+      else if (protectedOrderRecovery) recordOrderRecoveryAcknowledgement(persisted, protectedResult);
       else recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
       return persisted;
     }
@@ -1636,10 +1737,23 @@ class SupabaseStore {
     if (reportingCommitted) this.rememberSchedulerState(workspaceId, persisted);
     else this.invalidateSchedulerCache(workspaceId);
     if (protectedResult) {
-      if (protectedOrderRecovery) recordOrderRecoveryAcknowledgement(persisted, protectedResult);
+      if (protectedMetaCommit) recordMetaReceiptAcknowledgement(persisted, protectedMetaCommit, protectedResult.ack);
+      else if (protectedOrderRecovery) recordOrderRecoveryAcknowledgement(persisted, protectedResult);
       else recordContentReceiptAcknowledgement(persisted, protectedContentCommit, protectedResult.ack);
     }
     return persisted;
+  }
+
+  async readProtectedMetaPublication(workspaceId, writeId, session) {
+    return readProtectedMetaReceipt((operation, path, settings) => this.scopedRequest(workspaceId, operation, path, settings), workspaceId, writeId, session);
+  }
+
+  async readMetaObservations(workspaceId, writeId, session, anchor) {
+    return readMetaObservationHistory((operation, path, settings) => this.scopedRequest(workspaceId, operation, path, settings), workspaceId, writeId, session, anchor);
+  }
+
+  async appendMetaObservation(workspaceId, writeId, session, descriptor, anchor) {
+    return appendMetaObservation((operation, path, settings) => this.scopedRequest(workspaceId, operation, path, settings), workspaceId, writeId, session, descriptor, anchor);
   }
 
   async findUserByEmail(email) {

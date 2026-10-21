@@ -50,6 +50,57 @@ test.beforeEach(t => {
   t.mock.method(globalThis, 'fetch', () => assert.fail('Lifecycle tests cannot make live provider calls'));
 });
 
+test('unavailable full eBay comparison remains a recorded block without claiming OAuth or monitor failure', async t => {
+  const f = fixture(t, { rules: ['channelMismatchAlerts'] });
+  f.state.ebay = { source: 'ebay-oauth-readonly', coverage: { catalogueScope: 'inventory_api_only', fullCatalogueAvailable: false }, health: null };
+  const result = await f.run({ manual: true });
+  const run = result.runs.find(row => row.ruleId === 'channelMismatchAlerts');
+  assert.equal(run.status, 'BLOCKED');
+  assert.equal(run.errorCode, 'COVERAGE_UNAVAILABLE');
+  assert.equal(run.reason, 'COVERAGE_UNAVAILABLE');
+  assert.equal(run.evidence[0].type, 'channel_coverage');
+  assert.equal(run.evidence[0].available, false);
+  assert.equal(f.events.filter(event => event === 'provider').length, 0);
+  assert.equal(f.saved.length, 2, 'claim and terminal evidence remain durable');
+  assert.ok(f.state.audit.some(row => row.type === 'automation_finished'));
+  assert.deepEqual(await f.run({ manual: true }), { skipped: true, reason: 'FREQUENCY_OR_PERMISSION_LIMIT' });
+});
+
+for (const outcome of ['completed','partial','failed']) {
+  test(`channel sync records ${outcome} separately from connection state without changing admission or history`, async t => {
+    const calls=[];
+    const f=fixture(t,{rules:['channelSync'],integrations:{
+      shopifyRefreshAvailable:()=>true,ebayConfigured:()=>true,
+      syncProvider:async (_state,provider)=>{
+        calls.push(provider);
+        assert.equal(f.saved[0].automationRuns[0].status,'IN PROGRESS');
+        if(provider==='ebay' && outcome==='failed') throw Object.assign(new Error('private upstream response'),{code:'AUTH_EXPIRED'});
+        return {status:'connected',lastError:provider==='ebay' && outcome==='partial'?'EBAY_PARTIAL_READ':null};
+      }
+    }});
+    f.state.connections=[{provider:'meta',encryptedCredentials:'synthetic-fixture-only'}];
+    const historical={id:'historical-sync',ruleId:'channelSync',status:'BLOCKED',errorCode:'SOURCE_COVERAGE_INCOMPLETE',startedAt:'2026-10-01T00:00:00.000Z',completedAt:'2026-10-01T00:01:00.000Z',evidence:[{type:'integration_read',id:'ebay',detail:'connected'}]};
+    f.state.automationRuns=[structuredClone(historical)];
+    const result=await f.run({manual:true}),run=result.runs.find(row=>row.ruleId==='channelSync');
+    assert.deepEqual(calls.sort(),['ebay','meta','shopify']);
+    assert.equal(f.saved.length,2,'only the existing claim and terminal saves');
+    assert.equal(run.status,outcome==='completed'?'COMPLETED':'BLOCKED');
+    assert.equal(run.errorCode,outcome==='partial'?'SOURCE_COVERAGE_INCOMPLETE':outcome==='failed'?'AUTH_EXPIRED':null);
+    const ebay=run.evidence.find(row=>row.id==='ebay');
+    assert.equal(ebay.outcome,outcome);
+    assert.equal(ebay.connectionStatus,outcome==='failed'?null:'connected');
+    assert.equal(ebay.errorCode,outcome==='partial'?'EBAY_PARTIAL_READ':outcome==='failed'?'AUTH_EXPIRED':null);
+    assert.match(ebay.detail,new RegExp('Sync '+outcome));
+    for(const provider of ['shopify','meta']) assert.equal(run.evidence.find(row=>row.id===provider).outcome,'completed');
+    assert.equal(f.state.connectionSyncs.find(row=>row.provider==='ebay').status,outcome);
+    assert.ok(f.state.audit.some(row=>row.type==='connection_sync_finished' && row.detail.provider==='ebay' && row.detail.status===outcome));
+    assert.deepEqual(f.state.automationRuns.find(row=>row.id===historical.id),historical);
+    assert.doesNotMatch(JSON.stringify(run.evidence),/private upstream response/);
+    assert.deepEqual(await f.run({manual:true}),{skipped:true,reason:'FREQUENCY_OR_PERMISSION_LIMIT'});
+    assert.equal(calls.length,3,'no extra provider retries from reporting');
+  });
+}
+
 test('manual work remains available without starting the background scheduler and respects frequency', async t => {
   const f = fixture(t);
   const result = await f.run({ manual: true });

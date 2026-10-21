@@ -30,6 +30,15 @@ async function fixture(t, options = {}) {
   return { store, ops };
 }
 
+test('worker identity includes the actual numeric process ID and a distinct UUID', async t => {
+  const first = (await fixture(t)).ops, second = (await fixture(t)).ops;
+  const match = /^agent_worker_([1-9][0-9]*)_([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(first.workerId);
+  assert.ok(match, 'Worker identity must include a numeric PID');
+  assert.equal(Number(match[1]), process.pid);
+  assert.equal(first.status.workerId, first.workerId);
+  assert.notEqual(first.workerId, second.workerId);
+});
+
 test('agent operations queue is tenant scoped, idempotent and rejects unsafe job types', async t => {
   const {store,ops}=await fixture(t);
   const first=await ops.enqueue('alpha',{type:'agent_command',payload:{command:'check everything'},idempotencyKey:'same-key'},'alpha-owner');

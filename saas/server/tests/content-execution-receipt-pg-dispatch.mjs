@@ -10,6 +10,10 @@ import { objectiveContentContext } from '../lib/objective-content-source.mjs';
 import { resolveManualContentTarget } from '../lib/manual-content-target.mjs';
 import { IntegrationService } from '../lib/integrations.mjs';
 import { CONTENT_EXECUTION_RECEIPT_CONTRACT } from '../lib/content-execution-receipt.mjs';
+import { DESCRIPTION_EXECUTION_RECEIPT_CONTRACT } from '../lib/content-execution-receipt.mjs';
+import { createContentPilot, DESCRIPTION_PILOT_SCHEMA, DESCRIPTION_PILOT_BASELINE_QUERY } from '../lib/content-pilot.mjs';
+import { descriptionInput } from './description-edit-fixture.mjs';
+import { createHash } from 'node:crypto';
 import { validateReviewedSourceAction } from '../lib/reviewed-action-evidence.mjs';
 import { fakeSupabase } from './fake-supabase.mjs';
 import { originalContentPreimages } from './content-jsonb-test-fixture.mjs';
@@ -18,10 +22,11 @@ import { objectiveContentSeed, objectiveContentJob, objectiveContentBody, approv
 
 const governedRecordStage = createGovernedRecordStage({ GOVERNED_RECORD_PRODUCER_CONTRACT });
 
-async function seededRequest(family, workspaceId) {
+export async function seededRequest(family, workspaceId) {
   const initial = objectiveContentSeed({ workspaceId }), fake = fakeSupabase();
   const seedStore = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only' }, { fetchImpl: fake.fetchImpl });
   const state = initial.state;
+  let pilot;
   if (family === 'manual') state.businessObjectives = [];
   await seedStore.save(workspaceId, state);
   if (family === 'objective') {
@@ -31,6 +36,14 @@ async function seededRequest(family, workspaceId) {
     const context = await objectiveContentContext(state, job.id, 'opportunity-content', initial.session, loadJob);
     await prepareObjectiveContentRequest(state, objectiveContentBody(context, `receipt_bridge_${randomUUID()}`), initial.session,
       { governedRecordStage, loadJob, persist: options => seedStore.save(workspaceId, state, options) });
+  } else if (family === 'description') {
+    const input = descriptionInput(), target = resolveManualContentTarget(state).target, requestId = `receipt_bridge_${randomUUID()}`;
+    pilot = createContentPilot({ schema: DESCRIPTION_PILOT_SCHEMA, workspaceId, connectionId: target.connectionId, account: target.account,
+      productId: input.productId, operation: input.operation, requestId, requestedBy: initial.session.userId,
+      inputDigest: createHash('sha256').update(JSON.stringify(input)).digest('hex'), settingsRevision: state.connectionSettings.shopify.revision,
+      expiresAt: new Date(Date.now() + 600000).toISOString(), input });
+    proposeConnectionWrite(state, 'shopify', { ...input, requestId, target }, initial.session.userId,
+      { governedRecordStage: createGovernedRecordStage({}), contentPilot: pilot });
   } else {
     proposeConnectionWrite(state, 'shopify', { operation: 'product_content', requestId: `receipt_bridge_${randomUUID()}`,
       productId: CONTENT_PRODUCT, title: 'Synthetic exact title 雪', description: 'Synthetic <approved> text & details.\nSecond line.',
@@ -38,14 +51,16 @@ async function seededRequest(family, workspaceId) {
   }
   approveObjectiveContent(state, state.connectionWrites[0]);
   await seedStore.save(workspaceId, state);
-  return { ...initial, state, fake, expected: originalContentPreimages(state, state.connectionWrites[0]) };
+  return { ...initial, state, fake, pilot, expected: originalContentPreimages(state, state.connectionWrites[0]) };
 }
 
-export async function runContentReceiptDispatcherPgTests({ admin, withService }) {
+export async function runContentReceiptDispatcherPgTests({ admin, withService, families = ['manual','objective'],
+  modes = ['normal','lost-reserve','lost-reserve-newer','lost-final','lost-final-newer',
+    'quota-refused','paused-refused','missing-rpc','unknown-reserve-absent','unknown-reserve-committed','unknown-reserve-denied','unknown-reserve-cancelled'],
+  onCompleted }) {
   assert.equal((await admin.query('SELECT mode FROM public.runvara_content_receipt_control WHERE id')).rows[0].mode, 'enforced');
   const summaries = [];
-  for (const family of ['manual','objective']) for (const mode of ['normal','lost-reserve','lost-reserve-newer','lost-final','lost-final-newer',
-    'quota-refused','paused-refused','missing-rpc','unknown-reserve-absent','unknown-reserve-committed','unknown-reserve-denied','unknown-reserve-cancelled']) {
+  for (const family of families) for (const mode of modes) {
     const workspaceId = `receipt-dispatch-${randomUUID()}`, f = await seededRequest(family, workspaceId);
     await admin.query('INSERT INTO public.workspaces(id,name,slug) VALUES($1,$1,$1)', [workspaceId]);
     await admin.query('INSERT INTO public.saas_workspace_state(workspace_id,state) VALUES($1,$2)', [workspaceId, f.state]);
@@ -128,7 +143,9 @@ export async function runContentReceiptDispatcherPgTests({ admin, withService })
       }
       return f.fake.fetchImpl(input, options);
     };
-    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT, SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only', CONTENT_EXECUTION_RECEIPT_CONTRACT }, { fetchImpl });
+    const store = createStore({ GOVERNED_RECORD_PRODUCER_CONTRACT: family === 'description' ? undefined : GOVERNED_RECORD_PRODUCER_CONTRACT,
+      SUPABASE_URL: 'https://receipt-bridge.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-only',
+      CONTENT_EXECUTION_RECEIPT_CONTRACT: family === 'description' ? DESCRIPTION_EXECUTION_RECEIPT_CONTRACT : CONTENT_EXECUTION_RECEIPT_CONTRACT }, { fetchImpl });
     const state = await store.get(workspaceId), write = state.connectionWrites[0];
     assert.deepEqual(write.input, f.state.connectionWrites[0].input);
     assert.notDeepEqual(Object.keys(write.input), Object.keys(f.state.connectionWrites[0].input), 'Actual PostgreSQL JSONB must reorder producer input');
@@ -139,8 +156,15 @@ export async function runContentReceiptDispatcherPgTests({ admin, withService })
     } });
     provider.shopifyConfig = snapshot => ({ domain: snapshot.connections[0].metadata.shopDomain, workspaceId, mode: 'oauth', apiVersion: '2026-07', accessToken: 'synthetic-only' });
     provider.connectorCredentials = async () => ({ accessToken: 'synthetic-only' });
+    if (family === 'description') {
+      const graphql = provider.shopifyGraphql.bind(provider);
+      provider.shopifyGraphql = (query, variables, config, options) => query === DESCRIPTION_PILOT_BASELINE_QUERY
+        ? Promise.resolve({ product: { id: write.input.productId, descriptionHtml: write.input.baselineHtml, updatedAt: write.input.baselineUpdatedAt } })
+        : graphql(query, variables, config, options);
+    }
     const run = () => executeConnectionWrite(state, write.id, f.session.userId, provider, options => store.save(workspaceId, state, options), {
-      governedRecordStage, durableStore: true, actorSession: f.session, protectedContentReceipts: store.contentExecutionReceiptCapability,
+      governedRecordStage: family === 'description' ? createGovernedRecordStage({}) : governedRecordStage,
+      contentPilot: f.pilot ?? null, durableStore: true, actorSession: f.session, protectedContentReceipts: store.contentExecutionReceiptCapability,
       loadObjectiveJob: id => store.getAgentJob(workspaceId, id, { includeReport: true }),
       loadFreshState: request => store.getConnectionWriteContext(workspaceId, request) });
     const quotaBefore = (await admin.query("SELECT quota FROM public.runvara_content_receipt_quotas WHERE scope_key='global'")).rows[0].quota;
@@ -199,6 +223,7 @@ export async function runContentReceiptDispatcherPgTests({ admin, withService })
     if (mode === 'normal') assert.deepEqual(trace, ['generic','reporting','fresh','reserve','reporting','fresh','provider','finalize','reporting']);
     if (mode.startsWith('lost-final')) assert.deepEqual(trace.slice(-2), ['finalize','lookup'], 'Recovered finalization must not mirror/report or replay afterward');
     summaries.push({ family, mode, ...counters, ...rows, exactOriginalSource: Boolean(receiptSource), provider: 'synthetic-only' });
+    if (receiptSource && onCompleted) await onCompleted({ family, mode, workspaceId, session: f.session, source: receiptSource });
   }
   return summaries;
 }

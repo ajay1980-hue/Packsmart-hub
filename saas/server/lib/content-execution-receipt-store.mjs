@@ -42,7 +42,7 @@ export function prepareContentReceiptTransaction(workspaceId, state, expectedRev
     throw failure('CONTENT_RECEIPT_INVALID', 409, true);
   }
   if (Buffer.byteLength(JSON.stringify(state)) >= 2097152) throw failure('STATE_SIZE_LIMIT', 503, true);
-  const raw = JSON.stringify({ contract: CONTENT_EXECUTION_RECEIPT_CONTRACT, kind: descriptor.kind, workspaceId,
+  const raw = JSON.stringify({ contract: descriptor.contract, kind: descriptor.kind, workspaceId,
     expectedRevision, nextRevision: state._revision, state, admission: descriptor.admission,
     ...(descriptor.kind === 'reserve' ? { sourceTemplate: descriptor.sourceTemplate } : { receipt: descriptor.receipt }) });
   const body = JSON.stringify({ p_request_json: raw });

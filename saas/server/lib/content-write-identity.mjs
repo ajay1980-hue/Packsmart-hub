@@ -3,6 +3,7 @@
 import { OBJECTIVE_DISPATCH_PROPOSAL_SCHEMA, OBJECTIVE_CONTENT_PROPOSAL_SCHEMA } from './objective-dispatch-policy.mjs';
 import { validateObjectiveContentSource } from './objective-content-source.mjs';
 import { types } from 'node:util';
+import { descriptionEditPreimage } from './description-edit.mjs';
 
 // A compared row must fit the existing 2 MiB workspace storage ceiling. Keep
 // the dispatcher's existing maximum recursive scope depth (32). The node cap
@@ -101,6 +102,7 @@ const sourceKeys = ['schema', 'objectiveId', 'objectiveRevision', 'objectiveDige
   'productId', 'productDigest', 'approvalSourceDigest'];
 
 export function contentInputPreimage(value) {
+  if (Object.hasOwn(record(value), 'schema')) return descriptionEditPreimage(value);
   const input = ordered(value, inputKeys);
   if (input.operation !== 'product_content' || typeof input.productId !== 'string' || input.productId.length > 100
     || !/^gid:\/\/shopify\/Product\/\d+$/.test(input.productId) || typeof input.title !== 'string' || !input.title
@@ -185,7 +187,11 @@ export function contentWriteIdentityContract(write, approval, consent) {
     if (!own(approvalFields, 'payload')) return null;
     contentApprovalPayloadPreimage(approvalFields.payload.value, contract);
     contentConsentPreimage(consent);
-  } catch { return null; }
+  } catch (error) {
+    // Explicitly versioned inputs never fall back to legacy serialization.
+    if (Object.hasOwn(write.input || {}, 'schema')) throw error;
+    return null;
+  }
   return contract;
 }
 
