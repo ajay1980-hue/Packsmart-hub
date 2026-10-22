@@ -7,12 +7,19 @@ export function createStartupPolicy(env, staticPathnames) {
   }
   const staticPaths = new Set(staticPathnames);
   const quiet = mode === 'quiet';
+  const ownerLogin = env.RUNVARA_QUIET_OWNER_LOGIN === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_OWNER_LOGIN;
+  if (!['disabled/v1', 'enabled/v1'].includes(ownerLogin) || (ownerLogin === 'enabled/v1' && !quiet)) {
+    throw Object.assign(new Error('Quiet owner login requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_LOGIN_INVALID' });
+  }
+  const quietOwnerLogin = quiet && ownerLogin === 'enabled/v1';
   return Object.freeze({
     mode,
     quiet,
+    quietOwnerLogin,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
       if (method === 'GET' && pathname === '/api/auth/session') return true;
+      if (quietOwnerLogin && method === 'POST' && pathname === '/api/auth/login') return true;
       return (method === 'GET' || method === 'HEAD')
         && (pathname === '/api/health' || staticPaths.has(pathname));
     }

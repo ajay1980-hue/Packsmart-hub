@@ -236,10 +236,24 @@
     $('#app-shell').classList.remove('hidden');
   }
 
+  function showMaintenanceSession(session) {
+    state.data = null;
+    for (const id of ['login-screen', 'password-screen', 'app-shell']) $('#' + id).classList.add('hidden');
+    const screen = $('#loading-screen');
+    screen.classList.remove('hidden');
+    screen.querySelector('h1').textContent = 'Signed in. Maintenance continues.';
+    screen.querySelector('h1 + p').textContent = `${session.user.email} · ${session.workspace.name}`;
+    screen.querySelector('.skeleton-group').classList.add('hidden');
+    $('#startup-error').textContent = 'Your session is verified. Business actions and automatic work remain paused.';
+    $('#startup-retry').textContent = 'Check session';
+    $('#startup-retry').classList.remove('hidden');
+  }
+
   async function loadSession() {
     try {
       const session = await request('/api/auth/session');
       resetBusinessGraph(); state.session = session; state.csrf = session.csrf;
+      if (session.maintenance === true) { showMaintenanceSession(session); return false; }
       if (session.user && session.user.passwordChangeRequired) { showPasswordSetup(); return false; }
       return true;
     } catch (error) {
@@ -1652,7 +1666,7 @@
 
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#login-error'); error.textContent = ''; setBusy(button, true, 'Signing in…');
-    try { const payload = await request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: form.email.value, password: form.password.value }) }); resetBusinessGraph(); state.session = payload; state.csrf = payload.csrf; form.password.value = ''; if (payload.user && payload.user.passwordChangeRequired) showPasswordSetup(); else await loadBootstrap(); }
+    try { const payload = await request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: form.email.value, password: form.password.value }) }); resetBusinessGraph(); state.session = payload; state.csrf = payload.csrf; form.password.value = ''; if (payload.maintenance === true) showMaintenanceSession(payload); else if (payload.user && payload.user.passwordChangeRequired) showPasswordSetup(); else await loadBootstrap(); }
     catch (loginError) { error.textContent = loginError.message; }
     finally { setBusy(button, false); }
   });

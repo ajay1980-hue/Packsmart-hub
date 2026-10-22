@@ -722,6 +722,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   async function login(req, res) {
+    const maintenance = startupPolicy.quietOwnerLogin;
+    const assertLoginActive = () => {
+      if (draining || req.aborted || res.destroyed) throw Object.assign(new Error('Maintenance sign-in interrupted'), { status: 503, code: 'MAINTENANCE_LOGIN_INTERRUPTED' });
+    };
+    if (maintenance && (store.provider !== 'supabase' || typeof store.getIdentity !== 'function' || typeof store.recordMaintenanceLogin !== 'function')) {
+      throw Object.assign(new Error('Maintenance sign-in persistence unavailable'), { status: 503, code: 'MAINTENANCE_LOGIN_UNAVAILABLE' });
+    }
     if (!env.SESSION_SECRET || String(env.SESSION_SECRET).length < 32) {
       send(res, 503, { error: 'Server authentication is not configured', code: 'AUTH_NOT_CONFIGURED' });
       return;
@@ -744,14 +751,15 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
     let found = await store.findUserByEmail(email);
     const adminEmail = normalizeEmail(env.PACKSMART_ADMIN_EMAIL || 'sales@packsmartsolutions.com');
-    if (!found && email === adminEmail) {
+    if (!maintenance && !found && email === adminEmail) {
       const state = await getOrSeed(store, CUSTOMER_ZERO_WORKSPACE, env, { email: adminEmail, name: 'Packsmart Solutions Ltd', slug: CUSTOMER_ZERO_WORKSPACE });
       found = { ...state.users[0], workspaceId: CUSTOMER_ZERO_WORKSPACE };
     }
-    const state = found ? await store.get(found.workspaceId) : null;
+    const state = found ? await (maintenance ? store.getIdentity(found.workspaceId) : store.get(found.workspaceId)) : null;
     const user = state?.users?.find(item => item.id === found?.id);
     const suppliedPassword = String(body.password || '');
-    const valid = Boolean(user?.active !== false && (
+    const valid = Boolean(user?.active !== false && (!maintenance || (state?.workspace?.id === found?.workspaceId
+      && user?.role === 'owner' && user?.passwordHash && normalizeEmail(user.email) === email)) && (
       user?.passwordHash
         ? await verifyPasswordAsync(suppliedPassword, user.passwordHash)
         : Boolean(env.PACKSMART_ADMIN_PASSWORD) && found?.workspaceId === CUSTOMER_ZERO_WORKSPACE && email === adminEmail && safeEqual(suppliedPassword, env.PACKSMART_ADMIN_PASSWORD)
@@ -764,12 +772,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     }
     loginLimiter.reset(key);
     await withWorkspaceLock(found.workspaceId, async () => {
+      if (maintenance) {
+        assertLoginActive();
+        await store.recordMaintenanceLogin(found.workspaceId, user, { beforeCommit: assertLoginActive });
+        assertLoginActive();
+        return;
+      }
       const fresh = await store.get(found.workspaceId);
       const current = fresh?.users.find(item => item.id === user.id);
       if (!current || current.active === false || current.passwordHash !== user.passwordHash || current.sessionVersion !== user.sessionVersion) throw Object.assign(new Error('Account changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
       addAudit(fresh, { type: 'user_login', actor: user.id, detail: { method: user.passwordHash ? 'workspace-password' : 'customer-zero-bootstrap' } });
       await store.save(found.workspaceId, fresh);
     });
+    if (maintenance) assertLoginActive();
     const token = createSessionToken({
       userId: user.id,
       workspaceId: found.workspaceId,
@@ -781,6 +796,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     send(res, 200, {
       workspace: state.workspace,
       user: publicUser(user),
+      ...(maintenance ? { maintenance: true } : {}),
       csrf: session.csrf,
       expiresAt: new Date(session.exp * 1000).toISOString()
     }, { 'Set-Cookie': sessionCookie(token, { secure: secureCookies, maxAge: session.exp - Math.floor(Date.now() / 1000) }) });
@@ -1144,6 +1160,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           commit: env.RENDER_GIT_COMMIT || null,
           startedAt,
           startupMode: startupPolicy.mode,
+          quietOwnerLogin: startupPolicy.quietOwnerLogin,
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
           checkCacheMaxAgeMs: 5000,
           storage: store.provider,
@@ -1219,6 +1236,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
       if (req.method === 'POST' && pathname === '/api/auth/login') {
+        if (startupPolicy.quietOwnerLogin && url.search) throw Object.assign(new Error('Maintenance sign-in does not accept query overrides'), { status: 400, code: 'MAINTENANCE_LOGIN_INPUT_INVALID' });
         await login(req, res);
         return;
       }
@@ -1430,7 +1448,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/auth/session') {
-          send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString() });
+          send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString(),
+            ...(startupPolicy.quietOwnerLogin ? { maintenance: true } : {}) });
           return;
         }
 

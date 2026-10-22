@@ -17,7 +17,7 @@ This is a process-wide admission setting, not a live fleet switch or a per-tenan
 pilot policy. An existing normal process continues its original work until it is
 actually drained and terminated.
 
-Quiet startup admits only:
+By default, quiet startup admits only:
 
 - GET or HEAD `/api/health`;
 - GET `/api/auth/session` using its existing session validation and identity read;
@@ -43,6 +43,43 @@ GET polling can continue receiving inexpensive refusals. This mode therefore doe
 not promise zero browser/network traffic.
 
 ## Background work and health
+
+### Optional maintenance owner login
+
+`RUNVARA_QUIET_OWNER_LOGIN=enabled/v1` permits only the existing POST
+`/api/auth/login` in addition to the quiet allowlist. It defaults to
+`disabled/v1`; other spellings or enabling it outside quiet mode fail startup.
+The value is captured at construction. It cannot activate workers, integrity
+checks, bootstrap, signup, owner activation/seeding, password changes, OAuth,
+webhooks, provider routes or business actions. This local patch is not approval
+to set the flag or deploy it.
+
+Only an existing active owner with a stored password hash may sign in. Existing
+password verification, rate limiting, secure session cookies and tenant binding
+remain. The authenticated response and session check identify maintenance so the
+browser shows the verified identity and pause without bootstrap or pilot import.
+The UI's manual Check session reload performs another session read, not login.
+
+This allowance requires Supabase's narrow maintenance audit writer; other stores
+fail closed. It rechecks the owner, email, password hash and session version on an
+exact current snapshot, then appends the login audit through the existing revision
+CAS. It changes only audit, revision and workspace/update timestamps; no state
+upgrade, business/reporting mirrors, history compaction or repair is requested.
+Existing database writer guards still apply, including their control/barrier
+effects and possible lock contention or rejection. No schema change is needed.
+
+All prior audit entries stay in place, including beyond the usual embedded 300.
+The existing 2 MiB state ceiling refuses an oversized login rather than dropping
+history. Later normal integrity/retention work may compact that history; it is a
+separate activation effect. No database audit/archive export is introduced.
+
+Each attempt submits at most one CAS write. An uncertain response can only be
+accepted after a read proves that exact attempted revision; no write is replayed.
+Account changes, conflicts, unconfirmed persistence, a drained server or a lost
+client connection issue no session. An already submitted write may commit even
+when the client disappears; its audit is preserved, without automatic retry.
+Repeated deliberate successful sign-ins each add their own audit entry. No live
+login or hosted-write acceptance is implied by the local synthetic tests.
 
 Quiet construction forces scheduler and Agent Ops disabled and stops their
 admission, including direct start/tick/run probes. It suppresses initial and
