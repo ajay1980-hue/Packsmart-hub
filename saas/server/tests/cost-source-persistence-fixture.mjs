@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { seedWorkspaceState } from '../lib/store.mjs';
@@ -54,8 +55,9 @@ export function appendReview(state, options) {
 
 export function acceptedSource(path) {
   assert.match(path, /^saas\/server\/(?:lib\/store|server)\.mjs$/);
-  return execFileSync('git', ['show', `${ACCEPTED_TREE}:${path}`], {
-    cwd: fileURLToPath(new URL('../../..', import.meta.url)), encoding: 'utf8', maxBuffer: 1024 * 1024,
+  const cwd = resolve(fileURLToPath(new URL('../../..', import.meta.url)));
+  return execFileSync('git', ['-c', `safe.directory=${cwd.replaceAll('\\', '/')}`, 'show', `${ACCEPTED_TREE}:${path}`], {
+    cwd, encoding: 'utf8', maxBuffer: 1024 * 1024,
     env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1' }
   });
 }

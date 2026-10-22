@@ -36,3 +36,22 @@ test('normal and default startup leave HTTP admission unchanged', () => {
     }
   }
 });
+
+test('maintenance owner login is exact, opt-in, quiet-only and immutable', () => {
+  const env = { RUNVARA_STARTUP_MODE: 'quiet', RUNVARA_QUIET_OWNER_LOGIN: 'enabled/v1' };
+  const policy = createStartupPolicy(env, ['/']);
+  env.RUNVARA_QUIET_OWNER_LOGIN = 'disabled/v1';
+  assert.equal(policy.quiet, true);
+  assert.equal(policy.quietOwnerLogin, true);
+  assert.throws(() => { policy.quietOwnerLogin = false; }, TypeError);
+  for (const method of ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'post']) {
+    for (const pathname of ['/api/auth/login', '/api/auth/login/', '/api/auth/%6cogin', '/API/auth/login', '/api/bootstrap']) {
+      assert.equal(policy.allowsRequest(method, pathname), method === 'POST' && pathname === '/api/auth/login');
+    }
+  }
+  for (const value of [undefined, 'disabled/v1']) assert.equal(createStartupPolicy({ RUNVARA_STARTUP_MODE: 'quiet', RUNVARA_QUIET_OWNER_LOGIN: value }, []).quietOwnerLogin, false);
+  for (const value of ['', 'true', 'false', 'enabled', ' enabled/v1', 'enabled/v1 ', null, true, 1, {}]) {
+    assert.throws(() => createStartupPolicy({ RUNVARA_STARTUP_MODE: 'quiet', RUNVARA_QUIET_OWNER_LOGIN: value }, []), { code: 'QUIET_OWNER_LOGIN_INVALID' });
+  }
+  for (const mode of [undefined, 'normal']) assert.throws(() => createStartupPolicy({ RUNVARA_STARTUP_MODE: mode, RUNVARA_QUIET_OWNER_LOGIN: 'enabled/v1' }, []), { code: 'QUIET_OWNER_LOGIN_INVALID' });
+});

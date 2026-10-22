@@ -39,7 +39,8 @@ import {
   providerUsageSettlementParams, providerUsageSettlementResult, providerUsageSummaryResult,
   providerUsageUnavailableReason, USAGE_SUMMARY_COLUMNS, USAGE_SUMMARY_MAX_SCOPES
 } from './usage-governance.mjs';
-export { addAudit } from './events.mjs';
+import { addAudit } from './events.mjs';
+export { addAudit };
 
 const PERSISTED = Symbol('persisted');
 const SUPABASE_EMBEDDED_AUDIT_LIMIT = 300;
@@ -1328,13 +1329,13 @@ class SupabaseStore {
   // Share the same CAS/ambiguous-ack recovery for primary and reporting writes.
   // Every retry uses the original URL, body and revision fence. No business work
   // is repeated, and revision reads never hydrate the workspace snapshot.
-  async commitRevision(workspaceId, nextRevision, expectedRevision, path, options, { primary = true } = {}) {
+  async commitRevision(workspaceId, nextRevision, expectedRevision, path, options, { primary = true, allowRetry = true } = {}) {
     const operation = primary ? 'state_commit' : 'reporting_commit';
     const retryPrefix = primary ? 'primary' : 'reporting';
     let rows;
     try { rows = await this.scopedRequest(workspaceId, operation, path, options); }
     catch (error) {
-      if (error.databaseCode === '57014') {
+      if (error.databaseCode === '57014' && allowRetry) {
         // PostgreSQL cancelled this statement. Retry the same revision-guarded
         // write once; do not repeat any provider operation or business callback.
         await new Promise(resolve => setTimeout(resolve, 250));
@@ -1348,6 +1349,7 @@ class SupabaseStore {
         if (currentRevision === nextRevision) {
           rows = [{ workspace_id: workspaceId }];
         } else if (currentRevision === expectedRevision || (!expectedRevision && !currentRevision)) {
+          if (!allowRetry) throw error;
           await new Promise(resolve => setTimeout(resolve, 250));
           try { rows = await this.scopedRequest(workspaceId, operation, path, options, `${retryPrefix}_network_reconciled`); }
           catch (retryError) {
@@ -1379,7 +1381,7 @@ class SupabaseStore {
     }, { primary: false });
   }
 
-  async commit(workspaceId, state, expectedRevision, existing, { primary = true, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
+  async commit(workspaceId, state, expectedRevision, existing, { primary = true, allowRetry = true, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
     try {
       const stateBytes = Buffer.byteLength(JSON.stringify(state));
       this.telemetry.stateBytes = stateBytes;
@@ -1429,7 +1431,7 @@ class SupabaseStore {
         const revisionFilter = expectedRevision ? `eq.${encodeURIComponent(expectedRevision)}` : 'is.null';
         const path = `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&state->>_revision=${revisionFilter}&select=workspace_id`;
         const options = { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(record) };
-        await this.commitRevision(workspaceId, state._revision, expectedRevision, path, options, { primary });
+        await this.commitRevision(workspaceId, state._revision, expectedRevision, path, options, { primary, allowRetry });
       } else {
         // Atomically create the FK parent, unique login identity and primary state.
         try {
@@ -1453,6 +1455,42 @@ class SupabaseStore {
         this.primaryPersistenceHealthy = false;
       }
       throw error;
+    }
+  }
+
+  // Maintenance authentication must not upgrade business state, compact other
+  // histories, or mirror reporting tables. Keep every audit entry; the existing
+  // primary byte limit fails closed if this temporary history cannot fit.
+  async recordMaintenanceLogin(workspaceId, verifiedUser, { beforeCommit } = {}) {
+    const expected = structuredClone(verifiedUser);
+    const assertCurrent = saveGuard(beforeCommit);
+    const state = await this.get(workspaceId, { exactSnapshot: true });
+    assertWorkspace(workspaceId, state);
+    const matches = state.users?.filter(user => user.id === expected?.id) || [];
+    const user = matches[0];
+    if (matches.length !== 1 || user.role !== 'owner' || user.active === false || !user.passwordHash
+      || expected.role !== 'owner' || user.passwordHash !== expected.passwordHash
+      || normalizeEmail(user.email) !== normalizeEmail(expected.email)
+      || Number(user.sessionVersion || 1) !== Number(expected.sessionVersion || 1)) {
+      throw Object.assign(new Error('Account changed; sign in again'), { status: 401, code: 'SESSION_INVALID' });
+    }
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(state._revision || '')
+      || (state.audit !== undefined && !Array.isArray(state.audit))) {
+      throw Object.assign(new Error('Maintenance sign-in persistence unavailable'), { status: 503, code: 'MAINTENANCE_LOGIN_UNAVAILABLE' });
+    }
+    const expectedRevision = state._revision;
+    addAudit(state, { type: 'user_login', actor: user.id, detail: { method: 'workspace-password', maintenance: true } });
+    state._revision = crypto.randomUUID();
+    state.workspace.updatedAt = new Date().toISOString();
+    assertCurrent(state);
+    try {
+      // One write attempt only. Lost acknowledgements may be reconciled by an
+      // authoritative revision read, never by replaying this login write.
+      await this.commit(workspaceId, state, expectedRevision, true, { allowRetry: false });
+    } finally {
+      this.invalidateSchedulerCache(workspaceId);
+      this.mirrorRevisions.delete(workspaceId);
+      for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
     }
   }
 
