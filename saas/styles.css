@@ -176,6 +176,13 @@ p { line-height: 1.55; }
    from the heading's longest word. The card can grow vertically as it wraps. */
 #loading-screen { grid-template-columns: minmax(0, 1fr); }
 #loading-screen .auth-card { min-width: 0; overflow-wrap: anywhere; }
+#maintenance-commerce { margin-top: 1.25rem; }
+#maintenance-commerce h2, #maintenance-commerce h3 { margin-top: 1.25rem; }
+.saved-commerce-record { margin: .75rem 0; padding: .75rem; border: 1px solid var(--line); border-radius: 8px; }
+.saved-commerce-record h4 { margin: 0; }
+.saved-commerce-record dl { margin: .5rem 0 0; }
+.saved-commerce-record dt { font-weight: 600; margin-top: .5rem; }
+.saved-commerce-record dd { margin: 0; overflow-wrap: anywhere; }
 .auth-card .brand-lockup { margin-bottom: 2rem; }
 .auth-card h1 { margin: .7rem 0 1rem; }
 .auth-form {

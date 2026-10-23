@@ -195,6 +195,7 @@
   }
 
   function showLogin() {
+    clearMaintenancePreview();
     interruptCostSource();
     resetSeoReview();
     resetObjectiveEditing(true);
@@ -216,6 +217,7 @@
   }
 
   function showPasswordSetup() {
+    clearMaintenancePreview();
     interruptCostSource();
     resetSeoReview();
     window.RunvaraConnections?.interruptContent('Password replacement required', true);
@@ -230,13 +232,79 @@
   }
 
   function showApp() {
+    clearMaintenancePreview();
     $('#loading-screen')?.classList.add('hidden');
     $('#login-screen').classList.add('hidden');
     $('#password-screen').classList.add('hidden');
     $('#app-shell').classList.remove('hidden');
   }
 
+  let maintenancePreviewController = null, maintenancePreviewSequence = 0;
+  function clearMaintenancePreview() {
+    maintenancePreviewSequence++;
+    maintenancePreviewController?.abort(); maintenancePreviewController = null;
+    document.getElementById('maintenance-commerce')?.remove();
+  }
+  window.addEventListener('pagehide', clearMaintenancePreview);
+
+  function mountMaintenancePreview(session) {
+    if (session.savedCommercePreview !== true || session.user?.role !== 'owner') return;
+    const root = document.createElement('section'); root.id = 'maintenance-commerce';
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'secondary';
+    button.textContent = 'View saved commerce data';
+    const output = document.createElement('div'); output.setAttribute('aria-live', 'polite');
+    root.append(button, output); $('#loading-screen').querySelector('.auth-card').append(root);
+    const node = (tag, value) => { const el = document.createElement(tag); el.textContent = value; return el; };
+    const known = value => value === null || value === undefined || value === '' ? 'Unknown' : String(value);
+    button.addEventListener('click', async () => {
+      if (maintenancePreviewController) return;
+      const sequence = ++maintenancePreviewSequence;
+      const controller = new AbortController(); maintenancePreviewController = controller;
+      const current = () => sequence === maintenancePreviewSequence && state.session === session && root.isConnected;
+      button.disabled = true; output.replaceChildren(node('p', 'Reading saved commerce data…'));
+      try {
+        const payload = await request('/api/maintenance/commerce', { signal: controller.signal, isCurrent: current });
+        if (!current() || controller.signal.aborted) return;
+        if (payload.schema !== 'runvara-quiet-commerce-preview/v1' || payload.maintenance !== true || payload.workspace?.id !== session.workspace.id
+          || !Array.isArray(payload.rows) || !Array.isArray(payload.costs) || payload.rows.length > 100 || payload.costs.length > 100) throw new Error('Saved preview could not be verified.');
+        output.replaceChildren(node('h2', 'Saved commerce preview'),
+          node('p', 'Saved records only. Stock and prices may be out of date; no channel has been refreshed. Business actions remain paused.'),
+          node('p', 'Workspace record updated: ' + known(payload.workspaceUpdatedAt) + '. This is not a product sync time.'));
+        if (payload.partial) output.append(node('p', 'Partial view: some records were omitted. Up to 100 catalogue rows and 100 cost entries are shown.'));
+        output.append(node('h3', 'Saved catalogue'));
+        if (!payload.rows.length) output.append(node('p', 'No catalogue rows are available in this saved view. This does not establish zero stock.'));
+        for (const row of payload.rows) {
+          const card = node('article', ''); card.className = 'saved-commerce-record';
+          card.append(node('h4', known(row.product)), node('p', 'Variant: ' + known(row.variant) + ' · ID: ' + known(row.id)));
+          const dl = node('dl', '');
+          for (const [label, value] of [['SKU', row.sku], ['Recorded stock', row.stock], ['Recorded price', row.price], ['Recorded currency code', row.currency]]) {
+            dl.append(node('dt', label), node('dd', known(value)));
+          }
+          card.append(dl); output.append(card);
+        }
+        output.append(node('h3', 'Saved cost entries'), node('p', 'Entries are shown by their saved key, without assigning them to a product or variant. Missing values remain unknown. Profit and margins are not calculated.'));
+        if (!payload.costs.length) output.append(node('p', 'No cost entries are available in this saved view.'));
+        const labels = { supplierUnitCost: 'Supplier unit cost', supplierDelivery: 'Supplier delivery', supplierVatRate: 'Supplier VAT rate (%)',
+          boxQuantity: 'Box quantity', boxPrice: 'Box price', landed: 'Landed cost', packing: 'Packing', handling: 'Handling', delivery: 'Outbound delivery',
+          paymentFee: 'Payment fee', channelFee: 'Channel fee', advertising: 'Advertising', otherVariable: 'Other variable cost', marginFloor: 'Margin floor (%)' };
+        for (const entry of payload.costs) {
+          const detail = node('details', ''); detail.className = 'saved-commerce-record';
+          detail.append(node('summary', 'Saved key: ' + known(entry.key)), node('p', 'Recorded currency code: ' + known(entry.currency)));
+          const dl = node('dl', '');
+          for (const [key, label] of Object.entries(labels)) dl.append(node('dt', label), node('dd', known(entry.amounts?.[key])));
+          detail.append(dl); output.append(detail);
+        }
+        button.textContent = 'Refresh saved preview';
+      } catch (error) {
+        if (current() && !controller.signal.aborted) output.replaceChildren(node('p', 'Saved preview unavailable. ' + error.message));
+      } finally {
+        if (current()) { maintenancePreviewController = null; button.disabled = false; }
+      }
+    });
+  }
+
   function showMaintenanceSession(session) {
+    clearMaintenancePreview();
     state.data = null;
     for (const id of ['login-screen', 'password-screen', 'app-shell']) $('#' + id).classList.add('hidden');
     const screen = $('#loading-screen');
@@ -247,6 +315,7 @@
     $('#startup-error').textContent = 'Your session is verified. Business actions and automatic work remain paused.';
     $('#startup-retry').textContent = 'Check session';
     $('#startup-retry').classList.remove('hidden');
+    mountMaintenancePreview(session);
   }
 
   async function loadSession() {

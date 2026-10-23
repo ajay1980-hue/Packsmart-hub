@@ -51,6 +51,7 @@ import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, mergeEbay
 import { createAgentOperations } from './lib/agent-ops.mjs';
 import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
+import { quietCommercePreview } from './lib/quiet-commerce-preview.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
@@ -508,13 +509,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return verifySessionToken(token, env.SESSION_SECRET);
   }
 
-  async function authenticate(req, res, { identityOnly = false } = {}) {
+  async function authenticate(req, res, { identityOnly = false, exactSnapshot = false } = {}) {
     const session = sessionFrom(req);
     if (!session) {
       send(res, 401, { error: 'Authentication required', code: 'AUTH_REQUIRED' });
       return null;
     }
-    const state = identityOnly && store.getIdentity ? await store.getIdentity(session.workspaceId) : await store.get(session.workspaceId);
+    const state = identityOnly && store.getIdentity ? await store.getIdentity(session.workspaceId)
+      : exactSnapshot ? await store.get(session.workspaceId, { exactSnapshot: true }) : await store.get(session.workspaceId);
     const user = state?.users?.find(item => item.id === session.sub);
     if (!state || !user || user.active === false || Number(user.sessionVersion || 1) !== Number(session.sessionVersion || 1)) {
       send(res, 401, { error: 'Session is no longer valid', code: 'SESSION_INVALID' }, {
@@ -1138,6 +1140,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
 
+      // This narrow preview is never admitted in normal mode or via a hydrated fallback.
+      if (pathname === '/api/maintenance/commerce' && (!startupPolicy.quietCommercePreview || store.provider !== 'supabase')) {
+        send(res, 503, QUIET_STARTUP_RESPONSE); return;
+      }
+
       if (['GET', 'HEAD'].includes(req.method) && pathname === '/api/health') {
         if (!healthSnapshot || Date.now() - healthSnapshot.checkedMs > 5000) {
           healthPending ||= (async () => {
@@ -1161,6 +1168,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           startedAt,
           startupMode: startupPolicy.mode,
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
+          quietCommercePreview: startupPolicy.quietCommercePreview,
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
           checkCacheMaxAgeMs: 5000,
           storage: store.provider,
@@ -1270,7 +1278,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { exactSnapshot: pathname === '/api/maintenance/commerce', identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1449,8 +1457,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
         if (req.method === 'GET' && pathname === '/api/auth/session') {
           send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString(),
-            ...(startupPolicy.quiet ? { maintenance: true } : {}) });
+            ...(startupPolicy.quiet ? { maintenance: true } : {}),
+            ...(startupPolicy.quietCommercePreview && auth.user.role === 'owner' && !auth.user.passwordChangeRequired ? { savedCommercePreview: true } : {}) });
           return;
+        }
+
+        if (req.method === 'GET' && pathname === '/api/maintenance/commerce') {
+          send(res, 200, quietCommercePreview(auth)); return;
         }
 
         if (req.method === 'POST' && pathname === '/api/auth/logout') {
