@@ -128,18 +128,21 @@ try {
         }
       } finally { await typography.dispose(); }
       for (const activation of ['keyboard', 'pointer']) {
-        const attempts = () => requests.filter(row => row.width === width && row.reducedMotion === reducedMotion && row.path === '/api/bootstrap').length;
-        const before = attempts();
+        const identityReads = () => requests.filter(row => row.width === width && row.reducedMotion === reducedMotion && row.method === 'GET' && row.path === '/api/auth/session').length;
+        const businessAttempts = () => requests.filter(row => row.width === width && row.reducedMotion === reducedMotion && ['/api/bootstrap', '/api/migrate-pilot'].includes(row.path)).length;
+        const before = identityReads();
         if (activation === 'keyboard') {
           await page.locator('.skip-link').focus(); await page.keyboard.press('Tab');
           assert.equal(await page.evaluate(() => document.activeElement.id), 'startup-retry');
         }
         await Promise.all([page.waitForNavigation({ waitUntil: 'networkidle' }), activation === 'keyboard' ? page.keyboard.press('Enter') : retry.click()]);
         await error.waitFor({ state: 'visible' });
-        assert.equal(attempts(), before + 1, `${activation} retry makes one new bootstrap attempt`);
+        assert.equal(identityReads(), before + 1, `${activation} check makes one identity read`);
+        assert.equal(businessAttempts(), 0, `${activation} check never attempts bootstrap or import`);
+        assert.equal(await page.locator('#loading-screen h1').textContent(), 'Signed in. Maintenance continues.');
         assert.equal(await page.locator('#login-screen').isVisible(), false);
         assert.equal(await retry.isEnabled(), true);
-        retries.push({ width, reducedMotion, activation, bootstrapAttempts: attempts() - before });
+        retries.push({ width, reducedMotion, activation, identityReads: identityReads() - before, businessAttempts: businessAttempts() });
       }
     } finally { await context.close(); }
   }
