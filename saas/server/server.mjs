@@ -1449,7 +1449,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
         if (req.method === 'GET' && pathname === '/api/auth/session') {
           send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString(),
-            ...(startupPolicy.quietOwnerLogin ? { maintenance: true } : {}) });
+            ...(startupPolicy.quiet ? { maintenance: true } : {}) });
           return;
         }
 
