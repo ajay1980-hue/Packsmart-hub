@@ -12,13 +12,20 @@ export function createStartupPolicy(env, staticPathnames) {
     throw Object.assign(new Error('Quiet owner login requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_LOGIN_INVALID' });
   }
   const quietOwnerLogin = quiet && ownerLogin === 'enabled/v1';
+  const commercePreview = env.RUNVARA_QUIET_COMMERCE_PREVIEW === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_COMMERCE_PREVIEW;
+  if (!['disabled/v1', 'enabled/v1'].includes(commercePreview) || (commercePreview === 'enabled/v1' && !quiet)) {
+    throw Object.assign(new Error('Quiet commerce preview requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_COMMERCE_PREVIEW_INVALID' });
+  }
+  const quietCommercePreview = quiet && commercePreview === 'enabled/v1';
   return Object.freeze({
     mode,
     quiet,
     quietOwnerLogin,
+    quietCommercePreview,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
       if (method === 'GET' && pathname === '/api/auth/session') return true;
+      if (quietCommercePreview && method === 'GET' && pathname === '/api/maintenance/commerce') return true;
       if (quietOwnerLogin && method === 'POST' && pathname === '/api/auth/login') return true;
       return (method === 'GET' || method === 'HEAD')
         && (pathname === '/api/health' || staticPaths.has(pathname));
