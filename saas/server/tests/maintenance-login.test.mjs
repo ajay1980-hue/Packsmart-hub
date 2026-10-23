@@ -50,6 +50,44 @@ test('maintenance login persists only audit, keeps every prior entry, and binds 
   assert.equal(second.payload.workspace.id, 'beta');
 });
 
+test('closing fresh login retains maintenance identity without admitting business work or new writes', async t => {
+  const original = ownerState(), enabled = await fixture(t, { states: [original] });
+  const logged = await enabled.login();
+  assert.equal(logged.status, 200);
+  const persisted = structuredClone(enabled.fake.states.get('alpha'));
+  await enabled.close();
+  const closed = await fixture(t, { states: [persisted], env: { RUNVARA_QUIET_OWNER_LOGIN: 'disabled/v1' } });
+  for (let i = 0; i < 3; i++) {
+    const session = await closed.request('/api/auth/session?workspaceId=beta', { cookie: cookieValue(logged), headers: { 'X-Workspace-Id': 'beta' } });
+    assert.equal(session.status, 200);
+    assert.equal(session.payload.maintenance, true, 'quiet identity remains maintenance after closing fresh login');
+    assert.equal(session.payload.workspace.id, 'alpha');
+    assert.equal(session.payload.user.id, original.users[0].id);
+    assert.equal(session.payload.user.passwordHash, undefined);
+    assert.equal(session.cookie, null, 'identity check does not replace the issued session');
+  }
+  const reads = closed.calls.length;
+  for (const route of ['/api/auth/login', '/api/bootstrap', '/api/migrate-pilot', '/api/auth/signup', '/api/auth/logout', '/api/webhooks/stripe', '/api/integrations/shopify/oauth/callback', '/api/meta-production/campaigns/test/proposals']) {
+    for (const method of ['GET', 'POST']) {
+      const response = await closed.request(route, { method, cookie: cookieValue(logged), ...(method === 'POST' ? { body: '{invalid' } : {}) });
+      assert.equal(response.status, 503, `${method} ${route}`);
+      assert.equal(response.payload.code, 'STARTUP_QUIET_MODE');
+      noSession(response);
+    }
+  }
+  assert.equal(closed.calls.length, reads, 'rejected routes never reach persistence');
+  assert.equal(writes(closed).length, 0);
+  assert.deepEqual(closed.fake.states.get('alpha'), persisted, 'identity reads preserve the complete stored state');
+  assertOnlyLoginChanged(original, persisted, 1);
+  assert.equal((await closed.request('/api/auth/session')).status, 401);
+  assert.equal((await closed.request('/api/auth/session', { cookie: '__Host-packsmart_session=invalid' })).status, 401);
+  closed.fake.states.get('alpha').users[0].sessionVersion++;
+  assert.equal((await closed.request('/api/auth/session', { cookie: cookieValue(logged) })).status, 401);
+  assert.equal(writes(closed).length, 0);
+  assert.equal(closed.server.packsmart.scheduler.status.lastTickAt, null);
+  assert.equal(closed.server.packsmart.agentOps.status.lastTickAt, null);
+});
+
 test('maintenance allowance keeps business routes, alternate methods, workers and integrity closed', async t => {
   const f = await fixture(t);
   const routes = ['/api/bootstrap', '/api/brief', '/api/auth/signup', '/api/auth/signup-options', '/api/auth/activate-owner', '/api/auth/logout', '/api/auth/change-password',

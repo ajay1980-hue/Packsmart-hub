@@ -19,7 +19,7 @@ export function ownerState(id = 'alpha') {
   state.agentOps = { enabled: true, paused: false };
   return state;
 }
-export async function maintenanceFixture({ states = [ownerState(), ownerState('beta')], fault, intercept, env = {}, beforeListen } = {}) {
+export async function maintenanceFixture({ states = [ownerState(), ownerState('beta')], fault, intercept, env = {}, beforeListen, port = 0 } = {}) {
   const fake = fakeSupabase({ initialStates: states, fault });
   const calls = [];
   const transport = async (url, options = {}) => {
@@ -36,7 +36,7 @@ export async function maintenanceFixture({ states = [ownerState(), ownerState('b
   const server = createPacksmartServer(config, { store, schedulerEnabled: true, agentOpsEnabled: true,
     fetchImpl: async () => assert.fail('Provider request forbidden') });
   beforeListen?.({ store, server, fake, calls });
-  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  server.listen(port, '127.0.0.1'); await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}`;
   const request = async (route, { method = 'GET', body, cookie, headers = {}, signal } = {}) => {
     const response = await fetch(base + route, { method, headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...(cookie ? { Cookie: cookie } : {}), ...headers },
