@@ -50,7 +50,7 @@ async function harness(t) {
   w.fetch=async(route,options={})=>{calls.push({route,...options});if(route===POST)return h.post(route,options);if(route.startsWith(GET))return h.read(route,options);if(route==='/api/auth/change-password')return h.password(route,options);if(route==='/api/bootstrap')return Response.json(bootstrap);if(route==='/api/auth/session'||route==='/api/auth/login')return Response.json(session());if(route==='/api/auth/logout')return Response.json({ok:true});if(route==='/api/auth/signup-options')return Response.json({enabled:false});if(route==='/api/connection-centre')return Response.json({channels:bootstrap.connectionCentre,writes:[],autopilotEnabled:false});throw new Error('Unexpected synthetic route '+route);};
   for(const file of ['presentation.js','control-ui.js','connections-ui.js'])w.eval(await fs.readFile(ROOT+'/'+file,'utf8'));
   const init=w.RunvaraControl.init;w.RunvaraControl.init=api=>{h.controls=api;init(api);};
-  w.eval(await fs.readFile(ROOT+'/app.js','utf8'));
+  w.eval(await fs.readFile(ROOT+'/approval-request-ui.js','utf8'));w.eval(await fs.readFile(ROOT+'/app.js','utf8'));
   await until(()=>!d.getElementById('app-shell').classList.contains('hidden'));
   h.el=id=>d.getElementById(id); h.open=()=>{h.controls.setView('channels');w.RunvaraConnections.open('shopify');};
   h.change=(id,value)=>{const element=h.el(id);if(element.type==='checkbox')element.checked=value;else element.value=value;element.dispatchEvent(new w.Event('change',{bubbles:true}));};

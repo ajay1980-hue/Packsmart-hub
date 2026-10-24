@@ -71,7 +71,7 @@ async function harness(t, products = [product('active'), product('unknown', 'pen
     if (route === '/api/auth/signup-options') return response({ enabled: false });
     throw new Error('Unexpected synthetic SEO route: ' + route);
   };
-  for (const file of ['presentation.js', 'app.js']) w.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'approval-request-ui.js', 'app.js']) w.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !d.querySelector('#app-shell').classList.contains('hidden'));
   h.root = d.querySelector('#seo-issue-list'); h.panel = d.querySelector('#seo-review-panel');
   h.open = () => d.querySelector('#main-nav [data-view="issues"]').click();

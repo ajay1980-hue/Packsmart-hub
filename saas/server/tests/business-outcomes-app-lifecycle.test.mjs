@@ -86,7 +86,7 @@ async function harness(t, { linked = false, objective = false } = {}) {
     }
     throw new Error('Unexpected fixture route ' + route);
   };
-  for (const file of ['presentation.js', 'control-ui.js', 'outcomes-ui.js', 'activity-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'control-ui.js', 'outcomes-ui.js', 'activity-ui.js', 'approval-request-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
   await until(() => !h.$('app-shell').classList.contains('hidden'));
   h.panel = h.$('business-outcomes-panel');
   h.navigate = view => d.querySelector(`#main-nav [data-view="${view}"]`).click();

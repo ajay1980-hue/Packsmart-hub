@@ -68,7 +68,7 @@ export async function objectiveContentHarness(t,{role='owner',enforce=true,issue
  if(h.explicitRoutes.has(route))return h.explicitRoutes.get(route)(route,options);
  throw new Error('Unexpected synthetic route '+route);};
  for(const file of ['presentation.js','control-ui.js','connections-ui.js'])w.eval(await fs.readFile(new URL('../../'+file,import.meta.url),'utf8'));
- const init=w.RunvaraControl.init;w.RunvaraControl.init=api=>{h.controls=api;init(api);};w.eval(await fs.readFile(new URL('../../app.js',import.meta.url),'utf8'));await until(()=>!d.querySelector('#app-shell').classList.contains('hidden'));
+ const init=w.RunvaraControl.init;w.RunvaraControl.init=api=>{h.controls=api;init(api);};w.eval(await fs.readFile(new URL('../../approval-request-ui.js',import.meta.url),'utf8'));w.eval(await fs.readFile(new URL('../../app.js',import.meta.url),'utf8'));await until(()=>!d.querySelector('#app-shell').classList.contains('hidden'));
  h.el=id=>d.getElementById(id);h.form=h.el('objective-content-form');h.panel=h.el('objective-content-editor');h.details=d.querySelector('.business-objectives-panel');h.elc=id=>h.el('objective-content-'+id);
  h.change=(id,value)=>{const element=h.elc(id);if(element.type==='checkbox')element.checked=value;else element.value=value;element.dispatchEvent(new w.Event('change',{bubbles:true}));};
  h.fill=()=>{h.change('account',h.context.target.connectionId);h.change('product',h.context.product.id);h.change('title','Exact reviewed title');h.change('description','Exact description\nSecond line');h.change('ack',true);};

@@ -71,7 +71,7 @@ async function harness(t, options = {}) {
   };
   for (const file of ['presentation.js', 'control-ui.js']) w.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   const init = w.RunvaraControl.init; w.RunvaraControl.init = api => { h.controls = api; init(api); };
-  w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
+  w.eval(await fs.readFile(new URL('../../approval-request-ui.js', import.meta.url), 'utf8'));w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'), () => document.querySelector('#startup-error').textContent);
   h.panel = document.querySelector('#automation-history-panel'); h.root = document.querySelector('#automation-history-list');
   h.archiveCalls = () => calls.filter(call => call.route.startsWith('/api/automation-runs/'));

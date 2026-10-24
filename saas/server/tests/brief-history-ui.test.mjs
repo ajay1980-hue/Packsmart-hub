@@ -192,7 +192,7 @@ async function appHarness(t) {
     if (route.startsWith('/api/briefs')) return h.handler(route, config);
     throw new Error('Unexpected fixture route ' + route);
   };
-  for (const file of ['presentation.js', 'control-ui.js', 'brief-history-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'control-ui.js', 'brief-history-ui.js', 'approval-request-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../' + file, import.meta.url), 'utf8'));
   await until(() => !h.$('app-shell').classList.contains('hidden'));
   h.open = async () => { h.$('open-brief-history').click(); await until(() => h.$('brief-history-list').querySelector('button')); };
   h.begin = async () => { await h.open(); const hold = deferred(); h.handler = () => hold.promise; h.$('brief-history-list').querySelector('button').click(); return hold; };

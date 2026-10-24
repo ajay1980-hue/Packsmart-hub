@@ -494,6 +494,7 @@ test('production auth, CSRF, approval, logout and tenant isolation work end to e
     csrf,
     body: {
       type: 'supplier_order',
+      requestId: '35f090dc-68a5-4ac3-ae07-09af9b8dcb59',
       action: 'Order one launch carton',
       reason: 'Prevent launch stockout',
       financialImpact: 95,

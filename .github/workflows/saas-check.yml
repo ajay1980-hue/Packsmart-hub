@@ -49,6 +49,8 @@ jobs:
         run: |
           node saas/server/tests/render-connection-preview.mjs /tmp/runvara-mobile-preview.html
           node saas/server/tests/mobile-connection-check.mjs /tmp/runvara-mobile-preview.html
+      - name: Verify approval request uncertainty and refresh recovery
+        run: node saas/server/tests/approval-request-browser-check.mjs
       - name: Verify business graph and objectives on mobile and desktop
         run: node saas/server/tests/business-graph-browser-check.mjs
       - name: Verify governed usage on mobile and desktop
