@@ -73,7 +73,7 @@ async function harness(t, initialState = {}) {
   bootstrap.revenueEngine.customers = { summary: { customers: 2, repeatRate: 50, reorderDue: 1, churnRisk: 0, dormant: 0, totalRevenue: 500, knownContribution: 300 }, customers: [{ privacyLabel: 'Customer A', segment: 'repeat', orderCount: 2, daysSinceLastOrder: 4, revenue: 500 }] };
   bootstrap.revenueEngine.baskets = { pairs: [{ a: 'A', b: 'B', ordersTogether: 2, affinity: 50 }] };
   bootstrap.revenueEngine.attribution = { coverage: { orders: 5, sourceCoveragePercent: 99, sourceAttributedOrders: 5, recordedSourceCoveragePercent: 40, recordedSourceOrders: 2 } };
-  for (const file of ['presentation.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'approval-request-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'), () => document.querySelector('#startup-error').textContent);
   return h;
 }

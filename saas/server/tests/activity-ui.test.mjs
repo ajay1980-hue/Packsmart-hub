@@ -152,7 +152,7 @@ test('real app aborts on close/logout and ignores stale 401 while retaining curr
     if(route==='/api/activity')return activity?activity.promise:Response.json(fixture());
     throw new Error('Unexpected fixture route '+route);
   };
-  for(const file of ['presentation.js','control-ui.js','activity-ui.js','app.js'])w.eval(await fs.readFile(new URL('../../'+file,import.meta.url),'utf8'));
+  for(const file of ['presentation.js','control-ui.js','activity-ui.js','approval-request-ui.js', 'app.js'])w.eval(await fs.readFile(new URL('../../'+file,import.meta.url),'utf8'));
   const $=id=>d.getElementById(id),panel=$('workspace-activity-panel'),button=$('workspace-activity-refresh'),root=$('workspace-activity-result');
   await until(()=>!$('app-shell').classList.contains('hidden'));assert.equal(calls.some(c=>c.route==='/api/activity'),false);
   d.querySelector('#main-nav [data-view="audit"]').click();await new Promise(r=>setTimeout(r,10));assert.equal(calls.some(c=>c.route==='/api/activity'),false);

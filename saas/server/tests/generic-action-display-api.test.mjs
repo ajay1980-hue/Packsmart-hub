@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { createPacksmartServer } from '../server.mjs';
@@ -51,7 +52,7 @@ function poisonWrite(write, secret, { input = true } = {}) {
   write.result = { externalId: PRODUCT, confirmed: true, recovery: 'Review the recorded result.',
     futurePrivate: { source: secret.value('result_future') }, source: { digest: secret.value('result_source') } };
 }
-const actionBody = (payload = {}) => ({ type: 'customer_facing_publish', action: 'Review an exact public action',
+const actionBody = (payload = {}) => ({ requestId: randomUUID(), type: 'customer_facing_publish', action: 'Review an exact public action',
   reason: 'An intentional user-authored narrative with objective_public_reference.', financialImpact: null,
   expectedBenefit: 'Review the authored product description.', risk: 'Customer-facing text needs review.', payload,
   evidence: [{ type: 'reference', id: 'public_evidence_reference', detail: 'Keep this evidence text.' }] });

@@ -382,7 +382,7 @@ test('customer interface opens cards, saves sync settings, confirms disconnect, 
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
   window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
-  for(const file of ['presentation.js','connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
+  for(const file of ['presentation.js','connections-ui.js','control-ui.js','approval-request-ui.js', 'app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
   const until=async(fn)=>{for(let i=0;i<200;i++){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail(`UI did not reach expected state: ${errors.join('; ')} ${document.querySelector('#global-error').textContent}`);};
   await until(()=>document.querySelectorAll('.connection-card').length===8);
   document.querySelector('[data-view="channels"]').click();
@@ -590,7 +590,7 @@ test('Meta customer controls select assets, request scopes and prepare the exact
   window.HTMLDialogElement.prototype.showModal=function(){this.open=true;};window.HTMLDialogElement.prototype.close=function(){this.open=false;};
   const user=f.tenants.alpha.users[0],token=createSessionToken({userId:user.id,workspaceId:'alpha',email:user.email,role:'owner',sessionVersion:1},SESSION);
   window.fetch=async(route,options={})=>{const headers=new Headers(options.headers);headers.set('Cookie',`__Host-packsmart_session=${token}`);return fetch(f.base+route,{...options,headers});};
-  for(const file of ['presentation.js','connections-ui.js','control-ui.js','app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
+  for(const file of ['presentation.js','connections-ui.js','control-ui.js','approval-request-ui.js', 'app.js'])window.eval(await fs.readFile(new URL(`../../${file}`,import.meta.url),'utf8'));
   const until=async(fn)=>{for(let i=0;i<200;i++){if(await fn())return;await new Promise(resolve=>setTimeout(resolve,10));}assert.fail(errors.join('; ')||'Meta interface did not reach the expected state');};
   await until(()=>doc.querySelectorAll('.connection-card').length===8);doc.querySelector('[data-provider="meta"][data-connection-action="open"]').click();
   assert.equal(doc.querySelector('#connection-meta-assets [name=metaCatalogIds]').checked,true);

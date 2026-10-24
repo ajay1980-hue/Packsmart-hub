@@ -71,7 +71,7 @@ async function harness(t, { role = 'owner' } = {}) {
   };
   for (const file of ['presentation.js', 'control-ui.js']) w.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   const init = w.RunvaraControl.init; w.RunvaraControl.init = api => { h.controls = api; init(api); };
-  w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
+  w.eval(await fs.readFile(new URL('../../approval-request-ui.js', import.meta.url), 'utf8'));w.eval(await fs.readFile(new URL('../../app.js', import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'), () => document.querySelector('#startup-error').textContent);
   h.panel = document.querySelector('#business-objective-review'); h.result = document.querySelector('#business-objective-review-result'); h.status = document.querySelector('#business-objective-review-status');
   h.resume = document.querySelector('#resume-objective-review'); h.details = document.querySelector('.business-objectives-panel');

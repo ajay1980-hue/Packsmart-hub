@@ -6,6 +6,7 @@
     automations: 'packsmart-saas-automations-v1',
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
+  let approvalRequestUI = null;
   const state = {
     csrf: '', session: null, data: null, graphGeneration: 0, graphInspectionGeneration: 0, graphTicket: null, objectiveGeneration: 0, objectiveSnapshot: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
@@ -195,6 +196,7 @@
   }
 
   function showLogin() {
+    approvalRequestUI?.refresh();
     clearMaintenancePreview();
     interruptCostSource();
     resetSeoReview();
@@ -389,6 +391,7 @@
   }
 
   function setView(view) {
+    if (view !== 'approvals') approvalRequestUI?.interrupt();
     if (view === 'issues') renderSeoReview();
     if (view !== state.view) window.RunvaraConnections?.interruptContent('Navigation changed');
     if (view !== state.view) { interruptCostSource(); resetObjectiveEditing(); }
@@ -910,6 +913,7 @@
   }
 
   function renderApprovals() {
+    approvalRequestUI?.refresh();
     const approvals = (state.data.approvals || []).filter(item => state.approvalFilter === 'all' || item.status === state.approvalFilter);
     $('#approval-list').innerHTML = approvals.length ? approvals.map(approvalCard).join('') : '<div class="empty-state">No approval requests match this view.</div>';
     const pending = (state.data.approvals || []).filter(item => item.status === 'pending').length;
@@ -3494,12 +3498,15 @@
     }
   });
 
-  $('#approval-form').addEventListener('submit', async event => {
-    event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); $('#approval-form-error').textContent = ''; setBusy(button, true, 'Creating request…');
-    const values = Object.fromEntries(new FormData(form));
-    try { const payload = await request('/api/actions', { method: 'POST', body: JSON.stringify(Object.assign({}, values, { source: 'owner-command-centre' })) }); state.data.approvals.unshift(payload.approval); form.reset(); renderApprovals(); showMessage('Approval request created. No external action was executed.'); }
-    catch (error) { $('#approval-form-error').textContent = error.message; }
-    finally { setBusy(button, false); }
+  approvalRequestUI = window.RunvaraApprovalRequest.create({ form: $('#approval-form'), error: $('#approval-form-error'), request,
+    identity: () => ({ workspaceId: state.session?.workspace?.id, actorId: state.session?.user?.id,
+      role: state.session?.user?.role, session: state.session }),
+    onResolved: approval => {
+      if (!state.data) return;
+      const index = state.data.approvals.findIndex(item => item.id === approval.id);
+      if (index >= 0) state.data.approvals[index] = approval; else state.data.approvals.unshift(approval);
+      renderApprovals(); showMessage('Saved request confirmed. No external action was executed.');
+    }
   });
 
   $('#approval-list').addEventListener('click', async event => {

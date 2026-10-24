@@ -66,7 +66,7 @@ async function harness(t, fleet = fleetFixture(), { launchAdmin = true, role = '
     if (route === '/api/auth/signup-options') return Response.json({ enabled: false });
     throw new Error(`Unexpected request in Fleet Doctor fixture: ${route}`);
   };
-  for (const file of ['presentation.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
+  for (const file of ['presentation.js', 'approval-request-ui.js', 'app.js']) window.eval(await fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8'));
   await until(() => !document.querySelector('#app-shell').classList.contains('hidden'));
   h.open = async () => {
     document.querySelector('#operator-fleet-nav').click();

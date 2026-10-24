@@ -330,7 +330,7 @@ test('real app wiring aborts navigation reads and a late 401 cannot sign out or 
     if(route==='/api/business-outcomes') return held ? held.promise : Response.json({workspaceId,current:[],summary:{groups:[],coverage:{complete:true}}});
     throw new Error('Unexpected route '+route);
   };
-  for(const file of ['presentation.js','control-ui.js','outcomes-ui.js','app.js']) w.eval(await fs.readFile(new URL('../../'+file,import.meta.url),'utf8'));
+  for(const file of ['presentation.js','control-ui.js','outcomes-ui.js','approval-request-ui.js', 'app.js']) w.eval(await fs.readFile(new URL('../../'+file,import.meta.url),'utf8'));
   await until(()=>!d.getElementById('app-shell').classList.contains('hidden'));
   assert.equal(calls.filter(c=>c.route.includes('business-outcomes')).length,0);
   assert.match(d.getElementById('re-experiment-list').textContent,/Legacy recorded \/ unqualified · contribution unknown/);

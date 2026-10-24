@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { objectiveContentApiFixture, objectiveContentState } from './objective-content-test-fixture.mjs';
 import { createGovernedRecordStage, GOVERNED_RECORD_PRODUCER_CONTRACT } from '../lib/governed-record-stage.mjs';
@@ -18,7 +19,7 @@ const pendingWrite = state => proposeConnectionWrite(state, 'shopify', {
   title: 'Exact reviewed title', description: 'Exact reviewed description', target: resolveManualContentTarget(state).target
 }, state.users[0].id, { governedRecordStage: stage });
 
-const request = extra => ({ type: 'customer_facing_publish', action: 'Review a proposed change',
+const request = extra => ({ requestId: randomUUID(), type: 'customer_facing_publish', action: 'Review a proposed change',
   reason: 'Synthetic owner request', expectedBenefit: 'Owner review', risk: 'medium', ...extra });
 
 test('closed generic approval creation cannot persist governed source or payload markers', async t => {

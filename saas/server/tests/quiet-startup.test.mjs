@@ -13,7 +13,7 @@ import { verifyProductionHealth, PRODUCTION_HEALTH_URL } from '../lib/production
 const SECRET = 'quiet-startup-session-fixture-over-thirty-two-characters';
 const ENV = { NODE_ENV: 'production', SESSION_SECRET: SECRET, CREDENTIALS_KEY: SECRET,
   APP_PUBLIC_URL: 'https://quiet.example.test', RUNVARA_STARTUP_MODE: 'quiet' };
-const ASSETS = ['/', '/index.html', '/app.js', '/presentation.js', '/control-ui.js', '/outcomes-ui.js',
+const ASSETS = ['/', '/index.html', '/app.js', '/approval-request-ui.js', '/presentation.js', '/control-ui.js', '/outcomes-ui.js',
   '/activity-ui.js', '/brief-history-ui.js', '/connections-ui.js', '/styles.css', '/favicon.svg'];
 // Include both read-looking routes with side effects and every mutation family.
 const BLOCKED = [
@@ -33,7 +33,7 @@ const BLOCKED = [
   '/api/business-objectives/reviews', '/api/business-objectives/reviews/job_fixture', '/api/business-graph', '/api/automation-runs/run_1/archive',
   '/api/migrate-pilot', '/api/economics', '/api/suppliers', '/api/suppliers/supplier_1', '/api/orders/order_1/economics', '/api/advertising-costs',
   '/api/web-intelligence', '/api/web-intelligence/settings', '/api/web-intelligence/targets', '/api/web-intelligence/targets/target_1', '/api/web-intelligence/scan',
-  '/api/automations', '/api/actions', '/api/approvals', '/api/approvals/approval_1', '/api/approvals/approval_1/decision', '/api/audit',
+  '/api/automations', '/api/actions', '/api/actions/reconcile', '/api/approvals', '/api/approvals/approval_1', '/api/approvals/approval_1/decision', '/api/audit',
   '/api/agents', '/api/agents/command', '/api/agents/commander/settings', '/api/control', '/api/agent-ops', '/api/agent-ops/jobs', '/api/agent-ops/jobs/job_1/retry',
   '/api/activity', '/api/operator/provider-usage', '/api/operator/agent-ops', '/api/operator/agent-ops/workspaces/alpha',
   '/api/operator/agent-ops/workspaces/alpha/jobs/job_1/retry', '/api/operator/providers', '/api/autopilot', '/api/autopilot/run',

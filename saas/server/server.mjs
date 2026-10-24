@@ -52,6 +52,7 @@ import { createAgentOperations } from './lib/agent-ops.mjs';
 import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
 import { quietCommercePreview } from './lib/quiet-commerce-preview.mjs';
+import { prepareApprovalRequest, findApprovalRequest, createApprovalRequest } from './lib/approval-request.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
 import { CONNECTORS, connector, connectionCentre, connectionSettings, connectionError, validateAreas, saveConnectionSettings, activateConnection, disconnectConnection, beginConnectionSync, recoveryFor } from './lib/connection-centre.mjs';
@@ -101,6 +102,7 @@ const STATIC_FILES = new Map([
   ['/', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
+  ['/approval-request-ui.js', ['saas/approval-request-ui.js', 'text/javascript; charset=utf-8']],
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
@@ -1278,7 +1280,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { exactSnapshot: pathname === '/api/maintenance/commerce', identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { exactSnapshot: ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -2132,15 +2134,20 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
-        if (req.method === 'POST' && pathname === '/api/actions') {
+        if (req.method === 'POST' && (pathname === '/api/actions' || pathname === '/api/actions/reconcile')) {
+          if (url.search) throw Object.assign(new Error('Approval requests do not accept query overrides'), { status: 400, code: 'APPROVAL_REQUEST_INPUT_INVALID' });
           const body = await jsonBody(req, 128 * 1024);
-          const approval = normalizeApprovalRequest(body, auth.user.id);
-          await mutate(auth, async state => {
-            if (governedApproval(state, approval)) assertGovernedRecordCreation(governedRecordStage);
-            state.approvals = [approval, ...(state.approvals || [])];
-            addAudit(state, { type: 'approval_requested', actor: auth.user.id, detail: { approvalId: approval.id, actionType: approval.type, financialImpact: approval.financialImpact } });
-          });
-          send(res, 202, { approvalRequired: true, approval: publicApproval(approval), executedExternally: false });
+          const intent = prepareApprovalRequest(body, auth.user.id);
+          if (pathname === '/api/actions/reconcile') {
+            const approval = findApprovalRequest(auth.state, auth, intent);
+            send(res, 200, { requestId: intent.requestId, found: Boolean(approval), approval: approval ? publicApproval(approval) : null, executedExternally: false });
+            return;
+          }
+          const result = await withWorkspaceLock(auth.session.workspaceId, () => createApprovalRequest({ store, auth, intent,
+            admit: (state, approval) => { if (governedApproval(state, approval)) assertGovernedRecordCreation(governedRecordStage); }
+          }));
+          send(res, result.replayed ? 200 : 202, { requestId: intent.requestId, approvalRequired: true,
+            approval: publicApproval(result.approval), replayed: result.replayed, executedExternally: false });
           return;
         }
 
