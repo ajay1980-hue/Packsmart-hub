@@ -52,6 +52,7 @@ import { createAgentOperations } from './lib/agent-ops.mjs';
 import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
 import { quietCommercePreview } from './lib/quiet-commerce-preview.mjs';
+import { PILOT_BASE, isMaintenanceApproval, runQuietApprovalPilot } from './lib/quiet-approval-pilot.mjs';
 import { prepareApprovalRequest, findApprovalRequest, createApprovalRequest } from './lib/approval-request.mjs';
 import { createAiProvider } from './lib/ai-provider.mjs';
 import { publicModelCatalog } from './lib/ai-economics.mjs';
@@ -103,6 +104,7 @@ const STATIC_FILES = new Map([
   ['/index.html', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
   ['/approval-request-ui.js', ['saas/approval-request-ui.js', 'text/javascript; charset=utf-8']],
+  ['/maintenance-approval-ui.js', ['saas/maintenance-approval-ui.js', 'text/javascript; charset=utf-8']],
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
@@ -376,6 +378,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   if (contentPilot !== null) assertContentPilotConfiguration(contentPilot, governedRecordStage);
   const costSourceStage = createCostSourceStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
+  if (startupPolicy.approvalPilot && store.provider !== 'supabase') throw Object.assign(new Error('Maintenance pilot requires Supabase persistence'), { code: 'QUIET_APPROVAL_PILOT_UNAVAILABLE' });
   const metaContainerObserverMock = options.metaContainerObserverMock ?? null;
   if (metaContainerObserverMock !== null) assertMetaContainerObserverMock(metaContainerObserverMock,store,env);
   const localDraftStorage = options.localDraftStorage ?? null;
@@ -1134,6 +1137,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
+      const pilotRoute = ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action);
 
       // Reject before any body, authentication, persistence or provider work,
       // including GET callbacks and reads that normally refresh or save state.
@@ -1145,6 +1149,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       // This narrow preview is never admitted in normal mode or via a hydrated fallback.
       if (pathname === '/api/maintenance/commerce' && (!startupPolicy.quietCommercePreview || store.provider !== 'supabase')) {
         send(res, 503, QUIET_STARTUP_RESPONSE); return;
+      }
+      if (pilotRoute) {
+        if (!startupPolicy.approvalPilot || req.method !== 'POST') { send(res, 503, QUIET_STARTUP_RESPONSE); return; }
+        if (url.search) throw Object.assign(new Error('Maintenance pilot does not accept query overrides'), { code: 'MAINTENANCE_PILOT_INPUT_INVALID', status: 400 });
+        const signed = sessionFrom(req);
+        if (!signed) { send(res, 401, { error: 'Authentication required', code: 'AUTH_REQUIRED' }); return; }
+        startupPolicy.approvalPilot.assertScope(signed);
       }
 
       if (['GET', 'HEAD'].includes(req.method) && pathname === '/api/health') {
@@ -1171,6 +1182,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           startupMode: startupPolicy.mode,
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
           quietCommercePreview: startupPolicy.quietCommercePreview,
+          quietApprovalPilot: startupPolicy.approvalPilot?.status() || { open: false, expiresAt: null },
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
           checkCacheMaxAgeMs: 5000,
           storage: store.provider,
@@ -1280,7 +1292,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { exactSnapshot: ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { exactSnapshot: pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1291,6 +1303,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+        if (pilotRoute) {
+          requireApprover(auth);
+          const body = await jsonBody(req, 2048);
+          const assertActive = () => {
+            if (draining || req.aborted || res.destroyed) throw Object.assign(new Error('Maintenance test interrupted'), { status: 503, code: 'MAINTENANCE_PILOT_INTERRUPTED' });
+          };
+          const result = await withWorkspaceLock(auth.session.workspaceId, () => runQuietApprovalPilot({
+            pilot: startupPolicy.approvalPilot, store, auth, operation: pathname.slice(PILOT_BASE.length), body, assertActive }));
+          send(res, 200, result); return;
+        }
         const consumeOutcome = limiter => {
           if (!limiter.check(rateKey).allowed) throw Object.assign(new Error('Outcome request limit reached; review the current result before retrying'), { status: 429, code: 'OUTCOME_RATE_LIMITED' });
           limiter.fail(rateKey);
@@ -1460,6 +1482,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'GET' && pathname === '/api/auth/session') {
           send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString(),
             ...(startupPolicy.quiet ? { maintenance: true } : {}),
+            ...(startupPolicy.approvalPilot?.metadata(auth) ? { approvalPilot: startupPolicy.approvalPilot.metadata(auth) } : {}),
             ...(startupPolicy.quietCommercePreview && auth.user.role === 'owner' && !auth.user.passwordChangeRequired ? { savedCommercePreview: true } : {}) });
           return;
         }
@@ -2160,6 +2183,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const result = await mutate(auth, async state => {
             const approval = (state.approvals || []).find(item => item.id === approvalMatch[1]);
             if (!approval) throw Object.assign(new Error('Approval request not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
+            if (isMaintenanceApproval(approval) && decision === 'approved') throw Object.assign(new Error('Maintenance test requests cannot be approved or executed'), { status: 403, code: 'MAINTENANCE_PILOT_EXECUTION_FORBIDDEN' });
             if (approval.type === 'protected_meta_production_publication') throw Object.assign(new Error('Review the exact retained image, caption and destination in the publication panel'), {status: 409, code: 'META_PRODUCTION_EXACT_CONSENT_REQUIRED'});
             if (approval.status !== 'pending') throw Object.assign(new Error('Approval already decided'), { status: 409, code: 'APPROVAL_ALREADY_DECIDED' });
             if ((body.revision ?? 1) !== (approval.revision || 1)) throw Object.assign(new Error('Approval changed; review its current revision'), { status: 409, code: 'APPROVAL_CONFLICT' });
@@ -2939,6 +2963,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const drain = () => {
     if (drainPromise) return drainPromise;
     draining = true;
+    startupPolicy.approvalPilot?.close();
     scheduler.stop(); agentOps.stop();
     if (integrityTimer) { clearInterval(integrityTimer); integrityTimer = null; }
     // Worker drains close their admission synchronously and include late claim

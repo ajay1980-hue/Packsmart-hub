@@ -242,7 +242,9 @@
   }
 
   let maintenancePreviewController = null, maintenancePreviewSequence = 0;
+  let maintenanceApprovalController = null;
   function clearMaintenancePreview() {
+    maintenanceApprovalController?.destroy(); maintenanceApprovalController = null;
     maintenancePreviewSequence++;
     maintenancePreviewController?.abort(); maintenancePreviewController = null;
     document.getElementById('maintenance-commerce')?.remove();
@@ -318,6 +320,8 @@
     $('#startup-retry').textContent = 'Check session';
     $('#startup-retry').classList.remove('hidden');
     mountMaintenancePreview(session);
+    maintenanceApprovalController = window.RunvaraMaintenanceApproval?.create({ host: screen.querySelector('.auth-card'), session, request,
+      isCurrent: () => state.session === session });
   }
 
   async function loadSession() {
