@@ -58,8 +58,8 @@ function assertWorkspace(workspaceId, state) {
 function saveGuard(beforeCommit) {
   if (beforeCommit === undefined) return () => {};
   if (typeof beforeCommit !== 'function') throw new TypeError('Save guard must be a synchronous function');
-  return snapshot => {
-    const result = beforeCommit(snapshot);
+  return (snapshot, ...args) => {
+    const result = beforeCommit(snapshot, ...args);
     if (result && typeof result.then === 'function') {
       // A guard must finish before serialization, not create another unchecked
       // asynchronous boundary. Consume rejection without hiding the error here.
@@ -484,7 +484,8 @@ class FileStore {
     return state ? { workspace: structuredClone(state.workspace), users: structuredClone(state.users || []) } : null;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit } = {}) {
+    if (beforeEffects !== undefined) throw Object.assign(new Error('Pre-effect guards require Supabase persistence'), { code: 'PERSISTENCE_GUARD_UNAVAILABLE', status: 503 });
     if (protectedMetaCommit !== undefined) throw metaReceiptError('UNAVAILABLE', 503);
     if (protectedOrderRecovery !== undefined) throw orderRecoveryError('UNAVAILABLE', 503);
     if (protectedContentCommit !== undefined) throw Object.assign(new Error('CONTENT_RECEIPT_UNAVAILABLE'), { code: 'CONTENT_RECEIPT_UNAVAILABLE', status: 503 });
@@ -1613,7 +1614,7 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
     assertWorkspace(workspaceId, state);
     if (protectedMetaCommit !== undefined) {
       if (protectedContentCommit !== undefined || protectedOrderRecovery !== undefined || contentPilotPermit !== undefined) throw metaReceiptError();
@@ -1659,6 +1660,9 @@ class SupabaseStore {
     // revision or a deep clone. Scheduler claim handles survive save/finish.
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(protectedContentCommit ? source : state) : null;
     const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: true };
+    // The optional maintenance guard runs before the first archive write.
+    saveGuard(beforeEffects)(upgraded, { automationArchives: Boolean(automationPlan?.archiveCandidates.length || automationPlan?.summary.existingStubsToEvict),
+      briefArchives: Boolean(briefPlan?.candidates.length) });
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
     let acknowledgedArchives = [];

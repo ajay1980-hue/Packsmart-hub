@@ -56,7 +56,7 @@ export function findApprovalRequest(state, auth, intent) {
 // decided by the existing primary revision CAS, never by that lock alone.
 // Each call attempts at most one save. An uncertain save is followed only by
 // an exact read; absence is not proof the attempted write cannot still commit.
-export async function createApprovalRequest({ store, auth, intent, admit }) {
+export async function createApprovalRequest({ store, auth, intent, admit, beforeSave }) {
   const workspaceId = auth.session.workspaceId;
   const read = () => store.get(workspaceId, { exactSnapshot: true });
   const state = await read();
@@ -70,8 +70,10 @@ export async function createApprovalRequest({ store, auth, intent, admit }) {
   addAudit(state, { type: 'approval_requested', actor: auth.session.sub,
     detail: { approvalId: approval.id, actionType: approval.type, financialImpact: approval.financialImpact } });
   let acknowledged = false;
+  const guards = beforeSave?.(state);
   try {
-    await store.save(workspaceId, state, { ownedSnapshot: true, beforeCommit: snapshot => {
+    await store.save(workspaceId, state, { ownedSnapshot: true, beforeEffects: guards?.beforeEffects, beforeCommit: snapshot => {
+      guards?.beforeCommit(snapshot);
       if (findApprovalRequest(snapshot, auth, intent)?.id !== approval.id) throw fail('APPROVAL_REQUEST_STATE_INVALID');
     } });
     acknowledged = true;

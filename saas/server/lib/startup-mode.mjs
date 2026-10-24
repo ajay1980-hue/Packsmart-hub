@@ -1,3 +1,5 @@
+import { createQuietApprovalPilot, PILOT_BASE } from './quiet-approval-pilot.mjs';
+
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
 export function createStartupPolicy(env, staticPathnames) {
@@ -17,13 +19,16 @@ export function createStartupPolicy(env, staticPathnames) {
     throw Object.assign(new Error('Quiet commerce preview requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_COMMERCE_PREVIEW_INVALID' });
   }
   const quietCommercePreview = quiet && commercePreview === 'enabled/v1';
+  const approvalPilot = createQuietApprovalPilot(env);
   return Object.freeze({
     mode,
     quiet,
     quietOwnerLogin,
     quietCommercePreview,
+    approvalPilot,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
+      if (approvalPilot?.available() && method === 'POST' && ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action)) return true;
       if (method === 'GET' && pathname === '/api/auth/session') return true;
       if (quietCommercePreview && method === 'GET' && pathname === '/api/maintenance/commerce') return true;
       if (quietOwnerLogin && method === 'POST' && pathname === '/api/auth/login') return true;
