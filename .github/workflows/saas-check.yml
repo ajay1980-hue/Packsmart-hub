@@ -51,6 +51,8 @@ jobs:
           node saas/server/tests/mobile-connection-check.mjs /tmp/runvara-mobile-preview.html
       - name: Verify approval request uncertainty and refresh recovery
         run: node saas/server/tests/approval-request-browser-check.mjs
+      - name: Verify creative allowance review and retained uncertain tasks
+        run: node saas/server/tests/creative-allowance-browser-check.mjs
       - name: Verify bounded maintenance approval pilot
         run: node saas/server/tests/quiet-approval-pilot-browser-check.mjs
       - name: Verify business graph and objectives on mobile and desktop

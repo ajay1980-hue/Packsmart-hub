@@ -368,9 +368,9 @@ export async function marketingCreativeCycle(state, { env = process.env, persist
     }
     Object.assign(state.marketing.providers.canva, { status: /UNAVAILABLE/.test(error.code || '') ? 'degraded' : 'action_required', lastError: error.code || 'CANVA_AUTH_REQUIRED', lastTestStatus: 'failed' });
   }
-  // No allowance issuer is installed by production routes. Missing permission
-  // causes no health/balance probe and never silently activates generation.
-  if (typeof authorizePhase === 'function') {
+  // The protected issuer validates verified server policies without unrelated
+  // health/balance probes. Missing authority never activates generation.
+  if (typeof authorizePhase === 'function' && !authorizePhase.protectedCreativeIssuer) {
     const runtime = marketingRuntimeEnv(state, env);
     for (const provider of ['canva', 'runway']) {
       const pending = campaign.creativeRequests?.some(request => request.provider === provider && request.status === 'pending');

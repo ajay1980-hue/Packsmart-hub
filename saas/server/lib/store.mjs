@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { creativeRpcParams, creativeRpcResult, creativeAllowanceError } from './creative-allowance.mjs';
 import { metaStrictJson } from './meta-publication-bounded.mjs';
 import { contentWriteSnapshot } from './content-write-identity.mjs';
 import { localFileTransaction } from './local-file-transaction.mjs';
@@ -820,6 +821,23 @@ class SupabaseStore {
 
   // Trusted worker-only boundary. Tenant comes solely from the explicit argument;
   // DTO validation rejects client overrides, prices, raw bodies and credentials.
+  async creativeAllowanceRpc(name, workspaceId, input) {
+    const params = creativeRpcParams(name, workspaceId, input);
+    let value;
+    try {
+      // No automatic retry: a lost response can follow a committed approval,
+      // reservation or one-use dispatch admission. Reconcile by explicit read.
+      value = await this.scopedRequest(workspaceId, 'other', `rpc/runvara_creative_${name}`,
+        { method: 'POST', body: JSON.stringify(params), maxResponseBytes: 262144, strictJson: true });
+    } catch (cause) {
+      const code = ['42P01','42883','PGRST202'].includes(cause.databaseCode) ? 'CREATIVE_ALLOWANCE_MIGRATION_REQUIRED'
+        : cause.databaseCode === '42501' || [401,403].includes(cause.httpStatus) ? 'CREATIVE_ALLOWANCE_ACCESS_DENIED'
+        : cause.databaseCode === 'P0001' ? 'CREATIVE_ALLOWANCE_PRECONDITION_FAILED' : 'CREATIVE_ALLOWANCE_OUTCOME_UNKNOWN';
+      throw creativeAllowanceError(code, 503);
+    }
+    return creativeRpcResult(name, value, params);
+  }
+
   async reserveProviderUsage(workspaceId, input) {
     const params = providerUsageReservationParams(workspaceId, input);
     let result;
