@@ -243,8 +243,10 @@
 
   let maintenancePreviewController = null, maintenancePreviewSequence = 0;
   let maintenanceApprovalController = null;
+  let maintenanceCreativeController = null;
   function clearMaintenancePreview() {
     maintenanceApprovalController?.destroy(); maintenanceApprovalController = null;
+    maintenanceCreativeController?.destroy(); maintenanceCreativeController = null;
     maintenancePreviewSequence++;
     maintenancePreviewController?.abort(); maintenancePreviewController = null;
     document.getElementById('maintenance-commerce')?.remove();
@@ -320,6 +322,8 @@
     $('#startup-retry').textContent = 'Check session';
     $('#startup-retry').classList.remove('hidden');
     mountMaintenancePreview(session);
+    maintenanceCreativeController = window.RunvaraMaintenanceCreative?.create({ host: screen.querySelector('.auth-card'), session, request,
+      isCurrent: () => state.session === session });
     maintenanceApprovalController = window.RunvaraMaintenanceApproval?.create({ host: screen.querySelector('.auth-card'), session, request,
       isCurrent: () => state.session === session });
   }

@@ -55,6 +55,8 @@ jobs:
         run: node saas/server/tests/creative-allowance-browser-check.mjs
       - name: Verify bounded maintenance approval pilot
         run: node saas/server/tests/quiet-approval-pilot-browser-check.mjs
+      - name: Verify bounded Runway maintenance route without provider traffic
+        run: node saas/server/tests/quiet-creative-browser-check.mjs
       - name: Verify business graph and objectives on mobile and desktop
         run: node saas/server/tests/business-graph-browser-check.mjs
       - name: Verify governed usage on mobile and desktop

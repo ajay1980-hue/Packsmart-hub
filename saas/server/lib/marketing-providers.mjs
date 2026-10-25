@@ -258,22 +258,28 @@ export async function refreshCanvaCreative(campaign, request, env = process.env,
   });
 }
 
+export function runwayCreativeInput(campaign, request, env) {
+  const prompt = clean(`${campaign.copy?.videoHook || campaign.copy?.headline || campaign.product.title} Premium practical ecommerce packaging advert for Packsmart Solutions. Show the exact referenced product clearly, clean warehouse and dispatch context, confident business tone, crisp lighting, no invented product claims, no price overlays unless supplied.`, 2000);
+  const endpoint = `${RUNWAY_BASE}/recipes/product_ad`;
+  const body = JSON.stringify({ version: '2026-07', productImages: [{ uri: campaign.product.image }],
+    productInfo: clean(`${campaign.product.title}; SKU ${campaign.product.sku || 'unknown'}`, 500), userConcept: prompt, duration: 10, ratio: '1280:720', audio: false });
+  return { endpoint, body, payloadDigest: creativeDigest(body), accountBinding: credentialBinding('runway', env),
+    sourceDigest: sourceBinding(campaign, request), sourcePreview: sourcePreview(campaign, request), payloadPreview: body };
+}
+
 export async function startRunwayCreative(campaign, env = process.env, options = {}) {
   const request = options.request || { provider: 'runway', kind: 'product_video', status: 'pending' };
   if (beforeMutation(options.lifecycle, 'generation')) return request;
   if (!env.RUNWAY_API_KEY) throw providerError('runway', 'Runway developer API key is not configured.', 'RUNWAY_NOT_CONFIGURED', 409);
   if (!campaign.product?.image) throw providerError('runway', 'Campaign has no product image.', 'RUNWAY_PRODUCT_IMAGE_REQUIRED', 422);
-  const prompt = clean(`${campaign.copy?.videoHook || campaign.copy?.headline || campaign.product.title} Premium practical ecommerce packaging advert for Packsmart Solutions. Show the exact referenced product clearly, clean warehouse and dispatch context, confident business tone, crisp lighting, no invented product claims, no price overlays unless supplied.`, 2000);
-  const endpoint = `${RUNWAY_BASE}/recipes/product_ad`;
-  const body = JSON.stringify({ version: '2026-07', productImages: [{ uri: campaign.product.image }],
-    productInfo: clean(`${campaign.product.title}; SKU ${campaign.product.sku || 'unknown'}`, 500), userConcept: prompt, duration: 10 });
+  const { endpoint, body, sourcePreview: preview } = runwayCreativeInput(campaign, request, env);
   const headers = runwayHeaders(env);
   const bindings = () => ({ payloadDigest: creativeDigest(body), accountBinding: credentialBinding('runway', env), sourceDigest: sourceBinding(campaign, request) });
-  await options.lifecycle.mutate({ phase: 'generation', endpoint, ...bindings(), sourcePreview: sourcePreview(campaign, request), payloadPreview: body,
+  await options.lifecycle.mutate({ phase: 'generation', endpoint, ...bindings(), sourcePreview: preview, payloadPreview: body,
     checkBinding: () => ({ ...bindings(), accountBinding: liveCredentialBinding('runway', env, options) }),
     submit: () => jsonRequest(endpoint, { method: 'POST', headers, body }, { provider: 'runway', timeoutMs: 30000, fetchImpl: options.fetchImpl }),
     accepted: payload => ({ provider: 'runway', kind: 'product_video', status: 'in_progress', stage: 'generation', taskId: payload.id || payload.task?.id || null,
-      startedAt: new Date().toISOString(), formats: ['vertical_video', 'landscape_video'] }) });
+      startedAt: new Date().toISOString(), formats: ['landscape_video'] }) });
   return request;
 }
 
