@@ -958,8 +958,12 @@
         ? '<button class="secondary small-button" data-view-link="approvals">Open approval</button>'
         : '<button class="secondary small-button" data-marketing-approval="' + escapeHtml(campaign.id) + '">Request campaign review</button>';
       const creativeButton = (campaign.creativeRequests || []).some(item => ['pending', 'in_progress', 'failed'].includes(item.status)) ? '<button class="secondary small-button" data-marketing-creatives="' + escapeHtml(campaign.id) + '">Generate / refresh creatives</button>' : '';
-      return '<article class="opportunity-card"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + creativeButton + approvalButton + (state.data.user?.role === 'owner' && campaign.channels?.includes('meta') ? '<button type="button" class="secondary small-button" data-publication-choices="' + escapeHtml(campaign.id) + '">Preview exact Instagram selection</button>' : '') + '</div><div class="publication-selection" role="status"></div></article>';
+      return '<article class="opportunity-card" data-creative-card="' + escapeHtml(campaign.id) + '"><div class="section-head"><div><span class="tag ' + statusClass(campaign.status) + '">' + escapeHtml(statusLabel(campaign.status)) + '</span><h3>' + escapeHtml(product.title || 'Prepared campaign') + '</h3></div><strong>' + escapeHtml(percent(product.margin)) + ' margin</strong></div><p>' + escapeHtml(copy.longCaption || '') + '</p><div class="signal-chips">' + (campaign.channels || []).map(channel => '<span class="tag neutral">' + escapeHtml(statusLabel(channel)) + '</span>').join('') + '</div><small class="muted">' + escapeHtml(providerStates || 'Creative requests pending') + '</small><div class="button-row">' + creativeButton + approvalButton + (state.data.user?.role === 'owner' && campaign.channels?.includes('meta') ? '<button type="button" class="secondary small-button" data-publication-choices="' + escapeHtml(campaign.id) + '">Preview exact Instagram selection</button>' : '') + '</div><div class="publication-selection" role="status"></div></article>';
     }).join('') : '<div class="empty-state">No campaigns prepared yet. Runvara will only select active, in-stock products that meet the configured margin floor and have an image.</div>';
+    for (const card of $("#marketing-campaign-list").querySelectorAll("[data-creative-card]")) {
+      const campaign = campaigns.find(row => row.id === card.dataset.creativeCard);
+      if (campaign) card.insertAdjacentHTML("beforeend", window.RunvaraCreativeAllowances?.entries(campaign, state.data.user?.role) || "");
+    }
   }
 
   function renderLocalDraftEntryPoints() {
@@ -3324,6 +3328,8 @@
     }catch(error){if(localDraftCurrent(form,epoch)){panel.textContent=error.message+(form.localDraftPending?' The request reference is retained. Reopen it or retry the same save; a response failure does not prove that saving failed.':'');button.textContent=form.localDraftPending?'Retry same save':'Save local review draft';}}
     finally{form.localDraftSaving=false;button.disabled=Boolean(form.localDraftSaved)||!form.localDraftContext||form.localDraftContext.sourceAvailable===false;form.elements.reference.disabled=false;form.querySelector('[data-local-draft-reopen]').disabled=false;}
   });
+
+  window.RunvaraCreativeAllowances?.install($('#marketing-campaign-list'), { request, context: objectiveContext, isCurrent: sameObjectiveSession });
 
   $('#marketing-campaign-list').addEventListener('click', async event => {
     const choicesButton = event.target.closest('[data-publication-choices]');

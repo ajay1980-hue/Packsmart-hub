@@ -3,6 +3,7 @@ import { addAudit } from './events.mjs';
 import { deriveOperations, ebayComparisonAvailable } from './operations.mjs';
 import { automaticConnectionAreas, beginConnectionSync, finishConnectionSync, connectionSettings, connectionDue, pendingConnectionReadExhausted, CONNECTORS, isShopifyOrderSourceFailure, shopifyOrderReadBinding, isShopifyOrderReadBindingCurrent, isShopifyOrderReadAdmissionCurrent, shopifyOrderReadHold, shopifyOrderReadBudgetExhausted, shopifyOrderReadPolicyBlocked, orderReadHeld } from './connection-centre.mjs';
 import { marketingCreativeCycle, marketingCreativeReadiness, marketingPlannerCycle } from './marketing.mjs';
+import { createCreativeIssuer } from './creative-allowance.mjs';
 import { runConnectionDoctor } from './connection-doctor.mjs';
 import { runWebIntelligence } from './web-intelligence.mjs';
 import { assertEbayReadAdmission, ebayErrorCooldown, ebayReadCooldown, ebayReadDeferred, mergeEbayReadCooldown } from './ebay-read-cooldown.mjs';
@@ -213,7 +214,8 @@ export function createScheduler({ store, integrations, withWorkspaceLock, curren
             const result = marketingPlannerCycle(state, { now, source: 'autopilot' });
             evidence = [{ type: 'marketing_campaign', id: result.campaign?.id || run.id, detail: result.created ? `Prepared campaign for ${result.campaign.product.title}; publishing remains approval-gated.` : result.reason }];
           } else if (run.ruleId === 'marketingCreativeWorker') {
-            const result = await creativeCycle(state, { env, persist: () => store.save(workspaceId, state), durableStore: store.provider === 'supabase' });
+            const result = await creativeCycle(state, { env, persist: () => store.save(workspaceId, state), durableStore: store.provider === 'supabase',
+              authorizePhase: createCreativeIssuer({ store, state, env }) });
             const effects = recordCreativeEffects(run, result.effects);
             const reason = !result.effects ? 'CREATIVE_EFFECTS_UNAVAILABLE' : result.reason ? safeCode({ code: result.reason }) : null;
             run.reason = reason;

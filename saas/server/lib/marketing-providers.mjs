@@ -153,13 +153,14 @@ const credentialBinding = (provider, env) => creativeDigest(provider === 'canva'
   : [provider, env.RUNWAY_API_KEY || '']);
 const liveCredentialBinding = (provider, env, options) => credentialBinding(provider,
   typeof options.resolveRuntimeEnv === 'function' ? options.resolveRuntimeEnv(provider) : env);
-function sourceBinding(campaign, request) {
-  return creativeDigest({ campaignId: campaign.id, requestId: request.id, provider: request.provider,
+function sourcePreview(campaign, request) {
+  return JSON.stringify({ campaignId: campaign.id, requestId: request.id, provider: request.provider,
     stage: request.stage || null, status: request.status, assetId: request.assetId || null, designId: request.designId || null,
     jobId: request.jobId || null, taskId: request.taskId || null,
     product: Object.fromEntries(['title','sku','image','price'].map(key => [key, campaign.product?.[key] ?? null])),
     copy: Object.fromEntries(['videoHook','headline','longCaption','cta'].map(key => [key, campaign.copy?.[key] ?? null])) });
 }
+const sourceBinding = (campaign, request) => creativeDigest(sourcePreview(campaign, request));
 async function observe(request, patch, options, phase) {
   if (options.lifecycle) return options.lifecycle.observe(patch, phase);
   Object.assign(request, patch);
@@ -192,6 +193,7 @@ export async function startCanvaCreative(campaign, env = process.env, options = 
   const bindings = () => ({ payloadDigest: creativeDigest({ imageSha256: creativeDigest(image.bytes), metadata, contentType: headers['Content-Type'] }),
     accountBinding: credentialBinding('canva', env), sourceDigest: sourceBinding(campaign, request) });
   await options.lifecycle.mutate({ phase: 'asset_upload', endpoint, ...bindings(),
+    sourcePreview: sourcePreview(campaign, request), payloadPreview: JSON.stringify({ imageSha256: creativeDigest(image.bytes), metadata, contentType: headers['Content-Type'] }),
     checkBinding: () => ({ ...bindings(), accountBinding: liveCredentialBinding('canva', env, options) }),
     submit: () => jsonRequest(endpoint, { method: 'POST', headers, body: image.bytes }, { provider: 'canva', timeoutMs: 25000, fetchImpl: options.fetchImpl }),
     accepted: upload => ({ provider: 'canva', kind: 'social_post', status: 'in_progress', stage: 'asset_upload',
@@ -221,7 +223,7 @@ async function continueCanvaCreative(campaign, request, env, options) {
   }
   const headers = canvaHeaders(env, { 'Content-Type': 'application/json' });
   const bindings = () => ({ payloadDigest: creativeDigest(body), accountBinding: credentialBinding('canva', env), sourceDigest: sourceBinding(campaign, request) });
-  await options.lifecycle.mutate({ phase, endpoint, ...bindings(),
+  await options.lifecycle.mutate({ phase, endpoint, ...bindings(), sourcePreview: sourcePreview(campaign, request), payloadPreview: body,
     checkBinding: () => ({ ...bindings(), accountBinding: liveCredentialBinding('canva', env, options) }),
     submit: () => jsonRequest(endpoint, { method: 'POST', headers, body }, { provider: 'canva', fetchImpl: options.fetchImpl }),
     accepted: receipt => ({ provider: 'canva', stage: phase, status: 'in_progress', jobId: receipt.job?.id || null, updatedAt: new Date().toISOString() }) });
@@ -267,7 +269,7 @@ export async function startRunwayCreative(campaign, env = process.env, options =
     productInfo: clean(`${campaign.product.title}; SKU ${campaign.product.sku || 'unknown'}`, 500), userConcept: prompt, duration: 10 });
   const headers = runwayHeaders(env);
   const bindings = () => ({ payloadDigest: creativeDigest(body), accountBinding: credentialBinding('runway', env), sourceDigest: sourceBinding(campaign, request) });
-  await options.lifecycle.mutate({ phase: 'generation', endpoint, ...bindings(),
+  await options.lifecycle.mutate({ phase: 'generation', endpoint, ...bindings(), sourcePreview: sourcePreview(campaign, request), payloadPreview: body,
     checkBinding: () => ({ ...bindings(), accountBinding: liveCredentialBinding('runway', env, options) }),
     submit: () => jsonRequest(endpoint, { method: 'POST', headers, body }, { provider: 'runway', timeoutMs: 30000, fetchImpl: options.fetchImpl }),
     accepted: payload => ({ provider: 'runway', kind: 'product_video', status: 'in_progress', stage: 'generation', taskId: payload.id || payload.task?.id || null,

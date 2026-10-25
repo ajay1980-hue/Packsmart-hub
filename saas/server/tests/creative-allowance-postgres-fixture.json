@@ -1,0 +1,70 @@
+{
+  "description": "Hash-pinned installed-contract equivalent; synthetic local database only",
+  "sqlFiles": [
+    {
+      "path": "schema.sql",
+      "sha256": "afb5c67959571601f18e0c7aee9e595400fa24affe69c54b9c43b1443041be5d",
+      "executedLfSha256": "fbbbaa345c0b950b00dd834f980620d01dcd5395e182b26e885ead70cfab115c"
+    },
+    {
+      "path": "migrations/20260920201552_runvara_control_and_reporting.sql",
+      "sha256": "59c275ecbcdcb219024bff072f25c16bac255e42a467442ff99923ba3052e09d",
+      "executedLfSha256": "a9c11f1730cbf5c4a6935402fc796d7351fb6cfa9e03763ece2018fa131a00c4"
+    },
+    {
+      "path": "migrations/20260927113000_runvara_agent_operations.sql",
+      "sha256": "a7c2484ee4b969c902832eda854e461a6503ab6867563670907b22aedcc38f64",
+      "executedLfSha256": "349e0ecbd1bc58eacf85f714738241ddc266dff45992c7e48d968604fb22b15f"
+    },
+    {
+      "path": "migrations/20260927122500_ai_usage_economics.sql",
+      "sha256": "36b06cea93381f746aa4563f7d520449fb8133d839e6ed09423103b8fe2060b8",
+      "executedLfSha256": "18bdfdb9e631a080d8345fd90dfc899c28e196afb02ca38e2f28c60106920984"
+    },
+    {
+      "path": "migrations/20261006190318_atomic_provider_usage.sql",
+      "sha256": "2d500ddc33812f11b17b4413c4a47958d87c131b1424c8b182c0d0d09833b77b",
+      "executedLfSha256": "13c421d26f00c4a2a231c14a9196c58910be96e997e2ee42e5a91fc8e8133016"
+    },
+    {
+      "path": "migrations/20261006194326_objective_prepare_job_guard.sql",
+      "sha256": "51f137d5ecca0e7385ef25983aaa18a1efa4be2c0c4c377fb84836578c459fe9",
+      "executedLfSha256": "d065af48df400644d126ab7e77bea7076c6a90042bfabaa36449b14fb238e516"
+    },
+    {
+      "path": "migrations/20261007074031_reporting_status_cas.sql",
+      "sha256": "02dec648d018fa53bcce16c6fc2f79a09450954d0b26f44e7b8bf3986fb4f8bd",
+      "executedLfSha256": "0e8e7124c9c152ff0f3f530f748eb6d97fca50a83f230bda7cb59f249cbe699f"
+    },
+    {
+      "path": "migrations/20261007100823_business_outcome_publication.sql",
+      "sha256": "77ead63bf2025c08919cf28ee5a84a78a3e0bee1421f00be6ae76dbcbee39718",
+      "executedLfSha256": "7f642f8d22b7827185998d4847fa3890992a8c0569c3100efe3b69d9c07c179f"
+    },
+    {
+      "path": "migrations/20261007175355_reviewed_action_outcome_snapshot.sql",
+      "sha256": "db938e3566937f07420f934d4026bb19df306071d0688db1e9173bb95fbc49af",
+      "executedLfSha256": "16edaef11d430d0b43649690d39775104253aa77a6cce4ca4464d479dcd98736"
+    },
+    {
+      "path": "migrations/20261008055400_objective_action_outcome_snapshot.sql",
+      "sha256": "9856b7e6cba64b5b598e0b07dc75f0d113f176c287ac6da99e6daf5916dde76d",
+      "executedLfSha256": "61538e9d27e90305c3928fe174a11eda3f631eb7038d388472b9d568107e0a32"
+    },
+    {
+      "path": "migrations/20261008144414_protected_content_execution_receipts.sql",
+      "sha256": "92133a5f448e8dcd7f921eef2d01afee8e7f69f189d9c92bdc53f8248be00113",
+      "executedLfSha256": "d3fd084f492434de1594c8c1514be9291fcafc3fca96406c30f74e400fdf343f"
+    },
+    {
+      "path": "migrations/20261008163558_receipt_outcome_consumer.sql",
+      "sha256": "d64e54094f0a86ff85bc6f7c7fd6eb4ddb7a9700ff4117bba7c8f679ad3e8327",
+      "executedLfSha256": "90c563bc1790a9dcc8bc558e6197de55f2be96f65b759bf3cea7303906a460d8"
+    },
+    {
+      "path": "prepared/meta-production-v1.sql",
+      "sha256": "b5ab98fe5de09486a350c4e9a2c9a87f68fff8538b8faa8c52d5f25990374e0d",
+      "executedLfSha256": "b5ab98fe5de09486a350c4e9a2c9a87f68fff8538b8faa8c52d5f25990374e0d"
+    }
+  ]
+}

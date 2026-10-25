@@ -73,12 +73,13 @@ import { intelligentConnections, providerReadiness, doctorNotifications, recomme
 import { queueFirstSync, runFirstSync } from './lib/connection-doctor.mjs';
 import { disconnectMarketingProvider, draftMarketingCampaign, ensureMarketing, marketingCreativeCycle, marketingSnapshot, marketingRuntimeEnv, saveCanvaTemplate, saveMarketingProvider, testStoredMarketingProvider, updateMarketingSettings } from './lib/marketing.mjs';
 import { reviewMetaMarketingCampaign } from './lib/marketing-campaign-review.mjs';
+import { createCreativeIssuer, creativeAllowancesEnabled, creativeAllowanceError } from './lib/creative-allowance.mjs';
 import { previewMetaMarketingPublication, prepareMetaMarketingPublication, readMetaMarketingPublication, metaPublicationChoices } from './lib/marketing-publication.mjs';
 import { metaPublicationObservations, assertMetaObservationSimulation } from './lib/meta-publication-observation.mjs';
 import { assertMetaContainerObserverMock, previewMetaContainerObserver, runMetaContainerObserver } from './lib/meta-container-observer.mjs';
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
-import { listCanvaBrandTemplates } from './lib/marketing-providers.mjs';
+import { listCanvaBrandTemplates, advanceCampaignCreatives } from './lib/marketing-providers.mjs';
 import { buildSupportReply } from './lib/customer-support.mjs';
 import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
@@ -105,6 +106,7 @@ const STATIC_FILES = new Map([
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
   ['/approval-request-ui.js', ['saas/approval-request-ui.js', 'text/javascript; charset=utf-8']],
   ['/maintenance-approval-ui.js', ['saas/maintenance-approval-ui.js', 'text/javascript; charset=utf-8']],
+  ['/creative-allowance-ui.js', ['saas/creative-allowance-ui.js', 'text/javascript; charset=utf-8']],
   ['/presentation.js', ['saas/presentation.js', 'text/javascript; charset=utf-8']],
   ['/control-ui.js', ['saas/control-ui.js', 'text/javascript; charset=utf-8']],
   ['/outcomes-ui.js', ['saas/outcomes-ui.js', 'text/javascript; charset=utf-8']],
@@ -2088,6 +2090,37 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           return;
         }
 
+        const creativeReviewMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/creatives\/([^/]+)\/allowance$/);
+        const creativeDecisionMatch = pathname.match(/^\/api\/marketing\/creative-allowances\/([^/]+)\/decision$/);
+        if (creativeReviewMatch && ['GET','POST'].includes(req.method) || creativeDecisionMatch && req.method === 'POST') {
+          requireApprover(auth);
+          if (!creativeAllowancesEnabled(env)) throw creativeAllowanceError('CREATIVE_ALLOWANCES_DISABLED');
+          if (store.provider !== 'supabase' || typeof store.creativeAllowanceRpc !== 'function') throw creativeAllowanceError('CREATIVE_DURABLE_STORE_REQUIRED', 503);
+          const result = await withWorkspaceLock(auth.session.workspaceId, async () => {
+            const state = await store.get(auth.session.workspaceId, { exactSnapshot: true });
+            if (creativeDecisionMatch) {
+              const body = await jsonBody(req, 2048);
+              if (Object.keys(body).some(key => !['revision','decision'].includes(key))) throw creativeAllowanceError('CREATIVE_ALLOWANCE_INPUT_INVALID', 400);
+              return store.creativeAllowanceRpc('decide', auth.session.workspaceId, { auth, approvalId: creativeDecisionMatch[1], ...body });
+            }
+            const campaigns = state.marketing?.campaigns?.filter(row => row.id === creativeReviewMatch[1]) || [];
+            const requests = campaigns[0]?.creativeRequests?.filter(row => row.id === creativeReviewMatch[2]) || [];
+            if (campaigns.length !== 1 || requests.length !== 1) throw creativeAllowanceError('CREATIVE_REQUEST_INVALID', 404);
+            if (req.method === 'GET') return store.creativeAllowanceRpc('review', auth.session.workspaceId, { auth, requestId: requests[0].id });
+            const body = await jsonBody(req, 2048);
+            if (Object.keys(body).length !== 1 || typeof body.operationId !== 'string') throw creativeAllowanceError('CREATIVE_ALLOWANCE_INPUT_INVALID', 400);
+            if (requests[0].status !== 'pending' || requests[0].safety?.origin !== 'server_created') throw creativeAllowanceError('CREATIVE_REQUEST_NOT_FRESH');
+            const prepared = [];
+            const issuer = createCreativeIssuer({ store, state, env, auth, operationId: body.operationId, prepared });
+            const advanced = await advanceCampaignCreatives(campaigns[0], marketingRuntimeEnv(state, env), { state,
+              durableStore: true, persist: () => { throw creativeAllowanceError('CREATIVE_PREPARATION_MUST_NOT_DISPATCH'); },
+              authorizePhase: issuer, eligible: row => row.id === requests[0].id });
+            if (prepared.length !== 1) throw creativeAllowanceError(advanced.reason || 'CREATIVE_PREPARATION_FAILED', 409);
+            return prepared[0];
+          });
+          send(res, 200, { allowance: result }); return;
+        }
+
         const marketingCreativeMatch = pathname.match(/^\/api\/marketing\/campaigns\/([^/]+)\/creatives\/advance$/);
         if (req.method === 'POST' && marketingCreativeMatch) {
           requireOwner(auth);
@@ -2095,7 +2128,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             ensureMarketing(state);
             const campaign = state.marketing.campaigns.find(item => item.id === marketingCreativeMatch[1]);
             if (!campaign) throw Object.assign(new Error('Marketing campaign not found'), { status: 404, code: 'MARKETING_CAMPAIGN_NOT_FOUND' });
-            const advanced = await marketingCreativeCycle(state, { env, campaignId: campaign.id,
+            const advanced = await marketingCreativeCycle(state, { env, campaignId: campaign.id, authorizePhase: createCreativeIssuer({ store, state, env }),
               durableStore: store.provider === 'supabase', persist: () => store.save(auth.session.workspaceId, state) });
             addAudit(state, { type: 'marketing_creatives_advanced', actor: auth.user.id, detail: { campaignId: campaign.id,
               advanced: advanced.advanced, effects: advanced.effects, reason: advanced.reason,

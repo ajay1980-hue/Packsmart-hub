@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 
-// This boundary does not create permissions or decide a price. The production
-// caller supplies no allowance issuer until owner approval + atomic budget
-// reservation are implemented. Browser fields/settings are never a substitute.
+// This boundary does not create permissions or decide a price. Only the
+// protected server issuer can supply owner approval and an atomic reservation.
+// The production capability defaults off; browser fields are never authority.
 export const CREATIVE_SAFETY_SCHEMA = 'runvara-creative-safety/v1';
 export const CREATIVE_PHASES = Object.freeze({ canva: ['asset_upload', 'autofill', 'export'], runway: ['generation'] });
 export const CREATIVE_ALLOWANCE_ACTION = 'The owner must approve this exact creative phase and a verified finite provider allowance before new generation can start. Existing provider connections are unchanged.';
@@ -120,7 +120,7 @@ export function createCreativeLifecycle({ state, campaign, request, persist, dur
     }
   }
 
-  async function mutate({ phase, endpoint, payloadDigest, accountBinding, sourceDigest, checkBinding, submit, accepted }) {
+  async function mutate({ phase, endpoint, payloadDigest, accountBinding, sourceDigest, sourcePreview, payloadPreview, checkBinding, submit, accepted }) {
     if (!CREATIVE_PHASES[request.provider].includes(phase) || !HASH.test(payloadDigest || '')
       || !HASH.test(accountBinding || '') || !HASH.test(sourceDigest || '') || typeof checkBinding !== 'function'
       || typeof endpoint !== 'string' || typeof submit !== 'function' || typeof accepted !== 'function') throw error('CREATIVE_PHASE_INVALID');
@@ -136,9 +136,11 @@ export function createCreativeLifecycle({ state, campaign, request, persist, dur
     if (durableStore !== true || typeof persist !== 'function' || typeof state._revision !== 'string') return block('CREATIVE_DURABLE_STORE_REQUIRED');
     const binding = { workspaceId: safety.workspaceId, campaignId: campaign.id, requestId: request.id,
       provider: request.provider, phase, inputDigest };
-    // Only a future trusted server issuer may reserve an exact allowance. No
+    // Only the trusted server issuer may reserve an exact allowance. No
     // state/settings/raw provider price or browser estimate is accepted here.
-    const allowance = validateAllowance(await authorizePhase(Object.freeze({ ...binding })), binding, now);
+    const issued = await authorizePhase(Object.freeze({ ...binding }), Object.freeze({ endpoint, payloadDigest, accountBinding, sourceDigest, sourcePreview, payloadPreview }));
+    if (issued?.allowed === false) return block(safeCode({ code: issued.reason }, 'CREATIVE_ALLOWANCE_REQUIRED'));
+    const allowance = validateAllowance(issued, binding, now);
     if (!allowance) return block();
     Object.freeze(allowance);
     // Authorization is asynchronous. A sibling invocation sharing this request
@@ -171,6 +173,23 @@ export function createCreativeLifecycle({ state, campaign, request, persist, dur
     // Rebinding can itself take time (for example hashing a prepared image).
     // Keep the deadline check adjacent to the actual dispatch boundary.
     if (Date.parse(allowance.expiresAt) <= now()) return block('CREATIVE_ALLOWANCE_EXPIRED', true);
+    if (typeof authorizePhase.confirmDispatch === 'function') {
+      try { await authorizePhase.confirmDispatch(claim); }
+      catch (cause) {
+        effects.historicalExposureUnknown = true;
+        const failure = error(safeCode(cause, 'CREATIVE_ADMISSION_UNCERTAIN'), 503);
+        failure.creativePersistenceFailure = true; failure.creativeEffects = summarizeCreativeEffects(effects); throw failure;
+      }
+      // Remote admission may wait on a lock. Recheck the local immutable
+      // authority and bindings afterwards; a consumed admission is never reused.
+      if (Date.parse(allowance.expiresAt) <= now()) return block('CREATIVE_ALLOWANCE_EXPIRED', true);
+      try { live = checkBinding(); } catch { return block('CREATIVE_INPUT_CHANGED', true); }
+      if (creativeDigest(claim) !== claimDigest || request.safety !== safety || safety.phases[phase] !== claim
+        || live?.payloadDigest !== payloadDigest || live?.accountBinding !== accountBinding || live?.sourceDigest !== sourceDigest) return block('CREATIVE_INPUT_CHANGED', true);
+    }
+    // The post-admission rebinding can also cross the deadline while hashing.
+    // A consumed admission remains held; expiry never permits another POST.
+    if (Date.parse(allowance.expiresAt) <= now()) return block('CREATIVE_ALLOWANCE_EXPIRED', true);
     effects.submissionAttempts++;
     let patch;
     try {
@@ -188,12 +207,19 @@ export function createCreativeLifecycle({ state, campaign, request, persist, dur
       request.ownerAction = 'The provider may have accepted this request. Check its recorded job before any new submission; automatic replay is blocked.';
       effects.uncertainSubmissions++;
       effects.historicalExposureUnknown = true;
+      try { await authorizePhase.recordOutcome?.(claim, 'uncertain'); } catch { /* Permanent claim and full budget hold remain. */ }
       await save();
       return { blocked: true, uncertain: true, code: 'CREATIVE_SUBMISSION_UNCERTAIN' };
     }
     // Receipt failure propagates. A restart sees either the original permanent
     // intent or the accepted upstream ID, and neither permits another POST.
+    let receiptFailure;
+    try { await authorizePhase.recordOutcome?.(claim, 'accepted', claim.upstreamId); } catch (cause) { receiptFailure = cause; }
     await save();
+    if (receiptFailure) {
+      const failure = error(safeCode(receiptFailure, 'CREATIVE_RECEIPT_UNCERTAIN'), 503);
+      failure.creativePersistenceFailure = true; failure.creativeEffects = summarizeCreativeEffects(effects); throw failure;
+    }
     return { accepted: true, upstreamId: claim.upstreamId };
   }
 
@@ -204,8 +230,16 @@ export function createCreativeLifecycle({ state, campaign, request, persist, dur
     if (claim?.status === 'accepted' && (patch.status === 'complete' || patch.stage !== phase)) {
       claim.status = 'completed'; claim.observedAt = iso(now);
     }
+    let receiptFailure;
+    if (claim?.status === 'completed' && typeof authorizePhase?.recordOutcome === 'function') {
+      try { await authorizePhase.recordOutcome(claim, 'completed', claim.upstreamId); } catch (cause) { receiptFailure = cause; }
+    }
     request.lastPollError = null;
     await save();
+    if (receiptFailure) {
+      const failure = error(safeCode(receiptFailure, 'CREATIVE_RECEIPT_UNCERTAIN'), 503);
+      failure.creativePersistenceFailure = true; failure.creativeEffects = summarizeCreativeEffects(effects); throw failure;
+    }
     return request;
   }
   const lifecycle = { mutate, observe, block, safety, effects, canAuthorize: typeof authorizePhase === 'function',
