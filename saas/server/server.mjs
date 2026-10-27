@@ -81,7 +81,7 @@ import { assertMetaContainerObserverMock, previewMetaContainerObserver, runMetaC
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
 import { listCanvaBrandTemplates, advanceCampaignCreatives } from './lib/marketing-providers.mjs';
-import { buildSupportReply } from './lib/customer-support.mjs';
+import { buildSupportReply, validateSupportInput, supportNeedsOrders, SUPPORT_ORIGINS, PUBLIC_SUPPORT_WORKSPACE, supportUnavailable } from './lib/customer-support.mjs';
 import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
 import { deriveBusinessGraph, deriveBusinessGraphSummary } from './lib/business-graph.mjs';
@@ -383,6 +383,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const costSourceStage = createCostSourceStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
   if (startupPolicy.approvalPilot && store.provider !== 'supabase') throw Object.assign(new Error('Maintenance pilot requires Supabase persistence'), { code: 'QUIET_APPROVAL_PILOT_UNAVAILABLE' });
+  if (startupPolicy.quietPublicSupport && (store.provider !== 'supabase' || typeof store.getPublicSupportOrders !== 'function')) {
+    throw Object.assign(new Error('Quiet public support requires the bounded Supabase reader'), { code:'QUIET_PUBLIC_SUPPORT_UNAVAILABLE' });
+  }
   const metaContainerObserverMock = options.metaContainerObserverMock ?? null;
   if (metaContainerObserverMock !== null) assertMetaContainerObserverMock(metaContainerObserverMock,store,env);
   const localDraftStorage = options.localDraftStorage ?? null;
@@ -1194,6 +1197,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           startupMode: startupPolicy.mode,
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
           quietCommercePreview: startupPolicy.quietCommercePreview,
+          quietPublicSupport: startupPolicy.quietPublicSupport,
           quietApprovalPilot: startupPolicy.approvalPilot?.status() || { open: false, expiresAt: null },
           quietCreativePilot: startupPolicy.creativePilot?.status() || { open: false, expiresAt: null },
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
@@ -1233,13 +1237,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
 
       if ((req.method === 'OPTIONS' || req.method === 'POST') && pathname === '/api/public/support') {
         const origin = String(req.headers.origin || '');
-        const allowedOrigins = new Set([
-          'https://packsmartsolutions.com',
-          'https://www.packsmartsolutions.com',
-          'https://packsmartsolutionscom.myshopify.com'
-        ]);
+        const allowedOrigins = new Set(SUPPORT_ORIGINS);
         if (origin && !allowedOrigins.has(origin)) throw Object.assign(new Error('Origin not allowed'), { status: 403, code: 'ORIGIN_DENIED' });
         const corsOrigin = origin || 'https://packsmartsolutions.com';
+        res.setHeader('Access-Control-Allow-Origin', corsOrigin);
+        res.setHeader('Vary', 'Origin');
         if (req.method === 'OPTIONS') {
           res.writeHead(204, {
             ...headers(),
@@ -1252,11 +1254,20 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           res.end();
           return;
         }
-        const rate = supportLimiter.check(requestIp(req));
-        if (!rate.allowed) throw Object.assign(new Error('Too many support requests; try again shortly'), { status: 429, code: 'SUPPORT_RATE_LIMITED' });
-        const body = await jsonBody(req, 8192);
-        const state = await store.get(CUSTOMER_ZERO_WORKSPACE);
-        if (!state) throw Object.assign(new Error('Support is temporarily unavailable'), { status: 503, code: 'SUPPORT_UNAVAILABLE' });
+        const supportIp = 'ip:' + requestIp(req);
+        const rate = supportLimiter.check(supportIp);
+        // A conservative instance cap also bounds callers that vary forwarded IPs.
+        const instanceRate = supportLimiter.check('instance');
+        if (!rate.allowed || !instanceRate.allowed) throw Object.assign(new Error('Too many support requests; try again shortly'), { status: 429, code: 'SUPPORT_RATE_LIMITED' });
+        supportLimiter.fail(supportIp);
+        supportLimiter.fail('instance');
+        const body = validateSupportInput(await jsonBody(req, 8192));
+        let state = { orders:[] };
+        if (supportNeedsOrders(body)) {
+          if (typeof store.getPublicSupportOrders !== 'function') throw supportUnavailable();
+          try { state = { orders:await store.getPublicSupportOrders(PUBLIC_SUPPORT_WORKSPACE) }; }
+          catch { throw supportUnavailable(); }
+        }
         const result = buildSupportReply(state, body);
         send(res, 200, result, { 'Access-Control-Allow-Origin': corsOrigin, Vary: 'Origin' });
         return;
