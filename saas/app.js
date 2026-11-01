@@ -37,6 +37,57 @@
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
   const ownerWorkspaceViews = new Set(['overview', 'profit', 'orders', 'channels', 'approvals']);
+  let catalogueBusy = false, catalogueMessage = '';
+  const cataloguePath = '/api/owner/shopify-catalogue';
+  function catalogueAttemptKey() { return 'runvara-catalogue-attempt:' + state.session?.workspace?.id + ':' + state.data?.catalogueImport?.requestId; }
+  function catalogueWasAttempted() { try { return sessionStorage.getItem(catalogueAttemptKey()) === 'sent'; } catch { return true; } }
+  function catalogueCanRun() {
+    const c=state.data?.catalogueImport;
+    return state.session?.ownerWorkspace === true && !ownerWorkspaceClosed && c?.canRun === true && c.enabled === true
+      && Date.parse(c.expiresAt)>Date.now() && !catalogueBusy && !catalogueWasAttempted();
+  }
+  function mountCatalogueImport() {
+    const root=$('#catalogue-import-panel'), c=state.data?.catalogueImport;
+    if(!root) return;
+    root.classList.toggle('hidden',state.session?.ownerWorkspace !== true || !c);
+    if(!c) return;
+    const node=(tag,text)=>{const e=document.createElement(tag);e.textContent=text;return e;};
+    root.replaceChildren(node('h2','Shopify catalogue'),node('p','Source: '+c.domain+'. Products, variants and sellable stock only. Orders, customers, Shopify changes and automatic work remain off.'));
+    root.append(node('p','Currency comes from the shop response. Stock is shown per source variant; bundles and components are not added together. On-hand, committed and incoming stock remain unknown.'));
+    const run=c.run;
+    root.append(node('p',run ? 'Request '+run.requestId+': '+run.status+'. Last source capture: '+(run.sourceCapturedAt || 'Not confirmed')+'. Multi-page snapshot consistency is unverified.' : 'No catalogue run is confirmed for this release.'));
+    if(c.requestId) {
+      root.append(node('p','Approved window ends: '+c.expiresAt+'. Maximum '+c.limits.pages+' pages, '+c.limits.products+' products. One attempt; no automatic retry.'));
+      const start=node('button','Import current Shopify catalogue once');start.id='catalogue-import-start';start.type='button';start.className='primary';start.disabled=!catalogueCanRun();
+      const status=node('button','Check catalogue request');status.id='catalogue-import-status';status.type='button';status.className='secondary';status.disabled=catalogueBusy;
+      const context=state.session, current=()=>state.session===context && !ownerWorkspaceClosed;
+      start.addEventListener('click',async()=>{
+        if(!catalogueCanRun())return;
+        const body={requestId:c.requestId,expectedRevision:c.expectedRevision};
+        try { sessionStorage.setItem(catalogueAttemptKey(),'sent'); } catch { catalogueMessage='Cannot retain attempt state. Nothing sent.';mountCatalogueImport();return; }
+        catalogueBusy=true;catalogueMessage='Import requested. Do not repeat it.';mountCatalogueImport();
+        try { const result=await request(cataloguePath,{method:'POST',body:JSON.stringify(body),catalogueSubmission:true,isCurrent:current});
+          if(current()){state.data.catalogueImport=result;catalogueMessage=result.run?.status==='imported'?'Catalogue saved. Reload dashboard to view the current rows.':'Request recorded. Check its status before any new action.';}
+        } catch(error){if(current())catalogueMessage='Outcome needs reconciliation: '+error.message+' Use Check catalogue request; do not repeat the import.';}
+        finally{catalogueBusy=false;if(current())mountCatalogueImport();}
+      });
+      status.addEventListener('click',async()=>{
+        if(catalogueBusy)return;catalogueBusy=true;mountCatalogueImport();
+        try{const result=await request(cataloguePath,{isCurrent:current});if(current()){state.data.catalogueImport=result;catalogueMessage='Status checked. This did not repeat the import.';}}
+        catch(error){if(current())catalogueMessage=error.message;}finally{catalogueBusy=false;if(current())mountCatalogueImport();}
+      });root.append(start,status);
+    }
+    if(catalogueMessage)root.append(node('p',catalogueMessage));
+    const products=(state.data.products || []).filter(p=>p.provider==='shopify');
+    for(const status of ['active','unlisted','draft','archived','unknown']){
+      const rows=products.filter(p=>(['active','unlisted','draft','archived'].includes(p.status)?p.status:'unknown')===status);if(!rows.length)continue;
+      const group=node('details','');group.append(node('summary',status+' source records ('+rows.length+') — retail eligibility not verified'));
+      for(const p of rows){const kind=p.catalogueClassification?.kind || 'unclassified';
+        group.append(node('p',p.title+' — '+kind+(p.catalogueClassification?.basis==='sku_hint_unverified'?' (SKU hint only)':'')+(p.catalogueObserved===false?' — absent from latest capture; retained history':'')));
+        for(const v of p.variants || [])group.append(node('p',(v.sku || v.id)+' | '+(v.priceDecimal ?? v.price ?? 'Unknown price')+' '+(v.currency || 'Unknown currency')+' | sellable: '+(v.stock?.available ?? v.inventory ?? 'Unknown')+' | '+v.id));
+      }root.append(group);
+    }
+  }
   let ownerWorkspaceObserver = null, ownerWorkspaceExpiry = null, ownerWorkspaceClosed = false, ownerWorkspaceEpoch = 0;
   function applyOwnerWorkspaceControls() {
     if (state.session?.ownerWorkspace !== true) return;
@@ -44,7 +95,8 @@
     for (const control of $('#app-shell').querySelectorAll('button, input, select, textarea')) {
       const view = control.dataset.view || control.dataset.viewLink;
       const available = (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
-        || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all'].includes(control.id);
+        || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all','catalogue-import-status'].includes(control.id)
+        || control.id === 'catalogue-import-start' && catalogueCanRun();
       if (!available && !control.disabled) { control.disabled = true; control.title = 'Not released in owner workspace mode'; }
     }
     for (const link of $('#app-shell').querySelectorAll('a')) {
@@ -53,7 +105,7 @@
     if ($('#refresh-all').textContent !== 'Reload dashboard') $('#refresh-all').textContent = 'Reload dashboard';
     const notice = $('#owner-workspace-notice');
     notice.classList.remove('hidden');
-    const message = 'Owner workspace — viewing and local filters are available. This dashboard does not admit imports, edits, approval decisions or paid actions. Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
+    const message = 'Owner workspace - viewing and local filters are available. ' + (state.data?.catalogueImport?.enabled ? 'Only the separately approved, one-run Shopify catalogue import is available in Channels. Other imports, edits, approval decisions and paid actions remain unavailable. ' : 'This dashboard does not admit imports, edits, approval decisions or paid actions. ') + 'Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
     if (notice.textContent !== message) notice.textContent = message;
   }
   function closeOwnerWorkspace(message) {
@@ -88,6 +140,12 @@
   function money(value) {
     if (value === '' || value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
     return new Intl.NumberFormat('en-GB', { style: 'currency', currency: 'GBP' }).format(Number(value));
+  }
+  function cataloguePrice(item) {
+    const raw=typeof item.priceDecimal === 'string' && /^\d+(\.\d+)?$/.test(item.priceDecimal) ? item.priceDecimal
+      : item.price !== null && item.price !== undefined && Number.isFinite(Number(item.price)) ? String(item.price) : 'Unknown price';
+    const currency=/^[A-Z]{3}$/.test(item.currency || '') ? item.currency : 'Unknown currency';
+    return escapeHtml(raw+' '+currency);
   }
 
   function countLabel(value) {
@@ -214,7 +272,9 @@
     const originatingSession = state.session, originatingCsrf = state.csrf;
     const headers = new Headers(config.headers || {});
     const method = String(config.method || 'GET').toUpperCase();
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path))) {
+    const catalogueRead=path===cataloguePath && method==='GET' && state.data?.catalogueImport?.requestId;
+    const catalogueWrite=path===cataloguePath && method==='POST' && config.catalogueSubmission===true && state.data?.catalogueImport?.enabled===true;
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -449,7 +509,7 @@
       localStorage.removeItem(LOCAL.economics);
       localStorage.removeItem(LOCAL.automations);
     }
-    renderAll(); showApp(); mountOwnerWorkspaceControls();
+    renderAll(); showApp(); mountCatalogueImport(); mountOwnerWorkspaceControls();
   }
 
   function setBusy(button, busy, busyText) {
@@ -863,7 +923,8 @@
   function productMatches(item) {
     const filter = state.productStatus;
     if (filter === 'all') return true;
-    if (filter === 'active') return String(item.productStatus).toLowerCase() === 'active';
+    if (filter === 'active') return String(item.productStatus).toLowerCase() === 'active' && item.catalogueObserved !== false
+      && !['component','internal_review'].includes(item.catalogueClassification?.kind);
     if (filter === 'missing-costs') return !item.complete;
     if (filter === 'profitable') return item.status === 'profitable';
     if (filter === 'below-floor') return item.status === 'below-floor';
@@ -896,7 +957,7 @@
       const image = item.productImage ? '<img src="' + escapeHtml(item.productImage) + '" alt="">' : '<span class="image-placeholder">PS</span>';
       const supplierOptions = '<option value="">No supplier mapped</option>' + suppliers.map(supplier => '<option value="' + escapeHtml(supplier.id) + '"' + (economics.supplierId === supplier.id ? ' selected' : '') + '>' + escapeHtml(supplier.name) + '</option>').join('');
       const missingTitle = item.missingFields && item.missingFields.length ? item.missingFields.join(', ') : 'Complete cost coverage';
-      return '<tr class="economics-row" data-product-id="' + escapeHtml(item.productId) + '" data-variant-id="' + escapeHtml(item.id) + '" data-sku="' + escapeHtml(item.sku) + '"><td><div class="product-cell">' + image + '<div><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.title) + ' · ' + escapeHtml(item.sku || 'No SKU') + '</small><small>Order attribution unverified · sales and stock cover unavailable</small></div></div></td><td class="numeric">' + money(item.price) + '</td><td class="numeric ' + (item.inventory !== null && item.inventory <= lowStockThreshold ? 'warn' : '') + '">' + (item.inventory == null ? '—' : escapeHtml(item.inventory)) + '</td><td><select class="econ-input compact-select" data-field="supplierId" aria-label="Supplier for ' + escapeHtml(item.sku) + '">' + supplierOptions + '</select></td><td>' + moneyInput('landed', 'Landed cost for ' + item.sku, economics) + '</td><td>' + moneyInput('packing', 'Packing cost for ' + item.sku, economics) + '</td><td>' + moneyInput('handling', 'Handling cost for ' + item.sku, economics) + '</td><td>' + moneyInput('delivery', 'Actual postage cost for ' + item.sku, economics) + '</td><td>' + moneyInput('paymentFee', 'Payment fee for ' + item.sku, economics) + '</td><td>' + moneyInput('channelFee', 'Channel fee for ' + item.sku, economics) + '</td><td>' + moneyInput('advertising', 'Advertising allocation for ' + item.sku, economics) + '</td><td>' + moneyInput('otherVariable', 'Other variable cost for ' + item.sku, economics) + '</td><td class="numeric">' + money(item.totalVariableCost) + '</td><td class="numeric ' + statusClass(item.status) + '">' + money(item.contribution) + '</td><td class="numeric ' + statusClass(item.status) + '">' + percent(item.margin) + '</td><td><span class="tag ' + statusClass(item.status) + '" title="' + escapeHtml(missingTitle) + '">' + escapeHtml(statusLabel(item.status)) + '</span><div class="table-actions"><button class="text-button cost-details" type="button">Supplier detail</button>' + (costSourceAccess() ? '<button class="text-button cost-source-open" type="button" aria-haspopup="dialog" aria-controls="cost-source-dialog">Source review</button>' : '') + '<button class="primary small-button save-economics" type="button">Save</button></div></td></tr>' +
+      return '<tr class="economics-row" data-product-id="' + escapeHtml(item.productId) + '" data-variant-id="' + escapeHtml(item.id) + '" data-sku="' + escapeHtml(item.sku) + '"><td><div class="product-cell">' + image + '<div><b>' + escapeHtml(item.productTitle) + '</b><small>' + escapeHtml(item.title) + ' · ' + escapeHtml(item.sku || 'No SKU') + '</small><small>' + escapeHtml((item.catalogueClassification?.kind || 'Unclassified') + ' / ' + item.productStatus) + '</small><small>Order attribution unverified · sales and stock cover unavailable</small></div></div></td><td class="numeric">' + cataloguePrice(item) + '</td><td class="numeric ' + (item.inventory !== null && item.inventory <= lowStockThreshold ? 'warn' : '') + '">' + (item.inventory == null ? '—' : escapeHtml(item.inventory)) + '</td><td><select class="econ-input compact-select" data-field="supplierId" aria-label="Supplier for ' + escapeHtml(item.sku) + '">' + supplierOptions + '</select></td><td>' + moneyInput('landed', 'Landed cost for ' + item.sku, economics) + '</td><td>' + moneyInput('packing', 'Packing cost for ' + item.sku, economics) + '</td><td>' + moneyInput('handling', 'Handling cost for ' + item.sku, economics) + '</td><td>' + moneyInput('delivery', 'Actual postage cost for ' + item.sku, economics) + '</td><td>' + moneyInput('paymentFee', 'Payment fee for ' + item.sku, economics) + '</td><td>' + moneyInput('channelFee', 'Channel fee for ' + item.sku, economics) + '</td><td>' + moneyInput('advertising', 'Advertising allocation for ' + item.sku, economics) + '</td><td>' + moneyInput('otherVariable', 'Other variable cost for ' + item.sku, economics) + '</td><td class="numeric">' + money(item.totalVariableCost) + '</td><td class="numeric ' + statusClass(item.status) + '">' + money(item.contribution) + '</td><td class="numeric ' + statusClass(item.status) + '">' + percent(item.margin) + '</td><td><span class="tag ' + statusClass(item.status) + '" title="' + escapeHtml(missingTitle) + '">' + escapeHtml(statusLabel(item.status)) + '</span><div class="table-actions"><button class="text-button cost-details" type="button">Supplier detail</button>' + (costSourceAccess() ? '<button class="text-button cost-source-open" type="button" aria-haspopup="dialog" aria-controls="cost-source-dialog">Source review</button>' : '') + '<button class="primary small-button save-economics" type="button">Save</button></div></td></tr>' +
         '<tr class="cost-detail-row hidden" data-sku="' + escapeHtml(item.sku) + '"><td colspan="16"><div class="cost-detail-grid"><label>Supplier SKU<input class="econ-input" data-field="supplierSku" value="' + escapeHtml(inputValue(economics.supplierSku)) + '"></label><label><span>Box quantity<br>(saleable SKU units)</span><input class="econ-input" data-field="boxQuantity" type="number" min="0" step="1" value="' + escapeHtml(inputValue(economics.boxQuantity)) + '"></label><label><span>Box price (£)<br>(same box)</span><input class="econ-input" data-field="boxPrice" type="number" min="0" step="0.01" value="' + escapeHtml(inputValue(economics.boxPrice)) + '"></label><label><span>Supplier cost (£)<br>per saleable SKU unit</span><input class="econ-input" data-field="supplierUnitCost" type="number" min="0" step="0.0001" value="' + escapeHtml(inputValue(economics.supplierUnitCost)) + '"></label><label><span>Inbound delivery (£)<br>per saleable SKU unit</span><input class="econ-input" data-field="supplierDelivery" type="number" min="0" step="0.0001" value="' + escapeHtml(inputValue(economics.supplierDelivery)) + '"></label><label>Supplier VAT rate (%)<input class="econ-input" data-field="supplierVatRate" type="number" min="0" max="100" step="0.1" value="' + escapeHtml(inputValue(economics.supplierVatRate)) + '"></label><label>VAT recoverable<select class="econ-input" data-field="supplierVatRecoverable"><option value=""' + (economics.supplierVatRecoverable == null ? ' selected' : '') + '>Unknown</option><option value="true"' + (economics.supplierVatRecoverable === true ? ' selected' : '') + '>Yes</option><option value="false"' + (economics.supplierVatRecoverable === false ? ' selected' : '') + '>No</option></select></label><label>Margin floor (%)<input class="econ-input" data-field="marginFloor" type="number" min="0" max="100" step="0.1" value="' + escapeHtml(inputValue(economics.marginFloor)) + '"></label><label class="detail-notes">Notes<textarea class="econ-input" data-field="notes">' + escapeHtml(inputValue(economics.notes)) + '</textarea></label></div><p class="muted tiny">A recorded landed cost takes priority. If blank, the helper uses supplier cost per saleable SKU unit, or box price divided by box quantity. Supplier delivery, VAT rate and VAT recovery treatment must also be known. No pack conversion is applied.</p></td></tr>';
     }).join('') || '<tr><td colspan="16" class="empty-state">No products match this filter.</td></tr>';
     $('#economics-body').querySelectorAll('.econ-input').forEach(field=>{field.dataset.savedValue = field.value;});

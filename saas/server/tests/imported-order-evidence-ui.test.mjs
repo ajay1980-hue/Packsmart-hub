@@ -121,7 +121,7 @@ test('imported evidence keeps exact currency/status/cancellation cohorts and dis
   assert.equal(h.document.querySelector('#product-sort [value="revenue-desc"]'), null);
   assert.equal(h.document.querySelector('#product-sort [value="units-desc"]'), null);
   assert.match(h.document.getElementById('economics-body').textContent, /sales and stock cover unavailable/);
-  assert.match(h.document.getElementById('economics-body').textContent, /£55\.00/,'catalogue economics remains separate');
+  assert.match(h.document.getElementById('economics-body').textContent, /55 Unknown currency/,'legacy catalogue price without source currency must not inherit reporting GBP');
   assert.equal(h.calls.every(call => call.method === 'GET'), true);
 });
 

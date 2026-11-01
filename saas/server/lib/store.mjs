@@ -42,6 +42,7 @@ import {
   providerUsageUnavailableReason, USAGE_SUMMARY_COLUMNS, USAGE_SUMMARY_MAX_SCOPES
 } from './usage-governance.mjs';
 import { addAudit } from './events.mjs';
+import { assertCatalogueImportPermit } from './shopify-catalogue-import.mjs';
 export { addAudit };
 
 const PERSISTED = Symbol('persisted');
@@ -1652,8 +1653,13 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit } = {}) {
     assertWorkspace(workspaceId, state);
+    if (catalogueImportPermit !== undefined) {
+      if (protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_CATALOGUE_PERSISTENCE_PERMIT_INVALID'});
+      assertCatalogueImportPermit(catalogueImportPermit, workspaceId, state);
+      ownedSnapshot = true;
+    }
     if (protectedMetaCommit !== undefined) {
       if (protectedContentCommit !== undefined || protectedOrderRecovery !== undefined || contentPilotPermit !== undefined) throw metaReceiptError();
       validateMetaReceiptDescriptor(protectedMetaCommit, { requireIssued: true });
@@ -1697,7 +1703,9 @@ class SupabaseStore {
     // Plan against the predecessor and original run references, not the new
     // revision or a deep clone. Scheduler claim handles survive save/finish.
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(protectedContentCommit ? source : state) : null;
-    const upgraded = { ...upgradeState(source), _revision: crypto.randomUUID(), storageReady: true };
+    // Catalogue imports preserve unrelated exact values. Normal archive/retention
+    // and size/CAS guards below still run; no settings or historical upgrade.
+    const upgraded = { ...(catalogueImportPermit ? source : upgradeState(source)), _revision: crypto.randomUUID(), storageReady: true };
     // The optional maintenance guard runs before the first archive write.
     saveGuard(beforeEffects)(upgraded, { automationArchives: Boolean(automationPlan?.archiveCandidates.length || automationPlan?.summary.existingStubsToEvict),
       briefArchives: Boolean(briefPlan?.candidates.length) });
@@ -1761,7 +1769,14 @@ class SupabaseStore {
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     if (briefPlan?.candidates.length) assertBriefHistoryPlanCurrent(briefPlan);
     assertCurrent(upgraded);
-    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit });
+    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, allowRetry: !catalogueImportPermit });
+    if (catalogueImportPermit) {
+      // Do not mirror orders/customer/reporting records as a side effect of a
+      // catalogue-only run. Reporting is explicitly pending. No write replay.
+      this.invalidateSchedulerCache(workspaceId); this.mirrorRevisions.delete(workspaceId);
+      for (const key of this.mirrorDigests.keys()) if (key.startsWith(`${workspaceId}:`)) this.mirrorDigests.delete(key);
+      return markPersisted(upgraded);
+    }
     if (protectedResult?.recovered) {
       // The exact original primary transaction is proven, even if another
       // replica has since advanced the workspace. Never mirror or save this
