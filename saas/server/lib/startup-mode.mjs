@@ -1,6 +1,7 @@
 import { createQuietApprovalPilot, PILOT_BASE } from './quiet-approval-pilot.mjs';
 import { createQuietCreativePilot, creativePilotAction } from './quiet-creative-pilot.mjs';
 import { createCataloguePolicy, CATALOGUE_PATH } from './shopify-catalogue-import.mjs';
+import { SHOPIFY_DIAGNOSTIC_PATH } from './shopify-credential-metadata.mjs';
 
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
@@ -16,6 +17,11 @@ export function createStartupPolicy(env, staticPathnames) {
     throw Object.assign(new Error('Owner workspace requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_WORKSPACE_INVALID' });
   }
   const quietOwnerWorkspace = quiet && ownerWorkspace === 'enabled/v1';
+  const shopifyDiagnostic = env.RUNVARA_QUIET_SHOPIFY_DIAGNOSTIC === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_SHOPIFY_DIAGNOSTIC;
+  if (!['disabled/v1', 'enabled/v1'].includes(shopifyDiagnostic) || (shopifyDiagnostic === 'enabled/v1' && !quietOwnerWorkspace)) {
+    throw Object.assign(new Error('Shopify diagnostic requires quiet owner workspace and an exact switch'), { code: 'QUIET_SHOPIFY_DIAGNOSTIC_INVALID' });
+  }
+  const quietShopifyDiagnostic = shopifyDiagnostic === 'enabled/v1';
   const ownerLogin = env.RUNVARA_QUIET_OWNER_LOGIN === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_OWNER_LOGIN;
   if (!['disabled/v1', 'enabled/v1'].includes(ownerLogin) || (ownerLogin === 'enabled/v1' && !quiet)) {
     throw Object.assign(new Error('Quiet owner login requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_LOGIN_INVALID' });
@@ -38,6 +44,7 @@ export function createStartupPolicy(env, staticPathnames) {
     mode,
     quiet,
     quietOwnerWorkspace,
+    quietShopifyDiagnostic,
     quietOwnerLogin,
     quietCommercePreview,
     quietPublicSupport,
@@ -46,6 +53,7 @@ export function createStartupPolicy(env, staticPathnames) {
     catalogue,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
+      if (quietShopifyDiagnostic && method === 'GET' && pathname === SHOPIFY_DIAGNOSTIC_PATH) return true;
       if (catalogue && pathname === CATALOGUE_PATH && (method === 'GET' || method === 'POST' && catalogue.available())) return true;
       if (quietOwnerWorkspace && method === 'GET' && pathname === '/api/bootstrap') return true;
       if (quietPublicSupport && ['OPTIONS', 'POST'].includes(method) && pathname === '/api/public/support') return true;

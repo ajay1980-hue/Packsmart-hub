@@ -5,6 +5,7 @@ import { assertQuietOwnerWorkspace } from './quiet-owner-workspace.mjs';
 import { inspectShopifyCataloguePage } from './shopify-catalogue-read.mjs';
 import { addAudit } from './events.mjs';
 import { decryptCredentials } from './security.mjs';
+import { classifyShopifyCredential } from './shopify-credential-metadata.mjs';
 
 export const CATALOGUE_PATH = '/api/owner/shopify-catalogue';
 export const CATALOGUE_LIMITS = Object.freeze({pages:20,productsPerPage:10,variantsPerProduct:50,products:200,variants:1000,pageBytes:524288,totalBytes:2097152,windowMs:600000});
@@ -132,9 +133,10 @@ function sourceBinding(state,integrations,env) {
   if(rows.length!==1 || !c?.id || !c.encryptedCredentials || state.connectionSettings?.shopify?.disconnected
     || c.metadata?.shopDomain!==DOMAIN) throw catalogueError('SOURCE_INVALID');
   const credentials=decryptCredentials(c.encryptedCredentials,env.CREDENTIALS_KEY);
-  if(Object.hasOwn(credentials,'expiresAt') && (!Number.isFinite(credentials.expiresAt) || credentials.expiresAt<=Date.now()+60000)) throw catalogueError('TOKEN_RENEWAL_REQUIRED');
+  const metadata=classifyShopifyCredential(credentials);
+  if(!metadata.metadataCompatible) throw catalogueError(metadata.code);
   const config=integrations.shopifyConfig(state);
-  if(config.connection?.id!==c.id || config.domain!==DOMAIN || config.apiVersion!==VERSION || !config.accessToken) throw catalogueError('TOKEN_RENEWAL_REQUIRED');
+  if(config.connection?.id!==c.id || config.domain!==DOMAIN || config.apiVersion!==VERSION || !config.accessToken) throw catalogueError('SOURCE_CONFIG_MISMATCH');
   return {config,binding:{connectionId:c.id,domain:DOMAIN,apiVersion:VERSION,credentialDigest:digest(c.encryptedCredentials),settingsDigest:digest(state.connectionSettings?.shopify || {})}};
 }
 function ledger(state) {

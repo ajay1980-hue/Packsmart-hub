@@ -5,6 +5,7 @@ import net from 'node:net';
 import {chromium} from 'playwright';
 import {fixture,product,page as dataPage,response,ID} from './shopify-catalogue-import-fixture.mjs';
 import {CATALOGUE_PATH} from '../lib/shopify-catalogue-import.mjs';
+import {SHOPIFY_DIAGNOSTIC_PATH} from '../lib/shopify-credential-metadata.mjs';
 const folder=path.resolve(process.env.CATALOGUE_BROWSER_EVIDENCE || '.catalogue-browser-evidence');await fs.mkdir(folder,{recursive:true});
 const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH});
 let checks=0,external=0;const failures=[],events=[];const check=(x,label)=>{assert.ok(x,label);checks++;};
@@ -54,7 +55,7 @@ try{
   await page.route('**/*',r=>{const q=r.request(),u=new URL(q.url());if(u.origin!==f.base){external++;return r.abort();}events.push({method:q.method(),path:u.pathname});return r.continue();});
   try{
    await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});await page.locator('#main-nav [data-view="channels"]').click();
-   if(scenario==='disabled'){check(await page.locator('#catalogue-import-start').count()===0,'default off has no import action');check(f.reads.length===0,'default off makes no provider calls');}
+   if(scenario==='disabled'){check(await page.locator('#catalogue-import-start').count()===0,'default off has no import action');check(await page.locator('#shopify-credential-diagnostic').count()===0,'default off has no diagnostic action');check(f.reads.length===0,'default off makes no provider calls');}
    if(scenario==='expired'){check(await page.locator('#catalogue-import-start').isDisabled(),'expired descriptor disabled');check(f.reads.length===0,'expired descriptor makes no provider calls');}
    if(scenario==='uncertain'){
     await page.locator('#catalogue-import-start').click();await page.getByText('Outcome needs reconciliation:',{exact:false}).waitFor();check(await page.locator('#catalogue-import-start').isDisabled(),'uncertain response cannot be resubmitted');
@@ -63,6 +64,28 @@ try{
     await context.clearCookies();await context.addCookies([{name:'packsmart_session',value:f.token,url:f.base,httpOnly:true,sameSite:'Strict'}]);await page.reload({waitUntil:'networkidle'});
     await page.locator('#main-nav [data-view="channels"]').click();check(await page.locator('#catalogue-import-start').isDisabled(),'session reentry keeps consumed logical request disabled');check(f.reads.length===1,'unknown outcome not replayed');
    }
+  }finally{await context.close();await f.close();}
+ }
+ for(const width of [390,1200]){
+  const probe=net.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));const port=probe.address().port;await new Promise(r=>probe.close(r));
+  const f=await fixture(null,{port,env:{NODE_ENV:'test',APP_PUBLIC_URL:`http://127.0.0.1:${port}`,RUNVARA_QUIET_SHOPIFY_CATALOGUE:'disabled/v1',RUNVARA_QUIET_SHOPIFY_DIAGNOSTIC:'enabled/v1'}});
+  const context=await browser.newContext({viewport:{width,height:900}});await context.addCookies([{name:'packsmart_session',value:f.token,url:f.base,httpOnly:true,sameSite:'Strict'}]);
+  const page=await context.newPage();page.on('pageerror',e=>failures.push(e.message));let diagnostics=0;
+  await page.route('**/*',r=>{const q=r.request(),u=new URL(q.url());if(u.origin!==f.base){external++;return r.abort();}events.push({method:q.method(),path:u.pathname});if(u.pathname===SHOPIFY_DIAGNOSTIC_PATH)diagnostics++;return r.continue();});
+  try{
+   const before=structuredClone(f.fake.states.get(ID));
+   await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});
+   if(width<900)await page.locator('#mobile-menu').click();await page.locator('#main-nav [data-view="channels"]').click();
+   check(diagnostics===0,'metadata is never read automatically');check(await page.locator('#catalogue-import-start').count()===0,'diagnostic does not enable import');
+   await page.locator('#shopify-credential-diagnostic').click();await page.getByText('Shopify usability remains unverified.',{exact:false}).waitFor();
+   check(diagnostics===1,'one explicit metadata GET');check(f.reads.length===0,'diagnostic makes no Shopify request');
+   check((await page.locator('#shopify-credential-diagnostic-result').innerText()).includes('non_expiring_metadata'),'metadata result distinguished from provider validity');
+   check(!(await page.locator('#catalogue-import-panel').innerText()).includes('synthetic-token'),'no token in DOM');
+   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'diagnostic responsive layout');
+   assert.deepEqual(f.fake.states.get(ID),before);check(f.calls.every(c=>c.method==='GET'),'diagnostic has no business or credential writes');
+   f.fake.states.get(ID).users[0].sessionVersion++;
+   await page.locator('#shopify-credential-diagnostic').click();await page.locator('#app-shell').waitFor({state:'hidden'});
+   check(await page.locator('#app-shell').isHidden(),'revocation closes metadata view');check(f.reads.length===0,'revocation does not trigger fallback');
   }finally{await context.close();await f.close();}
  }
  assert.deepEqual(failures,[]);check(external===0,'no external browser traffic');
