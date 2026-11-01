@@ -38,6 +38,7 @@
   const $$ = selector => Array.from(document.querySelectorAll(selector));
   const ownerWorkspaceViews = new Set(['overview', 'profit', 'orders', 'channels', 'approvals']);
   let catalogueBusy = false, catalogueMessage = '';
+  let credentialDiagnosticBusy = false, credentialDiagnosticMessage = '';
   const cataloguePath = '/api/owner/shopify-catalogue';
   function catalogueAttemptKey() { return 'runvara-catalogue-attempt:' + state.session?.workspace?.id + ':' + state.data?.catalogueImport?.requestId; }
   function catalogueWasAttempted() { try { return sessionStorage.getItem(catalogueAttemptKey()) === 'sent'; } catch { return true; } }
@@ -78,6 +79,27 @@
       });root.append(start,status);
     }
     if(catalogueMessage)root.append(node('p',catalogueMessage));
+    if(state.data.shopifyCredentialDiagnosticAvailable === true) {
+      const check=node('button','Check stored Shopify connection metadata');check.id='shopify-credential-diagnostic';check.type='button';check.className='secondary';check.disabled=credentialDiagnosticBusy;
+      const context=state.session, epoch=ownerWorkspaceEpoch, current=()=>state.session===context && epoch===ownerWorkspaceEpoch && !ownerWorkspaceClosed;
+      check.addEventListener('click',async()=>{
+        if(credentialDiagnosticBusy || !current())return;
+        credentialDiagnosticBusy=true;credentialDiagnosticMessage='Checking stored metadata only; no Shopify request.';mountCatalogueImport();
+        try {
+          const result=await request('/api/owner/shopify-credential-metadata',{isCurrent:current});
+          if(current()) {
+            const type=['oauth','direct_access_token','client_credentials','missing'].includes(result.credentialType)?result.credentialType:'unknown';
+            const expiry=['non_expiring_metadata','future','expired','expiring','malformed'].includes(result.expiryState)?result.expiryState:'unknown';
+            credentialDiagnosticMessage='Stored credential: '+(result.credentialPresent===true?'present':'not confirmed')+'. Type: '+type+'. Expiry metadata: '+expiry+'. Account/configuration match: '+(result.bindingMatches===true && result.configMatches===true?'yes':'not confirmed')+'. Metadata compatible: '+(result.metadataCompatible===true?'yes':'no')+'. Shopify usability remains unverified. No token was renewed or import started.';
+          }
+        } catch(error) { if(current()) {
+          if(error.status===401 || error.status===403)closeOwnerWorkspace('Owner access could not be verified. Check your session before continuing.');
+          else credentialDiagnosticMessage='Connection metadata could not be checked. No renewal or import was requested.';
+        } }
+        finally { credentialDiagnosticBusy=false;if(current())mountCatalogueImport(); }
+      });
+      root.append(check);if(credentialDiagnosticMessage){const message=node('p',credentialDiagnosticMessage);message.id='shopify-credential-diagnostic-result';root.append(message);}
+    }
     const products=(state.data.products || []).filter(p=>p.provider==='shopify');
     for(const status of ['active','unlisted','draft','archived','unknown']){
       const rows=products.filter(p=>(['active','unlisted','draft','archived'].includes(p.status)?p.status:'unknown')===status);if(!rows.length)continue;
@@ -96,7 +118,8 @@
       const view = control.dataset.view || control.dataset.viewLink;
       const available = (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
         || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all','catalogue-import-status'].includes(control.id)
-        || control.id === 'catalogue-import-start' && catalogueCanRun();
+        || control.id === 'catalogue-import-start' && catalogueCanRun()
+        || control.id === 'shopify-credential-diagnostic' && state.data?.shopifyCredentialDiagnosticAvailable === true;
       if (!available && !control.disabled) { control.disabled = true; control.title = 'Not released in owner workspace mode'; }
     }
     for (const link of $('#app-shell').querySelectorAll('a')) {
@@ -109,7 +132,7 @@
     if (notice.textContent !== message) notice.textContent = message;
   }
   function closeOwnerWorkspace(message) {
-    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++;
+    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = '';
     state.data = null; ownerWorkspaceObserver?.disconnect(); clearTimeout(ownerWorkspaceExpiry);
     if (state.session) { showMaintenanceSession(state.session); $('#startup-error').textContent = message; }
   }
@@ -274,7 +297,8 @@
     const method = String(config.method || 'GET').toUpperCase();
     const catalogueRead=path===cataloguePath && method==='GET' && state.data?.catalogueImport?.requestId;
     const catalogueWrite=path===cataloguePath && method==='POST' && config.catalogueSubmission===true && state.data?.catalogueImport?.enabled===true;
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite) {
+    const credentialDiagnosticRead=path==='/api/owner/shopify-credential-metadata' && method==='GET' && state.data?.shopifyCredentialDiagnosticAvailable===true;
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -437,7 +461,7 @@
     try {
       const session = await request('/api/auth/session');
       resetBusinessGraph(); state.session = session; state.csrf = session.csrf;
-      ownerWorkspaceClosed = false; ownerWorkspaceEpoch++;
+      ownerWorkspaceClosed = false; ownerWorkspaceEpoch++; credentialDiagnosticMessage = '';
       if (session.maintenance === true && session.ownerWorkspace !== true) { showMaintenanceSession(session); return false; }
       if (session.user && session.user.passwordChangeRequired) { showPasswordSetup(); return false; }
       return true;
