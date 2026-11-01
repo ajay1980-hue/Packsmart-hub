@@ -36,6 +36,48 @@
 
   const $ = selector => document.querySelector(selector);
   const $$ = selector => Array.from(document.querySelectorAll(selector));
+  const ownerWorkspaceViews = new Set(['overview', 'profit', 'orders', 'channels', 'approvals']);
+  let ownerWorkspaceObserver = null, ownerWorkspaceExpiry = null, ownerWorkspaceClosed = false, ownerWorkspaceEpoch = 0;
+  function applyOwnerWorkspaceControls() {
+    if (state.session?.ownerWorkspace !== true) return;
+    document.body.classList.add('owner-workspace');
+    for (const control of $('#app-shell').querySelectorAll('button, input, select, textarea')) {
+      const view = control.dataset.view || control.dataset.viewLink;
+      const available = (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
+        || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all'].includes(control.id);
+      if (!available && !control.disabled) { control.disabled = true; control.title = 'Not released in owner workspace mode'; }
+    }
+    for (const link of $('#app-shell').querySelectorAll('a')) {
+      if (link.getAttribute('aria-disabled') !== 'true') { link.setAttribute('aria-disabled', 'true'); link.tabIndex = -1; link.title = 'Not released in owner workspace mode'; }
+    }
+    if ($('#refresh-all').textContent !== 'Reload dashboard') $('#refresh-all').textContent = 'Reload dashboard';
+    const notice = $('#owner-workspace-notice');
+    notice.classList.remove('hidden');
+    const message = 'Owner workspace — viewing and local filters are available. This dashboard does not admit imports, edits, approval decisions or paid actions. Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
+    if (notice.textContent !== message) notice.textContent = message;
+  }
+  function closeOwnerWorkspace(message) {
+    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++;
+    state.data = null; ownerWorkspaceObserver?.disconnect(); clearTimeout(ownerWorkspaceExpiry);
+    if (state.session) { showMaintenanceSession(state.session); $('#startup-error').textContent = message; }
+  }
+  function mountOwnerWorkspaceControls() {
+    if (state.session?.ownerWorkspace !== true) return;
+    applyOwnerWorkspaceControls(); ownerWorkspaceObserver?.disconnect();
+    ownerWorkspaceObserver = new MutationObserver(applyOwnerWorkspaceControls);
+    ownerWorkspaceObserver.observe($('#app-shell'), { childList: true, subtree: true });
+    clearTimeout(ownerWorkspaceExpiry);
+    const remaining = Date.parse(state.session.expiresAt) - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0 || remaining > 2147483647) { closeOwnerWorkspace('Session expiry could not be verified. Check your session before continuing.'); return; }
+    ownerWorkspaceExpiry = setTimeout(() => closeOwnerWorkspace('Your session expired. Check your session before continuing.'), remaining);
+  }
+  document.addEventListener('click', event => {
+    if (state.session?.ownerWorkspace && event.target.closest('#app-shell a[aria-disabled="true"]')) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  document.addEventListener('submit', event => {
+    if (state.session?.ownerWorkspace && event.target.closest('#app-shell')) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, true);
+  window.addEventListener('pagehide', () => { if (state.session?.ownerWorkspace) closeOwnerWorkspace('Check your session to reopen the workspace.'); });
 
   function escapeHtml(value) {
     return String(value == null ? '' : value)
@@ -172,6 +214,9 @@
     const originatingSession = state.session, originatingCsrf = state.csrf;
     const headers = new Headers(config.headers || {});
     const method = String(config.method || 'GET').toUpperCase();
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path))) {
+      throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
+    }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
     if (state.csrf && method !== 'GET' && method !== 'HEAD') headers.set('X-CSRF-Token', state.csrf);
     let response, payload = {};
@@ -332,7 +377,8 @@
     try {
       const session = await request('/api/auth/session');
       resetBusinessGraph(); state.session = session; state.csrf = session.csrf;
-      if (session.maintenance === true) { showMaintenanceSession(session); return false; }
+      ownerWorkspaceClosed = false; ownerWorkspaceEpoch++;
+      if (session.maintenance === true && session.ownerWorkspace !== true) { showMaintenanceSession(session); return false; }
       if (session.user && session.user.passwordChangeRequired) { showPasswordSetup(); return false; }
       return true;
     } catch (error) {
@@ -353,6 +399,8 @@
   }
 
   async function loadBootstrap(options) {
+    const ownerSession = state.session?.ownerWorkspace === true ? state.session : null;
+    const ownerEpoch = ownerWorkspaceEpoch;
     interruptCostSource();
     window.RunvaraBriefHistory?.reset();
     resetSeoReview('Refreshing SEO review. Classification is unavailable until the current workspace snapshot loads.');
@@ -362,11 +410,21 @@
     resetObjectiveEditing();
     resetBusinessGraph();
     const config = Object.assign({ migrate: true }, options || {});
+    if (state.session?.ownerWorkspace) config.migrate = false;
     if (config.migrate) {
       try { await migratePilotData(); }
       catch (error) { showMessage('Pilot migration needs attention: ' + error.message, 'error'); }
     }
-    const data = await request('/api/bootstrap');
+    let data;
+    try {
+      data = await request('/api/bootstrap');
+      if (ownerSession && (state.session !== ownerSession || ownerEpoch !== ownerWorkspaceEpoch || ownerWorkspaceClosed)) return;
+      if (ownerSession && (data.ownerWorkspace !== true || data.workspace?.id !== ownerSession.workspace.id || data.user?.id !== ownerSession.user.id || data.user?.role !== 'owner' || !(Date.parse(ownerSession.expiresAt) > Date.now()))) throw new Error('Owner workspace response could not be verified.');
+    } catch (error) {
+      if (ownerSession && (state.session !== ownerSession || ownerEpoch !== ownerWorkspaceEpoch)) return;
+      if (ownerSession) closeOwnerWorkspace(error.message);
+      throw error;
+    }
     const currentSeoLoad = seoTicket.epoch === seoReviewUI.epoch && seoTicket.session === state.session && seoTicket.signature === seoSessionSignature();
     resetBusinessGraph();
     if (state.data?.workspace?.id !== data.workspace.id || state.data?.user?.id !== data.user?.id || state.data?.user?.role !== data.user?.role) resetObjectiveEditing(true);
@@ -387,9 +445,11 @@
     $('#operator-nav-label').classList.toggle('hidden', !data.launchAdmin);
     if (!data.launchAdmin && state.view === 'fleet') state.view = 'overview';
     $('#customer-zero-manager').classList.toggle('hidden', data.workspace.id !== 'packsmart-solutions');
-    localStorage.removeItem(LOCAL.economics);
-    localStorage.removeItem(LOCAL.automations);
-    renderAll(); showApp();
+    if (!state.session?.ownerWorkspace) {
+      localStorage.removeItem(LOCAL.economics);
+      localStorage.removeItem(LOCAL.automations);
+    }
+    renderAll(); showApp(); mountOwnerWorkspaceControls();
   }
 
   function setBusy(button, busy, busyText) {
@@ -399,6 +459,7 @@
   }
 
   function setView(view) {
+    if (state.session?.ownerWorkspace && !ownerWorkspaceViews.has(view)) return;
     if (view !== 'approvals') approvalRequestUI?.interrupt();
     if (view === 'issues') renderSeoReview();
     if (view !== state.view) window.RunvaraConnections?.interruptContent('Navigation changed');
@@ -748,7 +809,7 @@
     $('#command-headline').textContent = dashboard.pendingApprovals ? `${dashboard.pendingApprovals} decisions await your judgement.` : dashboard.integrationIssues ? 'Your channels need attention.' : dashboard.stockRisks ? 'Keep your inventory in view.' : dashboard.products ? 'Your business, in perspective.' : 'Your command centre starts here.';
     $('#command-direction').textContent = top ? top.title + '. ' + top.detail : 'Connect your chosen channels to build a reliable operational picture.';
     const pendingApprovals = Number(dashboard.pendingApprovals || 0);
-    $('#command-posture').innerHTML = window.RunvaraUI.badge(state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') +
+    $('#command-posture').innerHTML = window.RunvaraUI.badge(state.session?.ownerWorkspace ? 'Automatic work paused' : state.data.autopilot?.enabled ? 'Autopilot on' : 'Autopilot paused','neutral') +
       window.RunvaraUI.badge(pendingApprovals ? pendingApprovals + (pendingApprovals === 1 ? ' approval waiting' : ' approvals waiting') : 'No approvals waiting', pendingApprovals ? 'warn' : 'good') +
       '<small>Protected actions still require owner approval before execution</small>';
     renderHypergrowthCommand(); renderTrajectory(); renderOperationsStream();
@@ -782,7 +843,7 @@
     $('#priority-list').innerHTML = (dashboard.recommendations || []).map((item, index) => '<li><span class="priority-number">' + (index + 1) + '</span><button class="priority-link" data-view-link="' + escapeHtml(item.view || 'overview') + '" data-target-filter="' + escapeHtml(item.filter || '') + '"><b>' + escapeHtml(item.title) + '</b><small>' + escapeHtml(item.detail) + '</small></button><span class="tag ' + (item.actionType === 'safe' ? 'good">Safe' : 'warn">Approval') + '</span></li>').join('') || '<li class="empty-state">No recommended actions.</li>';
     $('#control-status').innerHTML = [
       ['Pending approvals', dashboard.pendingApprovals || 0, dashboard.pendingApprovals ? 'warn' : 'good'],
-      ['Active automations', String(dashboard.activeAutomations || 0) + '/' + String(dashboard.automationCount || 0), dashboard.activeAutomations ? 'good' : 'warn'],
+      [state.session?.ownerWorkspace ? 'Saved enabled rules (not running)' : 'Active automations', String(dashboard.activeAutomations || 0) + '/' + String(dashboard.automationCount || 0), state.session?.ownerWorkspace ? 'neutral' : dashboard.activeAutomations ? 'good' : 'warn'],
       ['Recorded SEO findings', countLabel(dashboard.seoIssues), dashboard.seoIssues == null ? 'neutral' : dashboard.seoIssues ? 'warn' : 'neutral'],
       ['Recorded customer-service issues', countLabel(dashboard.customerServiceIssues), dashboard.customerServiceIssues == null ? 'neutral' : dashboard.customerServiceIssues ? 'warn' : 'good'],
       ['Integration issues', dashboard.integrationIssues || 0, dashboard.integrationIssues ? 'warn' : 'good'],
@@ -3532,7 +3593,7 @@
   $('#sync-shopify').addEventListener('click', event => syncProvider('shopify', event.currentTarget));
   $('#sync-ebay').addEventListener('click', event => syncProvider('ebay', event.currentTarget));
   $('#sync-all-channels').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Syncing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('All available commerce sources refreshed read-only.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
-  $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); try { await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage('Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); } });
+  $('#refresh-all').addEventListener('click', async event => { const button = event.currentTarget; setBusy(button, true, 'Reloading...'); try { if (!state.session?.ownerWorkspace) await request('/api/integrations/sync', { method: 'POST', body: '{}' }); await loadBootstrap({ migrate: false }); showMessage(state.session?.ownerWorkspace ? 'Dashboard reloaded from retained records. No source sync ran.' : 'Operations data refreshed.'); } catch (error) { showMessage(error.message, 'error'); } finally { setBusy(button, false); if (state.session?.ownerWorkspace) applyOwnerWorkspaceControls(); } });
   $('#refresh-audit').addEventListener('click', event => { const button = event.currentTarget; setBusy(button, true, 'Refreshing…'); loadAudit().catch(error => showMessage(error.message, 'error')).finally(() => setBusy(button, false)); });
   $('#logout').addEventListener('click', async () => { resetSeoReview(); window.RunvaraConnections?.interruptContent('Signing out', true); resetObjectiveEditing(true); resetBusinessGraph(true); window.RunvaraOutcomes?.reset(); window.RunvaraActivity?.reset(); window.RunvaraBriefHistory?.reset(); pauseObjectiveReview('Signing out. Status checks paused.'); resetAutomationHistory(); try { await request('/api/auth/logout', { method: 'POST', body: '{}' }); } finally { state.session = null; state.data = null; state.csrf = ''; showLogin(); } });
   $('#show-password-change').addEventListener('click', () => $('#account-password-form').classList.toggle('hidden'));

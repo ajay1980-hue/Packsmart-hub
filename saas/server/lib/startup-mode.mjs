@@ -10,6 +10,11 @@ export function createStartupPolicy(env, staticPathnames) {
   }
   const staticPaths = new Set(staticPathnames);
   const quiet = mode === 'quiet';
+  const ownerWorkspace = env.RUNVARA_QUIET_OWNER_WORKSPACE === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_OWNER_WORKSPACE;
+  if (!['disabled/v1', 'enabled/v1'].includes(ownerWorkspace) || (ownerWorkspace === 'enabled/v1' && !quiet)) {
+    throw Object.assign(new Error('Owner workspace requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_WORKSPACE_INVALID' });
+  }
+  const quietOwnerWorkspace = quiet && ownerWorkspace === 'enabled/v1';
   const ownerLogin = env.RUNVARA_QUIET_OWNER_LOGIN === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_OWNER_LOGIN;
   if (!['disabled/v1', 'enabled/v1'].includes(ownerLogin) || (ownerLogin === 'enabled/v1' && !quiet)) {
     throw Object.assign(new Error('Quiet owner login requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_LOGIN_INVALID' });
@@ -30,6 +35,7 @@ export function createStartupPolicy(env, staticPathnames) {
   return Object.freeze({
     mode,
     quiet,
+    quietOwnerWorkspace,
     quietOwnerLogin,
     quietCommercePreview,
     quietPublicSupport,
@@ -37,6 +43,7 @@ export function createStartupPolicy(env, staticPathnames) {
     creativePilot,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
+      if (quietOwnerWorkspace && method === 'GET' && pathname === '/api/bootstrap') return true;
       if (quietPublicSupport && ['OPTIONS', 'POST'].includes(method) && pathname === '/api/public/support') return true;
       if (creativePilot?.available() && creativePilotAction(method, pathname)) return true;
       if (approvalPilot?.available() && method === 'POST' && ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action)) return true;

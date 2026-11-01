@@ -1886,6 +1886,13 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
   #cost-source-dialog input[type=date] { padding-inline:.25rem; }
 }
 /* Exact creative previews and immutable digests must remain readable on phones. */
+/* The existing owner workspace keeps navigation usable at enlarged text sizes. */
+.owner-workspace .command-bar { height: auto; min-height: 72px; flex-wrap: wrap; }
+.owner-workspace .top-actions { min-width: 0; flex-wrap: wrap; }
+.owner-workspace .filters { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.owner-workspace .filters > * { max-width: 100%; }
+.owner-workspace .top-actions .secondary, .owner-workspace .tag { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
+.owner-workspace a[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
 .creative-allowance { min-width: 0; overflow-wrap: anywhere; }
 .creative-allowance article, .creative-allowance details { min-width: 0; max-width: 100%; }
 .creative-allowance pre { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }

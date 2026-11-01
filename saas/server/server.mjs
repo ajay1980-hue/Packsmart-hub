@@ -52,6 +52,7 @@ import { createAgentOperations } from './lib/agent-ops.mjs';
 import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
 import { quietCommercePreview } from './lib/quiet-commerce-preview.mjs';
+import { assertQuietOwnerWorkspace, quietOwnerWorkspaceAvailable } from './lib/quiet-owner-workspace.mjs';
 import { PILOT_BASE, isMaintenanceApproval, runQuietApprovalPilot } from './lib/quiet-approval-pilot.mjs';
 import { CREATIVE_PILOT_BASE, creativePilotAction, runQuietCreativePilot } from './lib/quiet-creative-pilot.mjs';
 import { prepareApprovalRequest, findApprovalRequest, createApprovalRequest } from './lib/approval-request.mjs';
@@ -1158,6 +1159,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if (pathname === '/api/maintenance/commerce' && (!startupPolicy.quietCommercePreview || store.provider !== 'supabase')) {
         send(res, 503, QUIET_STARTUP_RESPONSE); return;
       }
+      if (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') {
+        if (store.provider !== 'supabase') { send(res, 503, QUIET_STARTUP_RESPONSE); return; }
+        if (url.search) throw Object.assign(new Error('Owner workspace does not accept query overrides'), { status: 400, code: 'QUIET_OWNER_WORKSPACE_INPUT_INVALID' });
+      }
       if (pilotRoute) {
         if (!startupPolicy.approvalPilot || req.method !== 'POST') { send(res, 503, QUIET_STARTUP_RESPONSE); return; }
         if (url.search) throw Object.assign(new Error('Maintenance pilot does not accept query overrides'), { code: 'MAINTENANCE_PILOT_INPUT_INVALID', status: 400 });
@@ -1195,6 +1200,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           commit: env.RENDER_GIT_COMMIT || null,
           startedAt,
           startupMode: startupPolicy.mode,
+          quietOwnerWorkspace: startupPolicy.quietOwnerWorkspace,
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
           quietCommercePreview: startupPolicy.quietCommercePreview,
           quietPublicSupport: startupPolicy.quietPublicSupport,
@@ -1316,7 +1322,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { exactSnapshot: creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { exactSnapshot: (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1516,6 +1522,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (req.method === 'GET' && pathname === '/api/auth/session') {
           send(res, 200, { workspace: auth.state.workspace, user: publicUser(auth.user), csrf: auth.session.csrf, expiresAt: new Date(auth.session.exp * 1000).toISOString(),
             ...(startupPolicy.quiet ? { maintenance: true } : {}),
+            ...(startupPolicy.quietOwnerWorkspace && quietOwnerWorkspaceAvailable(auth) ? { ownerWorkspace: true } : {}),
             ...(startupPolicy.approvalPilot?.metadata(auth) ? { approvalPilot: startupPolicy.approvalPilot.metadata(auth) } : {}),
             ...(startupPolicy.creativePilot?.metadata(auth) ? { creativePilot: startupPolicy.creativePilot.metadata(auth) } : {}),
             ...(startupPolicy.quietCommercePreview && auth.user.role === 'owner' && !auth.user.passwordChangeRequired ? { savedCommercePreview: true } : {}) });
@@ -1662,6 +1669,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         }
 
         if (req.method === 'GET' && pathname === '/api/bootstrap') {
+          if (startupPolicy.quietOwnerWorkspace) {
+            assertQuietOwnerWorkspace(auth);
+            // Existing renderers may derive briefs/audit/defaults. They receive
+            // only a detached copy; this branch never hydrates or saves it.
+            const detached = structuredClone(auth.state);
+            const payload = bootstrapPayload(detached, detached.users.find(user => user.id === auth.user.id), auth.session.csrf);
+            send(res, 200, { ...payload, ownerWorkspace: true, automaticWorkPaused: true,
+              workspaceSnapshotAt: auth.state.workspace.updatedAt ?? null,
+              brief: { ...payload.brief, transient: true } }); return;
+          }
           if (locks.has(auth.session.workspaceId) || auth.state.controlSignature === briefSourceSignature(auth.state)) {
             send(res, 200, bootstrapPayload(auth.state, auth.user, auth.session.csrf)); return;
           }
