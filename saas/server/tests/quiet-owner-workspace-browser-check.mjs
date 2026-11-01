@@ -10,6 +10,12 @@ await fs.mkdir(output, { recursive: true });
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH });
 const errors = [], requests = [], captures = []; let checks = 0, external = 0;
 const check = (value, message) => { assert.ok(value, message); checks++; };
+async function overviewActionsFit(page) {
+  return page.locator('#view-overview .section-head > .text-button').evaluateAll(buttons => buttons.length > 0 && buttons.every(button => {
+    const bounds = button.getBoundingClientRect(), parent = button.parentElement.getBoundingClientRect();
+    return bounds.left >= parent.left - 1 && bounds.right <= parent.right + 1 && button.scrollWidth <= button.clientWidth + 1;
+  }));
+}
 try {
   for (const width of [390, 1200]) {
     const requestStart = requests.length;
@@ -55,11 +61,18 @@ try {
           await page.locator(`#main-nav [data-view="${view}"]`).focus(); await page.keyboard.press('Enter');
           check(await page.locator(`#view-${view}`).isVisible(), `existing view ${view}`);
           check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `layout ${width}/${scale}/${view}`);
+          if (view === 'overview') check(await overviewActionsFit(page), `overview actions remain inside their headings ${width}/${scale}`);
         }
         if (width < 900 && !await page.locator('.sidebar').isVisible()) await page.locator('#mobile-menu').click();
         await page.locator('#main-nav [data-view="overview"]').click();
         const file = path.join(output, `existing-dashboard-${width}-${scale}.png`); await page.screenshot({ path: file, fullPage: true }); captures.push(file);
         await page.screenshot({ path: path.join(output, `viewport-${width}-${scale}.png`), fullPage: false });
+      }
+      if (width === 1200) {
+        await page.evaluate(() => { document.documentElement.style.fontFamily = 'Arial, sans-serif'; });
+        check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '200% fallback-font layout');
+        check(await overviewActionsFit(page), '200% fallback-font overview actions remain inside their headings');
+        await page.evaluate(() => { document.documentElement.style.fontFamily = ''; });
       }
       const preserved = await page.evaluate(() => ({ economics: localStorage.getItem('packsmart-saas-economics-v1'), automations: localStorage.getItem('packsmart-saas-automations-v1'), migrated: localStorage.getItem('packsmart-saas-cloud-migration-v3:packsmart-solutions') }));
       assert.deepEqual(preserved, { economics: '{"legacy-cost":"2.50"}', automations: '{"legacy-rule":false}', migrated: null }); checks++;
