@@ -79,9 +79,12 @@ export function flattenProducts(products = []) {
     productImage: product.image || null,
     description: product.description || '',
     provider: product.provider || 'shopify',
+    ...(product.source?.system === 'shopify' ? {currency:variant.currency || null,priceDecimal:variant.priceDecimal || null,
+      catalogueClassification:product.catalogueClassification,source:variant.source,stock:variant.stock,catalogueObserved:product.catalogueObserved} : {}),
+    ...(product.catalogueObserved === false ? {catalogueObserved:false,stock:{aggregateEligible:false}} : {}),
     id: variant.id || variant.externalId || variant.sku,
     externalId: variant.externalId || variant.id,
-    sku: variant.sku || `${product.handle || product.id}-${variant.title || variant.id}`,
+    sku: product.source?.system === 'shopify' ? (variant.sku ?? '') : variant.sku || `${product.handle || product.id}-${variant.title || variant.id}`,
     title: variant.title || 'Default',
     price: hasCataloguePrice(variant.price) ? amount(variant.price) : null,
     inventory: variant.inventory === null || variant.inventory === undefined ? null : amount(variant.inventory),
@@ -140,15 +143,21 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   const economics = state.economics || {};
   const productRows = variants.map(item => {
     const result = contributionFor(item, economics, { marginFloor });
+    if (item.source?.system === 'shopify' || item.catalogueObserved === false) {
+      // A current selling price is not evidence that saved cost currency/pack
+      // units match. Retain the inputs without qualifying GBP profit by default.
+      Object.assign(result,{complete:false,contribution:null,margin:null,status:'missing-costs',missingFields:[...(result.missingFields || []),'source cost currency and pack-unit mapping']});
+    }
     return { ...item, ...result, units30d: null, revenue30d: null, stockCoverDays: null, salesAttribution: 'unverified_recorded_sku_only' };
   });
   const covered = productRows.filter(item => item.complete);
   const contributionKnown = covered.filter(item => hasCataloguePrice(item.price) && Number.isFinite(item.contribution));
   const marginKnown = contributionKnown.filter(item => Number.isFinite(item.margin));
-  const missingCosts = productRows.filter(item => !item.complete);
+  const missingCosts = productRows.filter(item => item.catalogueObserved !== false && !item.complete);
   const lowMargin = marginKnown.filter(item => !contributionMeetsMargin(item.price, economics[item.sku] || economics[item.id] || {}, item.marginFloor));
   const negativeMargin = contributionKnown.filter(item => item.status === 'loss-making');
   const stockRisks = productRows.filter(item =>
+    item.catalogueObserved !== false &&
     String(item.productStatus).toLowerCase() === 'active' &&
     ((item.inventory !== null && item.inventory <= lowStockThreshold) || item.available === false)
   );
@@ -169,7 +178,7 @@ export function deriveOperations(state, { now = new Date(), lowStockThreshold = 
   const averageMargin = marginKnown.length ? marginKnown.reduce((sum, item) => sum + item.margin, 0) / marginKnown.length : null;
   const costCoverage = variants.length ? Math.round(covered.length / variants.length * 100) : 0;
   const positiveStock = productRows.filter(item => item.inventory > 0);
-  const stockWithCost = positiveStock.filter(item => deriveLandedCost(economics[item.sku] || {}).complete);
+  const stockWithCost = positiveStock.filter(item => item.stock?.aggregateEligible !== false && deriveLandedCost(economics[item.sku] || {}).complete);
   const stockValue = stockWithCost.reduce((sum, item) => sum + item.inventory * deriveLandedCost(economics[item.sku] || {}).value, 0);
 
   // A display projection only. Existing importers do not retain per-product

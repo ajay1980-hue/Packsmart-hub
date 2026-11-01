@@ -53,6 +53,7 @@ import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
 import { quietCommercePreview } from './lib/quiet-commerce-preview.mjs';
 import { assertQuietOwnerWorkspace, quietOwnerWorkspaceAvailable } from './lib/quiet-owner-workspace.mjs';
+import { CATALOGUE_PATH, createCatalogueImporter, catalogueStatus } from './lib/shopify-catalogue-import.mjs';
 import { PILOT_BASE, isMaintenanceApproval, runQuietApprovalPilot } from './lib/quiet-approval-pilot.mjs';
 import { CREATIVE_PILOT_BASE, creativePilotAction, runQuietCreativePilot } from './lib/quiet-creative-pilot.mjs';
 import { prepareApprovalRequest, findApprovalRequest, createApprovalRequest } from './lib/approval-request.mjs';
@@ -393,6 +394,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   if (localDraftStorage !== null) assertLocalDraftStorage(localDraftStorage, store, env, repoRoot);
   const integrations = options.integrations || new IntegrationService(env, { fetchImpl: options.fetchImpl || fetch, repoRoot });
   const orderRecovery = createOrderRecoveryRunner({store,integrations,env});
+  const catalogueImporter = createCatalogueImporter({store,integrations,env,policy:startupPolicy.catalogue,fetchImpl:options.fetchImpl || fetch});
   const aiProvider = options.aiProvider || createAiProvider({ env, store, fetchImpl: options.fetchImpl || fetch });
   const isProduction = env.NODE_ENV === 'production';
   const secureCookies = isProduction || String(env.APP_PUBLIC_URL || '').startsWith('https://');
@@ -1147,6 +1149,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const pathname = url.pathname;
       const pilotRoute = ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action);
       const creativePilotRoute = pathname.startsWith(CREATIVE_PILOT_BASE);
+      const catalogueRoute = pathname === CATALOGUE_PATH;
 
       // Reject before any body, authentication, persistence or provider work,
       // including GET callbacks and reads that normally refresh or save state.
@@ -1154,6 +1157,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         send(res, 503, QUIET_STARTUP_RESPONSE);
         return;
       }
+      if (catalogueRoute && (!startupPolicy.quietOwnerWorkspace || !startupPolicy.catalogue || store.provider !== 'supabase' || !['GET','POST'].includes(req.method))) {
+        send(res,503,QUIET_STARTUP_RESPONSE); return;
+      }
+      if (catalogueRoute && url.search) throw Object.assign(new Error('Catalogue request overrides are not supported'), {status:400,code:'SHOPIFY_CATALOGUE_INPUT_INVALID'});
 
       // This narrow preview is never admitted in normal mode or via a hydrated fallback.
       if (pathname === '/api/maintenance/commerce' && (!startupPolicy.quietCommercePreview || store.provider !== 'supabase')) {
@@ -1201,6 +1208,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           startedAt,
           startupMode: startupPolicy.mode,
           quietOwnerWorkspace: startupPolicy.quietOwnerWorkspace,
+          quietShopifyCatalogue: Boolean(startupPolicy.catalogue?.available()),
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
           quietCommercePreview: startupPolicy.quietCommercePreview,
           quietPublicSupport: startupPolicy.quietPublicSupport,
@@ -1322,7 +1330,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { exactSnapshot: (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { exactSnapshot: catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1333,6 +1341,18 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+        if (catalogueRoute) {
+          assertQuietOwnerWorkspace(auth);
+          if (req.method === 'GET') { send(res,200,catalogueStatus(auth.state,startupPolicy.catalogue)); return; }
+          const body = await jsonBody(req,2048);
+          const result = await withWorkspaceLock(auth.session.workspaceId, async () => {
+            const state = await store.get(auth.session.workspaceId,{exactSnapshot:true});
+            return catalogueImporter.run({...auth,state},body,()=>{
+              if(draining || req.aborted || res.destroyed) throw Object.assign(new Error('Catalogue request interrupted'),{code:'SHOPIFY_CATALOGUE_INTERRUPTED',status:503});
+            });
+          });
+          send(res,200,result); return;
+        }
         if (creativePilotRoute) {
           requireOwner(auth);
           const body = req.method === 'GET' ? { requestId: startupPolicy.creativePilot.descriptor.requestId } : await jsonBody(req, 2048);
@@ -1676,6 +1696,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             const detached = structuredClone(auth.state);
             const payload = bootstrapPayload(detached, detached.users.find(user => user.id === auth.user.id), auth.session.csrf);
             send(res, 200, { ...payload, ownerWorkspace: true, automaticWorkPaused: true,
+              catalogueImport: catalogueStatus(auth.state,startupPolicy.catalogue),
               workspaceSnapshotAt: auth.state.workspace.updatedAt ?? null,
               brief: { ...payload.brief, transient: true } }); return;
           }

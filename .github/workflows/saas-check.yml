@@ -45,6 +45,10 @@ jobs:
           RUNVARA_QUIET_PROCESS_EVIDENCE_DIR: /tmp/runvara-quiet-process
       - name: Install browser for mobile layout checks
         run: cd saas/server && npx playwright install --with-deps chromium
+      - name: Verify owner workspace and bounded Shopify catalogue import with synthetic sources
+        run: |
+          node saas/server/tests/quiet-owner-workspace-browser-check.mjs
+          node saas/server/tests/shopify-catalogue-import-browser-check.mjs
       - name: Verify customer onboarding on mobile and desktop
         run: |
           node saas/server/tests/render-connection-preview.mjs /tmp/runvara-mobile-preview.html
