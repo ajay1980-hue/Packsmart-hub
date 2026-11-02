@@ -40,6 +40,90 @@
   let catalogueBusy = false, catalogueMessage = '';
   let credentialDiagnosticBusy = false, credentialDiagnosticMessage = '';
   const cataloguePath = '/api/owner/shopify-catalogue';
+  const shopifyTokenPath = '/api/connections/shopify/refresh';
+  let tokenExchangeBusy = false, tokenExchangeMessage = '', tokenExpiryTimer = null;
+  const tokenAttempts = new Set(), tokenExpired = new Set();
+  const tokenOutcomeText = {
+    not_started: 'Not started. No token exchange is confirmed.',
+    stored: 'Shopify token saved encrypted. No catalogue import was started.',
+    reserved_reconcile_no_replay: 'Request reserved. Outcome needs reconciliation; do not repeat it.',
+    prior_request_unresolved: 'An earlier request is unresolved. Do not start another exchange.',
+    commit_unconfirmed: 'Save outcome is unconfirmed. Reconcile it; do not repeat the request.'
+  };
+  function tokenDescriptor(value, expectedId) {
+    const uuid=v=>typeof v==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v);
+    const keys=['appId','appMatch','approvedScopes','canRun','domain','enabled','expectedRevision','expiresAt','importEnabled','outcome','requestId','schema'];
+    if(!value || Array.isArray(value) || Object.keys(value).sort().join('|')!==keys.join('|')
+      || value.schema!=='runvara-shopify-token-exchange/v1' || value.domain!=='wavtzm-vy.myshopify.com'
+      || value.appId!=='gid://shopify/App/408091000833' || !['unverified','matched','not_matched'].includes(value.appMatch)
+      || !uuid(value.requestId) || expectedId && value.requestId!==expectedId || !Number.isFinite(Date.parse(value.expiresAt))
+      || typeof value.enabled!=='boolean' || typeof value.canRun!=='boolean' || value.importEnabled!==false
+      || !Object.hasOwn(tokenOutcomeText,value.outcome) || !Array.isArray(value.approvedScopes)
+      || !value.approvedScopes.length || value.approvedScopes.length>100
+      || value.approvedScopes.some(s=>typeof s!=='string' || !/^((read|write)_[a-z0-9_]+|unauthenticated_[a-z0-9_]+)$/.test(s))
+      || new Set(value.approvedScopes).size!==value.approvedScopes.length
+      || [...value.approvedScopes].sort().join(',')!=='read_inventory,read_orders,read_products'
+      || value.canRun && value.appMatch==='not_matched'
+      || (value.canRun ? !value.enabled || value.outcome!=='not_started' || !uuid(value.expectedRevision) : value.expectedRevision!==null)) return null;
+    return value;
+  }
+  function tokenAttemptKey(c) { return 'runvara-shopify-token-attempt:'+state.session?.workspace?.id+':'+state.session?.user?.id+':'+c.requestId; }
+  function tokenWasAttempted(c) { try { return tokenAttempts.has(tokenAttemptKey(c)) || sessionStorage.getItem(tokenAttemptKey(c))==='sent'; } catch { return true; } }
+  function tokenCanRun() {
+    const c=tokenDescriptor(state.data?.shopifyTokenExchange);
+    return Boolean(c && state.session?.ownerWorkspace===true && state.session?.user?.role==='owner'
+      && state.session?.workspace?.id==='packsmart-solutions' && !ownerWorkspaceClosed && !tokenExchangeBusy
+      && c.canRun && c.enabled && !tokenExpired.has(c.requestId) && Date.parse(c.expiresAt)>Date.now()
+      && Date.parse(state.session.expiresAt)>Date.now() && !tokenWasAttempted(c));
+  }
+  function mountTokenExchange(root,node) {
+    clearTimeout(tokenExpiryTimer);
+    const c=tokenDescriptor(state.data?.shopifyTokenExchange);
+    if(!c || state.session?.user?.role!=='owner' || state.session?.workspace?.id!=='packsmart-solutions') return;
+    const panel=node('section','');panel.id='shopify-token-exchange-panel';
+    panel.append(node('h3','One-time Shopify access refresh'),node('p','Destination: '+c.domain+'. Uses the existing connection for one token exchange with Shopify and saves the returned access encrypted. Existing granted scopes only; no scope expansion. Opening this dashboard exchanges no token and starts no import or order action. No automatic renewal.'));
+    panel.append(node('p','Approved token capabilities: '+c.approvedScopes.join(', ')+'. Window ends: '+c.expiresAt+'.'));
+    panel.append(node('p','Installed app: '+c.appId+'. Public identifier match: '+({unverified:'not checked; checked privately before any reservation or transmission',matched:'matched',not_matched:'not matched; action blocked'}[c.appMatch])+'. This does not establish Shopify organization eligibility.'));
+    panel.append(node('p',tokenOutcomeText[c.outcome]));
+    const start=node('button','Refresh Shopify access once');start.id='shopify-token-exchange-start';start.type='button';start.className='primary';start.disabled=!tokenCanRun();
+    const check=node('button','Check Shopify access refresh');check.id='shopify-token-exchange-status';check.type='button';check.className='secondary';check.disabled=tokenExchangeBusy;
+    const context=state.session,epoch=ownerWorkspaceEpoch,current=()=>state.session===context && epoch===ownerWorkspaceEpoch && !ownerWorkspaceClosed;
+    function accept(result) {
+      const checked=tokenDescriptor(result,c.requestId);
+      if(!checked)throw new Error('INVALID_STATUS');
+      state.data.shopifyTokenExchange=checked;return checked;
+    }
+    function failure(error) {
+      if(error.status===401 || error.status===403){closeOwnerWorkspace('Owner access could not be verified. Check your session before continuing.');return;}
+      tokenExchangeMessage='Outcome needs reconciliation. Use Check Shopify access refresh; do not repeat the exchange. No raw provider details are displayed.';
+    }
+    start.addEventListener('click',async()=>{
+      if(!current() || !tokenCanRun())return;
+      const key=tokenAttemptKey(c);
+      try { sessionStorage.setItem(key,'sent'); } catch { tokenExchangeMessage='Cannot retain attempt state. Nothing sent.';mountCatalogueImport();return; }
+      tokenAttempts.add(key);tokenExchangeBusy=true;tokenExchangeMessage='One access refresh requested for the existing connection. Do not repeat it.';mountCatalogueImport();
+      try {
+        const result=await request(shopifyTokenPath,{method:'POST',body:JSON.stringify({requestId:c.requestId,expectedRevision:c.expectedRevision}),shopifyTokenSubmission:true,isCurrent:current});
+        if(current())tokenExchangeMessage=tokenOutcomeText[accept(result).outcome];
+      } catch(error){if(current())failure(error);}
+      finally{tokenExchangeBusy=false;if(current())mountCatalogueImport();}
+    });
+    check.addEventListener('click',async()=>{
+      if(!current() || tokenExchangeBusy)return;
+      tokenExchangeBusy=true;mountCatalogueImport();
+      try { const result=await request(shopifyTokenPath,{shopifyTokenStatus:true,isCurrent:current});
+        if(current())tokenExchangeMessage=tokenOutcomeText[accept(result).outcome]+' Status checked without repeating the exchange.';
+      }catch(error){if(current())failure(error);}
+      finally{tokenExchangeBusy=false;if(current())mountCatalogueImport();}
+    });
+    panel.append(start,check);
+    if(tokenWasAttempted(c) && c.outcome==='not_started')panel.append(node('p','This browser recorded an attempt. A missing receipt does not authorize another exchange.'));
+    if(tokenExchangeMessage){const message=node('p',tokenExchangeMessage);message.id='shopify-token-exchange-result';panel.append(message);}
+    root.append(panel);
+    const remaining=Date.parse(c.expiresAt)-Date.now();
+    if(remaining<=0)tokenExpired.add(c.requestId);
+    else if(!tokenExpired.has(c.requestId))tokenExpiryTimer=setTimeout(()=>{tokenExpired.add(c.requestId);if(current())mountCatalogueImport();},Math.min(remaining,2147483647));
+  }
   function catalogueAttemptKey() { return 'runvara-catalogue-attempt:' + state.session?.workspace?.id + ':' + state.data?.catalogueImport?.requestId; }
   function catalogueWasAttempted() { try { return sessionStorage.getItem(catalogueAttemptKey()) === 'sent'; } catch { return true; } }
   function catalogueCanRun() {
@@ -79,6 +163,7 @@
       });root.append(start,status);
     }
     if(catalogueMessage)root.append(node('p',catalogueMessage));
+    mountTokenExchange(root,node);
     if(state.data.shopifyCredentialDiagnosticAvailable === true) {
       const check=node('button','Check stored Shopify connection metadata');check.id='shopify-credential-diagnostic';check.type='button';check.className='secondary';check.disabled=credentialDiagnosticBusy;
       const context=state.session, epoch=ownerWorkspaceEpoch, current=()=>state.session===context && epoch===ownerWorkspaceEpoch && !ownerWorkspaceClosed;
@@ -119,6 +204,8 @@
       const available = (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
         || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all','catalogue-import-status'].includes(control.id)
         || control.id === 'catalogue-import-start' && catalogueCanRun()
+        || control.id === 'shopify-token-exchange-start' && tokenCanRun()
+        || control.id === 'shopify-token-exchange-status' && tokenDescriptor(state.data?.shopifyTokenExchange)
         || control.id === 'shopify-credential-diagnostic' && state.data?.shopifyCredentialDiagnosticAvailable === true;
       if (!available && !control.disabled) { control.disabled = true; control.title = 'Not released in owner workspace mode'; }
     }
@@ -128,11 +215,11 @@
     if ($('#refresh-all').textContent !== 'Reload dashboard') $('#refresh-all').textContent = 'Reload dashboard';
     const notice = $('#owner-workspace-notice');
     notice.classList.remove('hidden');
-    const message = 'Owner workspace - viewing and local filters are available. ' + (state.data?.catalogueImport?.enabled ? 'Only the separately approved, one-run Shopify catalogue import is available in Channels. Other imports, edits, approval decisions and paid actions remain unavailable. ' : 'This dashboard does not admit imports, edits, approval decisions or paid actions. ') + 'Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
+    const message = 'Owner workspace - viewing and local filters are available. ' + (state.data?.catalogueImport?.enabled ? 'Only the separately approved, one-run Shopify catalogue import is available in Channels. Other imports, edits, approval decisions and paid actions remain unavailable. ' : tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled ? 'Only the separately approved, one-time Shopify access refresh is available in Channels. Imports, other edits, approval decisions and paid actions remain unavailable. ' : 'This dashboard does not admit imports, edits, approval decisions or paid actions. ') + 'Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
     if (notice.textContent !== message) notice.textContent = message;
   }
   function closeOwnerWorkspace(message) {
-    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = '';
+    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
     state.data = null; ownerWorkspaceObserver?.disconnect(); clearTimeout(ownerWorkspaceExpiry);
     if (state.session) { showMaintenanceSession(state.session); $('#startup-error').textContent = message; }
   }
@@ -298,7 +385,9 @@
     const catalogueRead=path===cataloguePath && method==='GET' && state.data?.catalogueImport?.requestId;
     const catalogueWrite=path===cataloguePath && method==='POST' && config.catalogueSubmission===true && state.data?.catalogueImport?.enabled===true;
     const credentialDiagnosticRead=path==='/api/owner/shopify-credential-metadata' && method==='GET' && state.data?.shopifyCredentialDiagnosticAvailable===true;
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead) {
+    const tokenRead=path===shopifyTokenPath && method==='GET' && config.shopifyTokenStatus===true && tokenDescriptor(state.data?.shopifyTokenExchange);
+    const tokenWrite=path===shopifyTokenPath && method==='POST' && config.shopifyTokenSubmission===true && tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled===true;
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !tokenRead && !tokenWrite) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -461,7 +550,7 @@
     try {
       const session = await request('/api/auth/session');
       resetBusinessGraph(); state.session = session; state.csrf = session.csrf;
-      ownerWorkspaceClosed = false; ownerWorkspaceEpoch++; credentialDiagnosticMessage = '';
+      ownerWorkspaceClosed = false; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
       if (session.maintenance === true && session.ownerWorkspace !== true) { showMaintenanceSession(session); return false; }
       if (session.user && session.user.passwordChangeRequired) { showPasswordSetup(); return false; }
       return true;

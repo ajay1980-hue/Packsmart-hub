@@ -43,6 +43,7 @@ import {
 } from './usage-governance.mjs';
 import { addAudit } from './events.mjs';
 import { assertCatalogueImportPermit } from './shopify-catalogue-import.mjs';
+import { assertShopifyTokenPermit } from './shopify-token-exchange.mjs';
 export { addAudit };
 
 const PERSISTED = Symbol('persisted');
@@ -1653,8 +1654,14 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit, shopifyTokenPermit } = {}) {
     assertWorkspace(workspaceId, state);
+    if (shopifyTokenPermit !== undefined) {
+      if (catalogueImportPermit || protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_TOKEN_PERSISTENCE_PERMIT_INVALID'});
+      assertShopifyTokenPermit(shopifyTokenPermit,workspaceId,state);
+      ownedSnapshot = true;
+    }
+    const narrowConnectionCommit = catalogueImportPermit || shopifyTokenPermit;
     if (catalogueImportPermit !== undefined) {
       if (protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_CATALOGUE_PERSISTENCE_PERMIT_INVALID'});
       assertCatalogueImportPermit(catalogueImportPermit, workspaceId, state);
@@ -1705,7 +1712,7 @@ class SupabaseStore {
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(protectedContentCommit ? source : state) : null;
     // Catalogue imports preserve unrelated exact values. Normal archive/retention
     // and size/CAS guards below still run; no settings or historical upgrade.
-    const upgraded = { ...(catalogueImportPermit ? source : upgradeState(source)), _revision: crypto.randomUUID(), storageReady: true };
+    const upgraded = { ...(narrowConnectionCommit ? source : upgradeState(source)), _revision: crypto.randomUUID(), storageReady: true };
     // The optional maintenance guard runs before the first archive write.
     saveGuard(beforeEffects)(upgraded, { automationArchives: Boolean(automationPlan?.archiveCandidates.length || automationPlan?.summary.existingStubsToEvict),
       briefArchives: Boolean(briefPlan?.candidates.length) });
@@ -1769,8 +1776,8 @@ class SupabaseStore {
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     if (briefPlan?.candidates.length) assertBriefHistoryPlanCurrent(briefPlan);
     assertCurrent(upgraded);
-    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, allowRetry: !catalogueImportPermit });
-    if (catalogueImportPermit) {
+    const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, allowRetry: !narrowConnectionCommit });
+    if (narrowConnectionCommit) {
       // Do not mirror orders/customer/reporting records as a side effect of a
       // catalogue-only run. Reporting is explicitly pending. No write replay.
       this.invalidateSchedulerCache(workspaceId); this.mirrorRevisions.delete(workspaceId);

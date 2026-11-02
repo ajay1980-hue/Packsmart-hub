@@ -2,6 +2,7 @@ import { createQuietApprovalPilot, PILOT_BASE } from './quiet-approval-pilot.mjs
 import { createQuietCreativePilot, creativePilotAction } from './quiet-creative-pilot.mjs';
 import { createCataloguePolicy, CATALOGUE_PATH } from './shopify-catalogue-import.mjs';
 import { SHOPIFY_DIAGNOSTIC_PATH } from './shopify-credential-metadata.mjs';
+import { createShopifyTokenPolicy, SHOPIFY_TOKEN_PATH } from './shopify-token-exchange.mjs';
 
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
@@ -40,6 +41,7 @@ export function createStartupPolicy(env, staticPathnames) {
   const approvalPilot = createQuietApprovalPilot(env);
   const creativePilot = createQuietCreativePilot(env);
   const catalogue = createCataloguePolicy(env);
+  const shopifyTokenExchange = createShopifyTokenPolicy(env);
   return Object.freeze({
     mode,
     quiet,
@@ -51,8 +53,10 @@ export function createStartupPolicy(env, staticPathnames) {
     approvalPilot,
     creativePilot,
     catalogue,
+    shopifyTokenExchange,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
+      if (shopifyTokenExchange && pathname === SHOPIFY_TOKEN_PATH && (method === 'GET' || method === 'POST' && shopifyTokenExchange.available())) return true;
       if (quietShopifyDiagnostic && method === 'GET' && pathname === SHOPIFY_DIAGNOSTIC_PATH) return true;
       if (catalogue && pathname === CATALOGUE_PATH && (method === 'GET' || method === 'POST' && catalogue.available())) return true;
       if (quietOwnerWorkspace && method === 'GET' && pathname === '/api/bootstrap') return true;
