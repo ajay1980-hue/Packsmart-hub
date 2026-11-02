@@ -21,6 +21,21 @@ export function classifyShopifyCredential(value, now = Date.now()) {
     result.code = 'TOKEN_RENEWAL_REQUIRED'; return result;
   }
   if (!token(value.accessToken) || !Number.isFinite(now)) { result.code = 'TOKEN_METADATA_INVALID'; return result; }
+  // Explicit persisted client grant; arbitrary mixed credentials stay unknown.
+  if (value.mode === 'client_credentials') {
+    const fields=['storeDomain','clientId','clientSecret','mode','accessToken','issuedAt','expiresAt','scopes','tokenExchangeRequestId'];
+    if (Object.keys(value).length!==fields.length || Object.keys(value).some(k=>!fields.includes(k))
+      || typeof value.clientId!=='string' || !/^[A-Za-z0-9_-]{8,200}$/.test(value.clientId) || !token(value.clientSecret)
+      || !timestamp(value.issuedAt) || value.issuedAt>now || !timestamp(value.expiresAt) || value.expiresAt-value.issuedAt!==86399000
+      || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value.tokenExchangeRequestId || '')
+      || !Array.isArray(value.scopes) || value.scopes.length>100 || new Set(value.scopes).size!==value.scopes.length
+      || !value.scopes.includes('read_products') || !value.scopes.includes('read_inventory')
+      || value.scopes.some(s=>typeof s!=='string' || !/^((read|write)_[a-z0-9_]+|unauthenticated_[a-z0-9_]+)$/.test(s))) return result;
+    result.credentialType='client_credentials'; result.expiresAt=new Date(value.expiresAt).toISOString();
+    result.expiryState=value.expiresAt<=now?'expired':value.expiresAt<=now+60000?'expiring':'future';
+    result.metadataCompatible=result.expiryState==='future';
+    result.code=result.metadataCompatible?'METADATA_COMPATIBLE':'TOKEN_RENEWAL_REQUIRED'; return result;
+  }
   const oauth = value.mode === 'oauth';
   const direct = !own(value, 'mode') && !own(value, 'refreshToken') && !own(value, 'refreshTokenExpiresAt') && !own(value, 'scopes');
   const fields = oauth ? ['storeDomain','accessToken','mode','expiresAt','refreshToken','refreshTokenExpiresAt','scopes'] : ['storeDomain','accessToken','expiresAt'];
