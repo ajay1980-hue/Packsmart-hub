@@ -1986,7 +1986,13 @@
 
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault(); const form = event.currentTarget; const button = form.querySelector('button'); const error = $('#login-error'); error.textContent = ''; setBusy(button, true, 'Signing in…');
-    try { const payload = await request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: form.email.value, password: form.password.value }) }); resetBusinessGraph(); state.session = payload; state.csrf = payload.csrf; form.password.value = ''; if (payload.maintenance === true) showMaintenanceSession(payload); else if (payload.user && payload.user.passwordChangeRequired) showPasswordSetup(); else await loadBootstrap(); }
+    try {
+      await request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: form.email.value, password: form.password.value }) });
+      form.password.value = '';
+      // Resolve current capabilities from the issued session, just as a reload does.
+      // The login receipt's maintenance flag alone does not describe workspace access.
+      if (await loadSession()) await loadBootstrap();
+    }
     catch (loginError) { error.textContent = loginError.message; }
     finally { setBusy(button, false); }
   });

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { maintenanceFixture, ownerState, SECRET } from './maintenance-login-fixture.mjs';
 import { createSessionToken } from '../lib/security.mjs';
+import { verifyFreshOwnerLogin } from './quiet-owner-fresh-login-browser.mjs';
 
 const output = path.resolve(process.env.RUNVARA_OWNER_WORKSPACE_EVIDENCE || '.owner-workspace-browser-evidence');
 await fs.mkdir(output, { recursive: true });
@@ -17,6 +18,8 @@ async function overviewActionsFit(page) {
   }));
 }
 try {
+  const freshLogin = await verifyFreshOwnerLogin(browser);
+  checks += freshLogin.checks;
   for (const width of [390, 1200]) {
     const requestStart = requests.length;
     const state = ownerState('packsmart-solutions');
@@ -123,6 +126,6 @@ try {
     } finally { await context.close(); await active.close(); }
   }
   assert.deepEqual(errors, []); check(external === 0, 'no external browser requests');
-  const result = { checks, views: 20, browserErrors: errors, externalRequests: external, mutationRequests: requests.filter(row => row.method !== 'GET').length, apiPaths: [...new Set(requests.filter(row => row.path.startsWith('/api/')).map(row => row.path))], captures };
+  const result = { checks, freshLogin, views: 20, browserErrors: errors, externalRequests: external, mutationRequests: requests.filter(row => row.method !== 'GET').length, apiPaths: [...new Set(requests.filter(row => row.path.startsWith('/api/')).map(row => row.path))], captures };
   await fs.writeFile(path.join(output, 'result.json'), JSON.stringify(result, null, 2)); console.log(JSON.stringify(result));
 } finally { await browser.close(); }
