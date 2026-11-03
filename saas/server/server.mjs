@@ -85,7 +85,8 @@ import { assertMetaContainerObserverMock, previewMetaContainerObserver, runMetaC
 import { addWebIntelligenceTarget, ensureWebIntelligence, runWebIntelligence, setWebIntelligenceTargetActive, updateWebIntelligenceSettings, webIntelligenceSnapshot } from './lib/web-intelligence.mjs';
 import { canvaAuthorizationUrl, canvaRedirect, requestCanvaTokens, storeCanvaTokens, saveCanvaApplication, refreshCanvaCredentials } from './lib/marketing-oauth.mjs';
 import { listCanvaBrandTemplates, advanceCampaignCreatives } from './lib/marketing-providers.mjs';
-import { buildSupportReply, validateSupportInput, supportNeedsOrders, SUPPORT_ORIGINS, PUBLIC_SUPPORT_WORKSPACE, supportUnavailable } from './lib/customer-support.mjs';
+import { buildSupportReply, validateSupportInput, supportNeedsOrders, supportProductRequest, SUPPORT_ORIGINS, PUBLIC_SUPPORT_WORKSPACE, supportUnavailable } from './lib/customer-support.mjs';
+import { PRODUCT_ONLY_SUPPORT_PATH, validateProductOnlyInput, productOnlySupportReply } from './lib/support-product-facts.mjs';
 import { revenueEngineSnapshot, createLead, createQuote, recordIntentEvent, recordAttributionTouch, createExperiment, createOpportunityExperiment, recordExperimentMeasurement, verifyExperimentMeasurement } from './lib/revenue-engine.mjs';
 import { deriveBusinessState } from './lib/business-state.mjs';
 import { deriveBusinessGraph, deriveBusinessGraphSummary } from './lib/business-graph.mjs';
@@ -389,6 +390,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   if (startupPolicy.approvalPilot && store.provider !== 'supabase') throw Object.assign(new Error('Maintenance pilot requires Supabase persistence'), { code: 'QUIET_APPROVAL_PILOT_UNAVAILABLE' });
   if (startupPolicy.quietPublicSupport && (store.provider !== 'supabase' || typeof store.getPublicSupportOrders !== 'function')) {
     throw Object.assign(new Error('Quiet public support requires the bounded Supabase reader'), { code:'QUIET_PUBLIC_SUPPORT_UNAVAILABLE' });
+  }
+  if(startupPolicy.quietSupportProducts&&typeof store.getPublicSupportProduct!=='function') {
+    throw Object.assign(new Error('Product support requires its bounded saved-product reader'),{code:'QUIET_SUPPORT_PRODUCTS_UNAVAILABLE'});
+  }
+  if(startupPolicy.quietProductOnlySupport&&(store.provider!=='supabase'||typeof store.getPublicSupportProduct!=='function')) {
+    throw Object.assign(new Error('Product-only support requires the bounded Supabase product reader'),{code:'QUIET_PRODUCT_ONLY_SUPPORT_UNAVAILABLE'});
   }
   const metaContainerObserverMock = options.metaContainerObserverMock ?? null;
   if (metaContainerObserverMock !== null) assertMetaContainerObserverMock(metaContainerObserverMock,store,env);
@@ -1162,6 +1169,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         send(res, 503, QUIET_STARTUP_RESPONSE);
         return;
       }
+      if (pathname===PRODUCT_ONLY_SUPPORT_PATH) {
+        if(!startupPolicy.quietProductOnlySupport||!['POST','OPTIONS'].includes(req.method)) {send(res,503,QUIET_STARTUP_RESPONSE);return;}
+        if(req.url!==PRODUCT_ONLY_SUPPORT_PATH) throw Object.assign(new Error('Product-only support does not accept path or query overrides'),{status:400,code:'PRODUCT_ONLY_INPUT_INVALID'});
+      }
       if (catalogueRoute && (!startupPolicy.quietOwnerWorkspace || !startupPolicy.catalogue || store.provider !== 'supabase' || !['GET','POST'].includes(req.method))) {
         send(res,503,QUIET_STARTUP_RESPONSE); return;
       }
@@ -1227,6 +1238,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
           quietCommercePreview: startupPolicy.quietCommercePreview,
           quietPublicSupport: startupPolicy.quietPublicSupport,
+          quietSupportProducts: startupPolicy.quietSupportProducts,
+          quietProductOnlySupport: startupPolicy.quietProductOnlySupport,
           quietApprovalPilot: startupPolicy.approvalPilot?.status() || { open: false, expiresAt: null },
           quietCreativePilot: startupPolicy.creativePilot?.status() || { open: false, expiresAt: null },
           checkedAt: new Date(healthSnapshot.checkedMs).toISOString(),
@@ -1264,7 +1277,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         return;
       }
 
-      if ((req.method === 'OPTIONS' || req.method === 'POST') && pathname === '/api/public/support') {
+      if ((req.method === 'OPTIONS' || req.method === 'POST') && [ '/api/public/support', PRODUCT_ONLY_SUPPORT_PATH ].includes(pathname)) {
         const origin = String(req.headers.origin || '');
         const allowedOrigins = new Set(SUPPORT_ORIGINS);
         if (origin && !allowedOrigins.has(origin)) throw Object.assign(new Error('Origin not allowed'), { status: 403, code: 'ORIGIN_DENIED' });
@@ -1290,12 +1303,27 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if (!rate.allowed || !instanceRate.allowed) throw Object.assign(new Error('Too many support requests; try again shortly'), { status: 429, code: 'SUPPORT_RATE_LIMITED' });
         supportLimiter.fail(supportIp);
         supportLimiter.fail('instance');
+        if(pathname===PRODUCT_ONLY_SUPPORT_PATH) {
+          if(!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(String(req.headers['content-type']||''))) throw Object.assign(new Error('Product-only support requires JSON'),{status:415,code:'PRODUCT_ONLY_INPUT_INVALID'});
+          const sku=validateProductOnlyInput(await jsonBody(req,512));
+          let facts;
+          try {facts=await store.getPublicSupportProduct(PUBLIC_SUPPORT_WORKSPACE,sku);}
+          catch {throw supportUnavailable();}
+          send(res,200,productOnlySupportReply(facts),{'Access-Control-Allow-Origin':corsOrigin,Vary:'Origin'});
+          return;
+        }
         const body = validateSupportInput(await jsonBody(req, 8192));
         let state = { orders:[] };
         if (supportNeedsOrders(body)) {
           if (typeof store.getPublicSupportOrders !== 'function') throw supportUnavailable();
           try { state = { orders:await store.getPublicSupportOrders(PUBLIC_SUPPORT_WORKSPACE) }; }
           catch { throw supportUnavailable(); }
+        }
+        const productSku=startupPolicy.quietSupportProducts?supportProductRequest(body):null;
+        if(productSku){
+          if(typeof store.getPublicSupportProduct!=='function')throw supportUnavailable();
+          try {state={supportProductFacts:await store.getPublicSupportProduct(PUBLIC_SUPPORT_WORKSPACE,productSku)};}
+          catch {throw supportUnavailable();}
         }
         const result = buildSupportReply(state, body);
         send(res, 200, result, { 'Access-Control-Allow-Origin': corsOrigin, Vary: 'Origin' });

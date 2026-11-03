@@ -25,9 +25,9 @@ try{
    check(await page.locator('#sync-all-channels').isDisabled(),'broad sync blocked');check(await page.locator('#sync-shopify').isDisabled(),'legacy Shopify sync blocked');
    check(f.reads.length===0,'opening dashboard does not read provider');
    await page.locator('#catalogue-import-start').click();await page.getByText('Catalogue saved. Reload dashboard to view the current rows.',{exact:true}).waitFor();
-   check(await page.locator('#catalogue-import-start').isDisabled(),'no repeat button after completion');check(f.reads.length===1,'one synthetic provider call');
+   check(await page.locator('#catalogue-import-start').isDisabled(),'no repeat button after completion');check(f.reads.length===2,'one catalogue page and one component batch');
    await page.locator('#catalogue-import-status').click();await page.getByText('Status checked. This did not repeat the import.',{exact:true}).waitFor();
-   check(f.reads.length===1,'status read does not invoke provider');
+   check(f.reads.length===2,'status read does not invoke provider');
    await page.reload({waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});
    if(width<900)await page.locator('#mobile-menu').click();await page.locator('#main-nav [data-view="channels"]').click();
    check(await page.locator('#catalogue-import-start').isDisabled(),'reload retains logical request outcome');
@@ -90,5 +90,5 @@ try{
  }
  assert.deepEqual(failures,[]);check(external===0,'no external browser traffic');
  check(events.filter(e=>e.method==='POST').every(e=>e.path===CATALOGUE_PATH),'no migration, broad sync or unrelated browser mutation');
- const result={checks,failures,external,syntheticOnly:true,providerRequests:3,browserPosts:events.filter(e=>e.method==='POST')};await fs.writeFile(path.join(folder,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
+ const result={checks,failures,external,syntheticOnly:true,providerRequests:5,browserPosts:events.filter(e=>e.method==='POST')};await fs.writeFile(path.join(folder,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));
 }finally{await browser.close();}

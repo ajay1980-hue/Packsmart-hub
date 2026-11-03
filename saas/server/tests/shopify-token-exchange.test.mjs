@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { maintenanceFixture, SECRET } from './maintenance-login-fixture.mjs';
-import { catalogueState, catalogueEnv, response as catalogueResponse, ID, DOMAIN } from './shopify-catalogue-import-fixture.mjs';
-import { CATALOGUE_PATH } from '../lib/shopify-catalogue-import.mjs';
+import { catalogueState, catalogueEnv, response as catalogueResponse, page as cataloguePage, componentNode, ID, DOMAIN } from './shopify-catalogue-import-fixture.mjs';
+import { CATALOGUE_PATH, CATALOGUE_QUERY } from '../lib/shopify-catalogue-import.mjs';
+import { CATALOGUE_COMPONENT_QUERY } from '../lib/shopify-catalogue-evidence.mjs';
 import { createSessionToken, verifySessionToken, encryptCredentials, decryptCredentials } from '../lib/security.mjs';
 import { createStartupPolicy } from '../lib/startup-mode.mjs';
 import { classifyShopifyCredential } from '../lib/shopify-credential-metadata.mjs';
@@ -248,13 +249,17 @@ test('stored grant works with separately enabled catalogue, and does not auto-re
   for(const expired of [false,true]) {
     const state=structuredClone(saved);if(expired){const c=decryptCredentials(state.connections[0].encryptedCredentials,SECRET);
       c.issuedAt=Date.now()-86400000;c.expiresAt=c.issuedAt+86399000;state.connections[0].encryptedCredentials=encryptCredentials(c,SECRET);}
-    let reads=0;const env=catalogueEnv({RUNVARA_QUIET_SHOPIFY_TOKEN_EXCHANGE:'disabled/v1'});
+    let reads=0;const env=catalogueEnv({RUNVARA_QUIET_SHOPIFY_TOKEN_EXCHANGE:'disabled/v1'}),staged=cataloguePage();
     const g=await maintenanceFixture({states:[state],env,providerFetch:async(url,settings)=>{
       assert.equal(url,`https://${DOMAIN}/admin/api/2026-07/graphql.json`);assert.equal(settings.headers['X-Shopify-Access-Token'],ACCESS);
-      reads++;return catalogueResponse();
+      reads++;const body=JSON.parse(settings.body);
+      if(body.query===CATALOGUE_QUERY){assert.equal(reads,1);return catalogueResponse(staged);}
+      assert.equal(body.query,CATALOGUE_COMPONENT_QUERY);assert.equal(reads,2);
+      const nodes=staged.data.products.nodes.flatMap(p=>p.variants.nodes.map(v=>componentNode(p,v)));
+      assert.deepEqual(body.variables.ids,nodes.map(v=>v.id));return catalogueResponse({data:{shop:staged.data.shop,nodes}});
     }});t.after(g.close);
     const r=await g.request(CATALOGUE_PATH,{method:'POST',cookie:f.cookie,headers:{'X-CSRF-Token':f.session.csrf},body:{requestId:env.RUNVARA_SHOPIFY_CATALOGUE_REQUEST_ID,expectedRevision:state._revision}});
-    assert.equal(r.status,expired?409:200,JSON.stringify(r.payload));assert.equal(reads,expired?0:1);
+    assert.equal(r.status,expired?409:200,JSON.stringify(r.payload));assert.equal(reads,expired?0:2);
     if(expired)assert.equal(r.payload.code,'SHOPIFY_CATALOGUE_TOKEN_RENEWAL_REQUIRED');else assert.equal(r.payload.run.status,'imported');
     assert.deepEqual(g.fake.states.get(ID).connections,state.connections);
   }

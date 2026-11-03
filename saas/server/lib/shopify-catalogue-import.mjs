@@ -6,6 +6,7 @@ import { inspectShopifyCataloguePage } from './shopify-catalogue-read.mjs';
 import { addAudit } from './events.mjs';
 import { decryptCredentials } from './security.mjs';
 import { classifyShopifyCredential } from './shopify-credential-metadata.mjs';
+import { CATALOGUE_SHOP_ID, CATALOGUE_COMPONENT_QUERY, CATALOGUE_EVIDENCE_LIMITS, inspectCatalogueSourceFields, captureCatalogueVariantEvidence, validateCatalogueEvidenceContext } from './shopify-catalogue-evidence.mjs';
 
 export const CATALOGUE_PATH = '/api/owner/shopify-catalogue';
 export const CATALOGUE_LIMITS = Object.freeze({pages:20,productsPerPage:10,variantsPerProduct:50,products:200,variants:1000,pageBytes:524288,totalBytes:2097152,windowMs:600000});
@@ -45,10 +46,10 @@ export function createCataloguePolicy(env) {
 export const CATALOGUE_QUERY = `query RunvaraOwnerCatalogue($first: Int!, $after: String) {
   shop { id myshopifyDomain currencyCode }
   products(first: $first, after: $after, sortKey: ID) {
-    nodes { id title handle status productType description updatedAt totalInventory
+    nodes { id title handle status productType description updatedAt onlineStoreUrl totalInventory
       featuredMedia { preview { image { url } } }
       variants(first: 50) { pageInfo { hasNextPage }
-        nodes { id title sku price inventoryQuantity availableForSale requiresComponents }
+        nodes { id title sku price inventoryQuantity availableForSale requiresComponents updatedAt selectedOptions { name value } }
       }
     }
     pageInfo { hasNextPage endCursor }
@@ -57,6 +58,7 @@ export const CATALOGUE_QUERY = `query RunvaraOwnerCatalogue($first: Int!, $after
 
 const integer = value => value === null || Number.isSafeInteger(value);
 function mapProduct(raw, shop, at) {
+  inspectCatalogueSourceFields(raw,at);
   if (!['ACTIVE','DRAFT','ARCHIVED','UNLISTED'].includes(raw.status) || typeof raw.title !== 'string' || typeof raw.productType !== 'string'
     || typeof raw.handle !== 'string' || typeof raw.description !== 'string' || !Number.isFinite(Date.parse(raw.updatedAt)) || !integer(raw.totalInventory)) throw catalogueError('PRODUCT_INVALID',502);
   const source={system:'shopify',accountId:shop.id,domain:shop.myshopifyDomain,apiVersion:VERSION,capturedAt:at,currencySource:'Shop.currencyCode'};
@@ -68,14 +70,14 @@ function mapProduct(raw, shop, at) {
       || !Number.isFinite(Number(v.price)) || Number(v.price)>Number.MAX_SAFE_INTEGER || !integer(v.inventoryQuantity)
       || typeof v.availableForSale!=='boolean' || typeof v.requiresComponents!=='boolean') throw catalogueError('VARIANT_INVALID',502);
     return {id:v.id,externalId:v.id,title:v.title,sku:v.sku,price:Number(v.price),priceDecimal:v.price,currency:shop.currencyCode,
-      inventory:v.inventoryQuantity,available:v.availableForSale,requiresComponents:v.requiresComponents,
+      inventory:v.inventoryQuantity,available:v.availableForSale,requiresComponents:v.requiresComponents,updatedAt:v.updatedAt,selectedOptions:structuredClone(v.selectedOptions),
       stock:{available:v.inventoryQuantity,onHand:null,committed:null,incoming:null,unit:'Shopify sellable variant units',aggregateEligible:false},
       source:{...source,objectType:'ProductVariant',recordId:v.id},raw:structuredClone(v)};
   });
   const hint=variants.some(v=>/^(RAW|PACK)[-_]/i.test(v.sku));
   const classification=component ? 'component' : variants.some(v=>v.requiresComponents) ? 'bundle' : hint ? 'internal_review' : 'unclassified';
   return {id:raw.id,externalId:raw.id,provider:'shopify',title:raw.title,handle:raw.handle,status:raw.status.toLowerCase(),productType:raw.productType,
-    description:raw.description,image:raw.featuredMedia?.preview?.image?.url || null,inventory:raw.totalInventory,updatedAt:raw.updatedAt,
+    description:raw.description,image:raw.featuredMedia?.preview?.image?.url || null,inventory:raw.totalInventory,updatedAt:raw.updatedAt,onlineStoreUrl:raw.onlineStoreUrl,
     currency:shop.currencyCode,source:{...source,objectType:'Product',recordId:raw.id},raw:structuredClone(raw),variants,
     catalogueClassification:{kind:classification,basis:component?'source_product_type':classification==='bundle'?'source_requires_components':hint?'sku_hint_unverified':'unknown',retailVerified:false},
     stock:{available:raw.totalInventory,onHand:null,committed:null,incoming:null,aggregateEligible:false},catalogueObserved:true};
@@ -93,8 +95,9 @@ async function boundedJson(response) {
   return {payload,size};
 }
 
-export async function readBoundedCatalogue({config,fetchImpl,assertCurrent}) {
+export async function readBoundedCatalogue({config,fetchImpl,assertCurrent,context}) {
   if(config.domain!==DOMAIN || config.apiVersion!==VERSION || !config.accessToken) throw catalogueError('SOURCE_INVALID');
+  validateCatalogueEvidenceContext(context,new Date().toISOString());
   const products=[], pages=[], seenProductIds=new Set(),seenVariantIds=new Set(),seenCursors=new Set();
   let after=null,shop=null,totalBytes=0;
   for(let page=0;page<CATALOGUE_LIMITS.pages;page++) {
@@ -105,7 +108,7 @@ export async function readBoundedCatalogue({config,fetchImpl,assertCurrent}) {
     const {payload,size}=await boundedJson(response); totalBytes+=size;
     if(totalBytes>CATALOGUE_LIMITS.totalBytes) throw catalogueError('RESPONSE_LIMIT',502);
     const data=payload.data, current=data?.shop;
-    if(!current || !/^gid:\/\/shopify\/Shop\/[0-9]+$/.test(current.id) || current.myshopifyDomain!==DOMAIN || !/^[A-Z]{3}$/.test(current.currencyCode)
+    if(!current || current.id!==CATALOGUE_SHOP_ID || current.myshopifyDomain!==DOMAIN || !/^[A-Z]{3}$/.test(current.currencyCode)
       || shop && !isDeepStrictEqual(current,shop)) throw catalogueError('ACCOUNT_OR_CURRENCY_CHANGED',502);
     shop=structuredClone(current);
     const inspected=inspectShopifyCataloguePage(data,{workspaceId:WORKSPACE,after,seenProductIds,seenVariantIds,seenCursors});
@@ -114,9 +117,36 @@ export async function readBoundedCatalogue({config,fetchImpl,assertCurrent}) {
     if(seenProductIds.size>CATALOGUE_LIMITS.products || seenVariantIds.size>CATALOGUE_LIMITS.variants) throw catalogueError('COVERAGE_LIMIT',502);
     const at=new Date().toISOString();
     products.push(...inspected.nodes.map(raw=>mapProduct(raw,shop,at)));
-    pages.push({capturedAt:at,sha256:digest(data),bytes:size,products:inspected.nodes.length});
+    pages.push({kind:'catalogue',capturedAt:at,sha256:digest(data),bytes:size,products:inspected.nodes.length});
     await assertCurrent();
-    if(!inspected.hasNextPage) return {products,shop,pages,totalBytes,completedAt:at,snapshotConsistency:'unverified'};
+    if(!inspected.hasNextPage) {
+      const pairs=products.flatMap(product=>product.variants.map(variant=>({product,variant})));
+      const batch=CATALOGUE_EVIDENCE_LIMITS.variantsPerBatch;
+      // Component batches share the EXISTING 20-response/2MiB budget. No
+      // continuation/retry or partial completeness claim on nested truncation.
+      if(pages.length+Math.ceil(pairs.length/batch)>CATALOGUE_LIMITS.pages)throw catalogueError('COVERAGE_LIMIT',502);
+      const relationIds=new Set();
+      for(let start=0;start<pairs.length;start+=batch){
+        await assertCurrent();const selected=pairs.slice(start,start+batch),ids=selected.map(x=>x.variant.id);
+        const reply=await fetchImpl(`https://${DOMAIN}/admin/api/${VERSION}/graphql.json`,{method:'POST',redirect:'error',
+          headers:{'Content-Type':'application/json','X-Shopify-Access-Token':config.accessToken},
+          body:JSON.stringify({query:CATALOGUE_COMPONENT_QUERY,variables:{ids}}),signal:AbortSignal.timeout(20000)});
+        const part=await boundedJson(reply);totalBytes+=part.size;
+        if(totalBytes>CATALOGUE_LIMITS.totalBytes)throw catalogueError('RESPONSE_LIMIT',502);
+        const d=part.payload.data,rows=d?.nodes;
+        if(!isDeepStrictEqual(d?.shop,shop)||!Array.isArray(rows)||rows.length!==ids.length)throw catalogueError('EVIDENCE_INVALID',502);
+        const capturedAt=new Date().toISOString(),byId=new Map();
+        for(const row of rows){if(!row||!ids.includes(row.id)||byId.has(row.id))throw catalogueError('EVIDENCE_INVALID',502);byId.set(row.id,row);}
+        for(const {product,variant} of selected){
+          const evidence=captureCatalogueVariantEvidence(product,variant,byId.get(variant.id),{context,shop,capturedAt});
+          for(const entry of evidence.components.entries){if(relationIds.has(entry.relationId))throw catalogueError('EVIDENCE_INVALID',502);relationIds.add(entry.relationId);}
+          variant.catalogueEvidence=evidence;
+        }
+        pages.push({kind:'components',capturedAt,sha256:digest(d),bytes:part.size,variants:rows.length});
+        await assertCurrent();
+      }
+      return {products,shop,pages,totalBytes,completedAt:pages.at(-1).capturedAt,snapshotConsistency:'unverified'};
+    }
     after=inspected.nextCursor; seenCursors.add(after);
   }
   throw catalogueError('COVERAGE_LIMIT',502);
@@ -199,7 +229,7 @@ export function createCatalogueImporter({store,integrations,env,policy,fetchImpl
       assertActive(); return next;
     };
     let stage;
-    try { stage=await readBoundedCatalogue({config,fetchImpl,assertCurrent:fresh}); current=await fresh(); }
+    try { stage=await readBoundedCatalogue({config,fetchImpl,assertCurrent:fresh,context:{workspaceId:WORKSPACE,connectionId:binding.connectionId,revision:reservationRevision}}); current=await fresh(); }
     catch(error) { // The durable reservation remains spent. No retry or failure-write loop.
       throw catalogueError(error.code?.replace(/^SHOPIFY_CATALOGUE_/, '') || 'READ_FAILED',error.status || 502);
     }
@@ -213,7 +243,7 @@ export function createCatalogueImporter({store,integrations,env,policy,fetchImpl
       return replacement ? {...p,...replacement} : {...p,catalogueObserved:false};
     });
     next.products.push(...incoming.values());
-    const completed={...record,status:'imported',completedAt:new Date().toISOString(),sourceCapturedAt:stage.completedAt,sourceAccountId:stage.shop.id,currency:stage.shop.currencyCode,
+    const completed={...record,status:'imported',sourceRevision:reservationRevision,completedAt:new Date().toISOString(),sourceCapturedAt:stage.completedAt,sourceAccountId:stage.shop.id,currency:stage.shop.currencyCode,
       productCount:stage.products.length,variantCount:stage.products.reduce((n,p)=>n+p.variants.length,0),pages:stage.pages,bytes:stage.totalBytes,payloadDigest:digest(stage.products)};
     next.shopifyCatalogueImports=ledger(next).map(r=>r.requestId===record.requestId?completed:r);
     addAudit(next,{type:'shopify_catalogue_imported',actor:auth.session.sub,detail:{requestId:record.requestId,sourceAccountId:stage.shop.id,currency:stage.shop.currencyCode,productCount:completed.productCount,payloadDigest:completed.payloadDigest}});
