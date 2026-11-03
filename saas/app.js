@@ -39,6 +39,8 @@
   const ownerWorkspaceViews = new Set(['overview', 'profit', 'orders', 'channels', 'approvals']);
   let catalogueBusy = false, catalogueMessage = '';
   let credentialDiagnosticBusy = false, credentialDiagnosticMessage = '';
+  let productReadinessBusy = false, productReadinessMessage = '', productReadinessGeneration = 0;
+  const productReadinessPath = '/api/owner/product-readiness';
   const cataloguePath = '/api/owner/shopify-catalogue';
   const shopifyTokenPath = '/api/connections/shopify/refresh';
   let tokenExchangeBusy = false, tokenExchangeMessage = '', tokenExpiryTimer = null;
@@ -131,6 +133,52 @@
     return state.session?.ownerWorkspace === true && !ownerWorkspaceClosed && c?.canRun === true && c.enabled === true
       && Date.parse(c.expiresAt)>Date.now() && !catalogueBusy && !catalogueWasAttempted();
   }
+  function invalidateProductReadiness() {
+    productReadinessGeneration++;productReadinessBusy=false;productReadinessMessage='';
+    $('#product-readiness-result')?.remove();
+    const button=$('#product-readiness-check');if(button)button.disabled=true;
+  }
+  function mountProductReadiness(root, node) {
+    if (state.data?.productReadinessAvailable !== true || state.session?.user?.role !== 'owner') return;
+    const check=node('button','Check saved product readiness');check.id='product-readiness-check';check.type='button';check.className='secondary';check.disabled=productReadinessBusy;
+    const context=state.session, epoch=ownerWorkspaceEpoch, generation=productReadinessGeneration,
+      current=()=>state.session===context && epoch===ownerWorkspaceEpoch && generation===productReadinessGeneration && !ownerWorkspaceClosed;
+    check.addEventListener('click',async()=>{
+      if(productReadinessBusy || !current())return;
+      productReadinessBusy=true;productReadinessMessage='Checking saved catalogue evidence only. No Shopify request or import.';mountCatalogueImport();
+      try {
+        const result=await request(productReadinessPath,{isCurrent:current});
+        if(current()) {
+          const reasons={
+            VERIFIED_SAVED_EVIDENCE:'Saved evidence meets the product-trial review checks. A customer-facing trial still needs separate approval.',
+            IMPORT_OUTCOME_UNRESOLVED:'The previous import has no confirmed complete outcome. Reconcile it before considering another import.',
+            IMPORT_RECEIPT_UNVERIFIED:'No complete import receipt is confirmed. Review the evidence and reconcile any previous attempt before considering another import.',
+            ENRICHED_RECEIPT_REQUIRED:'The enriched source receipt is missing or invalid. Review the saved evidence.',
+            SOURCE_TIME_INVALID:'Source capture times could not be verified. Review the saved evidence.',
+            SOURCE_EVIDENCE_STALE:'Saved source evidence is over 24 hours old. Review a separately approved fresh import.',
+            CATALOGUE_UNVERIFIED:'The saved source, prices or complete bundle mapping could not be verified. Review the evidence before a trial.'
+          };
+          const ready=result.code==='VERIFIED_SAVED_EVIDENCE';
+          if(result.schema!=='runvara-owner-product-readiness/v1' || !Object.hasOwn(reasons,result.code)
+            || result.status!==(ready?'ready_for_trial_review':'not_ready') || result.livePriceVerified!==false
+            || result.credentialUsability!=='not_checked' || result.permitsImport!==false || result.permitsPublicSupport!==false
+            || !Number.isInteger(result.verifiedProductCount) || !Number.isInteger(result.verifiedVariantCount)
+            || (ready ? result.verifiedProductCount!==15 || result.verifiedVariantCount!==150 || result.sourceCurrency!=='GBP'
+              : result.verifiedProductCount!==0 || result.verifiedVariantCount!==0 || result.sourceCurrency!==null))throw new Error('Invalid readiness result');
+          const captured=typeof result.sourceCapturedAt==='string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(result.sourceCapturedAt) && Number.isFinite(Date.parse(result.sourceCapturedAt)) ? result.sourceCapturedAt : null;
+          if(ready&&!captured)throw new Error('Missing source time');
+          productReadinessMessage=reasons[result.code]+(ready?' Verified saved mapping: 15 products / 150 selling variants, source currency GBP.':'')
+            +(captured?' Source capture: '+captured+'.':' Source capture is not confirmed.')
+            +' This is not a live price, stock, shipping or credential-usability check. This check does not enable public support or imports.';
+        }
+      } catch(error) {if(current()) {
+        if(error.status===401 || error.status===403)closeOwnerWorkspace('Owner access could not be verified. Check your session before continuing.');
+        else productReadinessMessage='Product readiness could not be checked. No import or public support was requested.';
+      }} finally {if(generation===productReadinessGeneration){productReadinessBusy=false;if(current())mountCatalogueImport();}}
+    });
+    root.append(check);
+    if(productReadinessMessage){const message=node('p',productReadinessMessage);message.id='product-readiness-result';message.setAttribute('role','status');root.append(message);}
+  }
   function mountCatalogueImport() {
     const root=$('#catalogue-import-panel'), c=state.data?.catalogueImport;
     if(!root) return;
@@ -164,6 +212,7 @@
     }
     if(catalogueMessage)root.append(node('p',catalogueMessage));
     mountTokenExchange(root,node);
+    mountProductReadiness(root,node);
     if(state.data.shopifyCredentialDiagnosticAvailable === true) {
       const check=node('button','Check stored Shopify connection metadata');check.id='shopify-credential-diagnostic';check.type='button';check.className='secondary';check.disabled=credentialDiagnosticBusy;
       const context=state.session, epoch=ownerWorkspaceEpoch, current=()=>state.session===context && epoch===ownerWorkspaceEpoch && !ownerWorkspaceClosed;
@@ -206,7 +255,8 @@
         || control.id === 'catalogue-import-start' && catalogueCanRun()
         || control.id === 'shopify-token-exchange-start' && tokenCanRun()
         || control.id === 'shopify-token-exchange-status' && tokenDescriptor(state.data?.shopifyTokenExchange)
-        || control.id === 'shopify-credential-diagnostic' && state.data?.shopifyCredentialDiagnosticAvailable === true;
+        || control.id === 'shopify-credential-diagnostic' && state.data?.shopifyCredentialDiagnosticAvailable === true
+        || control.id === 'product-readiness-check' && state.data?.productReadinessAvailable === true;
       if (!available && !control.disabled) { control.disabled = true; control.title = 'Not released in owner workspace mode'; }
     }
     for (const link of $('#app-shell').querySelectorAll('a')) {
@@ -219,7 +269,7 @@
     if (notice.textContent !== message) notice.textContent = message;
   }
   function closeOwnerWorkspace(message) {
-    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
+    ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; invalidateProductReadiness(); tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
     state.data = null; ownerWorkspaceObserver?.disconnect(); clearTimeout(ownerWorkspaceExpiry);
     if (state.session) { showMaintenanceSession(state.session); $('#startup-error').textContent = message; }
   }
@@ -385,9 +435,10 @@
     const catalogueRead=path===cataloguePath && method==='GET' && state.data?.catalogueImport?.requestId;
     const catalogueWrite=path===cataloguePath && method==='POST' && config.catalogueSubmission===true && state.data?.catalogueImport?.enabled===true;
     const credentialDiagnosticRead=path==='/api/owner/shopify-credential-metadata' && method==='GET' && state.data?.shopifyCredentialDiagnosticAvailable===true;
+    const productReadinessRead=path===productReadinessPath && method==='GET' && state.data?.productReadinessAvailable===true;
     const tokenRead=path===shopifyTokenPath && method==='GET' && config.shopifyTokenStatus===true && tokenDescriptor(state.data?.shopifyTokenExchange);
     const tokenWrite=path===shopifyTokenPath && method==='POST' && config.shopifyTokenSubmission===true && tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled===true;
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !tokenRead && !tokenWrite) {
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -547,6 +598,7 @@
   }
 
   async function loadSession() {
+    invalidateProductReadiness();
     try {
       const session = await request('/api/auth/session');
       resetBusinessGraph(); state.session = session; state.csrf = session.csrf;
@@ -572,6 +624,7 @@
   }
 
   async function loadBootstrap(options) {
+    invalidateProductReadiness();
     const ownerSession = state.session?.ownerWorkspace === true ? state.session : null;
     const ownerEpoch = ownerWorkspaceEpoch;
     interruptCostSource();

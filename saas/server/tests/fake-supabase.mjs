@@ -4,13 +4,14 @@ function projectWorkspaceRow(workspaceId, state, select) {
   return Object.fromEntries(select.split(',').map(expression => {
     // Only ordinary columns and simple JSON-arrow paths are implemented. Keep
     // projection behavior explicit so a bad query cannot silently fetch state.
-    const match = /^(?:([A-Za-z_]\w*):)?(workspace_id|state)((?:(?:->>|->)(?:[A-Za-z_]\w*|\d+))*)$/.exec(expression);
+    const match = /^(?:([A-Za-z_]\w*):)?(workspace_id|state)((?:(?:->>|->)(?:[A-Za-z_]\w*|-?\d+))*)$/.exec(expression);
     if (!match) throw new Error(`Unsupported fake Supabase projection: ${expression}`);
     const [, alias, column, path] = match;
     let value = row[column], key = column;
-    for (const [, operator, segment] of path.matchAll(/(->>|->)([A-Za-z_]\w*|\d+)/g)) {
+    for (const [, operator, segment] of path.matchAll(/(->>|->)([A-Za-z_]\w*|-?\d+)/g)) {
       key = segment;
-      value = value !== null && typeof value === 'object' && Object.hasOwn(value, segment) ? value[segment] : null;
+      const index = Array.isArray(value) && /^-\d+$/.test(segment) ? value.length + Number(segment) : segment;
+      value = value !== null && typeof value === 'object' && Object.hasOwn(value, index) ? value[index] : null;
       if (operator === '->>' && value !== null) value = typeof value === 'object' ? JSON.stringify(value) : String(value);
     }
     return [alias || key, value ?? null];
