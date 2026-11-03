@@ -48,7 +48,18 @@ assert(Array.isArray(catalogue.products) && catalogue.products.length > 0, 'Pack
 assert(catalogue.products.every(product => Array.isArray(product.variants)), 'Every product must expose a variants array');
 
 const referencedIds = [...js.matchAll(/\$\('#([^']+)'\)/g)].map(match => match[1]);
-const missingIds = [...new Set(referencedIds)].filter(id => !html.includes(`id="${id}"`));
+// These owner-only controls are created after the capability check, not in index.html.
+// Require their actual constructor, ID and append statements before admitting them.
+const readinessMount = js.slice(js.indexOf('function mountProductReadiness('), js.indexOf('function mountCatalogueImport('));
+const dynamicIds = new Set();
+for (const [id, constructor, assignment, append] of [
+  ['product-readiness-check', "const check=node('button','Check saved product readiness')", "check.id='product-readiness-check'", 'root.append(check)'],
+  ['product-readiness-result', "const message=node('p',productReadinessMessage)", "message.id='product-readiness-result'", 'root.append(message)']
+]) {
+  assert([constructor, assignment, append].every(fragment => readinessMount.includes(fragment)), `Dynamic DOM control is missing its constructor, ID or append: ${id}`);
+  dynamicIds.add(id);
+}
+const missingIds = [...new Set(referencedIds)].filter(id => !html.includes(`id="${id}"`) && !dynamicIds.has(id));
 assert(missingIds.length === 0, `Browser code references missing DOM IDs: ${missingIds.join(', ')}`);
 
 console.log(`SaaS guard checks passed for ${catalogue.products.length} Packsmart products.`);
