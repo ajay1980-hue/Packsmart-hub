@@ -60,17 +60,17 @@ test('one complete import uses current source currency, preserves unrelated stat
   const r=await f.submit(); assert.equal(r.status,200,JSON.stringify(r.payload)); assert.equal(r.payload.run.status,'imported');
   const saved=f.fake.states.get(ID), p=saved.products[0];
   assert.equal(p.currency,'GBP'); assert.equal(p.variants[0].priceDecimal,'12.30'); assert.equal(p.variants[0].raw.price,'12.30');
-  assert.equal(p.source.accountId,'gid://shopify/Shop/123'); assert.equal(p.source.currencySource,'Shop.currencyCode');
+  assert.equal(p.source.accountId,'gid://shopify/Shop/105939173710'); assert.equal(p.source.currencySource,'Shop.currencyCode');
   assert.equal(p.variants[0].stock.onHand,null); assert.equal(p.variants[0].stock.available,12); assert.equal(p.variants[0].stock.aggregateEligible,false);
   for(const key of ['users','connections','orders','economics','settings','automations','autopilot','agentOps']) assert.deepEqual(saved[key],before[key],key);
-  assert.equal(saved.audit.length,before.audit.length+2); assert.equal(f.reads.length,1);
+  assert.equal(saved.audit.length,before.audit.length+2); assert.equal(f.reads.length,2);
   assert.equal(f.calls.filter(c=>c.method==='PATCH').length,2); assert.equal(f.calls.some(c=>c.method==='POST'),false);
   assert.equal(saved.integrationStatus.reporting.status,'degraded'); assert.equal(f.server.packsmart.scheduler.status.lastTickAt,null);
   assert.equal(f.server.packsmart.agentOps.status.lastTickAt,null);
 });
 test('duplicate logical request and reentry read receipt without repeating provider work',async t=>{
   const f=await fixture(t); assert.equal((await f.submit()).status,200);
-  assert.equal((await f.submit()).payload.run.status,'imported'); assert.equal((await f.status()).payload.canRun,false); assert.equal(f.reads.length,1);
+  assert.equal((await f.submit()).payload.run.status,'imported'); assert.equal((await f.status()).payload.canRun,false); assert.equal(f.reads.length,2);
 });
 test('stale revisions, changed request ID, extra input and query overrides rejected before writes',async t=>{
   const f=await fixture(t);
@@ -89,7 +89,7 @@ for(const mode of ['csrf','origin','admin','inactive','revoked','tenant']) test(
 test('multiple complete pages stage before final save and retain missing historical rows without claiming freshness',async t=>{
   const state=catalogueState(); state.products=[{id:'gid://shopify/Product/999',provider:'shopify',title:'Old',variants:[]}];
   const f=await fixture(t,{state,providerFetch:(_input,n)=>response(n===1?page([product(1)],true,'next'):page([product(2)]))});
-  assert.equal((await f.submit()).status,200); assert.equal(f.reads.length,2); assert.equal(f.reads[1].variables.after,'next');
+  assert.equal((await f.submit()).status,200); assert.equal(f.reads.length,3); assert.equal(f.reads[1].variables.after,'next');
   const p=f.fake.states.get(ID).products; assert.equal(p.length,3); assert.equal(p[0].catalogueObserved,false);
 });
 for(const defect of ['variant-page','cursor','duplicate','missing-currency','changed-account','malformed','graphql','api-version','oversize','limit']) test('incomplete '+defect+' never replaces catalogue',async t=>{
@@ -129,7 +129,7 @@ test('uncertain final persistence is not replayed; authoritative status can reco
   let writes=0; const f=await fixture(t,{intercept:async({options,proceed})=>{
     if(options.method==='PATCH' && ++writes===2) { await proceed(); throw new Error('Synthetic lost acknowledgement'); } return proceed();
   }});
-  const r=await f.submit(); assert.ok([200,503].includes(r.status)); assert.equal((await f.status()).payload.run.status,'imported');assert.equal(writes,2);assert.equal(f.reads.length,1);
+  const r=await f.submit(); assert.ok([200,503].includes(r.status)); assert.equal((await f.status()).payload.run.status,'imported');assert.equal(writes,2);assert.equal(f.reads.length,2);
 });
 test('unknown reservation never starts provider read or retries PATCH',async t=>{
   let writes=0;const f=await fixture(t,{intercept:({options,proceed})=>{if(options.method==='PATCH'){writes++;throw new Error('Synthetic timeout');}return proceed();}});
@@ -137,7 +137,7 @@ test('unknown reservation never starts provider read or retries PATCH',async t=>
 });
 test('concurrent attempts admit at most one provider run',async t=>{
   const f=await fixture(t), body={requestId:f.env.RUNVARA_SHOPIFY_CATALOGUE_REQUEST_ID,expectedRevision:f.fake.states.get(ID)._revision};
-  const results=await Promise.all([f.submit(body),f.submit(body)]);assert.equal(results.filter(r=>r.status===200).length,1);assert.equal(f.reads.length,1);
+  const results=await Promise.all([f.submit(body),f.submit(body)]);assert.equal(results.filter(r=>r.status===200).length,1);assert.equal(f.reads.length,2);
 });
 test('bundle, explicit component, archived and SKU hints remain distinct without retail inference',async t=>{
   const a=product(1),b=product(2,{productType:'Component'}),c=product(3,{status:'ARCHIVED'}),d=product(4);

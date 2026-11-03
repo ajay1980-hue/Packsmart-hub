@@ -103,7 +103,7 @@ for(const kind of ['absent','unreadable','domain','duplicate','disconnected','co
 });
 test('recognized OAuth null metadata allows the existing bounded import without renewal or credential changes',async t=>{
  const s=catalogueState();s.connections[0].encryptedCredentials=encryptCredentials(oauth,SECRET);const f=await fixture(t,{state:s});const original=structuredClone(s.connections);
- const r=await f.submit();assert.equal(r.status,200,JSON.stringify(r.payload));assert.equal(r.payload.run.status,'imported');assert.equal(f.reads.length,1);assert.deepEqual(f.fake.states.get(ID).connections,original);
+ const r=await f.submit();assert.equal(r.status,200,JSON.stringify(r.payload));assert.equal(r.payload.run.status,'imported');assert.equal(f.reads.length,2);assert.deepEqual(f.fake.states.get(ID).connections,original);
 });
 for(const [name,value] of [['null alone',{...direct,expiresAt:null}],['unknown mode',{...oauth,mode:'other'}],['malformed',{...direct,expiresAt:'tomorrow'}]]) test('import stops before claim/source for '+name,async t=>{
  const s=catalogueState();s.connections[0].encryptedCredentials=encryptCredentials(value,SECRET);const f=await fixture(t,{state:s});

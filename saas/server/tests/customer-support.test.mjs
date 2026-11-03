@@ -33,8 +33,8 @@ test('customer support retains alternate saved status fields and safe missing-st
   for (const field of ['fulfilmentStatus','displayFulfillmentStatus']) {
     assert.match(buildSupportReply({orders:[{...order,[field]:'PARTIALLY_FULFILLED'}]},input).reply,/\*\*partially dispatched\*\*/);
   }
-  assert.match(buildSupportReply({orders:[order]},input).reply,/\*\*being prepared\*\*/);
-  assert.match(buildSupportReply({orders:[{...order,financialStatus:'UNPAID'}]},input).reply,/\*\*being processed\*\*/);
+  assert.match(buildSupportReply({orders:[order]},input).reply,/\*\*not yet confirmed\*\*/);
+  assert.match(buildSupportReply({orders:[{...order,financialStatus:'UNPAID'}]},input).reply,/\*\*not yet confirmed\*\*/);
 });
 
 test('customer support requires both order reference and matching email on a Shopify order', () => {

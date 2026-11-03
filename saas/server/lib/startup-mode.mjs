@@ -3,6 +3,7 @@ import { createQuietCreativePilot, creativePilotAction } from './quiet-creative-
 import { createCataloguePolicy, CATALOGUE_PATH } from './shopify-catalogue-import.mjs';
 import { SHOPIFY_DIAGNOSTIC_PATH } from './shopify-credential-metadata.mjs';
 import { createShopifyTokenPolicy, SHOPIFY_TOKEN_PATH } from './shopify-token-exchange.mjs';
+import { PRODUCT_ONLY_SUPPORT_PATH } from './support-product-facts.mjs';
 
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
@@ -38,6 +39,16 @@ export function createStartupPolicy(env, staticPathnames) {
     throw Object.assign(new Error('Quiet public support requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_PUBLIC_SUPPORT_INVALID' });
   }
   const quietPublicSupport = quiet && publicSupport === 'enabled/v1';
+  const supportProducts=env.RUNVARA_QUIET_SUPPORT_PRODUCTS===undefined?'disabled/v1':env.RUNVARA_QUIET_SUPPORT_PRODUCTS;
+  if(!['disabled/v1','enabled/v1'].includes(supportProducts)||(supportProducts==='enabled/v1'&&!quietPublicSupport)) {
+    throw Object.assign(new Error('Product support requires enabled quiet public support and an exact switch'),{code:'QUIET_SUPPORT_PRODUCTS_INVALID'});
+  }
+  const quietSupportProducts=supportProducts==='enabled/v1';
+  const productOnlySupport=env.RUNVARA_QUIET_PRODUCT_ONLY_SUPPORT===undefined?'disabled/v1':env.RUNVARA_QUIET_PRODUCT_ONLY_SUPPORT;
+  if(!['disabled/v1','enabled/v1'].includes(productOnlySupport)||(productOnlySupport==='enabled/v1'&&!quiet)) {
+    throw Object.assign(new Error('Product-only support requires quiet mode and an exact switch'),{code:'QUIET_PRODUCT_ONLY_SUPPORT_INVALID'});
+  }
+  const quietProductOnlySupport=quiet&&productOnlySupport==='enabled/v1';
   const approvalPilot = createQuietApprovalPilot(env);
   const creativePilot = createQuietCreativePilot(env);
   const catalogue = createCataloguePolicy(env);
@@ -50,6 +61,8 @@ export function createStartupPolicy(env, staticPathnames) {
     quietOwnerLogin,
     quietCommercePreview,
     quietPublicSupport,
+    quietSupportProducts,
+    quietProductOnlySupport,
     approvalPilot,
     creativePilot,
     catalogue,
@@ -61,6 +74,7 @@ export function createStartupPolicy(env, staticPathnames) {
       if (catalogue && pathname === CATALOGUE_PATH && (method === 'GET' || method === 'POST' && catalogue.available())) return true;
       if (quietOwnerWorkspace && method === 'GET' && pathname === '/api/bootstrap') return true;
       if (quietPublicSupport && ['OPTIONS', 'POST'].includes(method) && pathname === '/api/public/support') return true;
+      if (quietProductOnlySupport && ['OPTIONS', 'POST'].includes(method) && pathname === PRODUCT_ONLY_SUPPORT_PATH) return true;
       if (creativePilot?.available() && creativePilotAction(method, pathname)) return true;
       if (approvalPilot?.available() && method === 'POST' && ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action)) return true;
       if (method === 'GET' && pathname === '/api/auth/session') return true;

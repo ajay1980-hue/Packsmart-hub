@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import {supportProductSku,supportProductReply} from './support-product-facts.mjs';
 
 const clean=(value,max=300)=>String(value??'').trim().slice(0,max);
 const hashEmail=value=>{const normalized=clean(value,254).toLowerCase();return normalized?crypto.createHash('sha256').update(normalized).digest('hex'):null;};
@@ -20,6 +21,10 @@ export function validateSupportInput(body){
 
 export function supportNeedsOrders(input){
   return classifySupportIntent(input.message)==='order_status'&&Boolean(normalizeOrderRef(input.orderNumber)&&hashEmail(input.email));
+}
+
+export function supportProductRequest(input){
+  return classifySupportIntent(input.message)==='product'?supportProductSku(input.message):null;
 }
 
 // Only these saved fields leave the trusted store reader. No hydration or writes.
@@ -63,7 +68,7 @@ export function classifySupportIntent(message){
   if(/deliver|shipping|postage|courier|how long/.test(value))return 'delivery';
   if(/stock|available|availability|sold out|in stock/.test(value))return 'stock';
   if(/vat|invoice|receipt|business account|trade/.test(value))return 'business';
-  if(/pack size|quantity|how many|size|dimensions/.test(value))return 'product';
+  if(/pack size|quantity|how many|size|dimensions|\bsku\b|\bprice\b/.test(value))return 'product';
   return 'general';
 }
 
@@ -73,17 +78,24 @@ function orderRefs(order){
 }
 
 function orderStatus(order){
-  const fulfilment=clean(order?.fulfillmentStatus||order?.fulfilmentStatus||order?.displayFulfillmentStatus,80).toLowerCase().replace(/[\s-]+/g,'_');
-  const financial=clean(order?.financialStatus||order?.displayFinancialStatus,80).toLowerCase();
-  // Exact statuses prevent UNFULFILLED / PARTIALLY_FULFILLED becoming dispatched.
-  if(fulfilment==='delivered')return 'delivered';
-  if(['fulfilled','shipped','in_transit'].includes(fulfilment))return 'dispatched';
-  if(['partial','partially_fulfilled','partially_shipped','partially_dispatched'].includes(fulfilment))return 'partially dispatched';
-  if(['cancelled','canceled'].includes(fulfilment))return 'cancelled';
-  if(['unfulfilled','unshipped'].includes(fulfilment))return 'not yet dispatched';
-  if(fulfilment)return 'not yet confirmed';
-  if(['paid','authorized','authorised','pending'].includes(financial))return 'being prepared';
-  return 'being processed';
+  const aliases=['fulfillmentStatus','fulfilmentStatus','displayFulfillmentStatus'];
+  const statuses=[];
+  for(const key of aliases){
+    const raw=order?.[key];
+    if(raw===undefined||raw===null||raw==='')continue;
+    if(typeof raw!=='string'||raw.length>80)return 'not yet confirmed';
+    const value=raw.trim().toLowerCase().replace(/[\s-]+/g,'_');
+    if(!value)continue;
+    // Compare every provided alias by exact status semantics, never financial state.
+    const status=value==='delivered'?'delivered'
+      :['fulfilled','shipped','in_transit'].includes(value)?'dispatched'
+      :['partial','partially_fulfilled','partially_shipped','partially_dispatched'].includes(value)?'partially dispatched'
+      :['cancelled','canceled'].includes(value)?'cancelled'
+      :['unfulfilled','unshipped'].includes(value)?'not yet dispatched':null;
+    if(!status)return 'not yet confirmed';
+    statuses.push(status);
+  }
+  return statuses.length&&new Set(statuses).size===1?statuses[0]:'not yet confirmed';
 }
 
 export function findCustomerOrder(orders,{orderNumber,email}={}){
@@ -111,15 +123,21 @@ export function buildSupportReply(state,input={}){
     if(!order)return {intent,reply:"I couldn't safely match that order number and email. Please contact Packsmart through the store's contact page. This chat has not sent a message to the team.",needsHuman:true,needsOrderDetails:false};
     const status=orderStatus(order);
     let reply=`The saved status for order ${normalizeOrderRef(order.name||orderNumber)} is **${status}**. This is not a live carrier check and may have changed.`;
+    const uncertain=status==='not yet confirmed';
+    if(uncertain)reply+=" Contact Packsmart through the store's contact page to confirm. This chat has not sent a message to the team.";
     const tracking=safeTrackingUrl(order.statusPageUrl);
     if(tracking)reply+=` For updates, open your store order-status page: ${tracking}`;
-    return {intent,reply,needsHuman:false,needsOrderDetails:false,matchedOrder:true,source:'saved_order'};
+    return {intent,reply,needsHuman:uncertain,needsOrderDetails:false,matchedOrder:true,source:'saved_order'};
   }
   if(intent==='delivery')return {intent,reply:'Delivery options and timings are shown at checkout and vary by parcel size and destination. For an existing order, I can check its saved status using your order number and checkout email.',needsHuman:false,needsOrderDetails:false};
   if(intent==='returns')return {intent,reply:"For a return or refund, contact Packsmart through the store's contact page with your order number and reason. This chat does not submit return or refund requests.",needsHuman:true,needsOrderDetails:false};
   if(intent==='stock')return {intent,reply:'Check the product page for current availability and pack options. This chat does not perform a live stock check.',needsHuman:false,needsOrderDetails:false};
   if(intent==='business')return {intent,reply:"For a VAT invoice, repeat order or larger quantity, contact Packsmart through the store's contact page. This chat has not sent a message to the team.",needsHuman:true,needsOrderDetails:false};
-  if(intent==='product')return {intent,reply:'Check the product page for pack quantities and dimensions. Contact Packsmart directly if you need further product advice.',needsHuman:false,needsOrderDetails:false};
+  if(intent==='product'){
+    const sku=supportProductRequest(input),facts=state?.supportProductFacts;
+    const grounded=sku&&facts?.sku===sku?supportProductReply(facts):null;
+    return grounded||{intent,reply:'I cannot verify product facts from the available saved evidence. Check the product page or contact Packsmart for pack quantities, dimensions and current price. For an exact catalogue check, use SKU: followed by the exact SKU. This chat has not sent a message to the team.',needsHuman:true,needsOrderDetails:false};
+  }
   if(intent==='escalate')return {intent,reply:"This chat cannot change an order, payment or address. Please contact Packsmart through the store's contact page. No message has been sent to the team.",needsHuman:true,needsOrderDetails:false};
   return {intent,reply:"I can explain delivery and returns or check saved order status. For a human response, contact Packsmart through the store's contact page; this chat does not send messages to the team.",needsHuman:false,needsOrderDetails:false};
 }
