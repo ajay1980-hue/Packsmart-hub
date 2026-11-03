@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { PUBLIC_SUPPORT_WORKSPACE, SUPPORT_READ_MAX_BYTES, supportOrderProjection, supportUnavailable } from './customer-support.mjs';
 import { supportBundleProductProjection } from './support-product-facts.mjs';
+import { ownerProductReadinessProjection } from './owner-product-readiness.mjs';
 import { SUPPORT_BUNDLE_CONTEXT_SELECT, SUPPORT_BUNDLE_CONTEXT_KEYS, supportBundleContext, supportBundleContextFromState } from './support-bundle-policy.mjs';
 import { creativeRpcParams, creativeRpcResult, creativeAllowanceError } from './creative-allowance.mjs';
 import { metaStrictJson } from './meta-publication-bounded.mjs';
@@ -1081,6 +1082,18 @@ class SupabaseStore {
     if(!Array.isArray(rows)||rows.length!==1||!rows[0]||rows[0].workspace_id!==workspaceId||rows[0].workspaceId!==workspaceId
       ||Object.keys(rows[0]).some(key=>!['workspace_id','workspaceId','products',...SUPPORT_BUNDLE_CONTEXT_KEYS].includes(key)))throw supportUnavailable();
     return supportBundleProductProjection(workspaceId,rows[0].products,sku,{context:supportBundleContext(workspaceId,rows[0])});
+  }
+
+  async getOwnerProductReadiness(workspaceId) {
+    if(workspaceId!==PUBLIC_SUPPORT_WORKSPACE)throw supportUnavailable();
+    let rows;
+    try {
+      rows=await this.scopedRequest(workspaceId,'state_read',`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=workspace_id,workspaceId:state->workspace->>id,products:state->products,${SUPPORT_BUNDLE_CONTEXT_SELECT}&limit=1`,
+        {strictJson:true,maxResponseBytes:SUPPORT_READ_MAX_BYTES});
+    } catch {throw supportUnavailable();}
+    if(!Array.isArray(rows)||rows.length!==1||!rows[0]||rows[0].workspace_id!==workspaceId||rows[0].workspaceId!==workspaceId
+      ||Object.keys(rows[0]).some(key=>!['workspace_id','workspaceId','products',...SUPPORT_BUNDLE_CONTEXT_KEYS].includes(key)))throw supportUnavailable();
+    return ownerProductReadinessProjection(workspaceId,rows[0].products,supportBundleContext(workspaceId,rows[0]));
   }
 
   async schedulerRevision(workspaceId) {

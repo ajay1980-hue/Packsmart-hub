@@ -53,6 +53,7 @@ import { closePacksmartServer } from './lib/server-shutdown.mjs';
 import { createStartupPolicy, QUIET_STARTUP_RESPONSE } from './lib/startup-mode.mjs';
 import { quietCommercePreview } from './lib/quiet-commerce-preview.mjs';
 import { assertQuietOwnerWorkspace, quietOwnerWorkspaceAvailable } from './lib/quiet-owner-workspace.mjs';
+import { OWNER_PRODUCT_READINESS_PATH } from './lib/owner-product-readiness.mjs';
 import { CATALOGUE_PATH, createCatalogueImporter, catalogueStatus } from './lib/shopify-catalogue-import.mjs';
 import { SHOPIFY_DIAGNOSTIC_PATH, shopifyCredentialDiagnostic } from './lib/shopify-credential-metadata.mjs';
 import { SHOPIFY_TOKEN_PATH, createShopifyTokenExchange } from './lib/shopify-token-exchange.mjs';
@@ -387,6 +388,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   if (contentPilot !== null) assertContentPilotConfiguration(contentPilot, governedRecordStage);
   const costSourceStage = createCostSourceStage(env);
   const store = options.store || createStore(env, { fetchImpl: options.fetchImpl });
+  if(startupPolicy.quietOwnerProductReadiness&&(store.provider!=='supabase'||typeof store.getIdentity!=='function'||typeof store.getOwnerProductReadiness!=='function')) {
+    throw Object.assign(new Error('Owner product readiness requires bounded identity and product readers'),{code:'QUIET_OWNER_PRODUCT_READINESS_UNAVAILABLE'});
+  }
   if (startupPolicy.approvalPilot && store.provider !== 'supabase') throw Object.assign(new Error('Maintenance pilot requires Supabase persistence'), { code: 'QUIET_APPROVAL_PILOT_UNAVAILABLE' });
   if (startupPolicy.quietPublicSupport && (store.provider !== 'supabase' || typeof store.getPublicSupportOrders !== 'function')) {
     throw Object.assign(new Error('Quiet public support requires the bounded Supabase reader'), { code:'QUIET_PUBLIC_SUPPORT_UNAVAILABLE' });
@@ -1160,6 +1164,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const pilotRoute = ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action);
       const creativePilotRoute = pathname.startsWith(CREATIVE_PILOT_BASE);
       const catalogueRoute = pathname === CATALOGUE_PATH;
+      const productReadinessRoute = pathname === OWNER_PRODUCT_READINESS_PATH;
       const shopifyDiagnosticRoute = pathname === SHOPIFY_DIAGNOSTIC_PATH;
       const shopifyTokenRoute = startupPolicy.quiet && pathname === SHOPIFY_TOKEN_PATH;
 
@@ -1172,6 +1177,10 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if (pathname===PRODUCT_ONLY_SUPPORT_PATH) {
         if(!startupPolicy.quietProductOnlySupport||!['POST','OPTIONS'].includes(req.method)) {send(res,503,QUIET_STARTUP_RESPONSE);return;}
         if(req.url!==PRODUCT_ONLY_SUPPORT_PATH) throw Object.assign(new Error('Product-only support does not accept path or query overrides'),{status:400,code:'PRODUCT_ONLY_INPUT_INVALID'});
+      }
+      if(productReadinessRoute) {
+        if(!startupPolicy.quietOwnerProductReadiness||req.method!=='GET') {send(res,503,QUIET_STARTUP_RESPONSE);return;}
+        if(req.url!==OWNER_PRODUCT_READINESS_PATH)throw Object.assign(new Error('Product readiness accepts no overrides'),{status:400,code:'PRODUCT_READINESS_INPUT_INVALID'});
       }
       if (catalogueRoute && (!startupPolicy.quietOwnerWorkspace || !startupPolicy.catalogue || store.provider !== 'supabase' || !['GET','POST'].includes(req.method))) {
         send(res,503,QUIET_STARTUP_RESPONSE); return;
@@ -1232,6 +1241,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           startedAt,
           startupMode: startupPolicy.mode,
           quietOwnerWorkspace: startupPolicy.quietOwnerWorkspace,
+          quietOwnerProductReadiness: startupPolicy.quietOwnerProductReadiness,
           quietShopifyCatalogue: Boolean(startupPolicy.catalogue?.available()),
           quietShopifyDiagnostic: startupPolicy.quietShopifyDiagnostic,
           quietShopifyTokenExchange: Boolean(startupPolicy.shopifyTokenExchange?.available()),
@@ -1373,7 +1383,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { exactSnapshot: shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { exactSnapshot: shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1384,6 +1394,18 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         const rate = apiLimiter.check(rateKey);
         if (!rate.allowed) throw Object.assign(new Error('Request limit reached; try again shortly'), { status: 429, code: 'API_RATE_LIMITED' });
         apiLimiter.fail(rateKey);
+        if(productReadinessRoute) {
+          assertQuietOwnerWorkspace(auth,{inspectEvidence:false});
+          let result;
+          try { result=await store.getOwnerProductReadiness(auth.session.workspaceId); }
+          catch {throw Object.assign(new Error('Saved product readiness is unavailable'),{status:503,code:'PRODUCT_READINESS_UNAVAILABLE'});}
+          // Recheck expiry, revocation and role after the bounded saved-data read.
+          const current=await authenticate(req,res,{identityOnly:true});if(!current)return;
+          assertQuietOwnerWorkspace(current,{inspectEvidence:false});
+          if(draining||req.aborted||res.destroyed)throw Object.assign(new Error('Readiness check interrupted'),{status:503,code:'PRODUCT_READINESS_UNAVAILABLE'});
+          if(!sessionFrom(req)){send(res,401,{error:'Authentication required',code:'AUTH_REQUIRED'});return;}
+          send(res,200,result,{'Cache-Control':'no-store'});return;
+        }
         if (shopifyTokenRoute) {
           assertQuietOwnerWorkspace(auth);
           if (req.method === 'GET') { send(res,200,shopifyTokenExchange.status(auth.state),{'Cache-Control':'no-store'}); return; }
@@ -1756,6 +1778,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             send(res, 200, { ...payload, ownerWorkspace: true, automaticWorkPaused: true,
               catalogueImport: catalogueStatus(auth.state,startupPolicy.catalogue),
               shopifyCredentialDiagnosticAvailable: startupPolicy.quietShopifyDiagnostic,
+              productReadinessAvailable: startupPolicy.quietOwnerProductReadiness,
               ...(startupPolicy.shopifyTokenExchange ? { shopifyTokenExchange: shopifyTokenExchange.status(auth.state) } : {}),
               workspaceSnapshotAt: auth.state.workspace.updatedAt ?? null,
               brief: { ...payload.brief, transient: true } }); return;
