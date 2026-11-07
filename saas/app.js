@@ -40,6 +40,9 @@
   let catalogueBusy = false, catalogueMessage = '';
   let credentialDiagnosticBusy = false, credentialDiagnosticMessage = '';
   let productReadinessBusy = false, productReadinessMessage = '', productReadinessGeneration = 0;
+  let productReadinessExpiryTimer = null;
+  const productReadinessExpired = new Set();
+  const productReadinessDeadlines = new Map();
   const productReadinessPath = '/api/owner/product-readiness';
   const cataloguePath = '/api/owner/shopify-catalogue';
   const shopifyTokenPath = '/api/connections/shopify/refresh';
@@ -134,15 +137,48 @@
       && Date.parse(c.expiresAt)>Date.now() && !catalogueBusy && !catalogueWasAttempted();
   }
   function invalidateProductReadiness() {
+    clearTimeout(productReadinessExpiryTimer);
     productReadinessGeneration++;productReadinessBusy=false;productReadinessMessage='';
     $('#product-readiness-result')?.remove();
     const button=$('#product-readiness-check');if(button)button.disabled=true;
   }
+  function bindProductReadinessWindow(data, requestStarted) {
+    const expiry=data.productReadinessExpiresAt,remaining=data.productReadinessRemainingMs,now=performance.now();
+    if(data.productReadinessAvailable!==true)return;
+    if(typeof expiry!=='string'||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(expiry)||!Number.isFinite(Date.parse(expiry)))return;
+    const prior=productReadinessDeadlines.get(expiry);
+    if(!Number.isSafeInteger(remaining)||remaining<0||remaining>300000||!Number.isFinite(requestStarted)||!Number.isFinite(now)||now<requestStarted||prior&&now<prior.lastNow) {
+      if(prior)productReadinessExpired.add(expiry);
+      return;
+    }
+    // Anchor at request START, not receipt: all transit/processing time is
+    // conservatively consumed. Refreshing the same window cannot extend it.
+    const deadline=Math.min(requestStarted+remaining,prior?.deadline??Infinity);
+    productReadinessDeadlines.set(expiry,{deadline,lastNow:now});
+    if(now>=deadline)productReadinessExpired.add(expiry);
+  }
+  function productReadinessOpen() {
+    const expiry=state.data?.productReadinessExpiresAt,clock=productReadinessDeadlines.get(expiry),now=performance.now();
+    if(!clock)return false;
+    if(!Number.isFinite(now)||now<clock.lastNow||now>=clock.deadline)productReadinessExpired.add(expiry);
+    clock.lastNow=now;
+    return state.data?.productReadinessAvailable===true && !productReadinessExpired.has(expiry);
+  }
   function mountProductReadiness(root, node) {
+    clearTimeout(productReadinessExpiryTimer);
     if (state.data?.productReadinessAvailable !== true || state.session?.user?.role !== 'owner') return;
-    const check=node('button','Check saved product readiness');check.id='product-readiness-check';check.type='button';check.className='secondary';check.disabled=productReadinessBusy;
+    const expiry=state.data.productReadinessExpiresAt,open=productReadinessOpen();
+    if(!open&&!productReadinessExpired.has(expiry))return;
+    const check=node('button','Check saved product readiness');check.id='product-readiness-check';check.type='button';check.className='secondary';check.disabled=productReadinessBusy||!open;
     const context=state.session, epoch=ownerWorkspaceEpoch, generation=productReadinessGeneration,
-      current=()=>state.session===context && epoch===ownerWorkspaceEpoch && generation===productReadinessGeneration && !ownerWorkspaceClosed;
+      sameView=()=>state.session===context && epoch===ownerWorkspaceEpoch && generation===productReadinessGeneration && !ownerWorkspaceClosed,
+      current=()=>sameView() && productReadinessOpen();
+    root.append(node('p','Read-only readiness window ends: '+expiry+'. The server rejects expired checks; no automatic run or retry.'));
+    if(!open)productReadinessMessage='The readiness window has expired. No further check is available.';
+    else productReadinessExpiryTimer=setTimeout(()=>{
+      productReadinessExpired.add(expiry);
+      if(sameView())mountCatalogueImport();
+    },Math.max(0,Math.ceil(productReadinessDeadlines.get(expiry).deadline-performance.now())));
     check.addEventListener('click',async()=>{
       if(productReadinessBusy || !current())return;
       productReadinessBusy=true;productReadinessMessage='Checking saved catalogue evidence only. No Shopify request or import.';mountCatalogueImport();
@@ -435,7 +471,7 @@
     const catalogueRead=path===cataloguePath && method==='GET' && state.data?.catalogueImport?.requestId;
     const catalogueWrite=path===cataloguePath && method==='POST' && config.catalogueSubmission===true && state.data?.catalogueImport?.enabled===true;
     const credentialDiagnosticRead=path==='/api/owner/shopify-credential-metadata' && method==='GET' && state.data?.shopifyCredentialDiagnosticAvailable===true;
-    const productReadinessRead=path===productReadinessPath && method==='GET' && state.data?.productReadinessAvailable===true;
+    const productReadinessRead=path===productReadinessPath && method==='GET' && productReadinessOpen();
     const tokenRead=path===shopifyTokenPath && method==='GET' && config.shopifyTokenStatus===true && tokenDescriptor(state.data?.shopifyTokenExchange);
     const tokenWrite=path===shopifyTokenPath && method==='POST' && config.shopifyTokenSubmission===true && tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled===true;
     if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
@@ -642,10 +678,12 @@
       catch (error) { showMessage('Pilot migration needs attention: ' + error.message, 'error'); }
     }
     let data;
+    const productReadinessRequestStarted=performance.now();
     try {
       data = await request('/api/bootstrap');
       if (ownerSession && (state.session !== ownerSession || ownerEpoch !== ownerWorkspaceEpoch || ownerWorkspaceClosed)) return;
       if (ownerSession && (data.ownerWorkspace !== true || data.workspace?.id !== ownerSession.workspace.id || data.user?.id !== ownerSession.user.id || data.user?.role !== 'owner' || !(Date.parse(ownerSession.expiresAt) > Date.now()))) throw new Error('Owner workspace response could not be verified.');
+      if(ownerSession)bindProductReadinessWindow(data,productReadinessRequestStarted);
     } catch (error) {
       if (ownerSession && (state.session !== ownerSession || ownerEpoch !== ownerWorkspaceEpoch)) return;
       if (ownerSession) closeOwnerWorkspace(error.message);

@@ -1016,8 +1016,8 @@ class SupabaseStore {
     return Response.json(value);
   }
 
-  async getIdentity(workspaceId) {
-    const rows = await this.scopedRequest(workspaceId, 'identity_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state->workspace,state->users&limit=1`);
+  async getIdentity(workspaceId, { signal } = {}) {
+    const rows = await this.scopedRequest(workspaceId, 'identity_read', `saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=state->workspace,state->users&limit=1`, { signal });
     const state = rows?.[0];
     if (!state?.workspace || !Array.isArray(state.users)) return null;
     assertWorkspace(workspaceId, state);
@@ -1084,12 +1084,12 @@ class SupabaseStore {
     return supportBundleProductProjection(workspaceId,rows[0].products,sku,{context:supportBundleContext(workspaceId,rows[0])});
   }
 
-  async getOwnerProductReadiness(workspaceId) {
+  async getOwnerProductReadiness(workspaceId, { signal } = {}) {
     if(workspaceId!==PUBLIC_SUPPORT_WORKSPACE)throw supportUnavailable();
     let rows;
     try {
       rows=await this.scopedRequest(workspaceId,'state_read',`saas_workspace_state?workspace_id=eq.${encodeURIComponent(workspaceId)}&select=workspace_id,workspaceId:state->workspace->>id,products:state->products,${SUPPORT_BUNDLE_CONTEXT_SELECT}&limit=1`,
-        {strictJson:true,maxResponseBytes:SUPPORT_READ_MAX_BYTES});
+        {strictJson:true,maxResponseBytes:SUPPORT_READ_MAX_BYTES,signal});
     } catch {throw supportUnavailable();}
     if(!Array.isArray(rows)||rows.length!==1||!rows[0]||rows[0].workspace_id!==workspaceId||rows[0].workspaceId!==workspaceId
       ||Object.keys(rows[0]).some(key=>!['workspace_id','workspaceId','products',...SUPPORT_BUNDLE_CONTEXT_KEYS].includes(key)))throw supportUnavailable();
