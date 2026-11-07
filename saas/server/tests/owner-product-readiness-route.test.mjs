@@ -6,25 +6,66 @@ import {createStartupPolicy} from '../lib/startup-mode.mjs';
 import {createStore} from '../lib/store.mjs';
 import {OWNER_PRODUCT_READINESS_PATH as PATH,OWNER_PRODUCT_READINESS_FLAG as FLAG} from '../lib/owner-product-readiness.mjs';
 import {SUPPORT_BUNDLE_CONTEXT_SELECT} from '../lib/support-bundle-policy.mjs';
-const WS='packsmart-solutions',enabled={RUNVARA_QUIET_OWNER_LOGIN:'disabled/v1',RUNVARA_QUIET_OWNER_WORKSPACE:'enabled/v1',[FLAG]:'enabled/v1'};
+const WS='packsmart-solutions',enabled=()=>({RUNVARA_QUIET_OWNER_LOGIN:'disabled/v1',RUNVARA_QUIET_OWNER_WORKSPACE:'enabled/v1',[FLAG]:'enabled/v1',RUNVARA_QUIET_OWNER_PRODUCT_READINESS_EXPIRES_AT:new Date(Date.now()+240000).toISOString()});
 const cookie=(ws=WS,changes={},ttl)=>'__Host-packsmart_session='+createSessionToken({userId:ws+'-owner',workspaceId:ws,email:ws+'@example.test',role:'owner',sessionVersion:1,...changes},SECRET,ttl);
 async function fixture(t,options={}){
   t.mock.method(console,'error',()=>{});
-  const f=await maintenanceFixture({states:[ownerState(WS),ownerState('beta')],...options,env:{...enabled,...options.env}});t.after(f.close);return f;
+  const f=await maintenanceFixture({states:[ownerState(WS),ownerState('beta')],...options,env:{...enabled(),...options.env}});t.after(f.close);return f;
 }
 const writes=f=>f.calls.filter(x=>!['GET','HEAD'].includes(x.method));
+const EXPIRY='RUNVARA_QUIET_OWNER_PRODUCT_READINESS_EXPIRES_AT';
+test('expiry closes admission, health and bootstrap while the quiet dashboard remains available',async t=>{
+  const start=Date.now();let elapsed=0;t.mock.method(Date,'now',()=>start+elapsed);
+  const f=await fixture(t),c=cookie();
+  assert.equal((await f.request('/api/health')).payload.quietOwnerProductReadiness,true);
+  const before=await f.request('/api/bootstrap',{cookie:c});assert.equal(before.payload.productReadinessAvailable,true);
+  assert.equal(before.payload.productReadinessExpiresAt,f.config[EXPIRY]);
+  assert.ok(Number.isSafeInteger(before.payload.productReadinessRemainingMs)&&before.payload.productReadinessRemainingMs>0&&before.payload.productReadinessRemainingMs<=240000);
+  elapsed=240000;
+  const health=await f.request('/api/health');assert.equal(health.payload.quietOwnerProductReadiness,false);
+  const count=f.calls.length;assert.equal((await f.request(PATH,{cookie:c})).status,503);assert.equal(f.calls.length,count);
+  const after=await f.request('/api/bootstrap',{cookie:c});assert.equal(after.status,200);assert.equal(after.payload.productReadinessAvailable,false);
+  assert.equal(after.payload.productReadinessExpiresAt,before.payload.productReadinessExpiresAt);
+  assert.equal(after.payload.productReadinessRemainingMs,0);
+  elapsed=0;assert.equal((await f.request(PATH,{cookie:c})).status,503,'observed expiry never reopens');
+  assert.equal(writes(f).length,0);
+});
+for(const endRead of [1,2,3])test(`permit expiry after database read ${endRead} suppresses the result and subsequent reads`,async t=>{
+  const start=Date.now();let elapsed=0,reads=0;t.mock.method(Date,'now',()=>start+elapsed);
+  const f=await fixture(t,{intercept:async({proceed})=>{const result=await proceed();if(++reads===endRead)elapsed=240000;return result;}});
+  const r=await f.request(PATH,{cookie:cookie()});assert.equal(r.status,503);assert.equal(r.payload.schema,undefined);
+  assert.equal(f.calls.length,endRead);assert.equal(writes(f).length,0);
+});
+test('the same bounded abort signal reaches identity, catalogue and identity transports',async t=>{
+  const signals=[],f=await fixture(t,{intercept:({options,proceed})=>{signals.push(options.signal);return proceed();}});
+  assert.equal((await f.request(PATH,{cookie:cookie()})).status,200);assert.equal(signals.length,3);
+  assert.ok(signals.every(s=>s instanceof AbortSignal&&s===signals[0]));assert.equal(writes(f).length,0);
+});
+test('expired configuration starts closed without taking down quiet owner viewing',async t=>{
+  const f=await fixture(t,{env:{[EXPIRY]:new Date(Date.now()-1000).toISOString()}});
+  assert.equal((await f.request(PATH,{cookie:cookie()})).status,503);assert.equal(f.calls.length,0);
+  assert.equal((await f.request('/api/bootstrap',{cookie:cookie()})).status,200);
+});
+test('an old OFF instance can overlap an expiring instance without waiting for shutdown logs',async t=>{
+  const old=await fixture(t,{env:{[FLAG]:'disabled/v1'}}),next=await fixture(t);
+  assert.equal(old.server.listening,true);assert.equal(next.server.listening,true);
+  assert.equal((await old.request(PATH,{cookie:cookie()})).status,503);assert.equal(old.calls.length,0);
+  assert.equal((await next.request(PATH,{cookie:cookie()})).status,200);
+  assert.equal(old.server.packsmart.agentOps.status.lastTickAt,null);assert.equal(next.server.packsmart.scheduler.status.lastTickAt,null);
+  assert.equal(writes(old).length+writes(next).length,0);
+});
 test('default OFF, exact GET admission, owner-workspace dependency and invalid flags fail closed',()=>{
   assert.equal(createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet'},[]).allowsRequest('GET',PATH),false);
-  for(const v of ['',true,null,'true','enabled/v1 ',{}])assert.throws(()=>createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled,[FLAG]:v},[]),{code:'QUIET_OWNER_PRODUCT_READINESS_INVALID'});
+  for(const v of ['',true,null,'true','enabled/v1 ',{}])assert.throws(()=>createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled(),[FLAG]:v},[]),{code:'QUIET_OWNER_PRODUCT_READINESS_INVALID'});
   assert.throws(()=>createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',[FLAG]:'enabled/v1'},[]),{code:'QUIET_OWNER_PRODUCT_READINESS_INVALID'});
-  const p=createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled},[]);
+  const p=createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled()},[]);
   for(const method of ['GET','HEAD','POST','PUT','OPTIONS','DELETE'])assert.equal(p.allowsRequest(method,PATH),method==='GET');
   for(const route of [PATH+'/',PATH+'?x=1','/api/public/support','/api/public/support/products','/api/connections/shopify/refresh','/api/integrations/sync'])assert.equal(p.allowsRequest('GET',route),false);
 });
 test('independent public support retains its own exact gate, not enabled by readiness',()=>{
-  const p=createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled,RUNVARA_QUIET_PUBLIC_SUPPORT:'enabled/v1'},[]);
+  const p=createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled(),RUNVARA_QUIET_PUBLIC_SUPPORT:'enabled/v1'},[]);
   assert.equal(p.allowsRequest('POST','/api/public/support'),true);assert.equal(p.allowsRequest('GET','/api/public/support'),false);
-  const closed=createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled},[]);assert.equal(closed.allowsRequest('POST','/api/public/support'),false);
+  const closed=createStartupPolicy({RUNVARA_STARTUP_MODE:'quiet',...enabled()},[]);assert.equal(closed.allowsRequest('POST','/api/public/support'),false);
 });
 test('strict owner reads narrow identity/catalogue/identity; no mutation, jobs or provider calls',async t=>{
   const f=await fixture(t),before=structuredClone([...f.fake.states]);

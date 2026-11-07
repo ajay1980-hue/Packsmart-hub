@@ -5,6 +5,7 @@ import { SHOPIFY_DIAGNOSTIC_PATH } from './shopify-credential-metadata.mjs';
 import { createShopifyTokenPolicy, SHOPIFY_TOKEN_PATH } from './shopify-token-exchange.mjs';
 import { PRODUCT_ONLY_SUPPORT_PATH } from './support-product-facts.mjs';
 import { OWNER_PRODUCT_READINESS_PATH, OWNER_PRODUCT_READINESS_FLAG } from './owner-product-readiness.mjs';
+import { createOwnerProductReadinessWindow } from './owner-product-readiness-window.mjs';
 
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
@@ -24,7 +25,7 @@ export function createStartupPolicy(env, staticPathnames) {
   if(!['disabled/v1','enabled/v1'].includes(productReadiness)||(productReadiness==='enabled/v1'&&!quietOwnerWorkspace)) {
     throw Object.assign(new Error('Product readiness requires quiet owner workspace and an exact switch'),{code:'QUIET_OWNER_PRODUCT_READINESS_INVALID'});
   }
-  const quietOwnerProductReadiness=productReadiness==='enabled/v1';
+  const productReadinessWindow=createOwnerProductReadinessWindow(env);
   const shopifyDiagnostic = env.RUNVARA_QUIET_SHOPIFY_DIAGNOSTIC === undefined ? 'disabled/v1' : env.RUNVARA_QUIET_SHOPIFY_DIAGNOSTIC;
   if (!['disabled/v1', 'enabled/v1'].includes(shopifyDiagnostic) || (shopifyDiagnostic === 'enabled/v1' && !quietOwnerWorkspace)) {
     throw Object.assign(new Error('Shopify diagnostic requires quiet owner workspace and an exact switch'), { code: 'QUIET_SHOPIFY_DIAGNOSTIC_INVALID' });
@@ -63,7 +64,8 @@ export function createStartupPolicy(env, staticPathnames) {
     mode,
     quiet,
     quietOwnerWorkspace,
-    quietOwnerProductReadiness,
+    get quietOwnerProductReadiness() { return !!productReadinessWindow?.available(); },
+    productReadinessWindow,
     quietShopifyDiagnostic,
     quietOwnerLogin,
     quietCommercePreview,
@@ -76,7 +78,7 @@ export function createStartupPolicy(env, staticPathnames) {
     shopifyTokenExchange,
     allowsRequest(method, pathname) {
       if (!quiet) return true;
-      if (quietOwnerProductReadiness && method === 'GET' && pathname === OWNER_PRODUCT_READINESS_PATH) return true;
+      if (productReadinessWindow?.available() && method === 'GET' && pathname === OWNER_PRODUCT_READINESS_PATH) return true;
       if (shopifyTokenExchange && pathname === SHOPIFY_TOKEN_PATH && (method === 'GET' || method === 'POST' && shopifyTokenExchange.available())) return true;
       if (quietShopifyDiagnostic && method === 'GET' && pathname === SHOPIFY_DIAGNOSTIC_PATH) return true;
       if (catalogue && pathname === CATALOGUE_PATH && (method === 'GET' || method === 'POST' && catalogue.available())) return true;

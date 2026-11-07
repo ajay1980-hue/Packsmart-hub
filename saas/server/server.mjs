@@ -538,13 +538,16 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return verifySessionToken(token, env.SESSION_SECRET);
   }
 
-  async function authenticate(req, res, { identityOnly = false, exactSnapshot = false } = {}) {
+  async function authenticate(req, res, { identityOnly = false, exactSnapshot = false, readBudget = null } = {}) {
+    readBudget?.assertActive();
     const session = sessionFrom(req);
     if (!session) {
       send(res, 401, { error: 'Authentication required', code: 'AUTH_REQUIRED' });
       return null;
     }
-    const state = identityOnly && store.getIdentity ? await store.getIdentity(session.workspaceId)
+    const state = identityOnly && store.getIdentity ? (readBudget
+      ? await readBudget.run(signal => store.getIdentity(session.workspaceId, { signal }))
+      : await store.getIdentity(session.workspaceId))
       : exactSnapshot ? await store.get(session.workspaceId, { exactSnapshot: true }) : await store.get(session.workspaceId);
     const user = state?.users?.find(item => item.id === session.sub);
     if (!state || !user || user.active === false || Number(user.sessionVersion || 1) !== Number(session.sessionVersion || 1)) {
@@ -1158,6 +1161,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const handleRequest = async (req, res) => {
     const requestId = crypto.randomUUID();
     res.setHeader('X-Request-Id', requestId);
+    let readinessRead = null;
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
@@ -1181,6 +1185,9 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if(productReadinessRoute) {
         if(!startupPolicy.quietOwnerProductReadiness||req.method!=='GET') {send(res,503,QUIET_STARTUP_RESPONSE);return;}
         if(req.url!==OWNER_PRODUCT_READINESS_PATH)throw Object.assign(new Error('Product readiness accepts no overrides'),{status:400,code:'PRODUCT_READINESS_INPUT_INVALID'});
+        readinessRead=startupPolicy.productReadinessWindow.beginRead();
+        req.once('aborted',readinessRead.cancel);
+        res.once('close',readinessRead.cancel);
       }
       if (catalogueRoute && (!startupPolicy.quietOwnerWorkspace || !startupPolicy.catalogue || store.provider !== 'supabase' || !['GET','POST'].includes(req.method))) {
         send(res,503,QUIET_STARTUP_RESPONSE); return;
@@ -1383,7 +1390,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { exactSnapshot: shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { readBudget: readinessRead, exactSnapshot: shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1397,13 +1404,14 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
         if(productReadinessRoute) {
           assertQuietOwnerWorkspace(auth,{inspectEvidence:false});
           let result;
-          try { result=await store.getOwnerProductReadiness(auth.session.workspaceId); }
+          try { result=await readinessRead.run(signal=>store.getOwnerProductReadiness(auth.session.workspaceId,{signal})); }
           catch {throw Object.assign(new Error('Saved product readiness is unavailable'),{status:503,code:'PRODUCT_READINESS_UNAVAILABLE'});}
           // Recheck expiry, revocation and role after the bounded saved-data read.
-          const current=await authenticate(req,res,{identityOnly:true});if(!current)return;
+          const current=await authenticate(req,res,{identityOnly:true,readBudget:readinessRead});if(!current)return;
           assertQuietOwnerWorkspace(current,{inspectEvidence:false});
           if(draining||req.aborted||res.destroyed)throw Object.assign(new Error('Readiness check interrupted'),{status:503,code:'PRODUCT_READINESS_UNAVAILABLE'});
           if(!sessionFrom(req)){send(res,401,{error:'Authentication required',code:'AUTH_REQUIRED'});return;}
+          readinessRead.assertActive();
           send(res,200,result,{'Cache-Control':'no-store'});return;
         }
         if (shopifyTokenRoute) {
@@ -1775,10 +1783,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             // only a detached copy; this branch never hydrates or saves it.
             const detached = structuredClone(auth.state);
             const payload = bootstrapPayload(detached, detached.users.find(user => user.id === auth.user.id), auth.session.csrf);
+            const productReadinessRemainingMs = startupPolicy.productReadinessWindow?.remainingMs() ?? 0;
             send(res, 200, { ...payload, ownerWorkspace: true, automaticWorkPaused: true,
               catalogueImport: catalogueStatus(auth.state,startupPolicy.catalogue),
               shopifyCredentialDiagnosticAvailable: startupPolicy.quietShopifyDiagnostic,
-              productReadinessAvailable: startupPolicy.quietOwnerProductReadiness,
+              productReadinessAvailable: productReadinessRemainingMs > 0,
+              productReadinessExpiresAt: startupPolicy.productReadinessWindow?.expiresAt ?? null,
+              productReadinessRemainingMs,
               ...(startupPolicy.shopifyTokenExchange ? { shopifyTokenExchange: shopifyTokenExchange.status(auth.state) } : {}),
               workspaceSnapshotAt: auth.state.workspace.updatedAt ?? null,
               brief: { ...payload.brief, transient: true } }); return;
@@ -3077,6 +3088,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if (!res.headersSent) send(res, safe.status, { error: safe.code === 'GOVERNED_RECORDS_PAUSED' ? GOVERNED_RECORDS_PAUSED_MESSAGE
         : safe.code === 'COST_SOURCE_REVIEW_PAUSED' ? COST_SOURCE_REVIEW_PAUSED_MESSAGE
           : safe.code === 'COST_SOURCE_SAVE_UNCONFIRMED' ? 'The save could not be confirmed. Check this exact request in saved source history before trying again.' : safe.publicMessage, code: safe.code });
+    } finally {
+      if(readinessRead) {
+        req.removeListener('aborted',readinessRead.cancel);
+        res.removeListener('close',readinessRead.cancel);
+        readinessRead.dispose();
+      }
     }
   };
   const server = http.createServer((req, res) => {

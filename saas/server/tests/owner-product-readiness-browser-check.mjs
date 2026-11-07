@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {chromium} from 'playwright';
 import {maintenanceFixture,ownerState,SECRET} from './maintenance-login-fixture.mjs';
 import {createSessionToken} from '../lib/security.mjs';
@@ -11,8 +12,13 @@ const output=path.resolve(process.env.RUNVARA_PRODUCT_READINESS_EVIDENCE||'.prod
 await fs.mkdir(output,{recursive:true});
 const browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH});
 const results=[],requests=[],errors=[];let external=0;
-const check=(ok,name)=>{assert.ok(ok,name);results.push(name);};
-const env={NODE_ENV:'test',APP_PUBLIC_URL:'http://127.0.0.1',RUNVARA_QUIET_OWNER_LOGIN:'disabled/v1',RUNVARA_QUIET_OWNER_WORKSPACE:'enabled/v1',[FLAG]:'enabled/v1'};
+const check=(ok,name)=>{assert.ok(ok,name);results.push(name);console.log('PASS '+name);};
+async function bounded(promise,label){
+ let timer;
+ try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Browser fixture stalled: '+label)),15000);})]);}
+ finally{clearTimeout(timer);}
+}
+const env={NODE_ENV:'test',APP_PUBLIC_URL:'http://127.0.0.1',RUNVARA_QUIET_OWNER_LOGIN:'disabled/v1',RUNVARA_QUIET_OWNER_WORKSPACE:'enabled/v1',[FLAG]:'enabled/v1',RUNVARA_QUIET_OWNER_PRODUCT_READINESS_EXPIRES_AT:new Date(Date.now()+240000).toISOString()};
 try{
  for(const width of [390,1200]){
   const state=ownerState('packsmart-solutions'),f=await maintenanceFixture({states:[state],env});
@@ -80,9 +86,97 @@ try{
    check(!await page.locator('#app-shell').isVisible(),`${width}: owner revocation closes view`);
    f.fake.states.get(state.workspace.id).users[0].role='owner';
    const port=f.server.address().port;await f.close();const closed=await maintenanceFixture({states:[state],env:{...env,[FLAG]:'disabled/v1'},port});
-   try{await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});check(await page.locator('#product-readiness-check').count()===0,`${width}: disabled flag hides button`);check(await page.evaluate(()=>localStorage.getItem('packsmart-saas-economics-v1'))==='preserve-synthetic-legacy',`${width}: legacy data untouched`);check(closed.calls.every(x=>x.method==='GET'),`${width}: closed server receives no mutations`);}finally{await closed.close();}
+   try{await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});check(await page.locator('#product-readiness-check').count()===0,`${width}: disabled flag hides button`);check(await page.evaluate(()=>localStorage.getItem('packsmart-saas-economics-v1'))==='preserve-synthetic-legacy',`${width}: legacy data untouched`);check(closed.calls.every(x=>x.method==='GET'),`${width}: closed server receives no mutations`);check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${width}: no horizontal page overflow`);}finally{await context.close();await bounded(closed.close(),'closed fixture teardown');}
    check(f.calls.every(x=>x.method==='GET'),`${width}: enabled fixture receives no mutations`);
-   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),`${width}: no horizontal page overflow`);
+  }finally{await context.close();await f.close();}
+ }
+ // A real browser timer closes the UI without a reload, server poll or operator click.
+ for(const width of [390,1200]){
+  const now=Date.now(),expiry=new Date(now+20000).toISOString(),state=ownerState('packsmart-solutions');
+  const f=await maintenanceFixture({states:[state],env:{...env,RUNVARA_QUIET_OWNER_PRODUCT_READINESS_EXPIRES_AT:expiry}});
+  const context=await browser.newContext({viewport:{width,height:900}});
+  try{
+   await context.addCookies([{name:'packsmart_session',value:createSessionToken({userId:state.users[0].id,workspaceId:state.workspace.id,email:state.users[0].email,role:'owner',sessionVersion:1},SECRET),url:f.base,httpOnly:true,sameSite:'Strict'}]);
+   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.clock.install({time:new Date(now)});
+   await page.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==f.base){external++;return route.abort();}requests.push({method:route.request().method(),path:u.pathname});return route.continue();});
+   await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});
+   if(width<600)await page.locator('#mobile-menu').click();await page.locator('#main-nav [data-view="channels"]').click();
+   check((await page.locator('#catalogue-import-panel').textContent()).includes(expiry),`${width}: absolute readiness deadline displayed`);
+   const source=syntheticBundleFixture(now),ready=createOwnerProductReadinessProjection(source.policy)(state.workspace.id,source.products,source.context,{now});
+   let release,entered,deliveries=0;const held=new Promise(r=>release=r),seen=new Promise(r=>entered=r);
+   await page.route('**'+PATH,async route=>{deliveries++;entered();await held;await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(ready)});});
+   await page.locator('#product-readiness-check').click();await seen;await page.clock.fastForward(20001);
+   check(await page.locator('#product-readiness-check').isDisabled(),`${width}: automatic expiry disables an in-flight check`);
+   check((await page.locator('#product-readiness-result').textContent()).includes('window has expired'),`${width}: expired state replaces pending message`);
+   const finished=page.waitForEvent('requestfinished',{predicate:r=>new URL(r.url()).pathname===PATH});release();await finished;
+   await page.evaluate(()=>new Promise(r=>queueMicrotask(r)));
+   check(!(await page.locator('#product-readiness-result').textContent()).includes('15 products'),`${width}: late success after expiry is discarded`);
+   await page.locator('#product-readiness-check').evaluate(button=>button.dispatchEvent(new Event('click')));
+   check(deliveries===1,`${width}: expired click cannot send another request`);
+   await page.clock.setFixedTime(new Date(now-1000));
+   await page.locator('#product-readiness-check').evaluate(button=>button.dispatchEvent(new Event('click')));
+   check(deliveries===1&&await page.locator('#product-readiness-check').isDisabled(),`${width}: clock rollback cannot reopen the expired UI`);
+   await page.unroute('**'+PATH);
+   await page.route('**/api/bootstrap',async route=>{const response=await route.fetch(),payload=await response.json();delete payload.productReadinessExpiresAt;await route.fulfill({response,json:payload});});
+   await page.reload({waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});
+   check(await page.locator('#product-readiness-check').count()===0,`${width}: missing expiry metadata never exposes a usable button`);
+   await page.unroute('**/api/bootstrap');
+   for(const remaining of [undefined,-1,300001,1.5,'20000']){
+    await page.route('**/api/bootstrap',async route=>{const response=await route.fetch(),payload=await response.json();assert.equal(payload.productReadinessAvailable,true);payload.productReadinessRemainingMs=remaining;await route.fulfill({response,json:payload});});
+    await page.reload({waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});
+    check(await page.locator('#product-readiness-check').count()===0,`${width}: invalid or missing remaining budget ${remaining} hides action`);
+    await page.unroute('**/api/bootstrap');
+   }
+   check(f.calls.every(x=>x.method==='GET'),`${width}: expiry fixture receives no mutations`);
+  }finally{await context.close();await f.close();}
+ }
+ // Real elapsed-time regression: the server finishes before expiry, but its
+ // response reaches a wall-clock-skewed browser only after the server closes.
+ for(const skew of [-60000,60000]){
+  const now=Date.now(),deadline=now+8000,expiry=new Date(deadline).toISOString(),state=ownerState('packsmart-solutions');
+  const f=await maintenanceFixture({states:[state],env:{...env,RUNVARA_QUIET_OWNER_PRODUCT_READINESS_EXPIRES_AT:expiry}});
+  const context=await browser.newContext({viewport:{width:1200,height:900}});let release;
+  try{
+   await context.addCookies([{name:'packsmart_session',value:createSessionToken({userId:state.users[0].id,workspaceId:state.workspace.id,email:state.users[0].email,role:'owner',sessionVersion:1},SECRET),url:f.base,httpOnly:true,sameSite:'Strict'}]);
+   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.clock.install({time:new Date(now+skew)});
+   await page.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==f.base){external++;return route.abort();}requests.push({method:route.request().method(),path:u.pathname});return route.continue();});
+   let entered,status,responseAt,deliveries=0;const held=new Promise(r=>release=r),seen=new Promise(r=>entered=r);
+   await page.route('**'+PATH,async route=>{deliveries++;const response=await route.fetch();status=response.status();responseAt=Date.now();entered();await held;await route.fulfill({response});});
+   await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});await page.locator('#main-nav [data-view="channels"]').click();
+   check(await page.locator('#product-readiness-check').isEnabled(),`${skew}: skewed browser admits the still-valid read`);
+   await page.locator('#product-readiness-check').click();await bounded(seen,'skewed readiness response');
+   check(status===200&&responseAt<deadline,`${skew}: actual server read completed before expiry`);
+   await delay(Math.max(0,deadline-Date.now()+120));
+   check((await f.request('/api/health')).payload.quietOwnerProductReadiness===false,`${skew}: actual server is closed before response delivery`);
+   const finished=page.waitForEvent('requestfinished',{predicate:r=>new URL(r.url()).pathname===PATH});release();await finished;
+   await bounded(page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))),'skewed UI frame');
+   const observation={skew,expiry,responseAt:new Date(responseAt).toISOString(),observedAt:new Date().toISOString(),clientNow:await page.evaluate(()=>new Date().toISOString()),buttonEnabled:await page.locator('#product-readiness-check').isEnabled(),text:await page.locator('#product-readiness-result').textContent(),deliveries};
+   await fs.writeFile(path.join(output,`clock-skew-${skew}.json`),JSON.stringify(observation,null,2));
+   check(!observation.buttonEnabled,`${skew}: button closes by server deadline despite device clock skew`);
+   check(observation.text.includes('window has expired')&&!observation.text.includes('No complete import receipt'),`${skew}: late real response is discarded`);
+   await page.locator('#product-readiness-check').evaluate(button=>button.dispatchEvent(new Event('click')));
+   check(deliveries===1,`${skew}: closed window sends no second request`);
+   check(f.calls.every(x=>x.method==='GET'),`${skew}: skew fixture makes no mutations`);
+  }finally{release?.();await context.close();await f.close();}
+ }
+ // Delayed bootstrap itself must consume the original deadline, not issue a
+ // fresh client countdown when the old response eventually arrives.
+ {
+  const now=Date.now(),deadline=now+6000,expiry=new Date(deadline).toISOString(),state=ownerState('packsmart-solutions');
+  const f=await maintenanceFixture({states:[state],env:{...env,RUNVARA_QUIET_OWNER_PRODUCT_READINESS_EXPIRES_AT:expiry}}),context=await browser.newContext();
+  try{
+   await context.addCookies([{name:'packsmart_session',value:createSessionToken({userId:state.users[0].id,workspaceId:state.workspace.id,email:state.users[0].email,role:'owner',sessionVersion:1},SECRET),url:f.base,httpOnly:true,sameSite:'Strict'}]);
+   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.clock.install({time:new Date(now-60000)});
+   await page.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==f.base){external++;return route.abort();}requests.push({method:route.request().method(),path:u.pathname});return route.continue();});
+   await page.route('**/api/bootstrap',async route=>{const response=await route.fetch(),payload=await response.json();assert.equal(payload.productReadinessAvailable,true);await delay(Math.max(0,deadline-Date.now()+120));await route.fulfill({response,json:payload});});
+   const prior=requests.filter(x=>x.path===PATH).length;
+   await page.goto(f.base,{waitUntil:'networkidle'});await page.locator('#app-shell').waitFor({state:'visible'});await page.locator('#main-nav [data-view="channels"]').click();
+   check((await f.request('/api/health')).payload.quietOwnerProductReadiness===false,'delayed bootstrap: real server has expired');
+   check(await page.locator('#product-readiness-check').isDisabled(),'delayed bootstrap: no new countdown starts at receipt');
+   check((await page.locator('#product-readiness-result').textContent()).includes('window has expired'),'delayed bootstrap: expired state is explicit');
+   await page.locator('#product-readiness-check').evaluate(button=>button.dispatchEvent(new Event('click')));
+   check(requests.filter(x=>x.path===PATH).length===prior,'delayed bootstrap: no readiness request sent');
+   check(f.calls.every(x=>x.method==='GET'),'delayed bootstrap: no mutations');
   }finally{await context.close();await f.close();}
  }
  check(external===0,'no external browser traffic');check(errors.length===0,'no browser errors');check(requests.every(x=>x.method==='GET'),'all browser requests GET');
