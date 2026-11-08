@@ -21,14 +21,14 @@ function convert(value, divisor) {
 export function parcel2GoQuoteRequest(input, binding, now, tax) {
   if(!tax||tax.accountCurrency!=='GBP'||!['Individual','NotRegistered','Registered'].includes(tax.collectionVatStatus)
     ||!['Individual','NotRegistered','Registered'].includes(tax.deliveryVatStatus))fail();
-  const prepared=prepareParcel2GoQuote(input,binding,now), p=prepared.parcel;
+  const prepared=prepareParcel2GoQuote(input,binding,now,{syntheticOnly:tax.mode==='sandbox-quote/v1'}), p=prepared.parcel;
   return {prepared, body:{CollectionAddress:{Country:'GBR',VatStatus:tax.collectionVatStatus},DeliveryAddress:{Country:'GBR',VatStatus:tax.deliveryVatStatus},Parcels:[{
     Weight:convert(p.weightGrams,1000),Length:convert(p.lengthMm,10),Width:convert(p.widthMm,10),Height:convert(p.heightMm,10),
     Value:Number(p.declaredValueDecimal)}]}};
 }
-export function parcel2GoQuoteResponse(bytes, {observedAt, requestId}) {
+export function parcel2GoQuoteResponse(bytes, {observedAt, requestId,responseSource='fixture'}) {
   try {
-    if (!(bytes instanceof Uint8Array) || bytes.byteLength>262144) fail();
+    if (!(bytes instanceof Uint8Array) || bytes.byteLength>262144||!['fixture','sandbox-http'].includes(responseSource)) fail();
     // Duplicate keys (including escaped aliases), malformed UTF-8 and depth fail.
     metaStrictJson(bytes);
     // Node 22 source-aware reviver preserves the original numeric spelling.
@@ -52,6 +52,6 @@ export function parcel2GoQuoteResponse(bytes, {observedAt, requestId}) {
         priceGuaranteed:false,deliveryGuaranteed:false,purchaseAllowed:false});
     });
     return Object.freeze({schema:'runvara-parcel2go-sandbox-quote/v1',requestId,observedAt,quotes:Object.freeze(quotes),
-      synthetic:true,accountVerified:false,liveReady:false,quoteValidity:'unknown',purchaseAllowed:false});
+      synthetic:responseSource==='fixture',responseSource,syntheticParcel:responseSource==='sandbox-http',accountVerified:false,liveReady:false,quoteValidity:'unknown',purchaseAllowed:false});
   } catch {fail();}
 }
