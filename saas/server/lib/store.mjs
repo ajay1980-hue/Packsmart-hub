@@ -15,7 +15,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { compactDailyBrief, defaultAutomations } from './operations.mjs';
+import { defaultAutomations } from './operations.mjs';
 import { defaultAgentSettings } from './agents.mjs';
 import { normalizeEmail } from './security.mjs';
 import { reportingStatusRequest, REPORTING_RESPONSE_MAX_BYTES } from './reporting-status.mjs';
@@ -46,6 +46,7 @@ import {
 } from './usage-governance.mjs';
 import { addAudit } from './events.mjs';
 import { assertCatalogueImportPermit } from './shopify-catalogue-import.mjs';
+import { compactStateBytes, planCatalogueSaveCapacity, retainedConnectionSyncs, legacyBriefProjection } from './catalogue-save-capacity.mjs';
 import { assertShopifyTokenPermit } from './shopify-token-exchange.mjs';
 export { addAudit };
 
@@ -1637,18 +1638,7 @@ class SupabaseStore {
     await this.archiveHistory(workspaceId, 'workRecords', workRecords.slice(SUPABASE_WORK_RECORD_LIMIT));
     state.workRecords = workRecords.slice(0, SUPABASE_WORK_RECORD_LIMIT);
 
-    const syncs = state.connectionSyncs || [];
-    const recoveryMarker = state.integrationStatus?.shopify?.orderRecovery;
-    const retainedRunId = recoveryMarker?.status !== 'committed' ? recoveryMarker?.runId : null;
-    const pinned = retainedRunId ? syncs.find(run => run.id === retainedRunId) : null;
-    const keptSyncs = [], archivedSyncs = [];
-    for (const run of syncs) {
-      // A retained admission stays in the exactly-100 hot history. Pinning a
-      // late run reserves one slot rather than increasing the history bound.
-      const room = SUPABASE_CONNECTION_SYNC_LIMIT - (pinned && !keptSyncs.includes(pinned) && run !== pinned ? 1 : 0);
-      if (run === pinned || keptSyncs.length < room) keptSyncs.push(run);
-      else archivedSyncs.push(run);
-    }
+    const {kept:keptSyncs,archived:archivedSyncs} = retainedConnectionSyncs(state,SUPABASE_CONNECTION_SYNC_LIMIT);
     await this.archiveHistory(workspaceId, 'connectionSyncs', archivedSyncs);
     state.connectionSyncs = keptSyncs;
 
@@ -1690,6 +1680,7 @@ class SupabaseStore {
 
   async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit, shopifyTokenPermit } = {}) {
     assertWorkspace(workspaceId, state);
+    let catalogueCapacityContext;
     if (shopifyTokenPermit !== undefined) {
       if (catalogueImportPermit || protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_TOKEN_PERSISTENCE_PERMIT_INVALID'});
       assertShopifyTokenPermit(shopifyTokenPermit,workspaceId,state);
@@ -1698,7 +1689,7 @@ class SupabaseStore {
     const narrowConnectionCommit = catalogueImportPermit || shopifyTokenPermit;
     if (catalogueImportPermit !== undefined) {
       if (protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_CATALOGUE_PERSISTENCE_PERMIT_INVALID'});
-      assertCatalogueImportPermit(catalogueImportPermit, workspaceId, state);
+      catalogueCapacityContext = assertCatalogueImportPermit(catalogueImportPermit, workspaceId, state);
       ownedSnapshot = true;
     }
     if (protectedMetaCommit !== undefined) {
@@ -1747,6 +1738,17 @@ class SupabaseStore {
     // Catalogue imports preserve unrelated exact values. Normal archive/retention
     // and size/CAS guards below still run; no settings or historical upgrade.
     const upgraded = { ...(narrowConnectionCommit ? source : upgradeState(source)), _revision: crypto.randomUUID(), storageReady: true };
+    // Catalogue-only pre-effect guard: measure Node's actual compact UTF-8
+    // serialization, including this save's revision, audit and bookkeeping.
+    // Required retention success is projected, never treated as acknowledged.
+    // Optional brief compaction is bounded for every success/fallback subset.
+    const catalogueSaveAt = catalogueCapacityContext ? new Date().toISOString() : null;
+    const catalogueCapacity = catalogueCapacityContext ? planCatalogueSaveCapacity(upgraded,{
+      currentBytes:catalogueCapacityContext.currentBytes,existing,at:catalogueSaveAt,briefPlan,
+      retainedAutomationRuns:automationPlan ? applyAutomationRetention(automationPlan,{acknowledgedArchives:automationPlan.archiveCandidates.map(candidate=>({...candidate.reference,confirmed:true}))}).automationRuns : null,
+      limits:{audit:SUPABASE_EMBEDDED_AUDIT_LIMIT,workRecords:SUPABASE_WORK_RECORD_LIMIT,connectionSyncs:SUPABASE_CONNECTION_SYNC_LIMIT,
+        agentRuns:SUPABASE_AGENT_RUN_LIMIT,dailyBriefs:SUPABASE_DAILY_BRIEF_LIMIT,hard:SUPABASE_STATE_HARD_BYTES}
+    }) : null;
     // The optional maintenance guard runs before the first archive write.
     saveGuard(beforeEffects)(upgraded, { automationArchives: Boolean(automationPlan?.archiveCandidates.length || automationPlan?.summary.existingStubsToEvict),
       briefArchives: Boolean(briefPlan?.candidates.length) });
@@ -1761,7 +1763,7 @@ class SupabaseStore {
       upgraded.agentRuns = (upgraded.agentRuns || []).slice(0, SUPABASE_AGENT_RUN_LIMIT);
       upgraded.dailyBriefs = (upgraded.dailyBriefs || []).slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
     }
-    upgraded.workspace.updatedAt = new Date().toISOString();
+    upgraded.workspace.updatedAt = catalogueSaveAt || new Date().toISOString();
     if (existing) {
       const briefs = [];
       for (const brief of upgraded.dailyBriefs) {
@@ -1770,7 +1772,7 @@ class SupabaseStore {
         // One snapshot per request also avoids the gateway's bulk payload limit.
         await this.upsert('operations_briefs', [{ id: brief.id, workspace_id: workspaceId, summary: brief.summary,
           metrics: brief, logic: brief.logic || 'deterministic-v1', created_at: brief.generatedAt }], 'id', {}, { workspaceId, operation: 'archive_write' });
-        briefs.push({ ...compactDailyBrief(brief), archive: { table: 'operations_briefs', id: brief.id, sha256: crypto.createHash('sha256').update(JSON.stringify(brief)).digest('hex') } });
+        briefs.push(legacyBriefProjection(brief));
       }
       upgraded.dailyBriefs = briefs;
     }
@@ -1801,7 +1803,7 @@ class SupabaseStore {
       const replacements = new Map(verifiedCandidates.map(candidate => [candidate.index, structuredClone(candidate.stub)]));
       upgraded.dailyBriefs = upgraded.dailyBriefs.map((brief, index) => replacements.get(index) || brief);
     }
-    const now = new Date().toISOString();
+    const now = catalogueSaveAt || new Date().toISOString();
     upgraded.integrationStatus.supabase = { status: 'connected', detail: 'Authoritative workspace state committed.', lastSyncAt: now, lastError: null };
     upgraded.integrationStatus.reporting = { ...upgraded.integrationStatus.reporting, status: 'degraded', detail: 'Reporting refresh pending; authoritative state is durable.' };
     // Revalidate the source after every archive await, just before serializing
@@ -1810,6 +1812,11 @@ class SupabaseStore {
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     if (briefPlan?.candidates.length) assertBriefHistoryPlanCurrent(briefPlan);
     assertCurrent(upgraded);
+    if(catalogueCapacity && compactStateBytes(upgraded)>catalogueCapacity.maximumCandidateBytes) {
+      // This is after possible archives, so deliberately NOT a branded
+      // pre-effect rejection. Preserve the importer's uncertain-outcome path.
+      throw Object.assign(new Error('Catalogue capacity plan changed.'),{code:'SHOPIFY_CATALOGUE_CAPACITY_PLAN_CHANGED'});
+    }
     const protectedResult = await this.commit(workspaceId, upgraded, expectedRevision, existing, { protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, allowRetry: !narrowConnectionCommit });
     if (narrowConnectionCommit) {
       // Do not mirror orders/customer/reporting records as a side effect of a
