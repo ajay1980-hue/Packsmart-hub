@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { assertCatalogueSavedPreservation, assertCatalogueReplacementPreserved } from './shopify-catalogue-preservation.mjs';
+import { compactStateBytes, isCatalogueCapacityRejection } from './catalogue-save-capacity.mjs';
 import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
 import { assertQuietOwnerWorkspace } from './quiet-owner-workspace.mjs';
@@ -189,12 +191,13 @@ export function catalogueStatus(state,policy) {
 function issuePermit(before,after) {
   const allowed=new Set(['products','shopifyCatalogueImports','audit']);
   for(const key of new Set([...Object.keys(before),...Object.keys(after)])) if(!allowed.has(key) && !isDeepStrictEqual(before[key],after[key])) throw catalogueError('UNRELATED_CHANGE');
-  const permit=Object.freeze({}); permits.set(permit,{workspaceId:before.workspace.id,revision:before._revision,sha256:digest(after)}); return permit;
+  const permit=Object.freeze({}); permits.set(permit,{workspaceId:before.workspace.id,revision:before._revision,sha256:digest(after),currentBytes:compactStateBytes(before)}); return permit;
 }
 export function assertCatalogueImportPermit(permit,workspaceId,state) {
   const expected=permits.get(permit);
   if(!expected || workspaceId!==expected.workspaceId || state._revision!==expected.revision || digest(state)!==expected.sha256) throw catalogueError('PERSISTENCE_PERMIT_INVALID');
   permits.delete(permit);
+  return Object.freeze({currentBytes:expected.currentBytes});
 }
 
 export function createCatalogueImporter({store,integrations,env,policy,fetchImpl}) {
@@ -203,7 +206,12 @@ export function createCatalogueImporter({store,integrations,env,policy,fetchImpl
   async function save(before,after,assertActive) {
     const permit=issuePermit(before,after);
     try { return await store.save(before.workspace.id,after,{ownedSnapshot:true,catalogueImportPermit:permit,beforeCommit:assertActive}); }
-    catch { unknown.add(scope(before)); throw catalogueError('COMMIT_UNCERTAIN',503); }
+    catch(error) {
+      // A branded planner rejection is known to precede every archive/primary
+      // effect of this save. All other failures remain outcome-unknown.
+      if(isCatalogueCapacityRejection(error))throw error;
+      unknown.add(scope(before)); throw catalogueError('COMMIT_UNCERTAIN',503);
+    }
   }
   async function run(auth,body,assertOpen=()=>{}) {
     if(!policy || store.provider!=='supabase') throw catalogueError('DISABLED',503);
@@ -214,6 +222,7 @@ export function createCatalogueImporter({store,integrations,env,policy,fetchImpl
     if(existing) return {...catalogueStatus(auth.state,policy),replayed:false};
     if(unknown.has(scope(auth.state))) throw catalogueError('COMMIT_UNCERTAIN',503);
     if(old.length>=20) throw catalogueError('LEDGER_FULL');
+    assertCatalogueSavedPreservation(auth.state);
     const {config,binding}=sourceBinding(auth.state,integrations,env);
     const before=structuredClone(auth.state), admitted=structuredClone(before);
     const record={schema:SCHEMA,requestId:policy.requestId,status:'reserved',actorId:auth.session.sub,sessionVersion:auth.session.sessionVersion,
@@ -222,10 +231,12 @@ export function createCatalogueImporter({store,integrations,env,policy,fetchImpl
     addAudit(admitted,{type:'shopify_catalogue_reserved',actor:auth.session.sub,detail:{requestId:policy.requestId,domain:DOMAIN,limits:CATALOGUE_LIMITS}});
     let current=await save(before,admitted,assertActive);
     const reservationRevision=current._revision;
+    const reservedProducts=structuredClone(current.products), reservedEconomics=structuredClone(current.economics);
     const fresh=async()=>{
       assertActive(); const next=await store.get(WORKSPACE,{exactSnapshot:true}); validateActor(next,auth.session);
       if(next._revision!==reservationRevision || !isDeepStrictEqual(sourceBinding(next,integrations,env).binding,binding)
-        || !isDeepStrictEqual(ledger(next).find(r=>r.requestId===policy.requestId),record)) throw catalogueError('SOURCE_OR_STATE_CHANGED');
+        || !isDeepStrictEqual(ledger(next).find(r=>r.requestId===policy.requestId),record)
+        || !isDeepStrictEqual(next.products,reservedProducts) || !isDeepStrictEqual(next.economics,reservedEconomics)) throw catalogueError('SOURCE_OR_STATE_CHANGED');
       assertActive(); return next;
     };
     let stage;
@@ -243,6 +254,7 @@ export function createCatalogueImporter({store,integrations,env,policy,fetchImpl
       return replacement ? {...p,...replacement} : {...p,catalogueObserved:false};
     });
     next.products.push(...incoming.values());
+    assertCatalogueReplacementPreserved(current,next);
     const completed={...record,status:'imported',sourceRevision:reservationRevision,completedAt:new Date().toISOString(),sourceCapturedAt:stage.completedAt,sourceAccountId:stage.shop.id,currency:stage.shop.currencyCode,
       productCount:stage.products.length,variantCount:stage.products.reduce((n,p)=>n+p.variants.length,0),pages:stage.pages,bytes:stage.totalBytes,payloadDigest:digest(stage.products)};
     next.shopifyCatalogueImports=ledger(next).map(r=>r.requestId===record.requestId?completed:r);
