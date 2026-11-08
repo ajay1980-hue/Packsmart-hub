@@ -6,6 +6,7 @@ import { createShopifyTokenPolicy, SHOPIFY_TOKEN_PATH } from './shopify-token-ex
 import { PRODUCT_ONLY_SUPPORT_PATH } from './support-product-facts.mjs';
 import { OWNER_PRODUCT_READINESS_PATH, OWNER_PRODUCT_READINESS_FLAG } from './owner-product-readiness.mjs';
 import { createOwnerProductReadinessWindow } from './owner-product-readiness-window.mjs';
+import { createParcel2GoCredentialWindow, PARCEL2GO_ENTRY_PATH } from './parcel2go-credential-entry.mjs';
 
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
@@ -60,6 +61,7 @@ export function createStartupPolicy(env, staticPathnames) {
   const creativePilot = createQuietCreativePilot(env);
   const catalogue = createCataloguePolicy(env);
   const shopifyTokenExchange = createShopifyTokenPolicy(env);
+  const parcel2goCredentialWindow = createParcel2GoCredentialWindow(env);
   return Object.freeze({
     mode,
     quiet,
@@ -76,7 +78,9 @@ export function createStartupPolicy(env, staticPathnames) {
     creativePilot,
     catalogue,
     shopifyTokenExchange,
+    parcel2goCredentialWindow,
     allowsRequest(method, pathname) {
+      if(pathname===PARCEL2GO_ENTRY_PATH)return Boolean(quietOwnerWorkspace&&parcel2goCredentialWindow&&(method==='GET'||method==='POST'&&parcel2goCredentialWindow.available()));
       if (!quiet) return true;
       if (productReadinessWindow?.available() && method === 'GET' && pathname === OWNER_PRODUCT_READINESS_PATH) return true;
       if (shopifyTokenExchange && pathname === SHOPIFY_TOKEN_PATH && (method === 'GET' || method === 'POST' && shopifyTokenExchange.available())) return true;

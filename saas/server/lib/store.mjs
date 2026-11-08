@@ -46,6 +46,7 @@ import {
 } from './usage-governance.mjs';
 import { addAudit } from './events.mjs';
 import { assertCatalogueImportPermit } from './shopify-catalogue-import.mjs';
+import { assertParcel2GoPersistencePermit } from './parcel2go-sandbox.mjs';
 import { compactStateBytes, planCatalogueSaveCapacity, retainedConnectionSyncs, legacyBriefProjection } from './catalogue-save-capacity.mjs';
 import { assertShopifyTokenPermit } from './shopify-token-exchange.mjs';
 export { addAudit };
@@ -1678,15 +1679,20 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit, shopifyTokenPermit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit, shopifyTokenPermit, parcel2goPermit } = {}) {
     assertWorkspace(workspaceId, state);
     let catalogueCapacityContext;
+    if (parcel2goPermit !== undefined) {
+      if ([catalogueImportPermit, shopifyTokenPermit, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit].some(v => v !== undefined)) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'PARCEL2GO_PERSISTENCE_INVALID'});
+      catalogueCapacityContext = assertParcel2GoPersistencePermit(parcel2goPermit, workspaceId, state);
+      ownedSnapshot = true;
+    }
     if (shopifyTokenPermit !== undefined) {
       if (catalogueImportPermit || protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_TOKEN_PERSISTENCE_PERMIT_INVALID'});
       assertShopifyTokenPermit(shopifyTokenPermit,workspaceId,state);
       ownedSnapshot = true;
     }
-    const narrowConnectionCommit = catalogueImportPermit || shopifyTokenPermit;
+    const narrowConnectionCommit = catalogueImportPermit || shopifyTokenPermit || parcel2goPermit;
     if (catalogueImportPermit !== undefined) {
       if (protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_CATALOGUE_PERSISTENCE_PERMIT_INVALID'});
       catalogueCapacityContext = assertCatalogueImportPermit(catalogueImportPermit, workspaceId, state);

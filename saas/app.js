@@ -6,7 +6,8 @@
     automations: 'packsmart-saas-automations-v1',
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
-  let approvalRequestUI = null;
+  let approvalRequestUI = null, parcel2goUI = null;
+  function p2gController(){return parcel2goUI ||= window.RunvaraParcel2GoEntry?.create({request,getContext:()=>({session:state.session,closed:ownerWorkspaceClosed,view:state.view})});}
   const state = {
     csrf: '', session: null, data: null, graphGeneration: 0, graphInspectionGeneration: 0, graphTicket: null, objectiveGeneration: 0, objectiveSnapshot: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
@@ -292,7 +293,7 @@
     document.body.classList.add('owner-workspace');
     for (const control of $('#app-shell').querySelectorAll('button, input, select, textarea')) {
       const view = control.dataset.view || control.dataset.viewLink;
-      const available = (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
+      const available = parcel2goUI?.allowsControl(control.id) || (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
         || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all','catalogue-import-status'].includes(control.id)
         || control.id === 'catalogue-import-start' && catalogueCanRun()
         || control.id === 'shopify-token-exchange-start' && tokenCanRun()
@@ -311,6 +312,7 @@
     if (notice.textContent !== message) notice.textContent = message;
   }
   function closeOwnerWorkspace(message) {
+    parcel2goUI?.clear();
     ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; invalidateProductReadiness(); tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
     state.data = null; ownerWorkspaceObserver?.disconnect(); clearTimeout(ownerWorkspaceExpiry);
     if (state.session) { showMaintenanceSession(state.session); $('#startup-error').textContent = message; }
@@ -470,7 +472,7 @@
   }
 
   async function request(path, options) {
-    const config = options || {};
+    const config = options || {}, requestStarted = performance.now();
     const originatingSession = state.session, originatingCsrf = state.csrf;
     const headers = new Headers(config.headers || {});
     const method = String(config.method || 'GET').toUpperCase();
@@ -480,7 +482,8 @@
     const productReadinessRead=path===productReadinessPath && method==='GET' && productReadinessOpen();
     const tokenRead=path===shopifyTokenPath && method==='GET' && config.shopifyTokenStatus===true && tokenDescriptor(state.data?.shopifyTokenExchange);
     const tokenWrite=path===shopifyTokenPath && method==='POST' && config.shopifyTokenSubmission===true && tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled===true;
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
+    const p2gRequest=path==='/api/owner/parcel2go-credentials'&&config.parcel2goCredentialRequest===true&&state.data?.parcel2goCredentialEntry&&['GET','POST'].includes(method);
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !p2gRequest && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -503,10 +506,13 @@
       const error = new Error(payload.code === 'AUTH_REQUIRED' ? 'Your Runvara session has expired. Sign in again to continue.' : payload.error || 'Request failed (' + response.status + ')');
       error.status = response.status; error.code = payload.code; throw error;
     }
+    const p2g=payload.parcel2goCredentialEntry || (payload.schema==='runvara-parcel2go-credential-entry/v1'?payload:null);
+    if(p2g)p2gController()?.observe(p2g,requestStarted);
     return payload;
   }
 
   function showLogin() {
+    parcel2goUI?.clear();
     approvalRequestUI?.refresh();
     clearMaintenancePreview();
     interruptCostSource();
@@ -739,6 +745,7 @@
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
     closeWorkspaceSearch();
     state.view = view;
+    if(view!=='channels')parcel2goUI?.clear();else p2gController()?.mount($('#parcel2go-credential-panel'),state.data?.parcel2goCredentialEntry);
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
@@ -1445,6 +1452,7 @@
   }
 
   function renderChannels() {
+    p2gController()?.mount($('#parcel2go-credential-panel'),state.data?.parcel2goCredentialEntry);
     window.RunvaraConnections?.render(state.data);
     $('#channel-grid').innerHTML = (state.data.integrations || []).filter(item => ['system', 'billing', 'intelligence'].includes(item.kind)).map(channelCard).join('');
     const shopifyConnection = (state.data.connections || []).find(item => item.provider === 'shopify');
