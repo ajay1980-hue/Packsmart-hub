@@ -1,5 +1,5 @@
-// Credential storage and disconnected quote preparation share guarded admission.
-// Credential-entry mode cannot quote. No fetch default or real provider transport.
+// Credential storage, fixture quotes and separately gated sandbox HTTP quotes.
+// Credential-entry mode cannot quote. No environment/route enables HTTP mode.
 import {createHash} from 'node:crypto';
 import {isDeepStrictEqual as same} from 'node:util';
 import {assertQuietOwnerWorkspace} from './quiet-owner-workspace.mjs';
@@ -8,7 +8,8 @@ import {decryptCredentials} from './security.mjs';
 import {sealParcel2GoCredentials,captureParcel2GoToken} from './parcel2go-quote-foundation.mjs';
 import {parcel2GoQuoteRequest,parcel2GoQuoteResponse} from './parcel2go-quote-schema.mjs';
 import {metaBoundedBytes,metaStrictJson} from './meta-publication-bounded.mjs';
-const WORKSPACE='packsmart-solutions', modes=['disabled/v1','offline-fixture/v2','credential-entry/v1'];
+import {createParcel2GoSandboxHttp} from './parcel2go-sandbox-http.mjs';
+const WORKSPACE='packsmart-solutions', modes=['disabled/v1','offline-fixture/v2','credential-entry/v1','sandbox-quote/v1'];
 const TOKEN='https://sandbox.parcel2go.com/auth/connect/token', QUOTE='https://sandbox.parcel2go.com/api/quotes';
 const uuid=v=>typeof v==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v);
 const id=v=>typeof v==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(v);
@@ -38,12 +39,13 @@ export function createParcel2GoSandboxPolicy(config={}, {now=Date.now,monotonic=
   const mode=config.mode??'disabled/v1';if(!modes.includes(mode))fail('DISABLED');if(mode==='disabled/v1')return null;
   const c=structuredClone(config), b=c.binding;
   if(mode==='credential-entry/v1'&&c.operation!=='admit_credentials')fail('CONFIG_INVALID');
+  if(mode==='sandbox-quote/v1'&&(c.operation!=='quote'||c.network!=='sandbox-only/v1'||c.quotePurpose!=='synthetic-sandbox/v1'||c.scopePolicy!=='public-api-only/no-openid-fallback/v1'))fail('CONFIG_INVALID');
   if(c.startupMode!=='quiet'||!['admit_credentials','quote'].includes(c.operation)||!uuid(c.requestId)||!uuid(c.expectedRevision)
     ||b?.workspaceId!==WORKSPACE||b.environment!=='sandbox'||!id(b.connectionId)||!id(b.accountId)
     ||typeof c.expectedClientId!=='string'||c.expectedClientId.length<8||c.expectedClientId.length>4096
     ||!id(c.termsReference))fail('CONFIG_INVALID');
   const opened=iso(c.openedAt),expiry=iso(c.expiresAt),initial=now(),mono=monotonic();
-  if(!Number.isSafeInteger(initial)||opened>initial||(expiry<=initial&&mode!=='credential-entry/v1')||expiry-opened>300000||expiry<=opened||!Number.isFinite(mono))fail('TIME_INVALID');
+  if(!Number.isSafeInteger(initial)||opened>initial||(expiry<=initial&&!['credential-entry/v1','sandbox-quote/v1'].includes(mode))||expiry-opened>300000||expiry<=opened||!Number.isFinite(mono))fail('TIME_INVALID');
   if(c.operation==='quote'&&(!/^[a-f0-9]{64}$/.test(c.inputHash||'')
     ||!['Individual','NotRegistered','Registered'].includes(c.collectionVatStatus)
     ||!['Individual','NotRegistered','Registered'].includes(c.deliveryVatStatus)||c.accountCurrency!=='GBP'))fail('CONFIG_INVALID');
@@ -52,7 +54,7 @@ export function createParcel2GoSandboxPolicy(config={}, {now=Date.now,monotonic=
     if(!Number.isSafeInteger(t)||!Number.isFinite(m)||t<last||m<lastMono||t>=expiry||m-mono>=expiry-initial)closed=true;
     last=t;lastMono=m;if(closed)fail('EXPIRED');return t;};
   const remainingMs=()=>{try{const t=check();return Math.max(0,Math.floor(Math.min(expiry-t,expiry-initial-(lastMono-mono))));}catch{return 0;}};
-  const p=Object.freeze({requestId:c.requestId,expiresAt:c.expiresAt,operation:c.operation,remainingMs,available:()=>remainingMs()>0});policies.set(p,{...c,check});return p;
+  const p=Object.freeze({requestId:c.requestId,expiresAt:c.expiresAt,operation:c.operation,remainingMs,available:()=>remainingMs()>0});policies.set(p,{...c,check,remainingMs,monotonic});return p;
 }
 function audit(state,p,status){
   addAudit(state,{type:'parcel2go_sandbox_'+status,actor:'owner',detail:{requestId:p.requestId,operation:p.operation,environment:'sandbox'}});
@@ -74,13 +76,15 @@ function credential(c,p,key){
     ||typeof value.credentials?.clientSecret!=='string'||value.credentials.clientSecret.length<8)fail('BINDING_INVALID');
   return value.credentials;
 }
-export function createParcel2GoSandboxCandidate({policy=null,store,key,fixtureTransport,assertCurrent=()=>{}}={}){
-  const p=policies.get(policy);let attempted=false;
-  const check=()=>{const at=p.check();assertCurrent();return at;};
-  const status=()=>Object.freeze({enabled:false,fixtureMode:Boolean(p),liveReady:false,credentialEntryAvailable:false,
+export function createParcel2GoSandboxCandidate({policy=null,store,key,fixtureTransport,sandboxRequest,assertCurrent}={}){
+  const p=policies.get(policy),network=p?.mode==='sandbox-quote/v1';let attempted=false,closed=false,http;
+  const close=()=>{closed=true;http?.close();};
+  const check=()=>{if(closed)fail('DISABLED');const at=p.check();try{assertCurrent?.();}catch{close();fail('REVOKED');}return at;};
+  const status=()=>Object.freeze({enabled:false,fixtureMode:p?.mode==='offline-fixture/v2',sandboxHttpPrepared:network,liveReady:false,credentialEntryAvailable:false,
     attempted,providerEnforcedReadOnlyScope:false,orders:false,payment:false,profile:false,labels:false,webhooks:false});
   async function run(args){
     if(!p||store?.provider!=='supabase')fail('DISABLED');check();
+    if(network&&(typeof assertCurrent!=='function'||fixtureTransport!==undefined))fail('CONFIG_INVALID');
     if(attempted)fail('ATTEMPT_SPENT');attempted=true;
     // Caller must be a server-verified session, never user-provided role claims.
     const session=structuredClone(args?.session),csrf=args?.csrf;
@@ -99,8 +103,9 @@ export function createParcel2GoSandboxCandidate({policy=null,store,key,fixtureTr
       const a={session,state:{workspace:state.workspace,users:state.users,_revision:state._revision}};
       sealed=sealParcel2GoCredentials({auth:a,trustedBinding:p.binding,value,key,now:check()});
     }else{
-      if(typeof fixtureTransport!=='function'||hash(args.input)!==p.inputHash)fail('INPUT_INVALID');
-      wire=parcel2GoQuoteRequest(args.input,p.binding,p.check(),p);
+      if(!network&&typeof fixtureTransport!=='function'||hash(args.input)!==p.inputHash)fail('INPUT_INVALID');
+      if(network&&args.input?.parcel?.provenance!=='synthetic_fixture')fail('INPUT_INVALID');
+      wire=parcel2GoQuoteRequest(args.input,p.binding,check(),p);
       if(wire.prepared.requestId!==p.requestId||wire.prepared.expectedRevision!==p.expectedRevision)fail('INPUT_INVALID');
       credential(connection(state,p),p,key);
     }
@@ -117,29 +122,42 @@ export function createParcel2GoSandboxCandidate({policy=null,store,key,fixtureTr
     const fresh=async()=>{const current=await read();if(!same(current,state))fail('STATE_CHANGED');return current;};
     await fresh();let projection;
     if(p.operation==='quote'){
-      const creds=credential(connection(state,p),p,key),sentAt=new Date(p.check()).toISOString();
-      const send=async(url,headers,body,maxBytes)=>{
+      const creds=credential(connection(state,p),p,key),sentAt=new Date(check()).toISOString(),sentMono=p.monotonic();
+      if(network)http=createParcel2GoSandboxHttp({enabled:true,...(sandboxRequest===undefined?{}:{requestImpl:sandboxRequest})});
+      const send=async(url,headers,body,maxBytes,tokenRemaining=Infinity)=>{
         // Only these fixed sandbox operations exist. No fallback fetch, redirects,
         // retry, refresh token, payment/profile/order URL or provider error logging.
-        try{return await metaBoundedBytes(signal=>{p.check();return fixtureTransport(url,{method:'POST',redirect:'error',headers,body,signal});},
-          {maxBytes,mediaType:'application/json',timeoutMs:5000});}catch{fail('PROVIDER_OUTCOME_UNKNOWN');}
+        try{check();const timeoutMs=Math.floor(Math.min(5000,p.remainingMs(),session.exp*1000-check(),tokenRemaining));
+          if(timeoutMs<1)fail('EXPIRED');
+          if(network)return await http.send({operation:url===TOKEN?'token':'quote',body,token:headers.Authorization?.slice(7),timeoutMs});
+          return await metaBoundedBytes(signal=>{check();return fixtureTransport(url,{method:'POST',redirect:'error',headers,body,signal});},
+          {maxBytes,mediaType:'application/json',timeoutMs});}catch{fail('PROVIDER_OUTCOME_UNKNOWN');}
       };
-      const raw=await send(TOKEN,{'Content-Type':'application/x-www-form-urlencoded'},new URLSearchParams({grant_type:'client_credentials',client_id:creds.clientId,client_secret:creds.clientSecret,scope:'public-api'}).toString(),16384);
-      let token;try{token=captureParcel2GoToken(metaStrictJson(raw),{sentAt,receivedAt:new Date(p.check()).toISOString()});}catch{fail('TOKEN_INVALID');}
-      await fresh();if(Date.parse(token.expiresAt)<=p.check())fail('TOKEN_EXPIRED');
-      const quotes=await send(QUOTE,{'Content-Type':'application/json',Authorization:'Bearer '+token.accessToken},JSON.stringify(wire.body),262144);
-      if(Date.parse(token.expiresAt)<=p.check())fail('TOKEN_EXPIRED');
-      projection=parcel2GoQuoteResponse(quotes,{observedAt:new Date(p.check()).toISOString(),requestId:p.requestId});
+      let raw,token;
+      try{
+        raw=await send(TOKEN,{'Content-Type':'application/x-www-form-urlencoded'},new URLSearchParams({grant_type:'client_credentials',client_id:creds.clientId,client_secret:creds.clientSecret,scope:'public-api'}).toString(),16384);
+        try{token=captureParcel2GoToken(metaStrictJson(raw),{sentAt,receivedAt:new Date(check()).toISOString()});}catch{fail('TOKEN_INVALID');}
+        raw.fill(0);raw=null;
+        const lifetime=Date.parse(token.expiresAt)-Date.parse(sentAt);
+        const tokenRemaining=()=>Math.floor(Math.min(Date.parse(token.expiresAt)-check(),lifetime-(p.monotonic()-sentMono)));
+        await fresh();if(tokenRemaining()<=0)fail('TOKEN_EXPIRED');
+        const quotes=await send(QUOTE,{'Content-Type':'application/json',Authorization:'Bearer '+token.accessToken},JSON.stringify(wire.body),262144,tokenRemaining());
+        if(tokenRemaining()<=0)fail('TOKEN_EXPIRED');
+        projection=parcel2GoQuoteResponse(quotes,{observedAt:new Date(check()).toISOString(),requestId:p.requestId,responseSource:network?'sandbox-http':'fixture'});
+        // Even an otherwise valid service code must not echo private material.
+        const publicJson=JSON.stringify(projection);
+        if([creds.clientId,creds.clientSecret,token.accessToken,key].some(secret=>publicJson.includes(secret)))fail('QUOTE_INVALID');
+      }finally{raw?.fill(0);raw=null;token=null;creds.clientSecret=null;http?.close();}
     }
     await fresh();const final=structuredClone(state);
     if(sealed)final.connections=[...(final.connections||[]),{id:p.binding.connectionId,provider:'parcel2go',
       metadata:{account:p.binding.accountId,environment:'sandbox',admissionRequestId:p.requestId},encryptedCredentials:sealed.encryptedCredentials}];
-    final.parcel2goSandboxRuns=final.parcel2goSandboxRuns.map(r=>r.requestId===p.requestId?{...r,status:'completed',completedAt:new Date(p.check()).toISOString(),quoteCount:projection?.quotes.length??0}:r);
+    final.parcel2goSandboxRuns=final.parcel2goSandboxRuns.map(r=>r.requestId===p.requestId?{...r,status:'completed',completedAt:new Date(check()).toISOString(),quoteCount:projection?.quotes.length??0,...(network?{responseSource:'sandbox-http',inputHash:p.inputHash,projectionHash:hash(projection)}:{})}:r);
     audit(final,p,'completed');const saved=await save(state,final);
     // Acknowledged CAS is necessary; readback additionally proves the receipt.
     state=saved;await fresh();
     return Object.freeze({requestId:p.requestId,status:'completed',revision:saved._revision,environment:'sandbox',synthetic:p.mode==='offline-fixture/v2',
       credentialStored:Boolean(sealed),quote:projection??null,liveReady:false});
   }
-  return Object.freeze({status,run});
+  return Object.freeze({status,run,close});
 }

@@ -48,8 +48,8 @@ function actor(auth, now) {
 }
 
 // Pure, bounded mapper input; no credentials, persistence or transport.
-export function prepareParcel2GoQuote(input, trustedBinding, now) {
-  return intent(input, binding(trustedBinding), now);
+export function prepareParcel2GoQuote(input, trustedBinding, now, {syntheticOnly=false}={}) {
+  return intent(input, binding(trustedBinding), now, syntheticOnly);
 }
 function binding(value) {
   plain(value); exact(value, 'workspaceId connectionId accountId environment');
@@ -106,12 +106,12 @@ export function captureParcel2GoToken(response, { sentAt, receivedAt }) {
 function measured(value, maximum) {
   if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)(\.[0-9]{1,3})?$/.test(value) || Number(value) <= 0 || Number(value) > maximum) fail('MEASUREMENT_INVALID');
 }
-function intent(input, b, now) {
+function intent(input, b, now, syntheticOnly=false) {
   plain(input); exact(input, 'operation requestId expectedRevision collectionCountry deliveryCountry parcel');
   if (input.operation !== 'quote') fail('OPERATION_UNSUPPORTED');
   if (!uuid(input.requestId) || !uuid(input.expectedRevision) || input.collectionCountry !== 'GBR' || input.deliveryCountry !== 'GBR') fail('INPUT_INVALID');
   const p = input.parcel; exact(p, 'measurementId measuredAt provenance weightGrams lengthMm widthMm heightMm declaredValueDecimal currency');
-  if (!text(p.measurementId) || p.provenance !== 'measured_packed_parcel' || p.currency !== 'GBP') fail('MEASUREMENT_INVALID');
+  if (!text(p.measurementId) || p.provenance !== (syntheticOnly?'synthetic_fixture':'measured_packed_parcel') || p.currency !== 'GBP') fail('MEASUREMENT_INVALID');
   const at = time(p.measuredAt); if (at > now || now - at > 86400000) fail('MEASUREMENT_STALE');
   measured(p.weightGrams, 1000000); for (const k of ['lengthMm', 'widthMm', 'heightMm']) measured(p[k], 10000);
   if (typeof p.declaredValueDecimal !== 'string' || !/^(0|[1-9][0-9]{0,5})\.[0-9]{2}$/.test(p.declaredValueDecimal)) fail('VALUE_INVALID');

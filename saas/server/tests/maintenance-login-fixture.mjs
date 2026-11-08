@@ -19,7 +19,7 @@ export function ownerState(id = 'alpha') {
   state.agentOps = { enabled: true, paused: false };
   return state;
 }
-export async function maintenanceFixture({ states = [ownerState(), ownerState('beta')], fault, intercept, env = {}, beforeListen, port = 0, providerFetch } = {}) {
+export async function maintenanceFixture({ states = [ownerState(), ownerState('beta')], fault, intercept, env = {}, beforeListen, port = 0, providerFetch, parcel2goSandboxRequest } = {}) {
   const fake = fakeSupabase({ initialStates: states, fault });
   const calls = [];
   const transport = async (url, options = {}) => {
@@ -34,6 +34,7 @@ export async function maintenanceFixture({ states = [ownerState(), ownerState('b
     PACKSMART_ADMIN_EMAIL: 'missing-owner@example.test', PACKSMART_ADMIN_PASSWORD: PASSWORD, ...env };
   const store = createStore(config, { fetchImpl: transport });
   const server = createPacksmartServer(config, { store, schedulerEnabled: true, agentOpsEnabled: true,
+    parcel2goSandboxRequest,
     fetchImpl: providerFetch || (async () => assert.fail('Provider request forbidden')) });
   beforeListen?.({ store, server, fake, calls });
   server.listen(port, '127.0.0.1'); await once(server, 'listening');

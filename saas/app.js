@@ -6,8 +6,9 @@
     automations: 'packsmart-saas-automations-v1',
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
-  let approvalRequestUI = null, parcel2goUI = null;
+  let approvalRequestUI = null, parcel2goUI = null, parcel2goQuoteUI = null;
   function p2gController(){return parcel2goUI ||= window.RunvaraParcel2GoEntry?.create({request,getContext:()=>({session:state.session,closed:ownerWorkspaceClosed,view:state.view})});}
+  function p2gQuoteController(){return parcel2goQuoteUI ||= window.RunvaraParcel2GoQuote?.create({request,getContext:()=>({session:state.session,closed:ownerWorkspaceClosed,view:state.view})});}
   const state = {
     csrf: '', session: null, data: null, graphGeneration: 0, graphInspectionGeneration: 0, graphTicket: null, objectiveGeneration: 0, objectiveSnapshot: null, audit: [], fleet: null, fleetQuery: '', view: 'overview',
     productQuery: '', productStatus: 'active', productSort: 'product',
@@ -293,7 +294,7 @@
     document.body.classList.add('owner-workspace');
     for (const control of $('#app-shell').querySelectorAll('button, input, select, textarea')) {
       const view = control.dataset.view || control.dataset.viewLink;
-      const available = parcel2goUI?.allowsControl(control.id) || (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
+      const available = parcel2goUI?.allowsControl(control.id) || parcel2goQuoteUI?.allowsControl(control.id) || (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
         || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all','catalogue-import-status'].includes(control.id)
         || control.id === 'catalogue-import-start' && catalogueCanRun()
         || control.id === 'shopify-token-exchange-start' && tokenCanRun()
@@ -313,6 +314,7 @@
   }
   function closeOwnerWorkspace(message) {
     parcel2goUI?.clear();
+    parcel2goQuoteUI?.clear();
     ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; invalidateProductReadiness(); tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
     state.data = null; ownerWorkspaceObserver?.disconnect(); clearTimeout(ownerWorkspaceExpiry);
     if (state.session) { showMaintenanceSession(state.session); $('#startup-error').textContent = message; }
@@ -483,7 +485,8 @@
     const tokenRead=path===shopifyTokenPath && method==='GET' && config.shopifyTokenStatus===true && tokenDescriptor(state.data?.shopifyTokenExchange);
     const tokenWrite=path===shopifyTokenPath && method==='POST' && config.shopifyTokenSubmission===true && tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled===true;
     const p2gRequest=path==='/api/owner/parcel2go-credentials'&&config.parcel2goCredentialRequest===true&&state.data?.parcel2goCredentialEntry&&['GET','POST'].includes(method);
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !p2gRequest && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
+    const p2gQuoteRequest=path==='/api/owner/parcel2go-sandbox-quote'&&config.parcel2goQuoteRequest===true&&state.data?.parcel2goSandboxQuote&&['GET','POST'].includes(method);
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !p2gRequest && !p2gQuoteRequest && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -508,11 +511,14 @@
     }
     const p2g=payload.parcel2goCredentialEntry || (payload.schema==='runvara-parcel2go-credential-entry/v1'?payload:null);
     if(p2g)p2gController()?.observe(p2g,requestStarted);
+    const p2gQuote=payload.parcel2goSandboxQuote || (payload.schema==='runvara-parcel2go-owner-quote/v1'?payload:null);
+    if(p2gQuote)p2gQuoteController()?.observe(p2gQuote,requestStarted);
     return payload;
   }
 
   function showLogin() {
     parcel2goUI?.clear();
+    parcel2goQuoteUI?.clear();
     approvalRequestUI?.refresh();
     clearMaintenancePreview();
     interruptCostSource();
@@ -746,6 +752,7 @@
     closeWorkspaceSearch();
     state.view = view;
     if(view!=='channels')parcel2goUI?.clear();else p2gController()?.mount($('#parcel2go-credential-panel'),state.data?.parcel2goCredentialEntry);
+    if(view!=='channels')parcel2goQuoteUI?.clear();else p2gQuoteController()?.mount($('#parcel2go-quote-panel'),state.data?.parcel2goSandboxQuote);
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
     document.body.classList.remove('nav-open'); $('#mobile-menu').setAttribute('aria-expanded','false');
     $$('.view').forEach(item => item.classList.toggle('active', item.id === 'view-' + view));
@@ -1453,6 +1460,7 @@
 
   function renderChannels() {
     p2gController()?.mount($('#parcel2go-credential-panel'),state.data?.parcel2goCredentialEntry);
+    p2gQuoteController()?.mount($('#parcel2go-quote-panel'),state.data?.parcel2goSandboxQuote);
     window.RunvaraConnections?.render(state.data);
     $('#channel-grid').innerHTML = (state.data.integrations || []).filter(item => ['system', 'billing', 'intelligence'].includes(item.kind)).map(channelCard).join('');
     const shopifyConnection = (state.data.connections || []).find(item => item.provider === 'shopify');

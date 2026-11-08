@@ -58,6 +58,7 @@ import { CATALOGUE_PATH, createCatalogueImporter, catalogueStatus } from './lib/
 import { SHOPIFY_DIAGNOSTIC_PATH, shopifyCredentialDiagnostic } from './lib/shopify-credential-metadata.mjs';
 import { SHOPIFY_TOKEN_PATH, createShopifyTokenExchange } from './lib/shopify-token-exchange.mjs';
 import { PARCEL2GO_ENTRY_PATH, parcel2GoEntryStatus, parseParcel2GoEntry, saveParcel2GoEntry } from './lib/parcel2go-credential-entry.mjs';
+import { PARCEL2GO_QUOTE_PATH, parcel2GoQuoteStatus, parseParcel2GoQuoteSubmission, runParcel2GoOwnerQuote } from './lib/parcel2go-quote-owner.mjs';
 import { PILOT_BASE, isMaintenanceApproval, runQuietApprovalPilot } from './lib/quiet-approval-pilot.mjs';
 import { CREATIVE_PILOT_BASE, creativePilotAction, runQuietCreativePilot } from './lib/quiet-creative-pilot.mjs';
 import { prepareApprovalRequest, findApprovalRequest, createApprovalRequest } from './lib/approval-request.mjs';
@@ -123,6 +124,7 @@ const STATIC_FILES = new Map([
   ['/brief-history-ui.js', ['saas/brief-history-ui.js', 'text/javascript; charset=utf-8']],
   ['/connections-ui.js', ['saas/connections-ui.js', 'text/javascript; charset=utf-8']],
   ['/parcel2go-entry-ui.js', ['saas/parcel2go-entry-ui.js', 'text/javascript; charset=utf-8']],
+  ['/parcel2go-quote-ui.js', ['saas/parcel2go-quote-ui.js', 'text/javascript; charset=utf-8']],
   ['/meta-production-ui.js', ['saas/meta-production-ui.js', 'text/javascript; charset=utf-8']],
   ['/styles.css', ['saas/styles.css', 'text/css; charset=utf-8']],
   ['/favicon.svg', ['saas/favicon.svg', 'image/svg+xml']]
@@ -1174,6 +1176,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const shopifyDiagnosticRoute = pathname === SHOPIFY_DIAGNOSTIC_PATH;
       const shopifyTokenRoute = startupPolicy.quiet && pathname === SHOPIFY_TOKEN_PATH;
       const parcel2goEntryRoute = pathname === PARCEL2GO_ENTRY_PATH;
+      const parcel2goQuoteRoute = pathname === PARCEL2GO_QUOTE_PATH;
 
       // Reject before any body, authentication, persistence or provider work,
       // including GET callbacks and reads that normally refresh or save state.
@@ -1188,6 +1191,11 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if(parcel2goEntryRoute){
         if(!startupPolicy.quietOwnerWorkspace||!startupPolicy.parcel2goCredentialWindow||store.provider!=='supabase'||!['GET','POST'].includes(req.method)){send(res,503,QUIET_STARTUP_RESPONSE);return;}
         if(req.url!==PARCEL2GO_ENTRY_PATH)throw Object.assign(new Error('Private entry accepts no overrides'),{status:400,code:'PARCEL2GO_ENTRY_INPUT_INVALID'});
+        res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
+      }
+      if(parcel2goQuoteRoute){
+        if(!startupPolicy.quietOwnerWorkspace||!startupPolicy.parcel2goQuoteWindow||store.provider!=='supabase'||!['GET','POST'].includes(req.method)){send(res,503,QUIET_STARTUP_RESPONSE);return;}
+        if(req.url!==PARCEL2GO_QUOTE_PATH)throw Object.assign(new Error('Sandbox quote accepts no overrides'),{status:400,code:'PARCEL2GO_QUOTE_INPUT_INVALID'});
         res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
       }
       if(productReadinessRoute) {
@@ -1261,6 +1269,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           quietShopifyDiagnostic: startupPolicy.quietShopifyDiagnostic,
           quietShopifyTokenExchange: Boolean(startupPolicy.shopifyTokenExchange?.available()),
           quietParcel2GoCredentialEntry: Boolean(startupPolicy.parcel2goCredentialWindow?.available()),
+          quietParcel2GoSandboxQuote: Boolean(startupPolicy.parcel2goQuoteWindow?.available()),
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
           quietCommercePreview: startupPolicy.quietCommercePreview,
           quietPublicSupport: startupPolicy.quietPublicSupport,
@@ -1399,7 +1408,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { readBudget: readinessRead, exactSnapshot: parcel2goEntryRoute || shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { readBudget: readinessRead, exactSnapshot: parcel2goQuoteRoute || parcel2goEntryRoute || shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
@@ -1441,6 +1450,26 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             // Never echo a body, credential value, database or parser exception.
             send(res,409,{error:'Credential save is unconfirmed or refused. Check saved status; do not repeat it.',code:'PARCEL2GO_ENTRY_UNCONFIRMED'},{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});
           }finally{if(body){body.clientId='';body.clientSecret='';}}
+          return;
+        }
+        if(parcel2goQuoteRoute){
+          assertQuietOwnerWorkspace(auth,{inspectEvidence:false});
+          const window=startupPolicy.parcel2goQuoteWindow;
+          if(req.method==='GET'){send(res,200,parcel2GoQuoteStatus(window,auth),{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});return;}
+          const interrupted=()=>{if(!res.writableEnded)window.close();};
+          try{
+            if(req.headers.origin!==new URL(publicUrl).origin)throw Error('ORIGIN');
+            if(String(req.headers['content-type']||'').split(';')[0]!=='application/json')throw Error('TYPE');
+            const body=parseParcel2GoQuoteSubmission(await rawBody(req,2048));
+            req.once('aborted',interrupted);res.once('close',interrupted);
+            const result=await withWorkspaceLock(auth.session.workspaceId,async()=>{
+              const state=await store.get(auth.session.workspaceId,{exactSnapshot:true});
+              return runParcel2GoOwnerQuote({window,store,key:env.CREDENTIALS_KEY,auth:{...auth,state},body,sandboxRequest:options.parcel2goSandboxRequest,
+                assertCurrent:()=>{if(draining||req.aborted||res.destroyed)throw Error('QUOTE_INTERRUPTED');}});
+            });
+            send(res,200,result,{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});
+          }catch{send(res,409,{error:'Sandbox quote is unconfirmed or refused. Check saved receipt; do not repeat it.',code:'PARCEL2GO_QUOTE_UNCONFIRMED'},{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});}
+          finally{req.removeListener('aborted',interrupted);res.removeListener('close',interrupted);}
           return;
         }
         if (shopifyTokenRoute) {
@@ -1820,6 +1849,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
               productReadinessExpiresAt: startupPolicy.productReadinessWindow?.expiresAt ?? null,
               productReadinessRemainingMs,
               ...(startupPolicy.parcel2goCredentialWindow ? {parcel2goCredentialEntry:parcel2GoEntryStatus(startupPolicy.parcel2goCredentialWindow,auth)} : {}),
+              ...(startupPolicy.parcel2goQuoteWindow ? {parcel2goSandboxQuote:parcel2GoQuoteStatus(startupPolicy.parcel2goQuoteWindow,auth)} : {}),
               ...(startupPolicy.shopifyTokenExchange ? { shopifyTokenExchange: shopifyTokenExchange.status(auth.state) } : {}),
               workspaceSnapshotAt: auth.state.workspace.updatedAt ?? null,
               brief: { ...payload.brief, transient: true } }); return;
@@ -3188,6 +3218,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     integrityTimer.unref?.();
   });
   server.once('close', () => {
+    startupPolicy.parcel2goQuoteWindow?.close();
     scheduler.stop();
     agentOps.stop();
     if (integrityTimer) clearInterval(integrityTimer);
@@ -3197,6 +3228,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const drain = () => {
     if (drainPromise) return drainPromise;
     draining = true;
+    startupPolicy.parcel2goQuoteWindow?.close();
     startupPolicy.approvalPilot?.close();
     scheduler.stop(); agentOps.stop();
     if (integrityTimer) { clearInterval(integrityTimer); integrityTimer = null; }
