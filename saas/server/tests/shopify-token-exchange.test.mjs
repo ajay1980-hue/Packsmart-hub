@@ -108,7 +108,7 @@ test('strict-owner bootstrap exposes only the fixed setup DTO with no credential
   const r=await f.request('/api/bootstrap',{cookie:f.cookie});assert.equal(r.status,200);
   assert.deepEqual(r.payload.shopifyTokenExchange,(await f.status()).payload);
   assert.equal(r.payload.shopifyTokenExchange.appMatch,'unverified');
-  assert.deepEqual(Object.keys(r.payload.shopifyTokenExchange).sort(),['appId','appMatch','approvedScopes','canRun','domain','enabled','expectedRevision','expiresAt','importEnabled','outcome','requestId','schema']);
+  assert.deepEqual(Object.keys(r.payload.shopifyTokenExchange).sort(),['appId','appMatch','approvedScopes','canRun','domain','enabled','expectedRevision','expiresAt','importEnabled','operation','outcome','previousRequestId','requestId','schema']);
   assert.doesNotMatch(JSON.stringify(r.payload.shopifyTokenExchange),new RegExp(CLIENT+'|'+KEY+'|'+ACCESS+'|ciphertext'));
   assert.equal(f.requests.length,0);assert.deepEqual(f.fake.states.get(ID),before);assert.ok(f.calls.every(c=>c.method==='GET'));
 });
