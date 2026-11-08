@@ -57,12 +57,14 @@
   };
   function tokenDescriptor(value, expectedId) {
     const uuid=v=>typeof v==='string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v);
-    const keys=['appId','appMatch','approvedScopes','canRun','domain','enabled','expectedRevision','expiresAt','importEnabled','outcome','requestId','schema'];
+    const keys=['appId','appMatch','approvedScopes','canRun','domain','enabled','expectedRevision','expiresAt','importEnabled','operation','outcome','previousRequestId','requestId','schema'];
     if(!value || Array.isArray(value) || Object.keys(value).sort().join('|')!==keys.join('|')
       || value.schema!=='runvara-shopify-token-exchange/v1' || value.domain!=='wavtzm-vy.myshopify.com'
       || value.appId!=='gid://shopify/App/408091000833' || !['unverified','matched','not_matched'].includes(value.appMatch)
       || !uuid(value.requestId) || expectedId && value.requestId!==expectedId || !Number.isFinite(Date.parse(value.expiresAt))
       || typeof value.enabled!=='boolean' || typeof value.canRun!=='boolean' || value.importEnabled!==false
+      || !['initial/v1','renew_expired/v1'].includes(value.operation)
+      || (value.operation==='initial/v1' ? value.previousRequestId!==null : !uuid(value.previousRequestId)||value.previousRequestId===value.requestId)
       || !Object.hasOwn(tokenOutcomeText,value.outcome) || !Array.isArray(value.approvedScopes)
       || !value.approvedScopes.length || value.approvedScopes.length>100
       || value.approvedScopes.some(s=>typeof s!=='string' || !/^((read|write)_[a-z0-9_]+|unauthenticated_[a-z0-9_]+)$/.test(s))
@@ -86,16 +88,18 @@
     const c=tokenDescriptor(state.data?.shopifyTokenExchange);
     if(!c || state.session?.user?.role!=='owner' || state.session?.workspace?.id!=='packsmart-solutions') return;
     const panel=node('section','');panel.id='shopify-token-exchange-panel';
+    const renewal=c.operation==='renew_expired/v1';
     panel.append(node('h3','One-time Shopify access refresh'),node('p','Destination: '+c.domain+'. Uses the existing connection for one token exchange with Shopify and saves the returned access encrypted. Existing granted scopes only; no scope expansion. Opening this dashboard exchanges no token and starts no import or order action. No automatic renewal.'));
+    if(renewal)panel.append(node('p','Renewal replaces only a verified expired saved grant from receipt '+c.previousRequestId+'. Usable or uncertain access is not replaced. Closing this control does not revoke any issued token.'));
     panel.append(node('p','Approved token capabilities: '+c.approvedScopes.join(', ')+'. Window ends: '+c.expiresAt+'.'));
     panel.append(node('p','Installed app: '+c.appId+'. Public identifier match: '+({unverified:'not checked; checked privately before any reservation or transmission',matched:'matched',not_matched:'not matched; action blocked'}[c.appMatch])+'. This does not establish Shopify organization eligibility.'));
     panel.append(node('p',tokenOutcomeText[c.outcome]));
-    const start=node('button','Refresh Shopify access once');start.id='shopify-token-exchange-start';start.type='button';start.className='primary';start.disabled=!tokenCanRun();
+    const start=node('button',renewal?'Renew expired Shopify access once':'Refresh Shopify access once');start.id='shopify-token-exchange-start';start.type='button';start.className='primary';start.disabled=!tokenCanRun();
     const check=node('button','Check Shopify access refresh');check.id='shopify-token-exchange-status';check.type='button';check.className='secondary';check.disabled=tokenExchangeBusy;
     const context=state.session,epoch=ownerWorkspaceEpoch,current=()=>state.session===context && epoch===ownerWorkspaceEpoch && !ownerWorkspaceClosed;
     function accept(result) {
       const checked=tokenDescriptor(result,c.requestId);
-      if(!checked)throw new Error('INVALID_STATUS');
+      if(!checked||checked.operation!==c.operation||checked.previousRequestId!==c.previousRequestId)throw new Error('INVALID_STATUS');
       state.data.shopifyTokenExchange=checked;return checked;
     }
     function failure(error) {
@@ -103,6 +107,8 @@
       tokenExchangeMessage='Outcome needs reconciliation. Use Check Shopify access refresh; do not repeat the exchange. No raw provider details are displayed.';
     }
     start.addEventListener('click',async()=>{
+      if(!current() || !tokenCanRun())return;
+      if(renewal && !window.confirm('Renew expired Shopify access once using the existing connection? Existing credentials go only to '+c.domain+'. The replacement has the existing product, inventory and order-read capabilities and is saved encrypted. No import or order read will run. An uncertain attempt must not be repeated.'))return;
       if(!current() || !tokenCanRun())return;
       const key=tokenAttemptKey(c);
       try { sessionStorage.setItem(key,'sent'); } catch { tokenExchangeMessage='Cannot retain attempt state. Nothing sent.';mountCatalogueImport();return; }
