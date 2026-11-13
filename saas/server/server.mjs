@@ -1,3 +1,6 @@
+import {createWorkspaceLock} from './lib/workspace-lock.mjs';
+import {createLiveCredentialEntryController, LIVE_ENTRY_PATH} from './lib/parcel2go-live-entry-controller.mjs';
+import { assertGenericQuoteDecisionAllowed } from './lib/parcel2go-exact-approval.mjs';
 import { inspectOrderPeriod, orderFinancialView, editorOrderRecord, FINANCIAL_QUALIFICATION_REASON } from './lib/order-analytics.mjs';
 import crypto from 'node:crypto';
 import { createMetaProductionController } from './lib/meta-production.mjs';
@@ -110,6 +113,8 @@ const VERSION = '6.15.2';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
+  ['/parcel2go-live-entry.html', ['saas/parcel2go-live-entry.html', 'text/html; charset=utf-8']],
+  ['/parcel2go-live-entry-ui.js', ['saas/parcel2go-live-entry-ui.js', 'text/javascript; charset=utf-8']],
   ['/', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
@@ -520,11 +525,13 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const etag = `"sha256-${crypto.createHash('sha256').update(body).digest('hex')}"`;
       const notModified = matchesStaticEtag(ifNoneMatch, etag);
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const cacheControl = ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/brief-history-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
+      const privateEntryAsset=['/parcel2go-live-entry.html','/parcel2go-live-entry-ui.js'].includes(pathname);
+      const cacheControl = privateEntryAsset ? 'no-store' : ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/brief-history-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(notModified ? 304 : 200, {
         ...headers(contentType, cacheControl),
         ETag: etag,
-        'Content-Security-Policy': csp
+        'Content-Security-Policy': csp,
+        ...(privateEntryAsset?{'Referrer-Policy':'no-referrer'}:{})
       });
       res.end(head || notModified ? undefined : body);
     } catch {
@@ -573,19 +580,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     if (auth.user.role !== 'owner') throw Object.assign(new Error('Workspace owner approval required'), { status: 403, code: 'OWNER_APPROVAL_REQUIRED' });
   }
 
-  async function withWorkspaceLock(workspaceId, callback) {
-    const previous = locks.get(workspaceId) || Promise.resolve();
-    let release;
-    const current = new Promise(resolve => { release = resolve; });
-    const queued = previous.then(() => current);
-    locks.set(workspaceId, queued);
-    await previous;
-    try { return await callback(); }
-    finally {
-      release();
-      if (locks.get(workspaceId) === queued) locks.delete(workspaceId);
-    }
-  }
+  const withWorkspaceLock = createWorkspaceLock(locks);
+  const parcel2goLiveEntry = createLiveCredentialEntryController({env,store,withWorkspaceLock});
 
   async function mutate(auth, callback, { persist = true } = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
@@ -1169,6 +1165,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
+      if (pathname === LIVE_ENTRY_PATH) { if (!parcel2goLiveEntry) { send(res,503,{error:'Live credential entry is not available',code:'PARCEL2GO_LIVE_ENTRY_DISABLED'},{'Cache-Control':'no-store'}); return; } const result=await parcel2goLiveEntry.handle(req,res);send(res,result.status,result.body,result.headers);return; }
       const pilotRoute = ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action);
       const creativePilotRoute = pathname.startsWith(CREATIVE_PILOT_BASE);
       const catalogueRoute = pathname === CATALOGUE_PATH;
@@ -2441,6 +2438,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           const result = await mutate(auth, async state => {
             const approval = (state.approvals || []).find(item => item.id === approvalMatch[1]);
             if (!approval) throw Object.assign(new Error('Approval request not found'), { status: 404, code: 'APPROVAL_NOT_FOUND' });
+            assertGenericQuoteDecisionAllowed(approval);
             if (isMaintenanceApproval(approval) && decision === 'approved') throw Object.assign(new Error('Maintenance test requests cannot be approved or executed'), { status: 403, code: 'MAINTENANCE_PILOT_EXECUTION_FORBIDDEN' });
             if (approval.type === 'protected_meta_production_publication') throw Object.assign(new Error('Review the exact retained image, caption and destination in the publication panel'), {status: 409, code: 'META_PRODUCTION_EXACT_CONSENT_REQUIRED'});
             if (approval.status !== 'pending') throw Object.assign(new Error('Approval already decided'), { status: 409, code: 'APPROVAL_ALREADY_DECIDED' });
@@ -3219,6 +3217,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   server.once('close', () => {
     startupPolicy.parcel2goQuoteWindow?.close();
+    parcel2goLiveEntry?.close();
     scheduler.stop();
     agentOps.stop();
     if (integrityTimer) clearInterval(integrityTimer);
@@ -3229,6 +3228,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     if (drainPromise) return drainPromise;
     draining = true;
     startupPolicy.parcel2goQuoteWindow?.close();
+    parcel2goLiveEntry?.close();
     startupPolicy.approvalPilot?.close();
     scheduler.stop(); agentOps.stop();
     if (integrityTimer) { clearInterval(integrityTimer); integrityTimer = null; }
