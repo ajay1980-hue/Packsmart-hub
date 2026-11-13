@@ -8,8 +8,9 @@ export function createEntryPreflight({env,store,now=Date.now,monotonic=()=>perfo
  if(flag==='disabled/v1')return null;
  const fail=()=>{throw Error('Entry preflight unavailable')};
  const expiry=Date.parse(env.RUNVARA_PARCEL2GO_ENTRY_PREFLIGHT_EXPIRES_AT),start=now(),mono=monotonic();
- if(!Number.isSafeInteger(start)||!Number.isFinite(mono)||flag!=='enabled/v1'||env.RUNVARA_STARTUP_MODE!=='quiet'||env.RUNVARA_QUIET_OWNER_WORKSPACE!=='enabled/v1'||!Number.isFinite(expiry)||expiry<=start||expiry-start>300000)fail();
+ if(!Number.isSafeInteger(start)||!Number.isFinite(mono)||flag!=='enabled/v1'||env.RUNVARA_STARTUP_MODE!=='quiet'||env.RUNVARA_QUIET_OWNER_WORKSPACE!=='enabled/v1'||!Number.isFinite(expiry)||expiry-start>300000)fail();
  for(const key of ['RUNVARA_QUIET_PARCEL2GO_LIVE_CREDENTIAL_ENTRY','RUNVARA_QUIET_PARCEL2GO_CREDENTIAL_ENTRY','RUNVARA_QUIET_PARCEL2GO_SANDBOX_QUOTE','RUNVARA_QUIET_SHOPIFY_TOKEN_EXCHANGE','RUNVARA_QUIET_SHOPIFY_CATALOGUE'])if(env[key]!==undefined&&env[key]!=='disabled/v1')fail();
+ if(expiry<=start)return null;
  const origin=new URL(env.APP_PUBLIC_URL).origin;if(!origin.startsWith('https://'))fail();
  const authenticate=createCredentialOwnerAuth({enabled:true,store,sessionSecret:env.SESSION_SECRET,now});
  let closed=false,last=start,lastMono=mono;
