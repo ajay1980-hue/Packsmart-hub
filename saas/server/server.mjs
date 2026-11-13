@@ -1,3 +1,4 @@
+import {createLiveSetup,LIVE_SETUP_PATH} from './lib/parcel2go-live-setup.mjs';
 import {createEntryPreflight,ENTRY_PREFLIGHT_PATH} from './lib/parcel2go-entry-preflight.mjs';
 import {createWorkspaceLock} from './lib/workspace-lock.mjs';
 import {createLiveCredentialEntryController, LIVE_ENTRY_PATH} from './lib/parcel2go-live-entry-controller.mjs';
@@ -114,6 +115,8 @@ const VERSION = '6.15.2';
 const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 const STATIC_FILES = new Map([
+  ['/parcel2go-live-setup.html', ['saas/parcel2go-live-setup.html', 'text/html; charset=utf-8']],
+  ['/parcel2go-live-setup-ui.js', ['saas/parcel2go-live-setup-ui.js', 'text/javascript; charset=utf-8']],
   ['/parcel2go-entry-preflight.html', ['saas/parcel2go-entry-preflight.html', 'text/html; charset=utf-8']],
   ['/parcel2go-entry-preflight-ui.js', ['saas/parcel2go-entry-preflight-ui.js', 'text/javascript; charset=utf-8']],
   ['/parcel2go-live-entry.html', ['saas/parcel2go-live-entry.html', 'text/html; charset=utf-8']],
@@ -528,7 +531,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const etag = `"sha256-${crypto.createHash('sha256').update(body).digest('hex')}"`;
       const notModified = matchesStaticEtag(ifNoneMatch, etag);
       const csp = "default-src 'self'; connect-src 'self'; img-src 'self' https://cdn.shopify.com data:; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
-      const privateEntryAsset=['/parcel2go-entry-preflight.html','/parcel2go-entry-preflight-ui.js','/parcel2go-live-entry.html','/parcel2go-live-entry-ui.js'].includes(pathname);
+      const privateEntryAsset=['/parcel2go-live-setup.html','/parcel2go-live-setup-ui.js','/parcel2go-entry-preflight.html','/parcel2go-entry-preflight-ui.js','/parcel2go-live-entry.html','/parcel2go-live-entry-ui.js'].includes(pathname);
       const cacheControl = privateEntryAsset ? 'no-store' : ['/','/index.html','/app.js','/presentation.js','/control-ui.js','/outcomes-ui.js','/activity-ui.js','/brief-history-ui.js','/connections-ui.js'].includes(pathname) ? 'no-cache' : 'public, max-age=300';
       res.writeHead(notModified ? 304 : 200, {
         ...headers(contentType, cacheControl),
@@ -584,6 +587,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   const withWorkspaceLock = createWorkspaceLock(locks);
+  const parcel2goLiveSetup = createLiveSetup({env,store,withWorkspaceLock});
   const parcel2goEntryPreflight = createEntryPreflight({env,store});
   const parcel2goLiveEntry = createLiveCredentialEntryController({env,store,withWorkspaceLock});
 
@@ -1169,6 +1173,8 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
+      if (pathname === LIVE_SETUP_PATH) { if (!parcel2goLiveSetup) { send(res,503,{error:'Private setup disabled'},{'Cache-Control':'no-store'});return; } const r=await parcel2goLiveSetup.handleSetup(req,res);send(res,r.status,r.body,r.headers);return; }
+      if (pathname === LIVE_ENTRY_PATH && parcel2goLiveSetup) { const r=await parcel2goLiveSetup.handleEntry(req,res);send(res,r.status,r.body,r.headers);return; }
       if (pathname === ENTRY_PREFLIGHT_PATH) { if (!parcel2goEntryPreflight) { send(res,503,{error:'Entry preflight disabled'},{'Cache-Control':'no-store'});return; } const r=await parcel2goEntryPreflight.handle(req,res);send(res,r.status,r.body,r.headers);return; }
       if (pathname === LIVE_ENTRY_PATH) { if (!parcel2goLiveEntry) { send(res,503,{error:'Live credential entry is not available',code:'PARCEL2GO_LIVE_ENTRY_DISABLED'},{'Cache-Control':'no-store'}); return; } const result=await parcel2goLiveEntry.handle(req,res);send(res,result.status,result.body,result.headers);return; }
       const pilotRoute = ['request', 'reconcile', 'reject'].some(action => pathname === PILOT_BASE + action);
@@ -3222,6 +3228,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   });
   server.once('close', () => {
     startupPolicy.parcel2goQuoteWindow?.close();
+    parcel2goLiveSetup?.close();
     parcel2goEntryPreflight?.close();
     parcel2goLiveEntry?.close();
     scheduler.stop();
@@ -3234,6 +3241,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     if (drainPromise) return drainPromise;
     draining = true;
     startupPolicy.parcel2goQuoteWindow?.close();
+    parcel2goLiveSetup?.close();
     parcel2goEntryPreflight?.close();
     parcel2goLiveEntry?.close();
     startupPolicy.approvalPilot?.close();
