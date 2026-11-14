@@ -85,6 +85,8 @@ export function shopifyOrderReadHold(state, provider, integrations = null) {
 // A retained or unrecognized recovery marker blocks automatic orders only.
 // Other areas keep the existing shared Doctor debt and scheduling rules.
 export function automaticConnectionAreas(state, provider, areas = connectionSettings(state,provider).areas) {
+  // Retained settings cannot create an adapter absent from the capability registry.
+  if (!connector(provider).areas.length) return [];
   const present = provider === 'shopify' && Object.hasOwn(state.integrationStatus?.shopify || {},'orderRecovery');
   const marker = provider === 'shopify' && state.integrationStatus?.shopify?.orderRecovery;
   const knownReleased = marker && typeof marker === 'object' && !Array.isArray(marker) && Object.keys(marker).length === 5 && ['schema','stageId','runId','status','attempt'].every(key=>Object.hasOwn(marker,key))
@@ -266,7 +268,7 @@ export function connectionCentre(state, integrations) {
   return Object.entries(CONNECTORS).map(([id, definition]) => {
     const settings = connectionSettings(state, id), health = state.integrationStatus?.[id] || {};
     const record = id === 'ebay' ? integrations.ebayConnection?.(state) : (state.connections || []).find(item => item.provider === id);
-    const configured = !settings.disconnected && (id === 'shopify' ? integrations.shopifyConfigured?.(state) : id === 'ebay' ? integrations.ebayConfigured?.(state) : Boolean(record?.encryptedCredentials));
+    const configured = Boolean(definition.areas.length) && !settings.disconnected && (id === 'shopify' ? integrations.shopifyConfigured?.(state) : id === 'ebay' ? integrations.ebayConfigured?.(state) : Boolean(record?.encryptedCredentials));
     const recovery = recoveryFor(id, health, id === 'ebay' ? state.ebay?.coverage || {} : {}, id === 'shopify' ? shopifyOrderReadHold(state, id, integrations) : undefined);
     const status = settings.disconnected ? 'disconnected' : !configured ? 'not_configured' : recovery?.action === 'reconnect' ? 'action_required' : recovery ? 'degraded' : ['connected', 'configured'].includes(health.status || record?.status) ? (health.status === 'connected' ? 'connected' : 'action_required') : 'action_required';
     const history = (state.connectionSyncs || []).filter(run => run.provider === id).slice(0, 30).map(({orderRecoveryStageId, ...run}) => ({ ...run, ...(run.status === 'running' && Date.parse(run.leaseUntil) <= Date.now() ? { status: 'failed', stage: 'Interrupted — retry sync', errorCode: 'WORKER_INTERRUPTED' } : {}) }));
