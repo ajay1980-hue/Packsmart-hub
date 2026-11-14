@@ -1,5 +1,8 @@
 # Offline supplier and consignment review
 
+See [coverage and next evidence gate](wholesale-readiness-map.md) for the combined
+stage-by-stage test map, pallet hold and minimum real evidence needed next.
+
 This packet adds one composable `createWholesaleConsignmentReview` on the existing
 PR110 branch. The factory is default-disabled; its only other mode is explicitly
 offline-fixture/v1. Enabled/live modes are refused. It reuses canonical JSON/hash,
