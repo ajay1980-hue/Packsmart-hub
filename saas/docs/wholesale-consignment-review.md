@@ -58,6 +58,8 @@ There is no customer-facing projection or publication path.
   all-in charge breakdown (base, VAT, fuel, collection, tail-lift, residential,
   insurance, other), matching actual shipping allocation, explicit service limits,
   tail-lift/residential support, insurance cover and collection/delivery timing.
+  Quotes observed before their packed measurements cannot pass, even while both
+  records remain unexpired. Matching observation timestamps are allowed.
   Failed, expired, missing or unsuitable quote evidence cannot pass. These are
   fixture facts, not a claim that current provider quotes contain those fields.
 

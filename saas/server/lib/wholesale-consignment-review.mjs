@@ -69,6 +69,7 @@ export function createWholesaleConsignmentReview({ mode = 'disabled/v1', fixture
           hash(s.parcel) !== hash(plan.parcel) || s.collectionPostcode !== plan.route.collectionPostcode) block('packed_measurements');
       if (q.status !== 'quoted' || q.currency !== 'GBP' || !syntheticRef(q.serviceCode) ||
           !Number.isFinite(time(q.observedAt)) || time(q.observedAt) > at ||
+          time(q.observedAt) < time(plan.parcel.observedAt) ||
           !Number.isFinite(time(q.expiresAt)) || time(q.expiresAt) <= at || time(q.expiresAt) > Date.parse(plan.expiresAt)) block('quote_validity');
       assertShopifySourceScope(q.charges, workspaceId);
       if (!charges.every(key => money(q.charges[key])) || Object.keys(q.charges).length !== charges.length ||

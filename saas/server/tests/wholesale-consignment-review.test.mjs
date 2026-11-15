@@ -93,6 +93,21 @@ test('pallets stay blocked without a service contract; failed/expired/unknown qu
   const g = fixture(); g.service.totalPence = 499; assert.ok(run(g).blockers.includes('all_in_shipping_cost'));
 });
 
+for (const [label, offset] of [['before', -1], ['at', 0], ['after', 1]]) {
+  test(`quote observed ${label} the packed measurement timestamp`, () => {
+    const f = fixture();
+    f.service.observedAt = new Date(start + offset).toISOString();
+    const before = structuredClone(f);
+    const reviewer = create({ mode: 'offline-fixture/v1', fixture: f, now: () => start + 1 });
+    const result = reviewer.review(f.state);
+    assert.equal(result.status, offset < 0 ? 'blocked' : 'fixture_checked');
+    assert.deepEqual(result.blockers, offset < 0 ? ['quote_validity'] : []);
+    for (const key of ['supplierVerified', 'serviceVerified', 'quoteRecommendationAllowed', 'bookingAllowed', 'liveReady']) assert.equal(result[key], false);
+    assert.deepEqual(reviewer.review(f.state), result);
+    assert.deepEqual(f, before);
+  });
+}
+
 test('service limits, postcodes, tail-lift, residential, insurance and timing are checked', () => {
   for (const change of [f => { f.service.limits.weightGrams = 999; }, f => { f.supplier.collectionPostcode = 'CC1 1CC'; },
     f => { f.service.input.route.deliveryPostcode = null; }, f => { f.supplier.transportMode = 'pallet'; }, f => { f.supplier.requirements.tailLift = true; },
