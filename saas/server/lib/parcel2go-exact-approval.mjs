@@ -4,6 +4,8 @@
 import { randomUUID } from 'node:crypto';
 import { parcel2GoCanonicalHash as hash, parcel2GoCanonicalJson as json } from './parcel2go-live-canonical.mjs';
 import { assertApprovalRequestActor, createApprovalRequest } from './approval-request.mjs';
+import {assertParcel2GoSynchronousCurrent as current} from './parcel2go-live-sync-guard.mjs';
+import {prepareParcel2GoLiveQuotePlan} from './parcel2go-live-quote-plan.mjs';
 export const PARCEL2GO_EXACT_APPROVAL_TYPE = 'protected_parcel2go_quote';
 const fail=()=>{throw Object.assign(Error('Exact owner quote review required'),{status:409,code:'PARCEL2GO_EXACT_CONSENT_REQUIRED'});};
 const exact=(x,keys)=>x&&Object.keys(x).sort().join('|')===keys.sort().join('|');
@@ -23,24 +25,41 @@ function operation(value,auth,now){
 }
 function owner(state,auth){assertApprovalRequestActor(state,auth);if(auth.user.role!=='owner'||auth.user.id!==auth.session.sub)fail();}
 export function assertGenericQuoteDecisionAllowed(approval){if(approval?.type===PARCEL2GO_EXACT_APPROVAL_TYPE)fail();}
-export function prepareExactQuoteApproval({mode='disabled/v1',requestId,operation:input,auth,now}){
+function quoteInput(value,op,now){
+ const input=JSON.parse(json(value)),plan=prepareParcel2GoLiveQuotePlan(input,now);
+ if(plan.account.evidenceSource!=='owner_declaration'||plan.account.workspaceId!==op.workspaceId||plan.account.accountId!==op.accountId||plan.fingerprint!==op.inputFingerprint)fail();
+ return input;
+}
+export function prepareExactQuoteApproval({mode='disabled/v1',requestId,operation:input,quoteInput:submitted,auth,now}){
  if(mode!=='local-contract/v1'||! /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(requestId??''))fail();
  const op=operation(input,auth,now),payload={operation:op,operationHash:hash(op)};
+ // Owner-entered values are persisted in the same immutable approval payload.
+ // They are hash-bound to the plan; this does not upgrade them into verified data.
+ if(submitted!==undefined)payload.quoteInput=quoteInput(submitted,op,now);
  const approval={id:`approval_${randomUUID()}`,type:PARCEL2GO_EXACT_APPROVAL_TYPE,workspaceId:op.workspaceId,action:'Review one Parcel2Go quote only',reason:'Exact owner review; no booking or spending',financialImpact:0,expectedBenefit:'Compare delivery prices',risk:'Parcel details transmitted only after separate operational admission',source:'parcel2go-exact-review',payload,evidence:[],agentId:auth.session.sub,requestedBy:auth.session.sub,revision:1,history:[],status:'pending',workStatus:'REQUIRES APPROVAL',createdAt:new Date(now).toISOString(),decidedAt:null,decidedBy:null,executedExternally:false,executionStatus:'not_connected'};
  return {requestId,approval,contentSha256:hash({type:approval.type,payload})};
 }
-export async function createExactQuoteApproval({mode='disabled/v1',store,auth,intent,now=Date.now}){
+export async function createExactQuoteApproval({mode='disabled/v1',store,auth,intent,now=Date.now,assertCurrent=()=>{},assertEvidenceCurrent}){
  if(mode!=='local-contract/v1'||auth.user.role!=='owner'||auth.user.id!==auth.session.sub)fail();
  const frozen=JSON.parse(json(intent));
  if(frozen.contentSha256!==hash({type:frozen.approval?.type,payload:frozen.approval?.payload})||frozen.approval?.status!=='pending'||frozen.approval?.decidedAt!==null||frozen.approval?.decidedBy!==null||frozen.approval?.executedExternally!==false||frozen.approval?.executionStatus!=='not_connected')fail();
- const result=await createApprovalRequest({store,auth,intent:frozen,admit(state,a){owner(state,auth);validate(a,auth,now());},beforeSave(){return {beforeCommit(state){owner(state,auth);validate(state.approvals.find(a=>a.id===frozen.approval.id),auth,now());}};}});
+ const check=state=>{current(assertCurrent);if(state&&assertEvidenceCurrent!==undefined)current(()=>assertEvidenceCurrent(state));current(assertCurrent);};
+ check();
+ const result=await createApprovalRequest({store,auth,intent:frozen,admit(state,a){check(state);owner(state,auth);validate(a,auth,now());},beforeSave(){const guard=state=>{check(state);owner(state,auth);validate(state.approvals.find(a=>a.id===frozen.approval.id),auth,now());};return {...(assertEvidenceCurrent!==undefined?{beforeEffects:guard}:{}),beforeCommit:guard};}});
+ check();
+ if(assertEvidenceCurrent!==undefined){
+  // Idempotent replay bypasses admit/beforeSave; it still needs fresh evidence.
+  const state=await store.get(auth.session.workspaceId,{exactSnapshot:true});check(state);owner(state,auth);
+  const rows=state.approvals.filter(a=>a.id===result.approval.id);if(rows.length!==1||hash(rows[0])!==hash(result.approval))fail();
+ }
  validate(result.approval,auth,now());
  if(result.approval.requestIdentity?.contentSha256!==hash({type:result.approval.type,payload:result.approval.payload}))fail();
  return result;
 }
 function validate(a,auth,now){
- if(a?.type!==PARCEL2GO_EXACT_APPROVAL_TYPE||a.revision!==1||a.requestedBy!==auth.session.sub||a.workspaceId!==auth.session.workspaceId||!exact(a.payload,['operation','operationHash']))fail();
- const op=operation(a.payload.operation,auth,now);if(hash(op)!==a.payload.operationHash)fail();return op;
+ if(a?.type!==PARCEL2GO_EXACT_APPROVAL_TYPE||a.revision!==1||a.requestedBy!==auth.session.sub||a.workspaceId!==auth.session.workspaceId||!exact(a.payload,a.payload?.quoteInput!==undefined?['operation','operationHash','quoteInput']:['operation','operationHash']))fail();
+ const op=operation(a.payload.operation,auth,now);if(hash(op)!==a.payload.operationHash)fail();
+ if(a.payload.quoteInput!==undefined)quoteInput(a.payload.quoteInput,op,now);return op;
 }
 export function decideExactQuoteApproval({mode='disabled/v1',state,auth,approvalId,confirmation,now}){
  if(mode!=='local-contract/v1')fail(); owner(state,auth);

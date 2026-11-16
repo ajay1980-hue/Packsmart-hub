@@ -1,4 +1,5 @@
 import {createLiveSetup,LIVE_SETUP_PATH} from './lib/parcel2go-live-setup.mjs';
+import {createParcel2GoOwnerQuoteMount,isParcel2GoOwnerQuotePath} from './lib/parcel2go-owner-quote-mount.mjs';
 import {createEntryPreflight,ENTRY_PREFLIGHT_PATH} from './lib/parcel2go-entry-preflight.mjs';
 import {createWorkspaceLock} from './lib/workspace-lock.mjs';
 import {createLiveCredentialEntryController, LIVE_ENTRY_PATH} from './lib/parcel2go-live-entry-controller.mjs';
@@ -590,6 +591,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const parcel2goLiveSetup = createLiveSetup({env,store,withWorkspaceLock});
   const parcel2goEntryPreflight = createEntryPreflight({env,store});
   const parcel2goLiveEntry = createLiveCredentialEntryController({env,store,withWorkspaceLock});
+  const parcel2goOwnerQuote = createParcel2GoOwnerQuoteMount({env,store,withWorkspaceLock});
 
   async function mutate(auth, callback, { persist = true } = {}) {
     return withWorkspaceLock(auth.session.workspaceId, async () => {
@@ -1173,6 +1175,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     try {
       const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = url.pathname;
+      // Like private credential entry, this surface has its own exact quiet-mode
+      // activation and owner boundary. It stays inside normal request tracking.
+      if (isParcel2GoOwnerQuotePath(pathname)) {
+        if (!parcel2goOwnerQuote) { send(res,503,{error:'Owner quote disabled',code:'PARCEL2GO_OWNER_QUOTE_DISABLED'},{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});return; }
+        await parcel2goOwnerQuote.handle(req,res);return;
+      }
       if (pathname === LIVE_SETUP_PATH) { if (!parcel2goLiveSetup) { send(res,503,{error:'Private setup disabled'},{'Cache-Control':'no-store'});return; } const r=await parcel2goLiveSetup.handleSetup(req,res);send(res,r.status,r.body,r.headers);return; }
       if (pathname === LIVE_ENTRY_PATH && parcel2goLiveSetup) { const r=await parcel2goLiveSetup.handleEntry(req,res);send(res,r.status,r.body,r.headers);return; }
       if (pathname === ENTRY_PREFLIGHT_PATH) { if (!parcel2goEntryPreflight) { send(res,503,{error:'Entry preflight disabled'},{'Cache-Control':'no-store'});return; } const r=await parcel2goEntryPreflight.handle(req,res);send(res,r.status,r.body,r.headers);return; }
@@ -3227,6 +3235,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     integrityTimer.unref?.();
   });
   server.once('close', () => {
+    parcel2goOwnerQuote?.close();
     startupPolicy.parcel2goQuoteWindow?.close();
     parcel2goLiveSetup?.close();
     parcel2goEntryPreflight?.close();
@@ -3240,6 +3249,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const drain = () => {
     if (drainPromise) return drainPromise;
     draining = true;
+    parcel2goOwnerQuote?.close();
     startupPolicy.parcel2goQuoteWindow?.close();
     parcel2goLiveSetup?.close();
     parcel2goEntryPreflight?.close();
