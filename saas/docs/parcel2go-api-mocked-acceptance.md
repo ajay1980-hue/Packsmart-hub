@@ -59,6 +59,8 @@ The component uses same-origin, no-store requests with CSRF, aborts on expiry/pa
 
 [`parcel2go-owner-quote-surface.test.mjs`](../server/tests/parcel2go-owner-quote-surface.test.mjs) and [`parcel2go-owner-input-ui.test.mjs`](../server/tests/parcel2go-owner-input-ui.test.mjs) execute the page/component in JSDOM with in-process Node request/response streams, the existing fake Supabase and intercepted native HTTPS. This covers the full UI → adapter → exact decision → reservation → token/quote → displayed comparison path, plus disabled mounting, private assets, auth/tenant/CSRF failures, body cancellation, XSS-safe rendering, exact response validation, storage uncertainty, deadline suppression and reload without replay. There are no listening sockets or provider requests in these tests. This is DOM integration evidence, not a production-browser or live-provider acceptance result.
 
+The [focused release review](parcel2go-release-review.md) also records a real local Chromium run against the existing Node session endpoint and a test-only adapter mount. Both successful and lost-response paths passed with intercepted provider transport, including rollback, retained history and reload without replay. Production routing remains unchanged.
+
 ## Exercised path
 
 [`parcel2go-https-orchestration-acceptance.test.mjs`](../server/tests/parcel2go-https-orchestration-acceptance.test.mjs) reuses the existing synthetic admission fixture and in-memory Supabase substitute. It checks the completed credential receipt and connection hash, then passes that saved envelope to the existing `approved-https-orchestration/v1` branch.
