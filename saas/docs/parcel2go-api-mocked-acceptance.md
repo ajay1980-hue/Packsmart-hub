@@ -1,6 +1,6 @@
 # Parcel2Go API acceptance checkpoint
 
-The native HTTPS orchestration and an unmounted exact-owner admission candidate now have synthetic acceptance tests through token exchange, quote serialization and response parsing. This is local test evidence only. It does not establish provider access, account eligibility, a real quote or an operational connection. No application route or environment activation flag is added.
+Recorded-evidence preparation, bounded owner review, exact-owner admission and native HTTPS orchestration now have a connected synthetic acceptance test through token exchange, quote serialization and response parsing. This is local test evidence only. It does not establish provider access, account eligibility, a real quote or an operational connection. No application route is mounted and no environment activation flag is added.
 
 ## Exercised path
 
@@ -28,11 +28,23 @@ Only that private composition can select native transport within the existing du
 
 [`parcel2go-exact-native-admission.test.mjs`](../server/tests/parcel2go-exact-native-admission.test.mjs) derives a synthetic review, saves its decision in the in-memory database through the existing store, signs a synthetic owner cookie, and runs this composition with native HTTPS intercepted. It covers successful completion, pre-admission refusals, misleading summaries, concurrent workers without a shared local lock, changed approval identity, revocation/abort/expiry around both responses, and lost reservation/provider/completion acknowledgements. The existing approval rows remain decision evidence; execution is recorded in `parcel2goLiveQuoteRuns` and audit rather than changing generic approval execution fields.
 
+## Recorded evidence and bounded owner review
+
+[`parcel2go-recorded-owner-review.mjs`](../server/lib/parcel2go-recorded-owner-review.mjs) adds a default-disabled, unmounted HTTP candidate for `/api/owner/parcel2go-quote-review?requestId=…`. GET previews or reads the exact saved review. POST accepts only preparation references or an exact decision. There is no execution action or native transport dependency. Secure signed owner cookies, current tenant/user/session checks, exact origin and CSRF, strict JSON, a 2 KiB/64-chunk body limit and a two-second whole-request deadline bound the interface. Authentication is rechecked after the asynchronous evidence read and inside the workspace lock.
+
+The host supplies a read-only evidence reader plus a pinned packet hash, request ID and finite deadline. The browser cannot supply parcel/account facts, source assertions, input replacements or permission flags. `deriveRecordedQuoteApproval` shares the canonical input, wire, credential-receipt and review-summary derivation with the existing synthetic producer. Its separate recorded-evidence schema binds account/terms/receipt references, input and packing scope to the owner workspace and request.
+
+The packing record must describe the selected whole package with measured gross weight and external dimensions, the same plan and quantity, and outer packaging included. Component measurements, estimates, mismatched quantities/dimensions, missing outer packaging and any added tare are refused. This validates the shape and consistency of recorded claims; it does not prove their physical accuracy. The DTO explicitly says the source and API eligibility are not independently verified and keeps `sourceVerified`, `accountEntitlementVerified`, `providerCallsAllowed` and `liveReady` false. Real data must never be relabelled as a synthetic fixture.
+
+Preparation uses the existing approval-request identity, primary CAS and audit. The packet's fixed issued/expiry times keep the operation hash stable across reads and process restarts; replay does not renew the window. Decisions use the existing exact confirmation contract and add an audit entry binding the evidence hash. Evidence and cancellation guards run before save effects and commit. Exact readback reconciles a lost acknowledgement without a second write. An unconfirmed in-process attempt cannot write again; absence of a saved row does not authorize retry after restart. A transmitted persistence request can still commit after cancellation, so an unconfirmed response is not proof that nothing was saved.
+
+[`parcel2go-recorded-owner-review.test.mjs`](../server/tests/parcel2go-recorded-owner-review.test.mjs) exercises preview → preparation → decision → manually composed native admission entirely with invented data and intercepted HTTPS. It also covers rejected decisions, immutable windows, invalid packing claims, client evidence injection, malformed/oversized input, tenant/auth refusals, changed evidence, competing workers, uncertain writes and cancellation before save effects. This test is not a production source-verification or live-permission receipt.
+
 ## Exact remaining live acceptance boundary
 
 The candidate is not mounted or constructed by the server. [`parcel2go-live-setup.mjs`](../server/lib/parcel2go-live-setup.mjs) and [`parcel2go-live-entry-controller.mjs`](../server/lib/parcel2go-live-entry-controller.mjs) remain private credential-storage routes only. The ordinary admission factory still rejects direct `approved-https-integrated/v1` configuration.
 
-A reviewed production host still needs bounded HTTP parsing, the exact owner review/decision route, authoritative input/evidence preparation, finite activation and closure, and a status/reconciliation view joining the durable run receipt to the approval. The existing input producer and owner panel remain synthetic-only; neither may be relabelled as production verification. An account-evidence reference is a pin, not proof of API entitlement, currency/VAT status or terms acceptance. A supplied measurement/provenance label likewise does not establish measured dispatch packaging.
+A reviewed production host still needs an authoritative read-only evidence adapter and independent source/entitlement checks, UI and server mounting of the reviewed candidates, finite activation/closure, an execution dispatcher that revalidates evidence, and outcome reconciliation after the review window closes. The new review candidate refuses after expiry; its active-window GET is not a post-expiry reconciliation service. The original synthetic producer and owner panel remain synthetic-only. The new recorded-evidence contract is also not an independent verifier: an evidence reference/hash does not prove API entitlement, currency/VAT status, terms acceptance or measured dispatch packaging.
 
 After that host is implemented and reviewed, release/activation and any real token/quote acceptance require separate authorization using privately admitted credentials and the approved exact parcel/route. Missing or uncertain results never authorize retry, a new UUID, or a larger allowance. There is no booking, payment, label, collection or purchase allowance here.
 
@@ -42,6 +54,7 @@ Run with the repository's Node 22 runtime:
 
 ```sh
 node --test \
+  saas/server/tests/parcel2go-recorded-owner-review.test.mjs \
   saas/server/tests/parcel2go-exact-native-admission.test.mjs \
   saas/server/tests/parcel2go-https-orchestration-acceptance.test.mjs \
   saas/server/tests/parcel2go-live-https-candidate.test.mjs \
@@ -50,7 +63,12 @@ node --test \
   saas/server/tests/parcel2go-live-sync-guard.test.mjs \
   saas/server/tests/parcel2go-exact-input-producer.test.mjs \
   saas/server/tests/parcel2go-exact-approval.test.mjs \
-  saas/server/tests/parcel2go-operational-approval.test.mjs
+  saas/server/tests/parcel2go-operational-approval.test.mjs \
+  saas/server/tests/parcel2go-live-entry-disabled.test.mjs \
+  saas/server/tests/parcel2go-live-entry-production.test.mjs \
+  saas/server/tests/parcel2go-live-setup.test.mjs \
+  saas/server/tests/parcel2go-exact-owner-panel.test.mjs \
+  saas/server/tests/parcel2go-exact-owner-http.test.mjs
 ```
 
 No live credentials, provider traffic or real persistence are needed by these tests.
