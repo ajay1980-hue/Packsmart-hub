@@ -24,20 +24,27 @@ export function createLiveSetup({env,store,withWorkspaceLock,now=Date.now,monoto
  let closed=false,last=start,lastMono=mono,entry=null,boundFingerprint=null;
  const guard=()=>{const t=now(),m=monotonic();if(closed||!Number.isSafeInteger(t)||!Number.isFinite(m)||t<last||m<lastMono||t>=expiry||m-mono>=expiry-start){closed=true;entry?.close();fail()}last=t;lastMono=m};
  return Object.freeze({close(){closed=true;entry?.close()},async handleEntry(req,res){if(!entry)return {status:503,headers,body:{status:'unavailable'}};return entry.handle(req,res)},async handleSetup(req,res){
-  const abort=new AbortController(),cancel=()=>abort.abort();let timer;req.once('aborted',cancel);res.once('close',cancel);
+  // Diagnostics contain only local labels and a capped duration, never exception
+  // messages/codes, account bindings, request headers or authentication payloads.
+  const observedStart=monotonic();let stage='request',failure,timer;
+  const refuse=(at,cause='refused')=>{failure??={stage:at,cause};fail()};
+  const abort=new AbortController(),cancel=()=>{failure??={stage,cause:'cancelled'};abort.abort()};req.once('aborted',cancel);res.once('close',cancel);
+  const windowCurrent=()=>{try{guard()}catch{refuse('window','unavailable')}};
   try{
-   guard();if(req.url!==LIVE_SETUP_PATH||req.method!=='POST'||req.headers.origin!==origin||req.headers['transfer-encoding']||Number(req.headers['content-length']??0)!==0)fail();
-   const began=monotonic(),current=()=>{guard();if(abort.signal.aborted||monotonic()-began>=2000)fail()};
-   const job=(async()=>{const request={headers:req.headers,signal:abort.signal};const a=await authenticate(request);current();if(req.headers['x-csrf-token']!==a.session.csrf)fail();
-    return withWorkspaceLock(a.session.workspaceId,async()=>{current();const fresh=await authenticate(request);current();const fingerprint=hash(fresh.session);if(fingerprint!==hash(a.session))fail();
-     if(entry){if(boundFingerprint!==fingerprint)fail();return {status:'prepared',entryPath:'/parcel2go-live-entry.html',savePerformed:false,providerCallsAllowed:false}}
-     const runs=fresh.state.parcel2goLiveQuoteRuns??[];if(!Array.isArray(runs)||runs.some(r=>r.requestId===config.requestId||r.status==='reserved')||(fresh.state.connections??[]).some(c=>c.provider==='parcel2go-live'||c.id===config.trustedBinding.connectionId))fail();
+   windowCurrent();if(req.url!==LIVE_SETUP_PATH||req.method!=='POST'||req.headers['transfer-encoding']||Number(req.headers['content-length']??0)!==0)refuse('request');
+   if(req.headers.origin!==origin)refuse('origin');
+   const began=monotonic(),current=()=>{windowCurrent();if(abort.signal.aborted)refuse(stage,'cancelled');if(monotonic()-began>=2000)refuse(stage,'deadline')};
+   const job=(async()=>{const request={headers:req.headers,signal:abort.signal};stage='owner_auth';const a=await authenticate(request);current();stage='csrf';if(req.headers['x-csrf-token']!==a.session.csrf)refuse('csrf');
+    stage='workspace_lock';return withWorkspaceLock(a.session.workspaceId,async()=>{current();stage='fresh_owner_auth';const fresh=await authenticate(request);current();const fingerprint=hash(fresh.session);if(fingerprint!==hash(a.session))refuse('fresh_owner_auth');
+     stage='account_revision';if(entry){if(boundFingerprint!==fingerprint)refuse(stage);return {status:'prepared',entryPath:'/parcel2go-live-entry.html',savePerformed:false,providerCallsAllowed:false}}
+     const runs=fresh.state.parcel2goLiveQuoteRuns??[];if(!Array.isArray(runs)||runs.some(r=>r.requestId===config.requestId||r.status==='reserved')||(fresh.state.connections??[]).some(c=>c.provider==='parcel2go-live'||c.id===config.trustedBinding.connectionId))refuse(stage);
      const c={...config,expiresAt:new Date(Math.min(expiry,fresh.session.exp*1000)).toISOString(),expectedRevision:fresh.state._revision,expectedSessionFingerprint:fingerprint};
      current();entry=createLiveCredentialEntryController({env:derivedEnv(c),store,withWorkspaceLock,now,monotonic});boundFingerprint=fingerprint;
      return {status:'prepared',entryPath:'/parcel2go-live-entry.html',savePerformed:false,providerCallsAllowed:false};
     });})();
-   const body=await Promise.race([job,new Promise((_,reject)=>{timer=setTimeout(()=>{cancel();reject(Error('Setup deadline'))},2000)})]);current();return {status:200,headers,body};
-  }catch{return {status:409,headers,body:{status:'unavailable',savePerformed:false,providerCallsAllowed:false}}}
+   const body=await Promise.race([job,new Promise((_,reject)=>{timer=setTimeout(()=>{failure??={stage,cause:'deadline'};abort.abort();reject(Error('Setup deadline'))},2000)})]);current();return {status:200,headers,body};
+  }catch{const elapsed=monotonic()-observedStart;return {status:409,headers,body:{status:'unavailable',savePerformed:false,providerCallsAllowed:false,
+   diagnostic:{schema:'parcel2go-setup-diagnostic/v1',...(failure??{stage,cause:'unavailable'}),durationMs:Number.isFinite(elapsed)?Math.max(0,Math.min(2000,Math.floor(elapsed))):0}}}}
   finally{clearTimeout(timer);req.off('aborted',cancel);res.off('close',cancel)}
  }});
 }
