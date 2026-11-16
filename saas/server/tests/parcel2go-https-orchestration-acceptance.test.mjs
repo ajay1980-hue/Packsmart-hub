@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import https from 'node:https';
-import net from 'node:net';
-import { EventEmitter } from 'node:events';
-import { PassThrough } from 'node:stream';
+import { nativeHttpFixture } from './parcel2go-native-http-fixture.mjs';
 import { fixture } from './parcel2go-live-integrated-fixture.mjs';
 import { CLIENT, SECRET_VALUE, TOKEN, KEY, quoteBody } from './parcel2go-sandbox-fixture.mjs';
 import { createParcel2GoLiveOrchestration } from '../lib/parcel2go-live-orchestration.mjs';
@@ -13,38 +10,9 @@ import { parcel2GoCanonicalHash as hash } from '../lib/parcel2go-live-canonical.
 // request is intercepted before a socket exists. The saved credentials, account,
 // state and responses all come from existing synthetic, in-memory fixtures.
 async function setup(t, responseFor = () => ({})) {
-  t.mock.method(net.Socket.prototype, 'connect', () => assert.fail('Socket creation forbidden'));
-  t.mock.method(globalThis, 'fetch', () => assert.fail('Uninjected fetch forbidden'));
-  const f = await fixture(), calls = [];
-  t.mock.method(https, 'request', (url, options, callback) => {
-    const call = { url: String(url), options, body: null, destroyed: false };
-    calls.push(call);
-    const request = new EventEmitter();
-    request.destroy = () => { call.destroyed = true; };
-    request.end = body => {
-      call.body = body;
-      queueMicrotask(() => {
-        const operation = url.pathname.endsWith('/token') ? 'token' : 'quote';
-        const spec = responseFor(operation, f) || {};
-        if (spec.reset) { request.emit('error', new Error('Synthetic response lost')); return; }
-        const data = spec.body ?? (operation === 'token'
-          ? { access_token: TOKEN, token_type: 'Bearer', scope: 'public-api', expires_in: 3600 }
-          : quoteBody());
-        const bytes = Buffer.from(typeof data === 'string' ? data : JSON.stringify(data));
-        const response = new PassThrough();
-        response.statusCode = spec.status ?? 200;
-        response.headers = { 'content-type': 'application/json', 'content-length': String(bytes.length) };
-        response.complete = true;
-        callback(response);
-        if (!response.destroyed) {
-          // Real stream boundary, including a response split across chunks.
-          const split = Math.floor(bytes.length / 2);
-          response.write(bytes.subarray(0, split)); response.end(bytes.subarray(split));
-        }
-      });
-    };
-    return request;
-  });
+  let f;
+  const calls = nativeHttpFixture(t, operation => responseFor(operation, f));
+  f = await fixture();
   const workspaceId = f.config.trustedBinding.workspaceId;
   const state = await f.store.get(workspaceId, { exactSnapshot: true });
   const connection = state.connections.find(row => row.id === f.config.trustedBinding.connectionId);
