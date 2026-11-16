@@ -51,17 +51,19 @@ export function createParcel2GoRecordedOwnerReview(options={}){
  };
  const view=(auth,prepared,row)=>{
   if(!prepared)return {schema:'runvara-owner-input-quote-review/v1',requestId,status:'input_required',expiresAt,
+   remainingMs:Math.max(0,Math.floor(Math.min(expiry-now(),expiry-start-(monotonic()-mono),auth.session.exp*1000-now()))),
    evidenceNotice:'Enter the complete packed parcel, including all outer packaging. Measurements, estimates, VAT status and GBP currency are owner declarations; comparison only.',
    sourceVerified:false,accountEntitlementVerified:false,providerCallsAllowed:false,liveReady:false};
   const op=prepared.intent.approval.payload.operation;
+  const attempted=ownerInput&&(attempts.has('execute')||(auth.state.parcel2goLiveQuoteRuns??[]).some(r=>r.requestId===requestId||row&&r.exactApproval?.approvalId===row.id));
   return {schema:ownerInput?'runvara-owner-input-quote-review/v1':'runvara-recorded-quote-review/v1',requestId,...(!ownerInput?{evidenceHash:expectedEvidenceHash}:{}),
    status:row?.status??'not_prepared',approvalId:row?.id??null,revision:row?.revision??1,operationHash:prepared.intent.approval.payload.operationHash,
    accountAlias:op.accountId,reviewSummary:op.reviewSummary,packing:prepared.packing,termsReference:op.termsReference,accountEvidenceReference:op.accountEvidenceReference,
    expiresAt:op.expiresAt,remainingMs:Math.max(0,Math.floor(Math.min(Date.parse(op.expiresAt)-now(),expiry-start-(monotonic()-mono)))),
    evidenceNotice:ownerInput?'Owner-entered values only; not independently verified. Comparison only, not a booking or guaranteed dispatch price.':'Recorded claims only; source and API eligibility are not independently verified.',
    sourceVerified:false,accountEntitlementVerified:false,providerCallsAllowed:false,operationalExecution:false,liveReady:false,
-   durableDecision:row?.status==='approved'||row?.status==='rejected',permission:op.permission,executionStatus:'not_connected',
-   ...(ownerInput?{inputSource:'owner_entered',separateExecutionConfirmationRequired:true}:{}),
+   durableDecision:row?.status==='approved'||row?.status==='rejected',permission:op.permission,executionStatus:ownerInput?(attempted?'reconcile_no_replay':'not_started'):'not_connected',
+   ...(ownerInput?{inputSource:'owner_entered',separateExecutionConfirmationRequired:true,canExecute:row?.status==='approved'&&!attempted}:{}),
    maxTokenRequests:1,maxQuoteRequests:1,maxSpendMinor:0,currency:'GBP',bookingAllowed:false,labelsAllowed:false,collectionsAllowed:false};
  };
  async function handle(req){
