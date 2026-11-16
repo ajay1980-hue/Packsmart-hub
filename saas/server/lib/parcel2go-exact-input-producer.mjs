@@ -8,9 +8,10 @@ import {prepareExactQuoteApproval} from './parcel2go-exact-approval.mjs';
 // assertion. Admission compares this with the exact summary the owner approved.
 export function parcel2GoExactReviewSummary({plan,body}){
  const r=plan.route,p=plan.parcel,a=plan.account,w=JSON.parse(body).Parcels[0];
- return {recipient:'Parcel2Go public API; quote request only',collection:`${r.collectionCountry} ${r.collectionPostcode}; VAT status ${a.collectionVatStatus}`,delivery:`${r.deliveryCountry} ${r.deliveryPostcode}; VAT status ${a.deliveryVatStatus}`,parcel:`${w.Weight} kg; length ${w.Length} cm × width ${w.Width} cm × height ${w.Height} cm; declared value GBP ${p.declaredValueDecimal}`,estimateProvenance:`${plan.estimate?'Owner-authorised estimate, not measured':'Measured packed parcel'}; evidence ${p.evidenceId}; observed ${p.observedAt}`};
+ const owner=a.evidenceSource==='owner_declaration',basis=plan.estimate?'Owner-authorised estimate, not measured':owner?'Owner-reported whole-package measurement':'Measured packed parcel';
+ return {recipient:'Parcel2Go public API; quote request only',collection:`${r.collectionCountry} ${r.collectionPostcode}; VAT status ${a.collectionVatStatus}${owner?' (owner declaration)':''}`,delivery:`${r.deliveryCountry} ${r.deliveryPostcode}; VAT status ${a.deliveryVatStatus}${owner?' (owner declaration)':''}`,parcel:`${w.Weight} kg; length ${w.Length} cm × width ${w.Width} cm × height ${w.Height} cm; declared value GBP ${p.declaredValueDecimal}`,estimateProvenance:`${basis}; evidence ${p.evidenceId}; ${owner?'declared':'observed'} ${p.observedAt}${owner?'; owner-entered; not independently verified; comparison only':''}`};
 }
-function derive({auth,input,requestId,connectionId,termsReference,accountEvidenceReference,expectedCredentialReceiptHash,now,window}){
+function derive({auth,input,requestId,connectionId,termsReference,accountEvidenceReference,expectedCredentialReceiptHash,now,window,persistInput=false}){
  const fail=()=>{throw Error('Trusted quote input unavailable');};
  assertQuietOwnerWorkspace(auth,{inspectEvidence:false});
  const snapshot=JSON.parse(json(input)),{plan,body}=parcel2GoLiveWireBody(snapshot,now);
@@ -21,8 +22,29 @@ function derive({auth,input,requestId,connectionId,termsReference,accountEvidenc
  const a=plan.account,issuedAt=window?.issuedAt??new Date(now).toISOString(),expiresAt=new Date(Math.min(window?Date.parse(window.expiresAt):now+300000,Date.parse(plan.expiresAt),auth.session.exp*1000)).toISOString();
  const operation={schema:'runvara-exact-quote-operation/v1',workspaceId:binding.workspaceId,ownerId:auth.session.sub,sessionFingerprint:hash(auth.session),accountId:a.accountId,inputFingerprint:plan.fingerprint,credentialReceiptHash:hash(receipt),termsReference,accountEvidenceReference,
  reviewSummary:parcel2GoExactReviewSummary({plan,body}),issuedAt,expiresAt,permission:'one_quote_only',maxTokenRequests:1,maxQuoteRequests:1,maxSpendMinor:0,currency:'GBP',bookingAllowed:false,labelsAllowed:false,collectionsAllowed:false};
- const intent=prepareExactQuoteApproval({mode:'local-contract/v1',requestId,operation,auth,now});
+ const intent=prepareExactQuoteApproval({mode:'local-contract/v1',requestId,operation,...(persistInput?{quoteInput:snapshot}:{}),auth,now});
  return Object.freeze({intent,wireBodyHash:hash(JSON.parse(body)),inputFingerprint:plan.fingerprint,operationalExecution:false,accountEntitlementVerified:false});
+}
+
+// An owner may request a comparison using their own complete parcel inputs. No
+// catalogue, packing registry or claimed entitlement is manufactured for this.
+// Account/receipt/terms and the short window remain server-pinned, not browser input.
+export function deriveOwnerEnteredQuoteApproval({mode='disabled/v1',auth,declaration,requestId,trustedBinding,termsReference,expectedCredentialReceiptHash,issuedAt,expiresAt,now}={}){
+ const fail=()=>{throw Error('Owner-entered quote input unavailable');};
+ const exact=(x,keys)=>{if(!x||Array.isArray(x)||Object.keys(x).sort().join('|')!==keys.split(' ').sort().join('|'))fail();};
+ if(mode!=='unmounted-owner-input/v1'||trustedBinding?.workspaceId!==auth.session.workspaceId||trustedBinding?.environment!=='live')fail();
+ const d=JSON.parse(json(declaration));
+ exact(d,'currency collectionVatStatus deliveryVatStatus collectionPostcode deliveryPostcode acknowledgedUnverified parcel');
+ exact(d.parcel,'basis scope includesOuter weightGrams lengthMm widthMm heightMm declaredValueDecimal');
+ if(d.acknowledgedUnverified!==true||!['estimate','measured'].includes(d.parcel.basis)||d.parcel.scope!=='whole_package'||d.parcel.includesOuter!==true)fail();
+ for(const t of [issuedAt,expiresAt])if(typeof t!=='string'||!Number.isFinite(Date.parse(t))||new Date(t).toISOString()!==t)fail();
+ if(Date.parse(issuedAt)>now||Date.parse(expiresAt)<=now||Date.parse(expiresAt)<=Date.parse(issuedAt)||Date.parse(expiresAt)-Date.parse(issuedAt)>300000)fail();
+ const {weightGrams,lengthMm,widthMm,heightMm,declaredValueDecimal}=d.parcel;
+ const input={operation:'quote',account:{workspaceId:trustedBinding.workspaceId,accountId:trustedBinding.accountId,environment:'live',currency:d.currency,
+  collectionVatStatus:d.collectionVatStatus,deliveryVatStatus:d.deliveryVatStatus,evidenceSource:'owner_declaration',declaredAt:issuedAt},
+  parcel:{evidenceId:`owner-${requestId}`,provenance:d.parcel.basis==='estimate'?'owner_authorised_estimate':'owner_reported_measurement',observedAt:issuedAt,weightGrams,lengthMm,widthMm,heightMm,declaredValueDecimal},
+  route:{collectionCountry:'GBR',deliveryCountry:'GBR',collectionPostcode:d.collectionPostcode,deliveryPostcode:d.deliveryPostcode}};
+ return derive({auth,input,requestId,connectionId:trustedBinding.connectionId,termsReference,accountEvidenceReference:'owner-declaration',expectedCredentialReceiptHash,now,window:{issuedAt,expiresAt},persistInput:true});
 }
 
 export function deriveExactQuoteApproval(args){

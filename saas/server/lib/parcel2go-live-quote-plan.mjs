@@ -11,12 +11,14 @@ export function prepareParcel2GoLiveQuotePlan(value,now=Date.now()){
  if(!Number.isSafeInteger(now)||now<0)fail();
  exact(input,'operation account parcel route');if(input.operation!=='quote')fail();
  const a=input.account,p=input.parcel,r=input.route;
- exact(a,'workspaceId accountId environment currency collectionVatStatus deliveryVatStatus verifiedAt');
+ const declared=a?.evidenceSource==='owner_declaration';
+ exact(a,declared?'workspaceId accountId environment currency collectionVatStatus deliveryVatStatus evidenceSource declaredAt':'workspaceId accountId environment currency collectionVatStatus deliveryVatStatus verifiedAt');
  if(a.workspaceId!=='packsmart-solutions'||!text(a.accountId)||a.environment!=='live'||a.currency!=='GBP')fail();
  if(!['Individual','NotRegistered','Registered'].includes(a.collectionVatStatus)||!['Individual','NotRegistered','Registered'].includes(a.deliveryVatStatus))fail();
  exact(p,'evidenceId provenance observedAt weightGrams lengthMm widthMm heightMm declaredValueDecimal');
- if(!text(p.evidenceId)||!['measured_packed_parcel','owner_authorised_estimate'].includes(p.provenance))fail();
- const verified=time(a.verifiedAt),observed=time(p.observedAt);
+ if(!text(p.evidenceId)||!['measured_packed_parcel','owner_authorised_estimate','owner_reported_measurement'].includes(p.provenance))fail();
+ if(declared&&p.provenance==='measured_packed_parcel'||!declared&&p.provenance==='owner_reported_measurement')fail();
+ const verified=time(declared?a.declaredAt:a.verifiedAt),observed=time(p.observedAt);
  if(verified>now||observed>now||now-verified>=86400000||now-observed>=86400000)fail();
  measured(p.weightGrams,1000000);for(const k of ['lengthMm','widthMm','heightMm'])measured(p[k],10000);
  if(typeof p.declaredValueDecimal!=='string'||!/^(0|[1-9][0-9]{0,5})\.[0-9]{2}$/.test(p.declaredValueDecimal))fail();
