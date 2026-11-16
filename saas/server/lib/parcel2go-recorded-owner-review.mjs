@@ -7,6 +7,7 @@ import {parcel2GoCanonicalHash as hash,parcel2GoCanonicalJson as json} from './p
 import {metaStrictJson} from './meta-publication-bounded.mjs';
 import {addAudit} from './events.mjs';
 import {isDeepStrictEqual as same} from 'node:util';
+import {createParcel2GoAuthoritativeEvidenceReader,PARCEL2GO_EVIDENCE_SOURCE_REQUIRED,PARCEL2GO_EVIDENCE_DEPENDENCIES} from './parcel2go-authoritative-evidence-reader.mjs';
 
 export const PARCEL2GO_RECORDED_REVIEW_PATH='/api/owner/parcel2go-quote-review';
 const uuid=x=>typeof x==='string'&&/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(x);
@@ -17,13 +18,17 @@ const reply=(status,body)=>new Response(JSON.stringify(body),{status,headers:{'C
 
 export function createParcel2GoRecordedOwnerReview(options={}){
  if((options.mode??'disabled/v1')==='disabled/v1')return Object.freeze({handle:async()=>reply(404,{error:'Unavailable'}),close(){}});
- const {store,sessionSecret,origin,withWorkspaceLock,readEvidence,expectedEvidenceHash,requestId,expiresAt,now=Date.now,monotonic=()=>performance.now()}=options;
- if(options.mode!=='unmounted-recorded-review/v1'||typeof origin!=='string'||new URL(origin).origin!==origin||!origin.startsWith('https://')||typeof withWorkspaceLock!=='function'||typeof readEvidence!=='function'||!digest(expectedEvidenceHash)||!uuid(requestId))refuse();
+ const {store,sessionSecret,origin,withWorkspaceLock,readEvidence:suppliedReader,expectedEvidenceHash,requestId,expiresAt,now=Date.now,monotonic=()=>performance.now()}=options;
+ if(options.mode!=='unmounted-recorded-review/v1'||typeof origin!=='string'||new URL(origin).origin!==origin||!origin.startsWith('https://')||typeof withWorkspaceLock!=='function'||suppliedReader!==undefined&&typeof suppliedReader!=='function'||!digest(expectedEvidenceHash)||!uuid(requestId))refuse();
  const start=now(),mono=monotonic(),expiry=Date.parse(expiresAt);
  if(!Number.isSafeInteger(start)||!Number.isFinite(mono)||!Number.isFinite(expiry)||new Date(expiry).toISOString()!==expiresAt||expiry<=start||expiry-start>300000)refuse();
  const authenticate=createCredentialOwnerAuth({enabled:true,store,sessionSecret,now});
+ // Default source checks only existing primary storage and refuses unavailable
+ // authoritative facts. Explicit readers remain host-only recorded-claim inputs.
+ const source=suppliedReader===undefined?createParcel2GoAuthoritativeEvidenceReader({mode:'unmounted-source-reader/v1',store,requestId,expiresAt,now,monotonic}):null;
+ const readEvidence=suppliedReader??source.readEvidence;
  const lifetime=new AbortController(),attempts=new Set();let closed=false,last=start,lastMono=mono;
- const close=()=>{closed=true;lifetime.abort();};
+ const close=()=>{closed=true;lifetime.abort();source?.close();};
  const clock=()=>{const t=now(),m=monotonic();if(closed||!Number.isSafeInteger(t)||!Number.isFinite(m)||t<last||m<lastMono||t>=expiry||m-mono>=expiry-start){close();refuse();}last=t;lastMono=m;return m;};
  const derive=(auth,packet)=>deriveRecordedQuoteApproval({mode:'unmounted-recorded-input/v1',auth,packet,expectedEvidenceHash,requestId,now:now()});
  const find=(auth,prepared)=>{
@@ -103,7 +108,9 @@ export function createParcel2GoRecordedOwnerReview(options={}){
    });
   };
   try{timer=setTimeout(stop,2000);return await Promise.race([job(),cancelled]);}
-  catch{return reply(409,{error:'Review outcome unconfirmed; reconcile without retry'});}
+  catch(error){return error?.code===PARCEL2GO_EVIDENCE_SOURCE_REQUIRED
+   ?reply(409,{error:'Authoritative shipping evidence is not available',code:PARCEL2GO_EVIDENCE_SOURCE_REQUIRED,blockers:PARCEL2GO_EVIDENCE_DEPENDENCIES,packet:null,sourceVerified:false,accountEntitlementVerified:false,quoteReady:false,providerCallsAllowed:false,liveReady:false})
+   :reply(409,{error:'Review outcome unconfirmed; reconcile without retry'});}
   finally{clearTimeout(timer);controller.abort();req.signal.removeEventListener('abort',stop);lifetime.signal.removeEventListener('abort',stop);reader?.cancel().catch(()=>{});}
  }
  return Object.freeze({handle,close});

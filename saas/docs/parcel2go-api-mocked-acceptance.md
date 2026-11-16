@@ -32,13 +32,29 @@ Only that private composition can select native transport within the existing du
 
 [`parcel2go-recorded-owner-review.mjs`](../server/lib/parcel2go-recorded-owner-review.mjs) adds a default-disabled, unmounted HTTP candidate for `/api/owner/parcel2go-quote-review?requestId=…`. GET previews or reads the exact saved review. POST accepts only preparation references or an exact decision. There is no execution action or native transport dependency. Secure signed owner cookies, current tenant/user/session checks, exact origin and CSRF, strict JSON, a 2 KiB/64-chunk body limit and a two-second whole-request deadline bound the interface. Authentication is rechecked after the asynchronous evidence read and inside the workspace lock.
 
-The host supplies a read-only evidence reader plus a pinned packet hash, request ID and finite deadline. The browser cannot supply parcel/account facts, source assertions, input replacements or permission flags. `deriveRecordedQuoteApproval` shares the canonical input, wire, credential-receipt and review-summary derivation with the existing synthetic producer. Its separate recorded-evidence schema binds account/terms/receipt references, input and packing scope to the owner workspace and request.
+The host supplies a pinned packet hash, request ID and finite deadline. Without an explicit recorded-claim reader, the review uses the fail-closed primary-state reader described below. The browser cannot supply parcel/account facts, source assertions, input replacements or permission flags. `deriveRecordedQuoteApproval` shares the canonical input, wire, credential-receipt and review-summary derivation with the existing synthetic producer. Its separate recorded-evidence schema binds account/terms/receipt references, input and packing scope to the owner workspace and request.
 
 The packing record must describe the selected whole package with measured gross weight and external dimensions, the same plan and quantity, and outer packaging included. Component measurements, estimates, mismatched quantities/dimensions, missing outer packaging and any added tare are refused. This validates the shape and consistency of recorded claims; it does not prove their physical accuracy. The DTO explicitly says the source and API eligibility are not independently verified and keeps `sourceVerified`, `accountEntitlementVerified`, `providerCallsAllowed` and `liveReady` false. Real data must never be relabelled as a synthetic fixture.
 
 Preparation uses the existing approval-request identity, primary CAS and audit. The packet's fixed issued/expiry times keep the operation hash stable across reads and process restarts; replay does not renew the window. Decisions use the existing exact confirmation contract and add an audit entry binding the evidence hash. Evidence and cancellation guards run before save effects and commit. Exact readback reconciles a lost acknowledgement without a second write. An unconfirmed in-process attempt cannot write again; absence of a saved row does not authorize retry after restart. A transmitted persistence request can still commit after cancellation, so an unconfirmed response is not proof that nothing was saved.
 
 [`parcel2go-recorded-owner-review.test.mjs`](../server/tests/parcel2go-recorded-owner-review.test.mjs) exercises preview → preparation → decision → manually composed native admission entirely with invented data and intercepted HTTPS. It also covers rejected decisions, immutable windows, invalid packing claims, client evidence injection, malformed/oversized input, tenant/auth refusals, changed evidence, competing workers, uncertain writes and cancellation before save effects. This test is not a production source-verification or live-permission receipt.
+
+## Primary-source reader and concrete missing contracts
+
+A bounded inspection of [`store.mjs`](../server/lib/store.mjs), the [database schema](../server/supabase/schema.sql), its migrations and the existing catalogue/order/consignment readers found no protected source contract for packed-parcel observations or current carrier-account entitlement. Supplier metadata and workspace settings are general records. Catalogue/order source manifests cover their own commerce data; they do not verify dispatch gross weight, external dimensions, or carrier-account facts. The existing wholesale consignment review is explicitly fixture-only. This finding concerns the repository's source model; no production records were queried.
+
+[`parcel2go-authoritative-evidence-reader.mjs`](../server/lib/parcel2go-authoritative-evidence-reader.mjs) provides a default-disabled, unmounted, read-only interface for the authenticated host. `inspect` uses the existing Supabase store's `exactSnapshot` read, checks tenant scope, and reports whether a unique retained credential-admission receipt links consistently to the encrypted connection and timestamps. `linked_receipt` means storage linkage only. It neither decrypts nor validates credentials, account eligibility, terms acceptance or physical measurements. It has a two-second read budget and a finite wall/monotonic window, with cancellation and no writes.
+
+There is deliberately no success path for `readEvidence`: it returns no packet and throws `PARCEL2GO_AUTHORITATIVE_EVIDENCE_UNAVAILABLE`. The recorded owner-review candidate uses it by default and returns fixed dependency diagnostics, without creating an approval or audit entry. Arbitrary workspace keys, supplier metadata, hashes, `verified` flags and recorded packets cannot add authority. Explicit injected readers remain useful for recorded-claim reviews and synthetic tests; they do not become independently verified sources.
+
+The missing contracts are:
+
+- `packed_measurement_source_missing`: a protected, tenant-scoped observation with stable identity/revision, authenticated recorder and acquisition/provenance evidence, observed time, revocation status, selected packing plan and quantity, measured whole-package gross mass including tare, and measured external dimensions. Supplier nominal/component figures cannot substitute for that observation.
+- `account_entitlement_source_missing`: an authoritative account/client binding and current evidence of API eligibility, intended scope/terms, currency and VAT basis, with observed/expiry times and revocation. Private credential-storage consent is not this evidence.
+- `consignment_selection_source_missing`: a current, revision-bound selection tying the intended order/packing observation to the route and declared value, with documented conflict resolution and source scope.
+
+Before implementing a successful reader, define and review those source producers, protected persistence/read contracts, provenance checks and revocation rules. Then bind their immutable revisions to the evidence packet and revalidate them at execution. Adding self-declared JSON fields to the current workspace does not satisfy this dependency. No new source table, import, verifier, supplier measurement or provider request is fabricated by this checkpoint.
 
 ## Exact remaining live acceptance boundary
 
@@ -54,6 +70,7 @@ Run with the repository's Node 22 runtime:
 
 ```sh
 node --test \
+  saas/server/tests/parcel2go-authoritative-evidence-reader.test.mjs \
   saas/server/tests/parcel2go-recorded-owner-review.test.mjs \
   saas/server/tests/parcel2go-exact-native-admission.test.mjs \
   saas/server/tests/parcel2go-https-orchestration-acceptance.test.mjs \
