@@ -9,12 +9,13 @@ const posts=c=>c.requests.filter(r=>r.opts.method==='POST');
 const state=c=>c.f.fake.states.get(c.workspaceId);
 const redacted=value=>{for(const secret of [KEY,CLIENT,SECRET_VALUE,TOKEN])assert.equal(value.includes(secret),false);};
 
-test('surface is default disabled and absent from production routes and assets',async t=>{
+test('surface defaults disabled and its assets are absent from the public static map',async t=>{
  const c=await surfaceFixture(t),surface=createParcel2GoOwnerQuoteSurface({get admission(){assert.fail('Disabled admission read');}});
  for(const path of [c.page,c.script,c.api])assert.equal((await c.send(path,{},surface)).status,404);
  assert.equal(c.network.length,0);assert.equal(c.f.calls.length,0);
  const server=await readFile(new URL('../server.mjs',import.meta.url),'utf8');
- assert.doesNotMatch(server,/createParcel2GoOwnerQuoteSurface|parcel2go-owner-quote-surface|parcel2go-owner-quote\.html|parcel2go-exact-owner-ui\.js|parcel2go-quote-review/);
+ const staticMap=server.slice(server.indexOf('const STATIC_FILES'),server.indexOf('function matchesStaticEtag'));
+ assert.doesNotMatch(staticMap,/parcel2go-owner-quote\.html|parcel2go-exact-owner-ui\.js/);
 });
 
 test('authenticated page and script stay private and contain no admitted credentials',async t=>{

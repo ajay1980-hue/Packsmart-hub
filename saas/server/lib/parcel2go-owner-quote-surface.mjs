@@ -1,5 +1,5 @@
-// Host-only Node adapter. No import, route/asset registration or environment flag
-// in server.mjs. Default construction neither reads assets nor creates a runner.
+// Private Node adapter. The production mount supplies explicit finite activation;
+// default construction neither reads assets nor creates a runner.
 import {readFileSync} from 'node:fs';
 import {createParcel2GoRecordedOwnerReview,PARCEL2GO_RECORDED_REVIEW_PATH} from './parcel2go-recorded-owner-review.mjs';
 export const PARCEL2GO_OWNER_QUOTE_PAGE='/owner/parcel2go-quote';
