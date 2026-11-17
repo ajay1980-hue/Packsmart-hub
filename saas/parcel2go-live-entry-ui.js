@@ -2,8 +2,8 @@
  const $=id=>document.getElementById(id),path='/api/owner/parcel2go-live-credentials';let descriptor,csrf,attempted=false,closed=false,timer,controller,deadline=0;
  const stages={request:'request admission',origin:'origin admission',csrf:'CSRF check',owner_auth:'owner authentication',body:'request body',workspace_lock:'workspace lock wait',fresh_owner_auth:'fresh owner authentication',review_binding:'review binding',credential_admission:'durable credential admission',saved_status:'saved-status confirmation',status_read:'saved-status authentication',status_review:'saved-status review',window:'entry window'};
  const causes={refused:'refused',unavailable:'unavailable',deadline:'server deadline reached',cancelled:'request cancelled'};
- const serverDiagnostic=d=>d&&typeof d==='object'&&!Array.isArray(d)&&Object.keys(d).sort().join('|')==='cause|durationMs|schema|stage'&&d.schema==='parcel2go-entry-diagnostic/v1'&&Object.hasOwn(stages,d.stage)&&Object.hasOwn(causes,d.cause)&&Number.isSafeInteger(d.durationMs)&&d.durationMs>=0&&d.durationMs<=2000
-  ?'Check: '+stages[d.stage]+'. Reason: '+causes[d.cause]+'. Server elapsed: '+d.durationMs+' ms (capped at 2000 ms).':null;
+ const serverDiagnostic=d=>d&&typeof d==='object'&&!Array.isArray(d)&&Object.keys(d).sort().join('|')==='cause|durationMs|schema|stage'&&d.schema==='parcel2go-entry-diagnostic/v1'&&Object.hasOwn(stages,d.stage)&&Object.hasOwn(causes,d.cause)&&Number.isSafeInteger(d.durationMs)&&d.durationMs>=0&&d.durationMs<=4000
+  ?'Check: '+stages[d.stage]+'. Reason: '+causes[d.cause]+'. Server elapsed: '+d.durationMs+' ms (capped at 4000 ms).':null;
  const diagnosticFrom=d=>['unconfirmed','unavailable'].includes(d?.status)?serverDiagnostic(d.diagnostic):null;
  const httpStatus=r=>[400,401,403,404,405,408,409,413,429,500,502,503,504].includes(r.status)?r.status:null;
  const detail=(diagnostic,stage,cause,began,http)=>{const elapsed=performance.now()-began,duration=Number.isFinite(elapsed)?Math.max(0,Math.min(5000,Math.floor(elapsed))):0;return (diagnostic??'Check: '+stage+'. Reason: '+cause+'. Browser elapsed: '+duration+' ms (capped at 5000 ms).')+(http===null?'':' HTTP '+http+'.');};

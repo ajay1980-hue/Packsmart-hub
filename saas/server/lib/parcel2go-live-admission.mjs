@@ -5,6 +5,7 @@ import {isDeepStrictEqual as same} from 'node:util';
 import {assertQuietOwnerWorkspace} from './quiet-owner-workspace.mjs';
 import {addAudit} from './events.mjs';
 import {parcel2GoCanonicalHash as hash,parcel2GoCanonicalJson as json} from './parcel2go-live-canonical.mjs';
+import {parcel2GoWorkspaceFingerprint as workspaceHash} from './parcel2go-workspace-fingerprint.mjs';
 import {assertParcel2GoSynchronousCurrent as current} from './parcel2go-live-sync-guard.mjs';
 import {prepareParcel2GoLiveQuotePlan} from './parcel2go-live-quote-plan.mjs';
 import {sealParcel2GoLiveCredentials,openParcel2GoLiveCredentials} from './parcel2go-live-credentials.mjs';
@@ -20,8 +21,8 @@ const id=x=>typeof x==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(x);
 const fail=code=>{throw Object.assign(new Error('Parcel2Go admission stopped; reconcile without retry.'),{code:'PARCEL2GO_LIVE_'+code,status:409});};
 const clone=x=>JSON.parse(json(x));
 function actor(state,session,now){try{assertQuietOwnerWorkspace({state,session},{inspectEvidence:false});}catch{fail('OWNER_REQUIRED');}const rows=state.users.filter(u=>u.id===session.sub);if(!uuid(state._revision)||rows.length!==1||rows[0].active!==true||!Number.isSafeInteger(session.sessionVersion)||rows[0].sessionVersion!==session.sessionVersion||!Number.isSafeInteger(session.exp)||session.exp*1000<=now)fail('OWNER_REQUIRED');}
-function issue(before,after){if(before._revision!==after._revision)fail('STATE_CHANGED');for(const k of new Set([...Object.keys(before),...Object.keys(after)]))if(!['connections','parcel2goLiveQuoteRuns','audit'].includes(k)&&!same(before[k],after[k]))fail('PERSISTENCE_INVALID');const p=Object.freeze({});permits.set(p,{revision:after._revision,hash:hash(after),bytes:Buffer.byteLength(JSON.stringify(before))});return p;}
-export function assertParcel2GoLivePersistencePermit(permit,workspaceId,state){const p=permits.get(permit);permits.delete(permit);if(!p||workspaceId!==W||state._revision!==p.revision||hash(state)!==p.hash)fail('PERSISTENCE_INVALID');return Object.freeze({currentBytes:p.bytes});}
+function issue(before,after){const fingerprint=workspaceHash(after);if(before._revision!==after._revision)fail('STATE_CHANGED');for(const k of new Set([...Object.keys(before),...Object.keys(after)]))if(!['connections','parcel2goLiveQuoteRuns','audit'].includes(k)&&!same(before[k],after[k]))fail('PERSISTENCE_INVALID');const p=Object.freeze({});permits.set(p,{revision:after._revision,hash:fingerprint,bytes:Buffer.byteLength(JSON.stringify(before))});return p;}
+export function assertParcel2GoLivePersistencePermit(permit,workspaceId,state){const p=permits.get(permit);permits.delete(permit);if(!p||workspaceId!==W)fail('PERSISTENCE_INVALID');const fingerprint=workspaceHash(state);if(state._revision!==p.revision||fingerprint!==p.hash)fail('PERSISTENCE_INVALID');return Object.freeze({currentBytes:p.bytes});}
 function create(config={},operation,exactApproval){
  const mode=config.mode??'disabled/v1';if(mode==='disabled/v1')return Object.freeze({run:async()=>fail('DISABLED'),close(){}});
  const native=operation==='quote'&&exactApproval!==undefined;

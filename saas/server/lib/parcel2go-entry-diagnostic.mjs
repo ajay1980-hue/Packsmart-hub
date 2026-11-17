@@ -6,6 +6,6 @@ export function createEntryDiagnostic(now){
  return Object.freeze({
   at(value){if(stages.has(value))stage=value;},
   reason(value){if(cause===undefined&&causes.has(value))cause=value;},
-  report(){const elapsed=now()-start;return {schema:'parcel2go-entry-diagnostic/v1',stage,cause:cause??'unavailable',durationMs:Number.isFinite(elapsed)?Math.max(0,Math.min(2000,Math.floor(elapsed))):0};}
+  report(){const elapsed=now()-start;return {schema:'parcel2go-entry-diagnostic/v1',stage,cause:cause??'unavailable',durationMs:Number.isFinite(elapsed)?Math.max(0,Math.min(4000,Math.floor(elapsed))):0};}
  });
 }

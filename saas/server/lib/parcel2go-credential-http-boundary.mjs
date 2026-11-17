@@ -2,15 +2,19 @@
 // Host composition must supply authenticated/locked admission; disabled by default.
 import {metaStrictJson} from './meta-publication-bounded.mjs';
 import {createEntryDiagnostic} from './parcel2go-entry-diagnostic.mjs';
+export const CREDENTIAL_SAVE_MAX_MS=4000;
 const fail=()=>{throw new Error('Private credential admission refused; reconcile without retry.');};
-export function createCredentialHttpBoundary({enabled=false,origin,authenticate,admit,now=()=>performance.now(),maxMs=2000}={}){
+export function createCredentialHttpBoundary({enabled=false,origin,authenticate,admit,now=()=>performance.now(),maxMs=2000,saveMaxMs=maxMs}={}){
  let closed=false;
- if(enabled&&(typeof origin!=='string'||new URL(origin).origin!==origin||!origin.startsWith('https://')||typeof authenticate!=='function'||typeof admit!=='function'||!Number.isFinite(maxMs)||maxMs<=0||maxMs>2000))fail();
+ if(enabled&&(typeof origin!=='string'||new URL(origin).origin!==origin||!origin.startsWith('https://')||typeof authenticate!=='function'||typeof admit!=='function'||!Number.isFinite(maxMs)||maxMs<=0||maxMs>2000||!Number.isFinite(saveMaxMs)||saveMaxMs<maxMs||saveMaxMs>CREDENTIAL_SAVE_MAX_MS))fail();
  return Object.freeze({close(){closed=true;},async handle(request){
-  let body,secretInput,timedOut=false,iterator,finished=false,merged;const chunks=[];const start=now();let last=start;
+  let body,secretInput,timedOut=false,iterator,finished=false,merged,admitting=false;const chunks=[];const start=now();let last=start;
+  // Auth/body retain the original 2s cap. Admission gets at most 4s TOTAL,
+  // including that initial work, inside the browser's absolute 5s deadline.
+  const limit=()=>admitting?saveMaxMs:maxMs;
   const diagnostic=createEntryDiagnostic(now),refuse=()=>{diagnostic.reason('refused');fail();};
-  const check=()=>{const t=now();if(!enabled||closed||timedOut||request.signal?.aborted||!Number.isFinite(t)||t<last||t-start>=maxMs){diagnostic.reason(timedOut||t-start>=maxMs?'deadline':request.signal?.aborted?'cancelled':'unavailable');fail();}last=t;};
-  const bounded=async fn=>{check();let timer;try{return await Promise.race([Promise.resolve().then(()=>{check();return fn();}),new Promise((_,reject)=>{timer=setTimeout(()=>{timedOut=true;diagnostic.reason('deadline');reject(new Error('Deadline'));},Math.max(1,maxMs-(now()-start)));})]);}finally{clearTimeout(timer);}};
+  const check=()=>{const t=now();if(!enabled||closed||timedOut||request.signal?.aborted||!Number.isFinite(t)||t<last||t-start>=limit()){diagnostic.reason(timedOut||t-start>=limit()?'deadline':request.signal?.aborted?'cancelled':'unavailable');fail();}last=t;};
+  const bounded=async fn=>{check();let timer;try{return await Promise.race([Promise.resolve().then(()=>{check();return fn();}),new Promise((_,reject)=>{timer=setTimeout(()=>{timedOut=true;diagnostic.reason('deadline');reject(new Error('Deadline'));},Math.max(1,limit()-(now()-start)));})]);}finally{clearTimeout(timer);}};
   try{
    check();if(request.method!=='POST'||request.contentType!=='application/json')refuse();
    diagnostic.at('origin');if(request.origin!==origin)refuse();
@@ -25,6 +29,7 @@ export function createCredentialHttpBoundary({enabled=false,origin,authenticate,
    for(const k of ['clientId','clientSecret'])if(typeof body[k]!=='string'||body[k].length<8||body[k].length>4096||/[\x00-\x20\x7f]/.test(body[k]))refuse();
    for(const k of ['requestId','expectedRevision'])if(typeof body[k]!=='string'||! /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(body[k]))refuse();
    secretInput={clientId:body.clientId,clientSecret:body.clientSecret};check();
+   admitting=true;
    diagnostic.at('credential_admission');const result=await bounded(()=>admit({auth,requestId:body.requestId,expectedRevision:body.expectedRevision,credentials:secretInput,reviewDigest:body.reviewDigest,assertCurrent:check,diagnostic}));check();
    // Never relay arbitrary admission output or provider/database exceptions.
    if(result?.status!=='stored'||result.requestId!==body.requestId)fail();
