@@ -1,4 +1,6 @@
 import {createHash} from 'node:crypto';
+import {assertParcel2GoLivePersistencePermit} from '../lib/parcel2go-live-admission.mjs';
+import {PARCEL2GO_WORKSPACE_LIMITS} from '../lib/parcel2go-workspace-fingerprint.mjs';
 import {planAutomationRetention} from '../lib/automation-retention.mjs';
 import {BRIEF_HISTORY_CONTRACT,planBriefHistoryCompaction} from '../lib/brief-history.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {maintenanceFixture,ownerState,SECRET} from './maintenance-login-fixture.mjs';import {createSessionToken,verifySessionToken} from '../lib/security.mjs';import {parcel2GoCanonicalHash as hash} from '../lib/parcel2go-live-canonical.mjs';import {LIVE_ENTRY_PATH} from '../lib/parcel2go-live-entry-window.mjs';
@@ -98,7 +100,7 @@ for(const scenario of latencyCases)test('synthetic save latency: '+scenario.name
  t.diagnostic(JSON.stringify(safe));
 });
 
-for(const kind of ['audit-batch','history-batch','legacy-read','optional-write','optional-read','optional-failed-write'])test('archive deadline stops '+kind+' without a primary write',async t=>{
+for(const kind of ['audit-batch','history-batch','legacy-read','large-brief','optional-write','optional-read','optional-failed-write'])test('archive deadline stops '+kind+' without a primary write',async t=>{
  let elapsed=0,armed=false,expired=false;const base=Date.now(),archives=[],warnings=[],legacy=[];
  t.mock.method(performance,'now',()=>elapsed);t.mock.method(Date,'now',()=>base+elapsed);t.mock.method(console,'warn',(...args)=>warnings.push(args));
  const prepareState=state=>{
@@ -109,6 +111,7 @@ for(const kind of ['audit-batch','history-batch','legacy-read','optional-write',
    state.dailyBriefs=Array.from({length:32},(_,i)=>({id:'synthetic-brief-'+i,generatedAt:at,summary:'Synthetic history'}));
    for(const brief of state.dailyBriefs.slice(30)){const original=structuredClone(brief);legacy.push({id:brief.id,workspace_id:state.workspace.id,metrics:original});brief.archive={table:'operations_briefs',id:brief.id,sha256:createHash('sha256').update(JSON.stringify(original)).digest('hex')};}
   }
+  if(kind==='large-brief')state.dailyBriefs=Array.from({length:2},(_,i)=>({id:'synthetic-large-'+i,generatedAt:at,summary:'x'.repeat(70000)}));
   if(kind.startsWith('optional')){
    state.dailyBriefs=Array.from({length:3},(_,i)=>({id:'synthetic-optional-'+i,generatedAt:new Date(base-(i?2*86400000:0)).toISOString(),summary:'Synthetic history',logic:'deterministic-v2',rows:[{description:'x'.repeat(2500)}]}));
    assert.equal(planBriefHistoryCompaction(state).candidates.length,2);
@@ -127,19 +130,68 @@ for(const kind of ['audit-batch','history-batch','legacy-read','optional-write',
  assert.equal(archives.length,kind==='optional-read'?2:1);assert.deepEqual(warnings,[],'Deadline is not swallowed/logged as optional compaction failure');
  assert.equal(JSON.stringify(r.payload).includes('synthetic-private-error'),false);
 });
-test('automation archive helper checks its guard between immutable batches',async t=>{
- let expired=false,posts=0;const at=new Date(Date.now()-60000).toISOString();
- // A full multi-batch automation state exceeds the current Parcel2Go canonical
- // limit. Exercise the real store helper, without pretending it was admitted.
+test('admitted automation archives stop between immutable batches',async t=>{
+ let elapsed=0,posts=0;const at=new Date(Date.now()-60000).toISOString();t.mock.method(performance,'now',()=>elapsed);
  const f=await fixture(t,{prepareState:state=>{state.automationRuns=Array.from({length:250},(_,i)=>({id:'synthetic-run-'+i,ruleId:'profitGuard',status:'COMPLETED',startedAt:at,completedAt:at,leaseUntil:at,risk:'low',spend:0,errorCode:null,evidence:[{type:'recorded',id:'synthetic-evidence-'+i,detail:'x'.repeat(1000)}]}));},intercept:async({url,options,proceed})=>{
-  if(!url.pathname.endsWith('/runvara_history'))return proceed();assert.equal(options.method,'POST');assert.equal(expired,false);posts++;const result=await proceed();expired=true;return result;
+  if(!url.pathname.endsWith('/runvara_history'))return proceed();assert.equal(options.method,'POST');assert.equal(elapsed,0);posts++;const result=await proceed();elapsed=4000;return result;
  }});
- const plan=planAutomationRetention(f.state);assert.ok(plan.archiveBatches.length>1);
- await assert.rejects(f.store.archiveAutomationVersions(plan,()=>{if(expired)throw Error('synthetic deadline');}),/synthetic deadline/);
+ assert.ok(planAutomationRetention(f.state).archiveBatches.length>1);
+ const r=await f.submit();assert.equal(r.status,409);assert.equal(r.payload.diagnostic.cause,'deadline');
  assert.equal(posts,1);assert.equal(f.calls.filter(x=>x.method==='PATCH').length,0);
 });
-test('existing canonical size bound refuses an oversized brief before admission',async t=>{
- const f=await fixture(t,{prepareState:state=>{state.dailyBriefs=[{id:'synthetic-large',generatedAt:new Date().toISOString(),summary:'x'.repeat(70000)}];}});
- const before=f.calls.length,r=await f.submit();assert.equal(r.status,409);assert.equal(r.payload.diagnostic.stage,'credential_admission');assert.equal(r.payload.diagnostic.cause,'unavailable');
- assert.equal(f.calls.slice(before).filter(x=>x.method!=='GET').length,0);assert.equal(f.fake.states.get('packsmart-solutions').parcel2goLiveQuoteRuns?.length??0,0);
+function largeSyntheticState(state,kind){
+ if(kind==='catalogue')state.products=Array.from({length:80},(_,i)=>({id:'synthetic-product-'+i,name:'Synthetic product',sku:'SYN-'+i,variants:Array.from({length:10},(_,j)=>({id:'synthetic-variant-'+i+'-'+j,sku:'SYN-'+i+'-'+j,title:'Synthetic variant',price:1,stock:1,inventoryTracked:true,currency:'GBP',options:[{name:'Synthetic size',value:String(j)}]}))}));
+ if(kind==='history')state.workRecords=Array.from({length:200},(_,i)=>({id:'synthetic-work-'+i,status:'COMPLETED',createdAt:'2026-01-01T00:00:00.000Z',summary:'Synthetic history '.repeat(30)}));
+ if(kind==='brief')state.dailyBriefs=[{id:'synthetic-large',generatedAt:new Date().toISOString(),summary:'Synthetic history '.repeat(4200)}];
+ if(kind==='nodes')state.syntheticCounts=Array(6000).fill(0);
+}
+for(const kind of ['catalogue','history','brief','nodes'])test('bounded workspace admission succeeds beyond operation canonical limit: '+kind,async t=>{
+ const f=await fixture(t,{prepareState:state=>largeSyntheticState(state,kind)}),before=f.calls.length,bytes=Buffer.byteLength(JSON.stringify(f.state));
+ assert.throws(()=>hash(f.state),'Operation fingerprint remains intentionally small');
+ const r=await f.submit();assert.equal(r.status,200);assert.equal(r.payload.status,'stored');assert.equal((await f.status()).payload.status,'stored');
+ const saved=f.fake.states.get('packsmart-solutions');assert.equal(saved.parcel2goLiveQuoteRuns[0].status,'completed');assert.equal(JSON.stringify(saved).includes('synthetic-client-secret'),false);
+ if(kind==='catalogue')assert.deepEqual(saved.products,f.state.products);if(kind==='nodes')assert.deepEqual(saved.syntheticCounts,f.state.syntheticCounts);
+ const writes=f.calls.slice(before).filter(x=>x.method==='PATCH').length;assert.equal(writes,2);assert.equal((await f.submit()).status,409);assert.equal(f.calls.slice(before).filter(x=>x.method==='PATCH').length,writes);
+ t.diagnostic(JSON.stringify({case:'workspace-'+kind,inputBytes:bytes,stateWrites:writes,archiveWrites:f.calls.slice(before).filter(x=>x.method==='POST').length}));
+});
+for(const kind of ['record','revision-getter','foreign-workspace'])test('large workspace permit rejects '+kind+' and remains spent',async t=>{
+ let captured,getters=0;const f=await fixture(t,{prepareState:state=>largeSyntheticState(state,'catalogue'),beforeListen:({store})=>{
+  const save=store.save.bind(store);store.save=async(w,s,o)=>{
+   captured={permit:o.parcel2goLivePermit,snapshot:structuredClone(s)};
+   if(kind==='record')s.products[0].name='Changed after permit';
+   if(kind==='revision-getter')Object.defineProperty(s,'_revision',{enumerable:true,get(){getters++;return captured.snapshot._revision;}});
+   if(kind==='foreign-workspace')assertParcel2GoLivePersistencePermit(o.parcel2goLivePermit,'synthetic-foreign',s);
+   return save(w,s,o);
+  };
+ }});
+ const r=await f.submit();assert.equal(r.status,409);assert.equal(getters,0);assert.ok(captured);
+ assert.equal(f.calls.filter(x=>x.method!=='GET').length,0);
+ assert.throws(()=>assertParcel2GoLivePersistencePermit(captured.permit,'packsmart-solutions',captured.snapshot));
+});
+test('large workspace key reordering preserves permit identity',async t=>{
+ const reorder=value=>Array.isArray(value)?value.map(reorder):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).reverse().map(([k,v])=>[k,reorder(v)])):value;
+ const f=await fixture(t,{prepareState:state=>largeSyntheticState(state,'catalogue'),beforeListen:({store})=>{const save=store.save.bind(store);store.save=(w,s,o)=>save(w,reorder(s),o);}});
+ assert.equal((await f.submit()).status,200);assert.equal((await f.status()).payload.status,'stored');assert.equal(f.calls.filter(x=>x.method==='PATCH').length,2);
+});
+test('larger fingerprint does not bypass final store capacity before effects',async t=>{
+ const f=await fixture(t,{prepareState:state=>{state.syntheticPadding='x'.repeat(2097152-Buffer.byteLength(JSON.stringify(state))-128);}});
+ assert.ok(Buffer.byteLength(JSON.stringify(f.state))<2097152);const r=await f.submit();assert.equal(r.status,409);
+ assert.equal(f.calls.filter(x=>x.method!=='GET').length,0);assert.equal(f.fake.states.get('packsmart-solutions').parcel2goLiveQuoteRuns?.length??0,0);
+});
+test('large workspace lost completion acknowledgement reconciles without repeat admission',async t=>{
+ let saves=0;const f=await fixture(t,{prepareState:state=>largeSyntheticState(state,'catalogue'),beforeListen:({store})=>{const save=store.save.bind(store);store.save=async(...args)=>{const result=await save(...args);if(++saves===2)throw Error('synthetic lost acknowledgement');return result;};}});
+ assert.equal((await f.submit()).status,409);assert.equal((await f.status()).payload.status,'stored');assert.equal((await f.submit()).status,409);assert.equal(saves,2);assert.equal(f.calls.filter(x=>x.method==='PATCH').length,2);
+});
+test('large workspace saves inside reviewed budget with 250ms per transport operation',{timeout:8000},async t=>{
+ let armed=false;const f=await fixture(t,{prepareState:state=>largeSyntheticState(state,'catalogue'),intercept:async({proceed})=>{if(armed)await new Promise(r=>setTimeout(r,250));return proceed();}});
+ const before=f.calls.length,start=performance.now();armed=true;const r=await f.submit(),elapsedMs=Math.round(performance.now()-start);armed=false;
+ assert.equal(r.status,200);assert.equal((await f.status()).payload.status,'stored');assert.equal(f.calls.slice(before).filter(x=>x.method==='PATCH').length,2);
+ t.diagnostic(JSON.stringify({case:'large-workspace-250ms',elapsedMs,inputBytes:Buffer.byteLength(JSON.stringify(f.state))}));
+});
+test('final bookkeeping cannot commit a reservation beyond the exact reader node limit',async t=>{
+ const nodes=value=>1+(value&&typeof value==='object'?Object.values(value).reduce((n,x)=>n+nodes(x),0):0);
+ let candidateNodes;const f=await fixture(t,{prepareState:state=>{state.syntheticCounts=Array(49685).fill(0);},beforeListen:({store})=>{const save=store.save.bind(store);store.save=(w,s,o)=>{candidateNodes=nodes(s);return save(w,s,o);};}});
+ assert.ok(nodes(f.state)<PARCEL2GO_WORKSPACE_LIMITS.nodes);const r=await f.submit();assert.equal(r.status,409);assert.equal(candidateNodes,PARCEL2GO_WORKSPACE_LIMITS.nodes);
+ assert.equal(f.calls.filter(x=>x.method!=='GET').length,0);
+ const saved=await f.store.get('packsmart-solutions',{exactSnapshot:true});assert.equal(saved.parcel2goLiveQuoteRuns?.length??0,0);assert.equal((await f.status()).status,200);
 });

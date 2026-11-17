@@ -47,6 +47,7 @@ import {
 import { addAudit } from './events.mjs';
 import { assertCatalogueImportPermit } from './shopify-catalogue-import.mjs';
 import { assertParcel2GoLivePersistencePermit } from './parcel2go-live-admission.mjs';
+import { parcel2GoWorkspaceFingerprint } from './parcel2go-workspace-fingerprint.mjs';
 import { assertParcel2GoPersistencePermit } from './parcel2go-sandbox.mjs';
 import { compactStateBytes, planCatalogueSaveCapacity, retainedConnectionSyncs, legacyBriefProjection } from './catalogue-save-capacity.mjs';
 import { assertShopifyTokenPermit } from './shopify-token-exchange.mjs';
@@ -1842,6 +1843,9 @@ class SupabaseStore {
     const retainedAutomationRuns = automationPlan ? applyAutomationRetention(automationPlan, { acknowledgedArchives }).automationRuns : null;
     if (retainedAutomationRuns) upgraded.automationRuns = ownedSnapshot ? structuredClone(retainedAutomationRuns) : retainedAutomationRuns;
     if (briefPlan?.candidates.length) assertBriefHistoryPlanCurrent(briefPlan);
+    // Bookkeeping/retention can add nodes after permit validation. Never commit
+    // a Parcel2Go snapshot that its exact reader cannot safely read back.
+    if (parcel2goLivePermit !== undefined) parcel2GoWorkspaceFingerprint(upgraded);
     assertCurrent(upgraded);
     if(catalogueCapacity && compactStateBytes(upgraded)>catalogueCapacity.maximumCandidateBytes) {
       // This is after possible archives, so deliberately NOT a branded
