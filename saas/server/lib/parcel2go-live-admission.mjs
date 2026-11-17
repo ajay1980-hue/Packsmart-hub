@@ -65,6 +65,21 @@ function create(config={},operation,exactApproval){
   const claim=structuredClone(state);claim.parcel2goLiveQuoteRuns=[...runs,{requestId:c.requestId,operation,connectionId:b.connectionId,accountId:b.accountId,environment:'live',status:'reserved',termsReference:c.termsReference,...(c.entryReview?{entryReview:c.entryReview}:{}),expiresAt:c.expiresAt,fingerprint:hash([operation==='quote'?'live-quote-admission/v1':'live-credential-admission/v1',operation==='quote'?c.inputFingerprint:b,c.expectedSessionFingerprint])}];
   if(approval)claim.parcel2goLiveQuoteRuns.at(-1).exactApproval=approval;
   const auditDetail={requestId:c.requestId,operation,...(approval?{approvalId:approval.approvalId,operationHash:approval.operationHash}:{})};
+  // Credential storage has no provider side effect between reservation and
+  // completion. Persist the connection, completed receipt and both audit events
+  // in one CAS; never leave a newly reserved credential row without its envelope.
+  // Existing reserved rows are still rejected above, including expired ones.
+  if(sealed){
+   try{
+    claim.connections=[...(claim.connections??[]),{id:b.connectionId,provider:'parcel2go-live',metadata:{account:b.accountId,environment:'live',admissionRequestId:c.requestId},encryptedCredentials:sealed.encryptedCredentials}];
+    claim.parcel2goLiveQuoteRuns=claim.parcel2goLiveQuoteRuns.map(r=>r.requestId===c.requestId?{...r,status:'completed',completedAt:new Date(checkSession()).toISOString(),admissionSessionFingerprint:c.expectedSessionFingerprint,connectionHash:hash(claim.connections.find(x=>x.id===b.connectionId))}:r);
+    addAudit(claim,{type:'parcel2go_live_reserved',actor:'owner',detail:auditDetail});
+    addAudit(claim,{type:'parcel2go_live_completed',actor:'owner',detail:auditDetail});
+    state=await save(state,claim);
+    const confirmed=await read();if(!same(confirmed,state))fail('STATE_CHANGED');
+    return Object.freeze({requestId:c.requestId,revision:state._revision,status:'completed',fixture:true,quote:null,liveReady:false,purchaseAllowed:false});
+   }finally{close();}
+  }
   addAudit(claim,{type:'parcel2go_live_reserved',actor:'owner',detail:auditDetail});state=await save(state,claim);
   const fresh=async()=>{const s=await read();if(!same(s,state))fail('STATE_CHANGED');};
   await fresh();let projection;
