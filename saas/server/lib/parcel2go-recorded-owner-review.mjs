@@ -137,12 +137,13 @@ export function createParcel2GoRecordedOwnerReview(options={}){
        evidenceNotice:'Provider comparison using owner-entered values; no independent measurement verification, booking or guaranteed dispatch price.'});
      }finally{runner.close();}
     }
-    let targetHash;
+    let targetHash,confirmedAuth;
     if(body.action==='prepare'){
      if(row)targetHash=hash(row);
      else{
       if(attempts.has('prepare'))refuse();attempts.add('prepare');
-      const result=await createExactQuoteApproval({mode:'local-contract/v1',store,auth:a,intent:prepared.intent,now,assertCurrent:check,assertEvidenceCurrent:evidenceGuard,primaryOnly:ownerInput});
+      const result=await createExactQuoteApproval({mode:'local-contract/v1',store,auth:a,intent:prepared.intent,now,assertCurrent:check,assertEvidenceCurrent:evidenceGuard,primaryOnly:ownerInput,
+       ...(ownerInput?{refreshAuth:auth,onConfirmed:latest=>{confirmedAuth=latest;}}:{})});
       check();targetHash=hash(result.approval);
      }
     }else{
@@ -156,7 +157,9 @@ export function createParcel2GoRecordedOwnerReview(options={}){
      const permit=ownerInput?issueParcel2GoQuoteReviewPersistencePermit({before:a.state,after:next,auth:a,approvalId:row.id,now:now()}):undefined;
      try{check();await store.save(a.session.workspaceId,next,{ownedSnapshot:true,beforeEffects:guard,beforeCommit:guard,...(ownerInput?{parcel2goReviewPermit:permit}:{})});}catch{/* Reconcile below. */}
     }
-    check();const latest=await auth(),fresh=await context(latest),saved=find(latest,fresh.prepared);check();
+    // Preparation's authenticated readback is already fresh. Reuse it only in
+    // this request for the same evidence/row checks; decisions still read here.
+    check();const latest=confirmedAuth??await auth(),fresh=await context(latest),saved=find(latest,fresh.prepared);check();
     if(hash(latest.session)!==hash(a.session)||!saved||hash(saved)!==targetHash)refuse();
     return reply(200,{...view(latest,fresh.prepared,saved),durableDecision:saved.status!=='pending'});
    });

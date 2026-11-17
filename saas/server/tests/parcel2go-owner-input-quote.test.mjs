@@ -6,6 +6,8 @@ import {KEY,CLIENT,SECRET_VALUE,TOKEN} from './parcel2go-sandbox-fixture.mjs';
 import {createSessionToken,verifySessionToken} from '../lib/security.mjs';
 import {parcel2GoCanonicalHash as hash} from '../lib/parcel2go-live-canonical.mjs';
 import {deriveOwnerEnteredQuoteApproval} from '../lib/parcel2go-exact-input-producer.mjs';
+import {createExactQuoteApproval} from '../lib/parcel2go-exact-approval.mjs';
+import {createCredentialOwnerAuth} from '../lib/parcel2go-credential-owner-auth.mjs';
 import {createParcel2GoRecordedOwnerReview as create,PARCEL2GO_RECORDED_REVIEW_PATH as PATH} from '../lib/parcel2go-recorded-owner-review.mjs';
 
 const ORIGIN='https://synthetic-owner-input.example.test';
@@ -112,6 +114,41 @@ test('changing a saved declaration or renewing its deadline requires a different
  c.f.advance(1000);const renewed=c.make({expiresAt:new Date(c.f.getTime()+300000).toISOString()});
  assert.equal((await c.send(undefined,{review:renewed})).status,409);assert.equal(writes(c).length,1);assert.equal(c.network.length,0);
 });
+
+test('concurrent owner-input preparations confirm one CAS winner and preserve unrelated state',async t=>{
+ const c=await setup(t),before=structuredClone(c.state),other=c.make();
+ const results=await Promise.all([c.send(c.prepare()),c.send(c.prepare(),{review:other})]);
+ assert.ok(results.every(r=>r.status===200));assert.equal(results[0].body.approvalId,results[1].body.approvalId);
+ const state=stored(c);assert.equal(state.approvals.length,1);assert.equal(state.audit.filter(a=>a.type==='approval_requested').length,1);
+ for(const key of ['users','connections','parcel2goLiveQuoteRuns','orders','products'])assert.deepEqual(state[key],before[key]);
+ assert.equal(c.network.length,0);assert.equal(writes(c).length,2);
+});
+
+for(const fault of ['none','changed-session','throwing-callback','async-callback','value-callback','revoked-replay','changed-replay']){
+ test(`consolidated exact readback ${fault} preserves authentication and callback boundary`,async t=>{
+  const c=await setup(t),auth={state:c.state,session:c.session,user:c.state.users[0]},before=structuredClone(c.state);
+  const derive=state=>deriveOwnerEnteredQuoteApproval({mode:'unmounted-owner-input/v1',auth:{...auth,state,user:state.users[0]},declaration:c.declaration,
+   requestId:c.options.requestId,trustedBinding:c.f.config.trustedBinding,termsReference:c.f.config.termsReference,
+   expectedCredentialReceiptHash:c.f.config.expectedCredentialReceiptHash,issuedAt:new Date(c.f.getTime()).toISOString(),expiresAt:c.options.expiresAt,now:c.f.getTime()});
+  const intent=derive(c.state).intent,authenticate=createCredentialOwnerAuth({enabled:true,store:c.f.store,sessionSecret:KEY,now:c.f.getTime});let reads=0,callbacks=0,last;
+  const options={mode:'local-contract/v1',store:c.f.store,auth,intent,now:c.f.getTime,primaryOnly:true,
+   assertEvidenceCurrent:state=>assert.equal(hash(derive(state).intent.approval.payload),hash(intent.approval.payload)),
+   refreshAuth:async()=>{reads++;const a=await authenticate({headers:c.headers});if(fault==='changed-session')a.session.csrf='synthetic-different-session';return {...a,user:a.state.users[0]};},
+   onConfirmed:a=>{callbacks++;last=a;if(fault==='throwing-callback')throw Error('synthetic callback');if(fault==='async-callback')return Promise.reject(Error('synthetic async callback'));if(fault==='value-callback')return false;}};
+  const rejects=['changed-session','throwing-callback','async-callback','value-callback'].includes(fault);
+  if(rejects)await assert.rejects(createExactQuoteApproval(options));else{
+   const result=await createExactQuoteApproval(options);assert.deepEqual(Object.keys(result).sort(),['approval','replayed']);
+   assert.equal(last.state.approvals[0].id,result.approval.id);redacted(result);
+  }
+  assert.equal(reads,1);assert.equal(callbacks,fault==='changed-session'?0:1);assert.equal(writes(c).length,1);assert.deepEqual(auth.state,before);
+  if(fault.endsWith('replay')){
+   auth.state=await c.f.store.get(c.workspaceId,{exactSnapshot:true});auth.user=auth.state.users[0];
+   if(fault==='revoked-replay')stored(c).users[0].active=false;else stored(c).approvals[0].payload.quoteInput.parcel.weightGrams='6000';
+   await assert.rejects(createExactQuoteApproval(options));assert.equal(reads,2);assert.equal(callbacks,1);assert.equal(writes(c).length,1);
+  }
+  assert.equal(c.network.length,0);
+ });
+}
 
 test('concurrent HTTP executors obtain one primary reservation without shared process locking',async t=>{
  const c=await setup(t),dto=await c.approve();
