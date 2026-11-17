@@ -3,6 +3,7 @@ import {createCredentialOwnerAuth} from './parcel2go-credential-owner-auth.mjs';
 import {createLiveCredentialEntryWindow,LIVE_ENTRY_PATH} from './parcel2go-live-entry-window.mjs';
 import {createParcel2GoLiveCredentialAdmission} from './parcel2go-live-admission.mjs';
 import {parcel2GoCanonicalHash as hash} from './parcel2go-live-canonical.mjs';
+import {createEntryDiagnostic} from './parcel2go-entry-diagnostic.mjs';
 export {LIVE_ENTRY_PATH};
 const fail=()=>{throw Error('Private credential admission unavailable');};
 export function createLiveCredentialEntryController({env,store,withWorkspaceLock,now=Date.now,monotonic=()=>performance.now()}={}){
@@ -15,21 +16,25 @@ export function createLiveCredentialEntryController({env,store,withWorkspaceLock
   const stored=rows.length===1&&connections.length===1&&r.operation==='admit_credentials'&&r.status==='completed'&&r.accountId===b.accountId&&r.connectionId===b.connectionId&&r.environment==='live'&&r.termsReference===config.termsReference&&r.entryReview?.reviewDigest===summary.reviewDigest&&r.entryReview?.principalEmail===config.principalEmail&&r.entryReview?.accountEvidenceReference===config.accountEvidenceReference&&r.entryReview?.scope==='private_storage_only'&&r.admissionSessionFingerprint===config.expectedSessionFingerprint&&r.fingerprint===hash(['live-credential-admission/v1',b,config.expectedSessionFingerprint])&&c.id===b.connectionId&&c.provider==='parcel2go-live'&&c.metadata?.admissionRequestId===config.requestId&&c.metadata?.account===b.accountId&&c.metadata?.environment==='live'&&typeof c.encryptedCredentials==='string'&&r.connectionHash===hash(c);
   const canSubmit=!stored&&window.available()&&Array.isArray(runs)&&!rows.length&&!connections.length&&!runs.some(r=>r.status==='reserved')&&state._revision===config.expectedRevision&&hash(auth.session)===config.expectedSessionFingerprint;
   return {...summary,remainingMs:Math.max(0,Math.min(window.remainingMs(),auth.session.exp*1000-now())),status:stored?'stored':rows.length?'unconfirmed':canSubmit?'ready':'unavailable',canSubmit,retryAllowed:false};};
- const boundary=createCredentialHttpBoundary({enabled:true,origin,now:monotonic,authenticate:async request=>{window.guard();const a=await authenticate(request);window.guard();return {...a,request}},admit:async({auth,requestId,expectedRevision,credentials,reviewDigest,assertCurrent})=>withWorkspaceLock(auth.session.workspaceId,async()=>{
-  const current=()=>{assertCurrent();window.guard();if(auth.session.exp*1000<=now())fail();};current();
-  const fresh=await authenticate(auth.request);current();
-  if(hash(fresh.session)!==hash(auth.session)||!read(fresh).canSubmit||requestId!==config.requestId||expectedRevision!==config.expectedRevision||reviewDigest!==summary.reviewDigest||credentials.clientId!==config.expectedClientId)fail();
+ const windowGuard=diagnostic=>{try{window.guard();}catch{diagnostic.at('window');diagnostic.reason('unavailable');fail();}};
+ const boundary=createCredentialHttpBoundary({enabled:true,origin,now:monotonic,authenticate:async(request,diagnostic)=>{windowGuard(diagnostic);const a=await authenticate(request);windowGuard(diagnostic);return {...a,request}},admit:async({auth,requestId,expectedRevision,credentials,reviewDigest,assertCurrent,diagnostic})=>{
+  diagnostic.at('workspace_lock');return withWorkspaceLock(auth.session.workspaceId,async()=>{
+  const current=()=>{assertCurrent();windowGuard(diagnostic);if(auth.session.exp*1000<=now())fail();};current();
+  diagnostic.at('fresh_owner_auth');const fresh=await authenticate(auth.request);current();
+  diagnostic.at('review_binding');if(hash(fresh.session)!==hash(auth.session)||!read(fresh).canSubmit||requestId!==config.requestId||expectedRevision!==config.expectedRevision||reviewDigest!==summary.reviewDigest||credentials.clientId!==config.expectedClientId){diagnostic.reason('refused');fail();}
+  diagnostic.at('credential_admission');
   const runner=createParcel2GoLiveCredentialAdmission({...config,mode:'private-credential-admission/v1',credentialEntryPermit:window.issue(),store,key:env.CREDENTIALS_KEY,now,monotonic,assertCurrent:current});
-  try{await runner.run({session:fresh.session,csrf:fresh.session.csrf,credentials});current();const status=read(await authenticate(auth.request));current();if(status.status!=='stored')fail();return {status:'stored',requestId};}finally{runner.close();}
- })});
+  try{await runner.run({session:fresh.session,csrf:fresh.session.csrf,credentials});current();diagnostic.at('saved_status');const status=read(await authenticate(auth.request));current();if(status.status!=='stored')fail();return {status:'stored',requestId};}finally{runner.close();}
+ });}});
  return Object.freeze({close(){window.close();boundary.close()},async handle(req,res){
+  const diagnostic=createEntryDiagnostic(monotonic);
   const abort=new AbortController(),cancel=()=>abort.abort();req.once('aborted',cancel);res.once('close',cancel);
   const request={method:req.method,origin:req.headers.origin,contentType:String(req.headers['content-type']??'').split(';')[0],csrf:req.headers['x-csrf-token'],headers:req.headers,signal:abort.signal,body:req};
-  try{if(req.url!==LIVE_ENTRY_PATH||!['GET','POST'].includes(req.method))fail();
-   if(req.method==='GET'){const readStart=monotonic();let timer;let a;try{a=await Promise.race([authenticate(request),new Promise((_,reject)=>{timer=setTimeout(()=>{cancel();reject(Error('Status deadline'));},2000)})]);if(abort.signal.aborted||!Number.isFinite(monotonic())||monotonic()<readStart||monotonic()-readStart>=2000)fail();}finally{clearTimeout(timer);}return {status:200,body:read(a),headers:{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}};}
+  try{if(req.url!==LIVE_ENTRY_PATH||!['GET','POST'].includes(req.method)){diagnostic.reason('refused');fail();}
+   if(req.method==='GET'){diagnostic.at('status_read');const readStart=monotonic();let timer;let a;try{a=await Promise.race([authenticate(request),new Promise((_,reject)=>{timer=setTimeout(()=>{diagnostic.reason('deadline');cancel();reject(Error('Status deadline'));},2000)})]);if(abort.signal.aborted||!Number.isFinite(monotonic())||monotonic()<readStart||monotonic()-readStart>=2000){diagnostic.reason(abort.signal.aborted?'cancelled':monotonic()-readStart>=2000?'deadline':'unavailable');fail();}}finally{clearTimeout(timer);}diagnostic.at('status_review');const body=read(a);if(!['ready','stored'].includes(body.status))body.diagnostic=diagnostic.report();return {status:200,body,headers:{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}};}
    // Retain original request only in private auth context for fresh locked verification.
    return await boundary.handle(request);
-  }catch{return {status:409,body:{status:'unconfirmed',message:'Credential save is unconfirmed or refused. Check saved status; do not repeat it.'},headers:{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}};}
+  }catch{if(abort.signal.aborted)diagnostic.reason('cancelled');return {status:409,body:{status:'unconfirmed',message:'Credential save is unconfirmed or refused. Check saved status; do not repeat it.',diagnostic:diagnostic.report()},headers:{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'}};}
   finally{req.off('aborted',cancel);res.off('close',cancel);}
  }});
 }
