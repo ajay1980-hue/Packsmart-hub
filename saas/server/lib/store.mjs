@@ -1572,7 +1572,7 @@ class SupabaseStore {
     }
   }
 
-  async archiveHistory(workspaceId, collection, records) {
+  async archiveHistory(workspaceId, collection, records, checkArchive = () => {}) {
     if (!records.length) return;
     // Automation run IDs are mutable identities, not immutable version keys.
     // All automation snapshots must use the content-addressed retention writer.
@@ -1586,11 +1586,13 @@ class SupabaseStore {
       archived_at: new Date().toISOString()
     }));
     for (let offset = 0; offset < rows.length; offset += 200) {
+      checkArchive();
       await this.upsert('runvara_history', rows.slice(offset, offset + 200), 'workspace_id,collection,record_id', {}, { workspaceId, operation: 'archive_write' });
+      checkArchive();
     }
   }
 
-  async archiveAutomationVersions(plan) {
+  async archiveAutomationVersions(plan, checkArchive = () => {}) {
     const acknowledgedArchives = [];
     for (const batch of plan.archiveBatches) {
       // The pure planner bounds both row count and exact serialized body bytes.
@@ -1610,9 +1612,11 @@ class SupabaseStore {
         || (rows.length > 1 && bytes > AUTOMATION_ARCHIVE_BATCH_BYTES)) {
         throw Object.assign(new Error('Automation archive batch exceeds its safety limit'), { code:'AUTOMATION_ARCHIVE_BATCH_TOO_LARGE' });
       }
+      checkArchive();
       await this.upsert('runvara_history', rows, 'workspace_id,collection,record_id', {
         headers: { Prefer:'resolution=ignore-duplicates,return=minimal' }
       }, { workspaceId: plan.workspaceId, operation: 'archive_write' });
+      checkArchive();
       // A successful immutable insert/ignore confirms this exact content key.
       // A thrown/uncertain batch never acknowledges any candidate in that batch.
       acknowledgedArchives.push(...batch.map(candidate => ({ ...candidate.reference, confirmed:true })));
@@ -1620,11 +1624,12 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async archiveAndCompact(workspaceId, state, automationPlan) {
+  async archiveAndCompact(workspaceId, state, automationPlan, checkArchive = () => {}) {
     const audit = state.audit || [];
     const archivedAudit = audit.slice(SUPABASE_EMBEDDED_AUDIT_LIMIT);
     if (archivedAudit.length) {
       for (let offset = 0; offset < archivedAudit.length; offset += 200) {
+        checkArchive();
         await this.upsert('audit_events', archivedAudit.slice(offset, offset + 200).map(event => ({
           id: event.id,
           workspace_id: workspaceId,
@@ -1633,22 +1638,23 @@ class SupabaseStore {
           detail: event.detail || {},
           created_at: event.createdAt
         })), 'id', {}, { workspaceId, operation: 'archive_write' });
+        checkArchive();
       }
     }
 
     const workRecords = state.workRecords || [];
-    await this.archiveHistory(workspaceId, 'workRecords', workRecords.slice(SUPABASE_WORK_RECORD_LIMIT));
+    await this.archiveHistory(workspaceId, 'workRecords', workRecords.slice(SUPABASE_WORK_RECORD_LIMIT), checkArchive);
     state.workRecords = workRecords.slice(0, SUPABASE_WORK_RECORD_LIMIT);
 
     const {kept:keptSyncs,archived:archivedSyncs} = retainedConnectionSyncs(state,SUPABASE_CONNECTION_SYNC_LIMIT);
-    await this.archiveHistory(workspaceId, 'connectionSyncs', archivedSyncs);
+    await this.archiveHistory(workspaceId, 'connectionSyncs', archivedSyncs, checkArchive);
     state.connectionSyncs = keptSyncs;
 
     const agentRuns = state.agentRuns || [];
-    await this.archiveHistory(workspaceId, 'agentRuns', agentRuns.slice(SUPABASE_AGENT_RUN_LIMIT));
+    await this.archiveHistory(workspaceId, 'agentRuns', agentRuns.slice(SUPABASE_AGENT_RUN_LIMIT), checkArchive);
     state.agentRuns = agentRuns.slice(0, SUPABASE_AGENT_RUN_LIMIT);
 
-    const acknowledgedArchives = automationPlan ? await this.archiveAutomationVersions(automationPlan) : [];
+    const acknowledgedArchives = automationPlan ? await this.archiveAutomationVersions(automationPlan, checkArchive) : [];
 
     const briefs = state.dailyBriefs || [];
     const keepBriefs = briefs.slice(0, SUPABASE_DAILY_BRIEF_LIMIT);
@@ -1662,10 +1668,13 @@ class SupabaseStore {
           // Prove that the original full legacy row still exists before losing
           // its retained pointer. Never turn a missing archive into stub data,
           // or rewrite an original-ID row from a potentially stale reread.
+          checkArchive();
           await this.readLegacyBriefArchive(workspaceId, brief.id, brief.archive);
+          checkArchive();
         } else assertBriefArchiveReference(brief.archive, workspaceId, brief.id);
         continue;
       }
+      checkArchive();
       await this.upsert('operations_briefs', [{
         id: brief.id,
         workspace_id: workspaceId,
@@ -1674,6 +1683,7 @@ class SupabaseStore {
         logic: brief.logic || 'deterministic-v1',
         created_at: brief.generatedAt || new Date().toISOString()
       }], 'id', {}, { workspaceId, operation: 'archive_write' });
+      checkArchive();
     }
     state.dailyBriefs = keepBriefs;
     state.audit = audit.slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
@@ -1764,10 +1774,13 @@ class SupabaseStore {
     // The optional maintenance guard runs before the first archive write.
     saveGuard(beforeEffects)(upgraded, { automationArchives: Boolean(automationPlan?.archiveCandidates.length || automationPlan?.summary.existingStubsToEvict),
       briefArchives: Boolean(briefPlan?.candidates.length) });
+    // Reuse the existing synchronous owner/deadline validator around each
+    // Parcel2Go archive IO. Already-dispatched writes can still settle late.
+    const checkArchive = parcel2goLivePermit !== undefined ? () => assertCurrent(upgraded) : () => {};
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
     let acknowledgedArchives = [];
-    if (existing) acknowledgedArchives = await this.archiveAndCompact(workspaceId, upgraded, automationPlan);
+    if (existing) acknowledgedArchives = await this.archiveAndCompact(workspaceId, upgraded, automationPlan, checkArchive);
     else {
       upgraded.audit = (upgraded.audit || []).slice(0, SUPABASE_EMBEDDED_AUDIT_LIMIT);
       upgraded.workRecords = (upgraded.workRecords || []).slice(0, SUPABASE_WORK_RECORD_LIMIT);
@@ -1782,8 +1795,10 @@ class SupabaseStore {
         if (Object.hasOwn(brief, 'archive') || Buffer.byteLength(JSON.stringify(brief)) <= 65536) { briefs.push(brief); continue; }
         // Commit the full historical snapshot before replacing it with a pointer.
         // One snapshot per request also avoids the gateway's bulk payload limit.
+        checkArchive();
         await this.upsert('operations_briefs', [{ id: brief.id, workspace_id: workspaceId, summary: brief.summary,
           metrics: brief, logic: brief.logic || 'deterministic-v1', created_at: brief.generatedAt }], 'id', {}, { workspaceId, operation: 'archive_write' });
+        checkArchive();
         briefs.push(legacyBriefProjection(brief));
       }
       upgraded.dailyBriefs = briefs;
@@ -1794,15 +1809,19 @@ class SupabaseStore {
         // Application-level append-only convention, not a DB immutability
         // claim. Insert-ignore alone is insufficient: validate the exact row
         // after writing, including when an earlier attempt already inserted it.
+        checkArchive();
         try {
           await this.upsert('operations_briefs', [candidate.row], 'id', {
             headers: { Prefer: 'resolution=ignore-duplicates,return=minimal' },
             maxResponseBytes: BRIEF_HISTORY_READ_MAX_BYTES
           }, { workspaceId, operation: 'archive_write' });
+          checkArchive();
           assertBriefHistoryPlanCurrent(briefPlan);
           await this.readBriefArchive(workspaceId, candidate.row.metrics.id, candidate.reference);
+          checkArchive();
           verifiedCandidates.push(candidate);
         } catch (error) {
+          checkArchive(); // Deadline/owner failure must not become optional fallback.
           if (error.code === 'BRIEF_HISTORY_SOURCE_CHANGED') throw error;
           // Compaction is optional, business completion is not. A failed
           // attempt retains the original full row; the unchanged primary size

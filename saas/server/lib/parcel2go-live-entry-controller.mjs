@@ -1,4 +1,4 @@
-import {createCredentialHttpBoundary} from './parcel2go-credential-http-boundary.mjs';
+import {createCredentialHttpBoundary,CREDENTIAL_SAVE_MAX_MS} from './parcel2go-credential-http-boundary.mjs';
 import {createCredentialOwnerAuth} from './parcel2go-credential-owner-auth.mjs';
 import {createLiveCredentialEntryWindow,LIVE_ENTRY_PATH} from './parcel2go-live-entry-window.mjs';
 import {createParcel2GoLiveCredentialAdmission} from './parcel2go-live-admission.mjs';
@@ -17,7 +17,7 @@ export function createLiveCredentialEntryController({env,store,withWorkspaceLock
   const canSubmit=!stored&&window.available()&&Array.isArray(runs)&&!rows.length&&!connections.length&&!runs.some(r=>r.status==='reserved')&&state._revision===config.expectedRevision&&hash(auth.session)===config.expectedSessionFingerprint;
   return {...summary,remainingMs:Math.max(0,Math.min(window.remainingMs(),auth.session.exp*1000-now())),status:stored?'stored':rows.length?'unconfirmed':canSubmit?'ready':'unavailable',canSubmit,retryAllowed:false};};
  const windowGuard=diagnostic=>{try{window.guard();}catch{diagnostic.at('window');diagnostic.reason('unavailable');fail();}};
- const boundary=createCredentialHttpBoundary({enabled:true,origin,now:monotonic,authenticate:async(request,diagnostic)=>{windowGuard(diagnostic);const a=await authenticate(request);windowGuard(diagnostic);return {...a,request}},admit:async({auth,requestId,expectedRevision,credentials,reviewDigest,assertCurrent,diagnostic})=>{
+ const boundary=createCredentialHttpBoundary({enabled:true,origin,now:monotonic,saveMaxMs:CREDENTIAL_SAVE_MAX_MS,authenticate:async(request,diagnostic)=>{windowGuard(diagnostic);const a=await authenticate(request);windowGuard(diagnostic);return {...a,request}},admit:async({auth,requestId,expectedRevision,credentials,reviewDigest,assertCurrent,diagnostic})=>{
   diagnostic.at('workspace_lock');return withWorkspaceLock(auth.session.workspaceId,async()=>{
   const current=()=>{assertCurrent();windowGuard(diagnostic);if(auth.session.exp*1000<=now())fail();};current();
   diagnostic.at('fresh_owner_auth');const fresh=await authenticate(auth.request);current();

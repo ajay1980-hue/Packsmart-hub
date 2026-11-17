@@ -1,5 +1,8 @@
+import {createHash} from 'node:crypto';
+import {planAutomationRetention} from '../lib/automation-retention.mjs';
+import {BRIEF_HISTORY_CONTRACT,planBriefHistoryCompaction} from '../lib/brief-history.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import {maintenanceFixture,ownerState,SECRET} from './maintenance-login-fixture.mjs';import {createSessionToken,verifySessionToken} from '../lib/security.mjs';import {parcel2GoCanonicalHash as hash} from '../lib/parcel2go-live-canonical.mjs';import {LIVE_ENTRY_PATH} from '../lib/parcel2go-live-entry-window.mjs';
-async function fixture(t,extra={}){const {entryConfig={},prepareState=()=>{},...serverExtra}=extra;const state=ownerState('packsmart-solutions');prepareState(state);const token=createSessionToken({userId:state.users[0].id,workspaceId:state.workspace.id,email:'synthetic@example.test',role:'owner',csrf:'synthetic-csrf-at-least-16'},SECRET),session=verifySessionToken(token,SECRET);const config={requestId:randomUUID(),expectedRevision:state._revision,trustedBinding:{workspaceId:state.workspace.id,connectionId:'synthetic-live-entry',accountId:'synthetic-own-alias',environment:'live'},expectedClientId:'synthetic-client-id',termsReference:'synthetic-terms-owner-review',expiresAt:new Date(Date.now()+300000).toISOString(),expectedSessionFingerprint:hash(session),principalEmail:'synthetic@example.test',accountEvidenceReference:'synthetic-observed-account',scope:'private_storage_only',...entryConfig};const f=await maintenanceFixture({states:[state],env:{RUNVARA_QUIET_OWNER_WORKSPACE:'enabled/v1',RUNVARA_QUIET_PARCEL2GO_LIVE_CREDENTIAL_ENTRY:'enabled/v1',RUNVARA_PARCEL2GO_LIVE_ENTRY_CONFIG:JSON.stringify(config)},...serverExtra});t.after(f.close);const cookie='__Host-packsmart_session='+token;const status=()=>f.request(LIVE_ENTRY_PATH,{cookie});const descriptor=(await status()).payload;const body={clientId:config.expectedClientId,clientSecret:'synthetic-client-secret',requestId:config.requestId,expectedRevision:state._revision,reviewDigest:descriptor.reviewDigest,confirmed:true};const submit=(overrides={})=>f.request(LIVE_ENTRY_PATH,{method:'POST',cookie,headers:{Origin:f.config.APP_PUBLIC_URL,'X-CSRF-Token':session.csrf},body,...overrides});return {...f,state,session,config,cookie,body,status,submit};}
+async function fixture(t,extra={}){const {entryConfig={},prepareState=()=>{},env:extraEnv={},...serverExtra}=extra;const state=ownerState('packsmart-solutions');prepareState(state);const token=createSessionToken({userId:state.users[0].id,workspaceId:state.workspace.id,email:'synthetic@example.test',role:'owner',csrf:'synthetic-csrf-at-least-16'},SECRET),session=verifySessionToken(token,SECRET);const config={requestId:randomUUID(),expectedRevision:state._revision,trustedBinding:{workspaceId:state.workspace.id,connectionId:'synthetic-live-entry',accountId:'synthetic-own-alias',environment:'live'},expectedClientId:'synthetic-client-id',termsReference:'synthetic-terms-owner-review',expiresAt:new Date(Date.now()+300000).toISOString(),expectedSessionFingerprint:hash(session),principalEmail:'synthetic@example.test',accountEvidenceReference:'synthetic-observed-account',scope:'private_storage_only',...entryConfig};const f=await maintenanceFixture({states:[state],env:{RUNVARA_QUIET_OWNER_WORKSPACE:'enabled/v1',RUNVARA_QUIET_PARCEL2GO_LIVE_CREDENTIAL_ENTRY:'enabled/v1',RUNVARA_PARCEL2GO_LIVE_ENTRY_CONFIG:JSON.stringify(config),...extraEnv},...serverExtra});t.after(f.close);const cookie='__Host-packsmart_session='+token;const status=()=>f.request(LIVE_ENTRY_PATH,{cookie});const descriptor=(await status()).payload;const body={clientId:config.expectedClientId,clientSecret:'synthetic-client-secret',requestId:config.requestId,expectedRevision:state._revision,reviewDigest:descriptor.reviewDigest,confirmed:true};const submit=(overrides={})=>f.request(LIVE_ENTRY_PATH,{method:'POST',cookie,headers:{Origin:f.config.APP_PUBLIC_URL,'X-CSRF-Token':session.csrf},body,...overrides});return {...f,state,session,config,cookie,body,status,submit};}
 test('real server production storage path with synthetic inputs stores once, no provider',async t=>{const f=await fixture(t);assert.equal((await f.status()).payload.status,'ready');const r=await f.submit();assert.equal(r.status,200);assert.equal(r.payload.status,'stored');const stored=f.fake.states.get('packsmart-solutions');assert.equal(stored.connections.at(-1).provider,'parcel2go-live');assert.ok(!JSON.stringify(stored).includes('synthetic-client-secret'));assert.equal((await f.status()).payload.status,'stored');const before=f.calls.filter(x=>x.method==='PATCH').length;assert.equal((await f.submit()).status,409);assert.equal(f.calls.filter(x=>x.method==='PATCH').length,before)});
 test('body cannot swap reviewed account scope',async t=>{const f=await fixture(t);f.body.reviewDigest='0'.repeat(64);assert.equal((await f.submit()).status,409);assert.equal(f.calls.filter(x=>x.method==='PATCH').length,0)});
 for(const error of ['csrf','origin','bearer'])test('production route rejects '+error,async t=>{const f=await fixture(t);let options={};if(error==='bearer')options={cookie:undefined,headers:{Authorization:'Bearer '+f.cookie.split('=')[1],Origin:f.config.APP_PUBLIC_URL,'X-CSRF-Token':f.session.csrf}};else options={headers:{Origin:error==='origin'?'https://evil.example':f.config.APP_PUBLIC_URL,'X-CSRF-Token':error==='csrf'?'bad':f.session.csrf}};assert.equal((await f.submit(options)).status,409);assert.equal(f.calls.filter(x=>x.method==='PATCH').length,0)});
@@ -22,18 +25,18 @@ function archiveNeeded(state){
 }
 const latencyCases=[
  {name:'minimal-zero',read:0,write:0,archive:0},
- ...[100,200,222,223,250,400,667].map(ms=>({name:'minimal-each-'+ms,read:ms,write:ms,archive:ms})),
+ ...[100,200,222,223,250,400,444,445,667].map(ms=>({name:'minimal-each-'+ms,read:ms,write:ms,archive:ms})),
  {name:'minimal-read-300',read:300,write:0,archive:0},
  {name:'minimal-write-1000',read:0,write:1000,archive:0},
  ...[0,100,150,200,300].map(ms=>({name:'archive-each-'+ms,read:ms,write:ms,archive:ms,archives:true})),
  {name:'archive-only-400',read:0,write:0,archive:400,archives:true},
  {name:'real-minimal-each-150',read:150,write:150,archive:150,real:true},
  {name:'real-minimal-each-250',read:250,write:250,archive:250,real:true},
- {name:'real-minimal-read-700',read:700,write:0,archive:0,real:true},
+ {name:'real-minimal-read-1400',read:1400,write:0,archive:0,real:true},
  {name:'real-archive-slow',read:100,write:100,archive:400,archives:true,real:true},
- {name:'real-archive-after-deadline',read:100,write:100,archive:600,archives:true,real:true},
- {name:'real-reservation-late',read:0,write:2100,archive:0,delayWrite:1,real:true},
- {name:'real-completion-late',read:0,write:2100,archive:0,delayWrite:2,real:true}
+ {name:'real-archive-stops-at-deadline',read:100,write:100,archive:1400,archives:true,real:true},
+ {name:'real-reservation-late',read:0,write:4100,archive:0,delayWrite:1,real:true},
+ {name:'real-completion-late',read:0,write:4100,archive:0,delayWrite:2,real:true}
 ];
 // Exact controlled-clock expectations: [HTTP, stage, receipt, reads, writes,
 // archive writes, elapsed IO ms]. CPU/serialization time is deliberately absent.
@@ -42,18 +45,20 @@ const latencyExpected={
  'minimal-each-100':[200,'stored','completed',7,2,0,900],
  'minimal-each-200':[200,'stored','completed',7,2,0,1800],
  'minimal-each-222':[200,'stored','completed',7,2,0,1998],
- 'minimal-each-223':[409,'saved_status','completed',7,2,0,2007],
- 'minimal-each-250':[409,'credential_admission','completed',6,2,0,2000],
- 'minimal-each-400':[409,'credential_admission','reserved',4,1,0,2000],
- 'minimal-each-667':[409,'credential_admission','none',3,0,0,2001],
- 'minimal-read-300':[409,'saved_status','completed',7,2,0,2100],
- 'minimal-write-1000':[409,'credential_admission','completed',5,2,0,2000],
+ 'minimal-each-223':[200,'stored','completed',7,2,0,2007],
+ 'minimal-each-250':[200,'stored','completed',7,2,0,2250],
+ 'minimal-each-400':[200,'stored','completed',7,2,0,3600],
+ 'minimal-each-444':[200,'stored','completed',7,2,0,3996],
+ 'minimal-each-445':[409,'saved_status','completed',7,2,0,4005],
+ 'minimal-each-667':[409,'credential_admission','reserved',5,1,0,4002],
+ 'minimal-read-300':[200,'stored','completed',7,2,0,2100],
+ 'minimal-write-1000':[200,'stored','completed',7,2,0,2000],
  'archive-each-0':[200,'stored','completed',7,2,6,0],
  'archive-each-100':[200,'stored','completed',7,2,6,1500],
- 'archive-each-150':[409,'credential_admission','completed',6,2,6,2100],
- 'archive-each-200':[409,'credential_admission','reserved',4,1,5,2000],
- 'archive-each-300':[409,'credential_admission','none',3,0,5,2400],
- 'archive-only-400':[409,'credential_admission','none',3,0,5,2000]
+ 'archive-each-150':[200,'stored','completed',7,2,6,2250],
+ 'archive-each-200':[200,'stored','completed',7,2,6,3000],
+ 'archive-each-300':[409,'credential_admission','completed',6,2,6,4200],
+ 'archive-only-400':[200,'stored','completed',7,2,6,2400]
 };
 for(const scenario of latencyCases)test('synthetic save latency: '+scenario.name,{timeout:10000},async t=>{
  let armed=false,elapsed=0,patches=0,active=0;const trace=[],wallNow=performance.now.bind(performance),base=Date.now();
@@ -80,15 +85,61 @@ for(const scenario of latencyCases)test('synthetic save latency: '+scenario.name
  assert.equal(JSON.stringify(f.fake.states.get('packsmart-solutions')).includes('synthetic-client-secret'),false);
  assert.ok([200,409].includes(response.status));
  if(response.status===200){assert.equal(response.payload.status,'stored');assert.equal(settled.receipt,'completed');assert.equal(settled.connections,1);assert.equal(reconciled.payload.status,'stored');}
- else{assert.equal(response.payload.status,'unconfirmed');assert.equal(response.payload.diagnostic.cause,'deadline');assert.ok(response.payload.diagnostic.durationMs<=2000);assert.equal(reconciled.payload.canSubmit,false);}
+ else{assert.equal(response.payload.status,'unconfirmed');assert.equal(response.payload.diagnostic.cause,'deadline');assert.ok(response.payload.diagnostic.durationMs<=4000);assert.equal(reconciled.payload.canSubmit,false);}
  assert.equal(settled.connections,settled.receipt==='completed'?1:0);
  assert.equal(counts.write,settled.receipt==='none'?0:settled.receipt==='reserved'?1:2);
  assert.equal(settled.admissionAudits,counts.write);
  if(!scenario.archives)assert.equal(counts.archive,0);
  if(!scenario.real)assert.deepEqual([response.status,response.payload.diagnostic?.stage??'stored',settled.receipt,counts.read,counts.write,counts.archive,responseMs],latencyExpected[scenario.name]);
  if(scenario.delayWrite){assert.equal(response.status,409);assert.equal(atResponse.receipt,scenario.delayWrite===1?'none':'reserved');assert.equal(settled.receipt,scenario.delayWrite===1?'reserved':'completed');}
- if(scenario.name==='real-archive-after-deadline'){assert.equal(response.status,409);assert.equal(settled.receipt,'none');assert.equal(counts.write,0);assert.equal(counts.archive,5);assert.ok(trace.some(row=>row.kind==='archive'&&row.startMs>=2000),'Observe archive calls begun after HTTP deadline');assert.ok(settled.archiveRows>atResponse.archiveRows);}
+ if(scenario.name==='real-archive-stops-at-deadline'){assert.equal(response.status,409);assert.equal(settled.receipt,'none');assert.equal(counts.write,0);assert.equal(counts.archive,3);assert.ok(trace.filter(row=>row.kind==='archive').every(row=>row.startMs<4000),'No archive starts after deadline');assert.ok(settled.archiveRows>atResponse.archiveRows);}
  for(const value of [f.body.clientId,f.body.clientSecret,f.cookie,f.session.csrf,f.body.requestId,f.body.reviewDigest])assert.equal(JSON.stringify(response.payload.diagnostic??{}).includes(value),false,'Diagnostic leaked synthetic private value');
  const safe={case:scenario.name,clock:scenario.real?'real-timer':'controlled-monotonic',responseMs,http:response.status,stage:response.payload.diagnostic?.stage??'stored',counts,atResponse,settled,reconciled:reconciled.payload.status,trace};
  t.diagnostic(JSON.stringify(safe));
+});
+
+for(const kind of ['audit-batch','history-batch','legacy-read','optional-write','optional-read','optional-failed-write'])test('archive deadline stops '+kind+' without a primary write',async t=>{
+ let elapsed=0,armed=false,expired=false;const base=Date.now(),archives=[],warnings=[],legacy=[];
+ t.mock.method(performance,'now',()=>elapsed);t.mock.method(Date,'now',()=>base+elapsed);t.mock.method(console,'warn',(...args)=>warnings.push(args));
+ const prepareState=state=>{
+  const at=new Date(base-86400000).toISOString();
+  if(kind==='audit-batch')state.audit=Array.from({length:501},(_,i)=>({id:'a'+i,type:'s',actor:'s',createdAt:at}));
+  if(kind==='history-batch')state.workRecords=Array.from({length:501},(_,i)=>({id:'synthetic-work-'+i,createdAt:at}));
+  if(kind==='legacy-read'){
+   state.dailyBriefs=Array.from({length:32},(_,i)=>({id:'synthetic-brief-'+i,generatedAt:at,summary:'Synthetic history'}));
+   for(const brief of state.dailyBriefs.slice(30)){const original=structuredClone(brief);legacy.push({id:brief.id,workspace_id:state.workspace.id,metrics:original});brief.archive={table:'operations_briefs',id:brief.id,sha256:createHash('sha256').update(JSON.stringify(original)).digest('hex')};}
+  }
+  if(kind.startsWith('optional')){
+   state.dailyBriefs=Array.from({length:3},(_,i)=>({id:'synthetic-optional-'+i,generatedAt:new Date(base-(i?2*86400000:0)).toISOString(),summary:'Synthetic history',logic:'deterministic-v2',rows:[{description:'x'.repeat(2500)}]}));
+   assert.equal(planBriefHistoryCompaction(state).candidates.length,2);
+  }
+ };
+ const f=await fixture(t,{prepareState,env:kind.startsWith('optional')?{BRIEF_HISTORY_COMPACTION_CONTRACT:BRIEF_HISTORY_CONTRACT}:{},beforeListen:({fake})=>{if(legacy.length)fake.tables.set('operations_briefs',legacy);},intercept:async({url,options,proceed})=>{
+  const table=url.pathname.split('/').at(-1),method=options.method||'GET';
+  if(!armed||!['audit_events','runvara_history','operations_briefs'].includes(table))return proceed();
+  assert.equal(expired,false,'No further archive IO after deadline');archives.push({table,method});
+  const target=kind==='optional-read'?method==='GET':true;
+  const result=kind==='optional-failed-write'?Response.json({code:'synthetic-private-error',message:'synthetic-private-error'},{status:503}):await proceed();
+  if(target){elapsed=4000;expired=true;}return result;
+ }});
+ armed=true;const r=await f.submit();assert.equal(r.status,409);assert.equal(r.payload.diagnostic.cause,'deadline');assert.equal(r.payload.diagnostic.durationMs,4000);
+ assert.equal(f.calls.filter(x=>x.method==='PATCH').length,0);assert.equal(f.fake.states.get('packsmart-solutions').parcel2goLiveQuoteRuns?.length??0,0);
+ assert.equal(archives.length,kind==='optional-read'?2:1);assert.deepEqual(warnings,[],'Deadline is not swallowed/logged as optional compaction failure');
+ assert.equal(JSON.stringify(r.payload).includes('synthetic-private-error'),false);
+});
+test('automation archive helper checks its guard between immutable batches',async t=>{
+ let expired=false,posts=0;const at=new Date(Date.now()-60000).toISOString();
+ // A full multi-batch automation state exceeds the current Parcel2Go canonical
+ // limit. Exercise the real store helper, without pretending it was admitted.
+ const f=await fixture(t,{prepareState:state=>{state.automationRuns=Array.from({length:250},(_,i)=>({id:'synthetic-run-'+i,ruleId:'profitGuard',status:'COMPLETED',startedAt:at,completedAt:at,leaseUntil:at,risk:'low',spend:0,errorCode:null,evidence:[{type:'recorded',id:'synthetic-evidence-'+i,detail:'x'.repeat(1000)}]}));},intercept:async({url,options,proceed})=>{
+  if(!url.pathname.endsWith('/runvara_history'))return proceed();assert.equal(options.method,'POST');assert.equal(expired,false);posts++;const result=await proceed();expired=true;return result;
+ }});
+ const plan=planAutomationRetention(f.state);assert.ok(plan.archiveBatches.length>1);
+ await assert.rejects(f.store.archiveAutomationVersions(plan,()=>{if(expired)throw Error('synthetic deadline');}),/synthetic deadline/);
+ assert.equal(posts,1);assert.equal(f.calls.filter(x=>x.method==='PATCH').length,0);
+});
+test('existing canonical size bound refuses an oversized brief before admission',async t=>{
+ const f=await fixture(t,{prepareState:state=>{state.dailyBriefs=[{id:'synthetic-large',generatedAt:new Date().toISOString(),summary:'x'.repeat(70000)}];}});
+ const before=f.calls.length,r=await f.submit();assert.equal(r.status,409);assert.equal(r.payload.diagnostic.stage,'credential_admission');assert.equal(r.payload.diagnostic.cause,'unavailable');
+ assert.equal(f.calls.slice(before).filter(x=>x.method!=='GET').length,0);assert.equal(f.fake.states.get('packsmart-solutions').parcel2goLiveQuoteRuns?.length??0,0);
 });
