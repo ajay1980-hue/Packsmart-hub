@@ -85,3 +85,27 @@ test('a preparation response after the original deadline is suppressed',async t=
  c.click(ui,'Prepare exact review');await flush(()=>ui.root.textContent.includes('expired'));
  assert.equal(ui.root.querySelector('[name="reviewed"]'),null);assert.equal(posts(c).length,1);assert.equal(c.network.length,0);assert.equal(posts(c)[0].opts.signal.aborted,true);
 });
+
+for(const action of ['prepare','decide'])for(const stage of ['fetch','body'])test(`${action} refuses a late ${stage} even when its abort timer has not fired`,async t=>{
+ const c=await surfaceFixture(t),ui=await c.boot();
+ if(action==='decide')await c.prepare(ui);else{await flush(()=>!!ui.root.querySelector('form'));c.fill(ui);}
+ let mono=0,bodyReads=0;Object.defineProperty(ui.w.performance,'now',{value:()=>mono});
+ c.transform=async(path,opts,response)=>{
+  if(path!==c.api||opts.method!=='POST'||JSON.parse(opts.body).action!==action)return response;
+  if(stage==='fetch')mono=5000;
+  return {ok:response.ok,async text(){bodyReads++;const text=await response.text();mono=5000;return text;}};
+ };
+ if(action==='decide'){c.check(ui,'reviewed');c.click(ui,'Approve exact review');}else c.click(ui,'Prepare exact review');
+ await flush(()=>ui.root.textContent.includes('unconfirmed'));
+ assert.equal(bodyReads,stage==='fetch'?0:1);assert.equal(posts(c).at(-1).opts.signal.aborted,false,'Timer callback deliberately has not run');
+ assert.equal(ui.root.querySelector('[name="sendConfirmed"]'),null);assert.equal(c.network.length,0);
+ assert.equal(posts(c).length,action==='prepare'?1:2);
+});
+
+test('review confirmation inside five seconds is displayed without transmitting',async t=>{
+ const c=await surfaceFixture(t),ui=await c.boot();await flush(()=>!!ui.root.querySelector('form'));c.fill(ui);
+ let mono=0;Object.defineProperty(ui.w.performance,'now',{value:()=>mono});
+ c.transform=async(path,opts,response)=>{if(path===c.api&&opts.method==='POST')mono=4500;return response;};
+ c.click(ui,'Prepare exact review');await flush(()=>!!ui.root.querySelector('[name="reviewed"]'));
+ assert.equal(posts(c).length,1);assert.equal(c.network.length,0);
+});

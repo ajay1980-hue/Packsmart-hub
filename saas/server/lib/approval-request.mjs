@@ -72,7 +72,8 @@ export async function createApprovalRequest({ store, auth, intent, admit, before
   let acknowledged = false;
   const guards = beforeSave?.(state);
   try {
-    await store.save(workspaceId, state, { ownedSnapshot: true, beforeEffects: guards?.beforeEffects, beforeCommit: snapshot => {
+    await store.save(workspaceId, state, { ownedSnapshot: true, beforeEffects: guards?.beforeEffects,
+      ...(guards?.parcel2goReviewPermit!==undefined?{parcel2goReviewPermit:guards.parcel2goReviewPermit}:{}),beforeCommit: snapshot => {
       guards?.beforeCommit(snapshot);
       if (findApprovalRequest(snapshot, auth, intent)?.id !== approval.id) throw fail('APPROVAL_REQUEST_STATE_INVALID');
     } });
