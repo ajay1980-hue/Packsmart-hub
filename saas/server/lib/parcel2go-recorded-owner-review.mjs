@@ -5,7 +5,7 @@ import {createCredentialOwnerAuth} from './parcel2go-credential-owner-auth.mjs';
 import {deriveRecordedQuoteApproval,deriveOwnerEnteredQuoteApproval} from './parcel2go-exact-input-producer.mjs';
 import {createParcel2GoExactQuoteCandidate} from './parcel2go-live-admission.mjs';
 import {assertParcel2GoSynchronousCurrent as current} from './parcel2go-live-sync-guard.mjs';
-import {createExactQuoteApproval,readExactQuoteApproval,decideExactQuoteApproval} from './parcel2go-exact-approval.mjs';
+import {createExactQuoteApproval,readExactQuoteApproval,decideExactQuoteApproval,issueParcel2GoQuoteReviewPersistencePermit} from './parcel2go-exact-approval.mjs';
 import {parcel2GoCanonicalHash as hash,parcel2GoCanonicalJson as json} from './parcel2go-live-canonical.mjs';
 import {metaStrictJson} from './meta-publication-bounded.mjs';
 import {addAudit} from './events.mjs';
@@ -111,9 +111,9 @@ export function createParcel2GoRecordedOwnerReview(options={}){
    if(!body||body.requestId!==requestId)refuse();
    if(ownerInput){
     if(!(body.action==='prepare'&&exact(body,'action requestId declaration')||['decide','execute'].includes(body.action)&&exact(body,'action requestId approvalId confirmation')))refuse();
-    // Authentication and bounded body reading retain the 2s limit. Only an exact
-    // execute envelope gets the transport budget, measured from request start.
-    if(body.action==='execute'){budget=12000;clearTimeout(timer);timer=setTimeout(stop,Math.max(0,budget-(monotonic()-began)));}
+    // Authentication and bounded body reading retain 2s. Valid owner-input
+    // review writes get 4s, execution retains 12s, all from original request start.
+    budget=body.action==='execute'?12000:4000;clearTimeout(timer);timer=setTimeout(stop,Math.max(0,budget-(monotonic()-began)));
    }else if(body.evidenceHash!==expectedEvidenceHash||!(body.action==='prepare'&&exact(body,'action requestId evidenceHash')||body.action==='decide'&&exact(body,'action requestId evidenceHash approvalId confirmation')))refuse();
    return withWorkspaceLock(initial.session.workspaceId,async()=>{
     const a=await auth();if(hash(a.session)!==hash(initial.session))refuse();
@@ -142,7 +142,7 @@ export function createParcel2GoRecordedOwnerReview(options={}){
      if(row)targetHash=hash(row);
      else{
       if(attempts.has('prepare'))refuse();attempts.add('prepare');
-      const result=await createExactQuoteApproval({mode:'local-contract/v1',store,auth:a,intent:prepared.intent,now,assertCurrent:check,assertEvidenceCurrent:evidenceGuard});
+      const result=await createExactQuoteApproval({mode:'local-contract/v1',store,auth:a,intent:prepared.intent,now,assertCurrent:check,assertEvidenceCurrent:evidenceGuard,primaryOnly:ownerInput});
       check();targetHash=hash(result.approval);
      }
     }else{
@@ -153,7 +153,8 @@ export function createParcel2GoRecordedOwnerReview(options={}){
      const guard=state=>{evidenceGuard(state);const saved=readExactQuoteApproval({state,auth:a,approvalId:row.id,now:now()});if(hash(saved)!==targetHash)refuse();};
      // A single CAS attempt. Read back an exact lost acknowledgement; never retry.
      if(attempts.has('decide'))refuse();attempts.add('decide');
-     try{check();await store.save(a.session.workspaceId,next,{ownedSnapshot:true,beforeEffects:guard,beforeCommit:guard});}catch{/* Reconcile below. */}
+     const permit=ownerInput?issueParcel2GoQuoteReviewPersistencePermit({before:a.state,after:next,auth:a,approvalId:row.id,now:now()}):undefined;
+     try{check();await store.save(a.session.workspaceId,next,{ownedSnapshot:true,beforeEffects:guard,beforeCommit:guard,...(ownerInput?{parcel2goReviewPermit:permit}:{})});}catch{/* Reconcile below. */}
     }
     check();const latest=await auth(),fresh=await context(latest),saved=find(latest,fresh.prepared);check();
     if(hash(latest.session)!==hash(a.session)||!saved||hash(saved)!==targetHash)refuse();

@@ -41,11 +41,13 @@
    return structuredClone(v);
   }
   async function request(url,body,gen){
-   const active=new AbortController();controller=active;const limit=body?.action==='execute'?12000:2000;
-   const timeout=setTimeout(()=>active.abort(),Math.max(1,Math.min(limit,deadline-performance.now())));
+   const active=new AbortController();controller=active;const limit=body?.action==='execute'?12000:['prepare','decide'].includes(body?.action)?5000:2000;
+   const requestDeadline=Math.min(deadline,performance.now()+limit);
+   const current=()=>!active.signal.aborted&&gen===epoch&&alive()&&performance.now()<requestDeadline;
+   const timeout=setTimeout(()=>active.abort(),Math.max(1,requestDeadline-performance.now()));
    try{const response=await fetcher(url,{method:body?'POST':'GET',credentials:'same-origin',cache:'no-store',redirect:'error',
      headers:body?{'Content-Type':'application/json','X-CSRF-Token':csrf}:{},...(body?{body:JSON.stringify(body)}:{}),signal:active.signal});
-    if(active.signal.aborted||gen!==epoch||!alive())fail();const text=await response.text();if(text.length>65536||!response.ok||active.signal.aborted||gen!==epoch||!alive())fail();return JSON.parse(text);
+    if(!current())fail();const text=await response.text();if(text.length>65536||!response.ok||!current())fail();return JSON.parse(text);
    }finally{clearTimeout(timeout);}
   }
   function bound(v,began){deadline=Math.min(deadline,began+v.remainingMs);clearTimeout(timer);timer=setTimeout(expire,Math.max(1,Math.ceil(deadline-performance.now())));}
