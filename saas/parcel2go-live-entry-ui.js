@@ -18,9 +18,9 @@
   e.preventDefault();if(!alive()||!$('confirmed').checked)return;attempted=true;clearTimeout(timer);
   const body={clientId:$('clientId').value,clientSecret:$('clientSecret').value,requestId:descriptor.requestId,expectedRevision:descriptor.expectedRevision,reviewDigest:descriptor.reviewDigest,confirmed:true};clear();disable();
   try{sessionStorage.setItem('p2g-live-entry-'+descriptor.requestId,'attempted');}catch{body.clientId='';body.clientSecret='';$('status').textContent='Private submission blocked because one-use browser storage is unavailable.';return;}
-  controller=new AbortController();const began=performance.now();let timedOut=false,cause='network unavailable',http=null,diagnostic=null;
-  const timeout=setTimeout(()=>{timedOut=true;controller.abort()},Math.max(1,Math.min(5000,deadline-performance.now())));
-  const current=()=>{if(closed||controller.signal.aborted||performance.now()>=deadline)throw Error()};
+  controller=new AbortController();const began=performance.now(),postDeadline=Math.min(began+5000,deadline);let timedOut=false,cause='network unavailable',http=null,diagnostic=null;
+  const timeout=setTimeout(()=>{timedOut=true;controller.abort()},Math.max(1,postDeadline-performance.now()));
+  const current=()=>{if(performance.now()>=postDeadline){timedOut=true;controller.abort()}if(closed||controller.signal.aborted)throw Error()};
   $('status').textContent='Saving privately. Do not submit again.';
   try{
    const r=await fetch(path,{method:'POST',credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},body:JSON.stringify(body),signal:controller.signal});current();http=httpStatus(r);cause='invalid response';
