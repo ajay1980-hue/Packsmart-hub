@@ -38,13 +38,31 @@ async function setup(t,{delay=0,archives=false,real=false,hook,prepareState=()=>
   saved:()=>f.fake.states.get(W),elapsed:()=>elapsed};
 }
 
-for(const scenario of [{delay:0},{delay:250},{delay:500},{delay:571},{delay:572,uncertain:true},{delay:300,archives:true},{delay:250,real:true,large:true}])test('bounded review persistence '+JSON.stringify(scenario),{timeout:12000},async t=>{
+test('uneven reads, audit archive and slower commit confirm within the existing deadline',async t=>{
+ let committed=false;
+ const c=await setup(t,{prepareState:s=>{
+  s.syntheticPadding='x'.repeat(1600000);
+  s.audit=Array.from({length:300},(_,i)=>({id:'synthetic-audit-'+i,type:'synthetic',actor:'system',detail:{},createdAt:'2026-01-01T00:00:00.000Z'}));
+ },hook:async({row,advance,proceed})=>{
+  advance(row.method==='GET'?(committed?650:450):row.method==='PATCH'?1400:600);
+  const result=await proceed();if(row.method==='PATCH')committed=true;return result;
+ }});
+ c.arm();const response=await c.prepare();
+ const counts={reads:c.trace.filter(x=>x.method==='GET').length,archives:c.trace.filter(x=>x.method==='POST').length,patches:c.trace.filter(x=>x.method==='PATCH').length};
+ t.diagnostic(JSON.stringify({http:response.status,elapsedMs:c.elapsed(),counts,review:c.saved().approvals[0]?.status}));
+ assert.equal(response.status,200);assert.equal(response.payload.status,'pending');
+ assert.deepEqual(counts,{reads:3,archives:1,patches:1});assert.equal(c.elapsed(),3550);
+ assert.equal(c.saved().audit.filter(a=>a.type==='approval_requested').length,1);assert.equal(c.network.length,0);
+ assert.deepEqual(c.saved().connections,c.state.connections);assert.deepEqual(c.saved().parcel2goLiveQuoteRuns,c.state.parcel2goLiveQuoteRuns);
+});
+
+for(const scenario of [{delay:0},{delay:250},{delay:500},{delay:999},{delay:1000,uncertain:true},{delay:300,archives:true},{delay:250,real:true,large:true}])test('bounded review persistence '+JSON.stringify(scenario),{timeout:12000},async t=>{
  const c=await setup(t,{...scenario,prepareState:scenario.large?s=>{s.syntheticPadding='x'.repeat(1500000);}:undefined});c.arm();const start=performance.now(),r=await c.prepare(),elapsedMs=performance.now()-start;c.disarm();
  const row=c.saved().approvals.find(a=>a.requestIdentity?.requestId===c.config.requestId);
  const counts=()=>({reads:c.trace.filter(x=>x.method==='GET').length,patches:c.trace.filter(x=>x.method==='PATCH').length,archives:c.trace.filter(x=>x.method==='POST').length});
  t.diagnostic(JSON.stringify({scenario,clock:scenario.real?'real-timer':'controlled-monotonic',http:r.status,elapsedMs:Math.round(elapsedMs),inputBytes:Buffer.byteLength(JSON.stringify(c.state)),review:row?.status??'none',counts:counts()}));
  assert.equal(r.status,scenario.uncertain?409:200);assert.equal(row.status,'pending');assert.equal(c.network.length,0);
- assert.deepEqual(counts(),{reads:6,patches:1,archives:scenario.archives?5:0});
+ assert.deepEqual(counts(),{reads:3,patches:1,archives:scenario.archives?5:0});
  assert.ok(c.trace.every(x=>x.table==='saas_workspace_state'||['audit_events','runvara_history','operations_briefs'].includes(x.table)),'No normalized mirrors/reporting RPC');
  assert.equal(c.saved().integrationStatus.reporting.status,'degraded');
  assert.deepEqual(c.saved().connections,c.state.connections);assert.deepEqual(c.saved().parcel2goLiveQuoteRuns,c.state.parcel2goLiveQuoteRuns);
@@ -64,7 +82,7 @@ for(const scenario of ['initial-auth-deadline','archive-deadline','activation-ex
    reads++;
    if(scenario==='owner-revoked'&&reads===2)fake.states.get(W).users[0].role='member';
    if(scenario==='foreign-state'&&reads===2)fake.states.get(W).workspace.id='synthetic-other-tenant';
-   const result=await proceed();if(scenario==='initial-auth-deadline'&&reads===1)advance(2000);if(scenario==='late-readback'&&reads===4)advance(4000);return result;
+   const result=await proceed();if(scenario==='initial-auth-deadline'&&reads===1)advance(2000);if(scenario==='late-readback'&&patches>0)advance(4000);return result;
   }
   if(row.method==='POST'){archives++;assert.equal(archives,1,'No archive after deadline');const result=await proceed();advance(4000);return result;}
   assert.equal(row.method,'PATCH');patches++;
@@ -85,6 +103,33 @@ for(const scenario of ['initial-auth-deadline','archive-deadline','activation-ex
  if(scenario==='archive-deadline'){assert.equal(archives,1);assert.equal(patches,0);}
  t.diagnostic(JSON.stringify({scenario,http:response.status,reads,patches,archives,committed}));
 });
+
+for(const phase of ['prepare','decide'])for(const fault of ['inactive','missing-active','role','session-version','password-change','foreign-tenant','receipt','connection','approval','duplicate','missing-row','expired']){
+ test(`fresh ${phase} confirmation refuses ${fault} after commit without another write`,async t=>{
+  let armed=false,committed=false;
+  const c=await setup(t,{hook:async({row,proceed,fake,advance})=>{
+   if(armed&&committed&&row.method==='GET'){
+    const state=fake.states.get(W),user=state.users[0],review=state.approvals[0];
+    if(fault==='inactive')user.active=false;if(fault==='missing-active')delete user.active;
+    if(fault==='role')user.role='member';if(fault==='session-version')user.sessionVersion++;
+    if(fault==='password-change')user.passwordChangeRequired=true;if(fault==='foreign-tenant')state.workspace.id='synthetic-foreign';
+    if(fault==='receipt')state.parcel2goLiveQuoteRuns[0].connectionHash='0'.repeat(64);
+    if(fault==='connection')state.connections.find(x=>x.provider==='parcel2go-live').metadata.account='synthetic-changed';
+    if(fault==='approval')review.payload.quoteInput.parcel.weightGrams='300';
+    if(fault==='duplicate')state.approvals.push(structuredClone(review));if(fault==='missing-row')state.approvals=[];
+    if(fault==='expired')advance(300000);
+   }
+   const result=await proceed();if(armed&&row.method==='PATCH')committed=true;return result;
+  }});
+  const prepared=phase==='decide'?await c.prepare():null;
+  if(prepared)assert.equal(prepared.status,200);
+  armed=true;c.arm();const response=phase==='prepare'?await c.prepare():await c.decide(prepared.payload);
+  assert.equal(response.status,409);assert.equal(committed,true);
+  assert.equal(c.trace.filter(x=>x.method==='PATCH').length,1);assert.equal(c.network.length,0);
+  assert.deepEqual(Object.keys(response.payload),['error']);
+  assert.doesNotMatch(JSON.stringify(response.payload),/synthetic-changed|synthetic-foreign|encryptedCredentials|sessionVersion/);
+ });
+}
 
 test('already-dispatched primary write can settle after the response deadline without replay',{timeout:8000},async t=>{
  let release,entered;const gate=new Promise(r=>release=r),seen=new Promise(r=>entered=r);

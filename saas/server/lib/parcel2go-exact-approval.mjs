@@ -42,22 +42,34 @@ export function prepareExactQuoteApproval({mode='disabled/v1',requestId,operatio
  const approval={id:`approval_${randomUUID()}`,type:PARCEL2GO_EXACT_APPROVAL_TYPE,workspaceId:op.workspaceId,action:'Review one Parcel2Go quote only',reason:'Exact owner review; no booking or spending',financialImpact:0,expectedBenefit:'Compare delivery prices',risk:'Parcel details transmitted only after separate operational admission',source:'parcel2go-exact-review',payload,evidence:[],agentId:auth.session.sub,requestedBy:auth.session.sub,revision:1,history:[],status:'pending',workStatus:'REQUIRES APPROVAL',createdAt:new Date(now).toISOString(),decidedAt:null,decidedBy:null,executedExternally:false,executionStatus:'not_connected'};
  return {requestId,approval,contentSha256:hash({type:approval.type,payload})};
 }
-export async function createExactQuoteApproval({mode='disabled/v1',store,auth,intent,now=Date.now,assertCurrent=()=>{},assertEvidenceCurrent,primaryOnly=false}){
+export async function createExactQuoteApproval({mode='disabled/v1',store,auth,intent,now=Date.now,assertCurrent=()=>{},assertEvidenceCurrent,primaryOnly=false,refreshAuth,onConfirmed}){
  if(mode!=='local-contract/v1'||auth.user.role!=='owner'||auth.user.id!==auth.session.sub)fail();
+ const consolidated=refreshAuth!==undefined;
+ if(consolidated&&(!primaryOnly||!auth.state||typeof refreshAuth!=='function'||typeof onConfirmed!=='function'||typeof assertEvidenceCurrent!=='function')||!consolidated&&onConfirmed!==undefined)fail();
  const frozen=JSON.parse(json(intent));
  if(frozen.contentSha256!==hash({type:frozen.approval?.type,payload:frozen.approval?.payload})||frozen.approval?.status!=='pending'||frozen.approval?.decidedAt!==null||frozen.approval?.decidedBy!==null||frozen.approval?.executedExternally!==false||frozen.approval?.executionStatus!=='not_connected')fail();
  const check=state=>{current(assertCurrent);if(state&&assertEvidenceCurrent!==undefined)current(()=>assertEvidenceCurrent(state));current(assertCurrent);};
+ let confirmedAuth;
+ const readBack=async()=>{
+  check();const fresh=await refreshAuth();check();
+  if(hash(fresh.session)!==hash(auth.session))fail();owner(fresh.state,fresh);
+  confirmedAuth=fresh;return fresh.state;
+ };
  check();
- const result=await createApprovalRequest({store,auth,intent:frozen,admit(state,a){check(state);owner(state,auth);validate(a,auth,now());},beforeSave(state){const guard=state=>{check(state);owner(state,auth);validate(state.approvals.find(a=>a.id===frozen.approval.id),auth,now());};return {...(assertEvidenceCurrent!==undefined?{beforeEffects:guard}:{}),beforeCommit:guard,
+ const result=await createApprovalRequest({store,auth,intent:frozen,...(consolidated?{initialSnapshot:auth.state,readBack}:{}),admit(state,a){check(state);owner(state,auth);validate(a,auth,now());},beforeSave(state){const guard=state=>{check(state);owner(state,auth);validate(state.approvals.find(a=>a.id===frozen.approval.id),auth,now());};return {...(assertEvidenceCurrent!==undefined?{beforeEffects:guard}:{}),beforeCommit:guard,
   ...(primaryOnly?{parcel2goReviewPermit:issueParcel2GoQuoteReviewPersistencePermit({before:auth.state,after:state,auth,approvalId:frozen.approval.id,now:now()})}:{})};}});
  check();
- if(assertEvidenceCurrent!==undefined){
-  // Idempotent replay bypasses admit/beforeSave; it still needs fresh evidence.
-  const state=await store.get(auth.session.workspaceId,{exactSnapshot:true});check(state);owner(state,auth);
+ if(assertEvidenceCurrent!==undefined||consolidated){
+  // Reuse the single post-save authenticated primary read. Even idempotent
+  // replay, which bypasses admit/beforeSave/readBack, must refresh its evidence.
+  const state=consolidated?(confirmedAuth?.state??await readBack()):await store.get(auth.session.workspaceId,{exactSnapshot:true});check(state);owner(state,auth);
   const rows=state.approvals.filter(a=>a.id===result.approval.id);if(rows.length!==1||hash(rows[0])!==hash(result.approval))fail();
  }
  validate(result.approval,auth,now());
  if(result.approval.requestIdentity?.contentSha256!==hash({type:result.approval.type,payload:result.approval.payload}))fail();
+ // Synchronous host callback only, after all checks and outside the save catch.
+ // No authentication or workspace state is added to the serializable result.
+ if(consolidated){current(()=>onConfirmed(confirmedAuth));check();}
  return result;
 }
 function validate(a,auth,now){

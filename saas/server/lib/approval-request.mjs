@@ -56,10 +56,13 @@ export function findApprovalRequest(state, auth, intent) {
 // decided by the existing primary revision CAS, never by that lock alone.
 // Each call attempts at most one save. An uncertain save is followed only by
 // an exact read; absence is not proof the attempted write cannot still commit.
-export async function createApprovalRequest({ store, auth, intent, admit, beforeSave }) {
+export async function createApprovalRequest({ store, auth, intent, admit, beforeSave, initialSnapshot, readBack }) {
   const workspaceId = auth.session.workspaceId;
   const read = () => store.get(workspaceId, { exactSnapshot: true });
-  const state = await read();
+  // Optional host-owned snapshot from fresh authentication under the caller's
+  // workspace lock. Detach it: the protected permit still needs its predecessor.
+  // Generic callers retain the original reads; the primary revision CAS remains.
+  const state = initialSnapshot === undefined ? await read() : structuredClone(initialSnapshot);
   const existing = findApprovalRequest(state, auth, intent);
   if (existing) return { approval: existing, replayed: true };
   const approval = structuredClone(intent.approval);
@@ -80,7 +83,7 @@ export async function createApprovalRequest({ store, auth, intent, admit, before
     acknowledged = true;
   } catch { /* No replay, including on a revision conflict or lost response. */ }
   let current;
-  try { current = await read(); }
+  try { current = await (readBack === undefined ? read() : readBack()); }
   catch { throw fail('APPROVAL_REQUEST_OUTCOME_UNKNOWN', 503); }
   const confirmed = findApprovalRequest(current, auth, intent);
   if (!confirmed) throw fail('APPROVAL_REQUEST_OUTCOME_UNKNOWN', 503);
