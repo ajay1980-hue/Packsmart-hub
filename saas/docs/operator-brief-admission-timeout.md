@@ -15,18 +15,24 @@ already-running command. A local PostgreSQL 17.6 test demonstrated a successful
 was longer. A clock check inside the function cannot preempt a running scan,
 trigger or lock wait. An HTTP AbortSignal is not proof of database rollback.
 
-The smallest supported configuration is **PostgREST transaction-setting hoisting
-with `statement_timeout` included**. PostgREST applies that function setting
-before the main query. Its documented default includes
+The requirement is a **verified finite outer statement deadline**. Retain an
+existing stricter connection/impersonated-role deadline when HTTP qualification
+proves it is effective. Do not change configuration just to match a test profile.
+PostgREST transaction-setting hoisting is another supported mechanism: it applies
+the function setting before the main query. Its documented default includes
 `statement_timeout,plan_filter.statement_cost_limit,default_transaction_isolation`.
 The setting is `db-hoisted-tx-settings`, environment equivalent
 `PGRST_DB_HOISTED_TX_SETTINGS`, or database configuration
 `pgrst.db_hoisted_tx_settings`. Preserve all existing entries. If the deployed
-gateway already has this effective configuration, no configuration change is
-needed; obtain evidence rather than assuming the default.
+gateway already has a verified outer bound, no configuration change is needed.
+Hoisting can override a connection-role timeout: the local comparison below shows
+a 15-second function setting overriding an 8-second connection default. Enabling
+hoisting blindly can therefore weaken a stricter deadline. Missing database-role
+configuration does not establish the effective gateway default or overrides.
 
-This bounds the main database statement at 15 seconds and retains the existing
-five-second timeout for each lock acquisition. It is **not** a 15-second HTTP
+The qualified connection profile bounds the main statement at eight seconds;
+the hoisted-function profile bounds it at 15 seconds. Both retain the existing
+five-second timeout for each lock acquisition. Neither is an end-to-end HTTP
 response guarantee: connection-pool acquisition, transaction setup/commit and
 network delivery have separate bounds. SupabaseStore's request deadline remains
 20–60 seconds (30 seconds by default). Any timeout, disconnect or missing exact
@@ -35,11 +41,12 @@ hold, issue a provider request, or retry admission. Reconcile durable state usin
 the same workspace/job/call/fingerprint. Deterministic Commander remains usable.
 
 For the administrator-only opening installer, send separate protocol commands on
-one database session: `BEGIN`, then `SET LOCAL statement_timeout = '15s'`, then
+one database session: `BEGIN`, then `SET LOCAL statement_timeout = '8s'`, then
 the exact reviewed installer call, then `COMMIT`. On an error, roll back. A lost
 commit acknowledgment requires read-only reconciliation. Do not rely on a SET
 embedded inside the installer or change shared role-wide timeouts. The service
-role remains unable to execute installation.
+role remains unable to execute installation. Eight seconds is the stricter
+qualified profile here; do not raise an existing deadline without separate review.
 
 ## Reproducible local qualification
 
@@ -52,26 +59,40 @@ The database must be empty and named `runvara_atomic_usage_test` on loopback.
 The test refuses an absent or different gateway binary rather than skipping.
 
 `atomic-usage-postgrest-timeout-cases.mjs` reuses the SQL suite's synthetic
-opening fixtures. It starts two isolated gateways with hoisting explicitly on
-and off, fresh local authentication, and no inherited gateway configuration.
+opening fixtures. It starts four isolated gateways, with and without hoisting
+and with and without 8-second connection-role defaults. All use fresh local
+authentication and no inherited gateway configuration. No service-role timeout
+overrides are installed in this fixture; the managed service may differ.
 Temporary triggers delay only selected synthetic workspaces after counter
 writes. Production RPC definitions are unchanged. The cases establish:
 
 - Anonymous admission and service-role installation are denied; governance off
   still denies dispatch.
+- Absent governance denies admission and administrator installation with no
+  accounting effects. Test-only revision-guarded disabled-state preparation
+  creates missing object parents, preserves unrelated JSONB (including numbers
+  beyond JavaScript's exact range), is a no-op when already disabled, and refuses
+  malformed parents, active governance and concurrent revision drift. This is a
+  disposable transaction qualification, not a deployed production config writer.
 - Concurrent HTTP requests cannot exceed the opening-adjusted allowance or
   reacquire dispatch for the same logical call.
-- With hoisting off, the actual function can commit after 16 seconds: a negative
-  control that must succeed to expose the original timeout assumption.
+- With no outer role deadline and hoisting off, the actual function can commit
+  after 16 seconds: a negative control exposing the original timeout assumption.
 - With hoisting on, the actual delayed admission returns SQLSTATE `57014` around
   15 seconds. Reservation and counter updates roll back together; the opening
   balances and another tenant's rows remain unchanged.
+- With an 8-second connection timeout and statement-timeout hoisting excluded,
+  delayed admission returns `57014` around eight seconds and rolls back exact
+  reservation/counter state. The opening, workspace state and measured history
+  remain unchanged. Hoisting the 15-second function setting on another gateway
+  using the same role demonstrably overrides the shorter outer deadline, while
+  the role's 8-second defaults themselves remain unchanged.
 - A concurrent same-workspace waiter reaches SQLSTATE `55P03` around five
   seconds, another tenant progresses, and the delayed holder rolls back.
 - A deliberately lost acknowledgment after a real HTTP commit remains uncertain
   in SupabaseStore, with one submission and a retained hold. A synthetic
   duplicate cannot regain dispatch.
-- A separate outer 15-second administrator deadline rolls back the opening and
+- A separate outer eight-second administrator deadline rolls back the opening and
   seeded counters together, leaving governance disabled.
 
 These are bounded cancellation/transaction tests, not production latency or
@@ -94,12 +115,13 @@ that must safely deny/leave uncertainty, never bypass accounting.
    rollback/counter checks and cleanup evidence. Also verify the application and
    gateway pool/network deadlines and no automatic mutation retry. Do not install
    delay triggers or run mutation probes on production.
-3. If configuration is missing or overridden, approve the smallest addition of
-   `statement_timeout` to the effective hoisted list, with supported config
-   reload/restart and preserved existing entries. Inventory other RPCs declaring
-   function timeouts: hoisting affects them too. If the managed gateway does not
-   expose a supported setting/version, keep paid activation off and obtain a
-   supported configuration path; do not silently fall back to function-local SET.
+3. Retain a verified stricter bound. If no finite outer deadline is established,
+   keep activation off and approve only the smallest supported configuration
+   needed, with reload/restart and preserved existing entries. Qualify precedence
+   first: adding hoisting can override a shorter role limit. Inventory other RPCs
+   affected by any change. If the managed gateway does not expose its supported
+   setting/version, obtain that evidence; do not silently assume function-local
+   SET or a database-role default proves the actual HTTP deadline.
 4. Keep all original verified billing, historical-uncertainty, dispatcher-drain,
    exact policy/model/pricing and finite allowance requirements. A fast query or
    successful timeout test supplies none of that commercial evidence.

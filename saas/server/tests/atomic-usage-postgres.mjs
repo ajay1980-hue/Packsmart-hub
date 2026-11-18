@@ -1160,7 +1160,7 @@ test('explicit zero opening does not loosen a zero allowance and an over-budget 
   }
 });
 
-test('real PostgREST opening admission deadlines, rollback and concurrency', { timeout: 120000 }, async t => {
+test('real PostgREST opening admission deadlines, rollback and concurrency', { timeout: 180000 }, async t => {
   await runPostgrestTimeoutCases(t, { admin, connectionString, openingFixture, openingEvidence,
-    installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects });
+    installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects, saveState, waitUntilBlocked });
 });
