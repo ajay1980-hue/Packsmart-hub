@@ -4,10 +4,12 @@ on:
   pull_request:
     paths:
       - 'saas/server/**'
+      - 'saas/docs/operator-brief-admission-timeout.md'
       - '.github/workflows/atomic-usage-check.yml'
   push:
     paths:
       - 'saas/server/**'
+      - 'saas/docs/operator-brief-admission-timeout.md'
       - '.github/workflows/atomic-usage-check.yml'
 
 permissions:
@@ -60,7 +62,24 @@ jobs:
           exit 1
       - name: Install locked test-only PostgreSQL driver
         run: npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts --no-audit --no-fund
+      - name: Verify pinned local PostgREST for HTTP timeout qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_dir="$RUNNER_TEMP/runvara-atomic-postgrest"
+          mkdir -p "$test_dir"
+          curl --fail --location --proto '=https' --tlsv1.2 --max-time 60 \
+            --output "$test_dir/postgrest.tar.xz" \
+            https://github.com/PostgREST/postgrest/releases/download/v14.5/postgrest-v14.5-linux-static-x86-64.tar.xz
+          echo 'ab5cc7e974d4940447991804588cfb8b3f7b2c57b691f0905df04d51ede69470  '"$test_dir/postgrest.tar.xz" | sha256sum --check --strict
+          test "$(tar -tJf "$test_dir/postgrest.tar.xz")" = postgrest
+          tar -xJf "$test_dir/postgrest.tar.xz" --directory "$test_dir" --no-same-owner --no-same-permissions postgrest
+          echo '39ce04b0597c6b3c3eb4c5f34fe6ab590a2d0172616eeaccf1e4c659b822295a  '"$test_dir/postgrest" | sha256sum --check --strict
+          chmod 700 "$test_dir/postgrest"
+          test "$("$test_dir/postgrest" --version)" = 'PostgREST 14.5'
       - name: Run real PostgreSQL admission, settlement, and privilege tests
+        env:
+          ATOMIC_USAGE_POSTGREST_BIN: ${{ runner.temp }}/runvara-atomic-postgrest/postgrest
         run: npm --prefix saas/server/tests/atomic-usage test
       - name: Verify automation archive PostgreSQL roundtrip bounds
         run: node --test --test-concurrency=1 saas/server/tests/automation-retention-postgres.mjs

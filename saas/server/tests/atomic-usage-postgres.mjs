@@ -6,6 +6,7 @@
  * npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts, then run:
  * ATOMIC_USAGE_ALLOW_DISPOSABLE_TEST_DB=1 \
  * ATOMIC_USAGE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/runvara_atomic_usage_test \
+ * ATOMIC_USAGE_POSTGREST_BIN=/absolute/path/to/verified/postgrest-14.5 \
  * npm --prefix saas/server/tests/atomic-usage test
  * This runner deliberately fails rather than skipping when PostgreSQL is absent.
  */
@@ -18,6 +19,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createAiProvider } from '../lib/ai-provider.mjs';
 import { createStore } from '../lib/store.mjs';
 import { OPERATOR_BRIEF_ENDPOINT, OPERATOR_BRIEF_SHAPE } from '../lib/operator-brief-policy.mjs';
+import { runPostgrestTimeoutCases } from './atomic-usage-postgrest-timeout-cases.mjs';
 
 const require = createRequire(new URL('./atomic-usage/package.json', import.meta.url));
 const { Client } = require('pg');
@@ -1156,4 +1158,9 @@ test('explicit zero opening does not loosen a zero allowance and an over-budget 
     denied(await admit(request(f)));
     assert.equal((await reservations(f)).length, 0);
   }
+});
+
+test('real PostgREST opening admission deadlines, rollback and concurrency', { timeout: 120000 }, async t => {
+  await runPostgrestTimeoutCases(t, { admin, connectionString, openingFixture, openingEvidence,
+    installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects });
 });
