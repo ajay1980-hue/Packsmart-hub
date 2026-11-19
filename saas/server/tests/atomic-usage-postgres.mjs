@@ -20,6 +20,7 @@ import { createAiProvider } from '../lib/ai-provider.mjs';
 import { createStore } from '../lib/store.mjs';
 import { OPERATOR_BRIEF_ENDPOINT, OPERATOR_BRIEF_SHAPE } from '../lib/operator-brief-policy.mjs';
 import { runPostgrestTimeoutCases } from './atomic-usage-postgrest-timeout-cases.mjs';
+import { runFutureAllowanceCases, futureFixture, futureRequest, reserveFuture, futureEvidence, installFuture, enableFuture } from './future-allowance-postgres-cases.mjs';
 
 const require = createRequire(new URL('./atomic-usage/package.json', import.meta.url));
 const { Client } = require('pg');
@@ -163,6 +164,7 @@ before(async () => {
   assert.ok(migration.includes('runvara_settle_provider_usage'), 'Atomic usage migration must be complete');
   await admin.query(migration);
   await admin.query(await readFile(new URL('../supabase/migrations/20261118185735_verified_provider_usage_opening.sql', import.meta.url), 'utf8'));
+  await admin.query(await readFile(new URL('../supabase/migrations/20261119060000_future_provider_allowance.sql', import.meta.url), 'utf8'));
 }, { timeout: 30_000 });
 after(async () => { await Promise.all([...clients].map(c => close(c).catch(() => {}))); });
 
@@ -1023,7 +1025,9 @@ test('failed second counter insert rolls back opening evidence and every counter
   finally { await admin.query(`DROP TRIGGER synthetic_opening_failure ON ${W}; DROP FUNCTION public.synthetic_opening_failure()`); }
 });
 
-for (const scenario of ['complete', 'unverified-opening', 'lost-reservation-ack', 'unknown-provider-outcome']) {
+for (const scenario of ['complete', 'unverified-opening', 'lost-reservation-ack', 'unknown-provider-outcome',
+  'future-complete','future-lost-reservation-ack','future-unknown-provider-outcome','future-disabled',
+  'future-account-mismatch','future-late-ack','future-policy-change']) {
   test(`real operator brief + SupabaseStore + PostgreSQL opening, mocked transport: ${scenario}`, async () => {
     const f = await openingFixture();
     f.governance.providers.openai.allowedModels = ['gpt-5.6-luna'];
@@ -1035,18 +1039,22 @@ for (const scenario of ['complete', 'unverified-opening', 'lost-reservation-ack'
       maxBillableInputTokens: 4, maxBillableOutputTokens: 64, checkedAt: Date.now() - 1000,
       expiresAt: Date.now() + 300000, cacheWriteMode: 'reported' } };
     await saveState(f);
-    let posts = 0, reserveCalls = 0;
+    let posts = 0, reserveCalls = 0, clockOffset=0;
+    const isFuture=scenario.startsWith('future-');
     const store = createStore({ SUPABASE_URL: 'https://synthetic-opening.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-test-key-only' }, {
       fetchImpl: async (url, options) => {
         const parsed = new URL(url), path = parsed.pathname;
         const p = options.body ? JSON.parse(options.body) : null;
         if (path === '/rest/v1/rpc/runvara_reserve_provider_usage') {
           reserveCalls++;
-          const result = await using('service_role', c => reserve(c, { workspaceId: p.p_workspace_id, jobId: p.p_job_id,
+          const result = await using('service_role', c => (p.p_future_grant_id ? reserveFuture : reserve)(c, { workspaceId: p.p_workspace_id, jobId: p.p_job_id,
             workerId: p.p_worker_id, attempt: p.p_job_attempt, callKey: p.p_call_key, fingerprint: p.p_request_fingerprint,
             provider: p.p_provider, adapter: p.p_adapter_id, model: p.p_model, input: p.p_input_token_bound,
-            output: p.p_output_token_bound, pricing: p.p_pricing_version, validUntil: p.p_route_valid_until }));
-          if (scenario === 'lost-reservation-ack' && result.dispatch_allowed) throw new Error('Synthetic lost acknowledgement AFTER commit');
+            output: p.p_output_token_bound, pricing: p.p_pricing_version, validUntil: p.p_route_valid_until,
+            futureGrantId:p.p_future_grant_id,credentialDigest:p.p_credential_digest }));
+          if (scenario.endsWith('lost-reservation-ack') && result.dispatch_allowed) throw new Error('Synthetic lost acknowledgement AFTER commit');
+          if (scenario==='future-late-ack')clockOffset=310000;
+          if (scenario==='future-policy-change'){f.governance.futureAllowance.projectId='proj_changed';await saveState(f);}
           return Response.json(result);
         }
         if (path === '/rest/v1/rpc/runvara_settle_provider_usage') {
@@ -1067,13 +1075,16 @@ for (const scenario of ['complete', 'unverified-opening', 'lost-reservation-ack'
         assert.fail(`Unexpected synthetic transport path: ${path}`);
       }
     });
-    const provider = createAiProvider({ store, env: { RUNVARA_OPENAI_ENABLED: 'true', OPENAI_API_KEY: 'synthetic-provider-key-only', RUNVARA_AI_MAX_OUTPUT_TOKENS: '64' },
-      fetchImpl: async url => {
+    const provider = createAiProvider({ store, now:()=>Date.now()+clockOffset, env: { RUNVARA_OPENAI_ENABLED: 'true',
+      RUNVARA_AI_FUTURE_ALLOWANCE_ENABLED:scenario==='future-disabled'?'false':'true',
+      OPENAI_API_KEY:scenario==='future-account-mismatch'?'synthetic-wrong-provider-key':'synthetic-provider-key-only', RUNVARA_AI_MAX_OUTPUT_TOKENS: '64' },
+      fetchImpl: async (url,init) => {
         assert.equal(url, OPERATOR_BRIEF_ENDPOINT);
         const rows = await reservations(f);
         assert.equal(rows.length, 1); assert.equal(rows[0].status, 'held', 'Committed hold must precede even mocked provider transport');
         posts++;
-        if (scenario === 'unknown-provider-outcome') throw new Error('Synthetic lost provider response');
+        if (isFuture){assert.equal(init.headers['OpenAI-Organization'],'org_synthetic');assert.equal(init.headers['OpenAI-Project'],'proj_synthetic');}
+        if (scenario.endsWith('unknown-provider-outcome')) throw new Error('Synthetic lost provider response');
         const result = Response.json({ id: 'synthetic-response', object: 'response', model: 'gpt-5.6-luna', status: 'completed', output_text: 'Synthetic brief',
           usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } });
         Object.defineProperty(result, 'url', { value: OPERATOR_BRIEF_ENDPOINT });
@@ -1087,26 +1098,37 @@ for (const scenario of ['complete', 'unverified-opening', 'lost-reservation-ack'
       workerId: originalJob.worker_id, attempt: originalJob.attempts, createdAt: originalJob.created_at.toISOString(), leaseUntil: originalJob.lease_until.toISOString() };
     assert.equal((await provider.enhanceCommander(args)).reason, 'AI_GOVERNANCE_NOT_CONFIGURED');
     assert.equal(posts, 0); assert.equal(reserveCalls, 0, 'Default disabled path does not acquire a reservation');
-    await enableOpening(f, scenario === 'unverified-opening' ? { accountingStartAt: Date.now() } : await installOpening(f, await openingEvidence(f)));
+    if(isFuture)await enableFuture({admin,saveState},f,await installFuture({admin},f,await futureEvidence({admin},f)));
+    else await enableOpening(f, scenario === 'unverified-opening' ? { accountingStartAt: Date.now() } : await installOpening(f, await openingEvidence(f)));
     await admin.query("UPDATE public.runvara_agent_jobs SET ai_provider='openai',ai_model='gpt-5.6-luna' WHERE workspace_id=$1", [f.workspaceId]);
     const job = (await admin.query('SELECT * FROM public.runvara_agent_jobs WHERE id=$1', [f.jobs[0]])).rows[0];
     args.jobContext = { workspaceId: f.workspaceId, jobId: job.id, type: job.type, status: job.status,
       workerId: job.worker_id, attempt: job.attempts, createdAt: job.created_at.toISOString(), leaseUntil: job.lease_until.toISOString() };
     const result = await provider.enhanceCommander(args);
+    if (isFuture){
+      assert.equal(result.effects.accountingScope,'additional_after_cutover');
+      assert.deepEqual(result.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+      if(['future-disabled','future-account-mismatch','future-late-ack','future-policy-change'].includes(scenario)){
+        assert.equal(result.used,false);assert.equal(posts,0);
+        assert.equal(reserveCalls,['future-late-ack','future-policy-change'].includes(scenario)?1:0);
+        assert.equal((await reservations(f)).length,reserveCalls);return;
+      }
+    }
     if (scenario === 'unverified-opening') {
       assert.equal(result.reason, 'AI_ACCOUNTING_BASELINE_UNVERIFIED'); assert.equal(posts, 0);
       assert.equal((await reservations(f)).length, 0); assert.equal(reserveCalls, 1);
       assert.equal(args.run.summary, 'Deterministic Commander remains available'); return;
     }
-    assert.equal(result.used, scenario === 'complete', result.reason);
-    assert.equal(posts, scenario === 'lost-reservation-ack' ? 0 : 1);
+    const completed=scenario.endsWith('complete'),lostAck=scenario.endsWith('lost-reservation-ack');
+    assert.equal(result.used, completed, result.reason);
+    assert.equal(posts, lostAck ? 0 : 1);
     assert.equal(reserveCalls, 1);
-    assert.equal((await reservations(f))[0].status, scenario === 'complete' ? 'settled' : scenario === 'lost-reservation-ack' ? 'held' : 'uncertain');
-    assert.equal((await measured(f)).length, scenario === 'complete' ? 1 : 0);
+    assert.equal((await reservations(f))[0].status, completed ? 'settled' : lostAck ? 'held' : 'uncertain');
+    assert.equal((await measured(f)).length, completed ? 1 : 0);
     assert.equal((await provider.enhanceCommander(args)).used, false, 'Same job cannot acquire a second dispatch');
-    assert.equal(posts, scenario === 'lost-reservation-ack' ? 0 : 1);
+    assert.equal(posts, lostAck ? 0 : 1);
     assert.equal(args.run.summary, 'Deterministic Commander remains available');
-    if (scenario !== 'complete') { assert.equal(result.effects.costStatus, 'unknown'); await assertExposure(f, { settled_cost_micros: 20_000, held_cost_micros: 10_000 }); }
+    if (!completed) { assert.equal(result.effects.costStatus, 'unknown'); await assertExposure(f, { settled_cost_micros: isFuture?0:20_000, held_cost_micros: 10_000 }); }
   });
 }
 
@@ -1160,7 +1182,14 @@ test('explicit zero opening does not loosen a zero allowance and an over-budget 
   }
 });
 
+test('future-only allowance integrated with the real reservation and settlement functions', {timeout:60000}, async t=>{
+  await runFutureAllowanceCases(t,{admin,using,openingFixture,openingEvidence,installOpening,request,reserve,windows,reservations,
+    saveState,legacyRow,measured,finish,receipt,waitUntilBlocked});
+});
+
 test('real PostgREST opening admission deadlines, rollback and concurrency', { timeout: 180000 }, async t => {
   await runPostgrestTimeoutCases(t, { admin, connectionString, openingFixture, openingEvidence,
-    installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects, saveState, waitUntilBlocked });
+    installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects, saveState, waitUntilBlocked,
+    futureFixture: async()=>futureFixture({admin,openingFixture,saveState}),
+    futureRequest:f=>futureRequest(request,f) });
 });

@@ -18,7 +18,8 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const input = r => ({ jobId: r.jobId, workerId: r.workerId, jobAttempt: r.attempt,
   callKey: r.callKey, requestFingerprint: r.fingerprint, provider: r.provider,
   adapterId: r.adapter, model: r.model, inputTokenBound: r.input,
-  outputTokenBound: r.output, pricingVersion: r.pricing, routeValidUntil: r.validUntil });
+  outputTokenBound: r.output, pricingVersion: r.pricing, routeValidUntil: r.validUntil,
+  ...(r.futureGrantId ? {futureGrantId:r.futureGrantId,credentialDigest:r.credentialDigest} : {}) });
 async function freePort() {
   const server = net.createServer();
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -161,6 +162,14 @@ export async function runPostgrestTimeoutCases(t, api) {
     const bounded = await gateway('hoisting-enabled', true), unbounded = await gateway('hoisting-disabled', false);
     const strict = await gateway('connection-8s-no-statement-hoisting', false, strictRole);
     const overridden = await gateway('connection-8s-hoisted-function-15s', true, strictRole);
+    await t.test('future grant overload is reachable through real PostgREST and the old signature cannot bypass it', async()=>{
+      const f=await api.futureFixture(),r=api.futureRequest(f);
+      const old=await reserve(strict,{...r,futureGrantId:undefined,credentialDigest:undefined});
+      assert.equal(old.status,200);assert.equal(old.value.reason,'AI_FUTURE_ALLOWANCE_UNVERIFIED');
+      const admitted=await reserve(strict,r);
+      assert.equal(admitted.status,200);assert.equal(admitted.value.dispatch_allowed,true);
+      const again=await reserve(strict,r);assert.equal(again.value.dispatch_allowed,false);assert.equal(again.value.reason,'AI_LOGICAL_CALL_EXISTS');
+    });
     const strictSettings = async () => (await admin.query('SELECT rolconfig FROM pg_roles WHERE rolname=$1', [strictRole])).rows[0].rolconfig;
     assert.deepEqual((await strictSettings()).sort(), ['lock_timeout=8s', 'statement_timeout=8s']);
     // This models the supplied connection defaults, not unknown managed overrides.

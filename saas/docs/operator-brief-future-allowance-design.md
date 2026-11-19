@@ -1,5 +1,9 @@
 # Future-only allowance: disabled local design experiment
 
+The subsequent [local production-path implementation](operator-brief-future-allowance.md)
+now reuses existing reservation rows instead of deploying this laboratory's
+counter schema. This file and its experiment remain the original design evidence.
+
 This is a proposal and disposable database qualification, not a release migration,
 an accounting attestation or an executable provider integration. The SQL lives in
 `server/tests/future-allowance-lab`, outside the migrations directory. It refuses

@@ -81,7 +81,7 @@ export function providerUsageMonth(workspaceId, admissionMonth) {
 export function providerUsageReservationParams(workspaceId, input) {
   text(workspaceId);
   record(input, ['jobId', 'workerId', 'jobAttempt', 'callKey', 'requestFingerprint', 'provider',
-    'adapterId', 'model', 'inputTokenBound', 'outputTokenBound', 'pricingVersion', 'routeValidUntil']);
+    'adapterId', 'model', 'inputTokenBound', 'outputTokenBound', 'pricingVersion', 'routeValidUntil','futureGrantId','credentialDigest']);
   const jobId = text(input.jobId);
   const workerId = text(input.workerId);
   if (workerId.length < 8 || input.callKey !== `${jobId}:operator-brief:v1`) fail();
@@ -98,7 +98,10 @@ export function providerUsageReservationParams(workspaceId, input) {
     p_input_token_bound: integer(input.inputTokenBound, 1_000_000),
     p_output_token_bound: integer(input.outputTokenBound, 128_000),
     p_pricing_version: text(input.pricingVersion, /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/),
-    p_route_valid_until: timestamp(input.routeValidUntil)
+    p_route_valid_until: timestamp(input.routeValidUntil),
+    ...(input.futureGrantId !== undefined || input.credentialDigest !== undefined ? {
+      p_future_grant_id: text(input.futureGrantId), p_credential_digest: text(input.credentialDigest,HASH)
+    } : {})
   };
 }
 
@@ -148,7 +151,8 @@ export function providerUsageSettlementParams(workspaceId, input) {
 const RESERVATION_REASONS = new Set(['AI_LOGICAL_CALL_EXISTS', 'AI_JOB_LEASE_INVALID', 'AI_ROUTE_EXPIRED',
   'AI_GOVERNANCE_NOT_CONFIGURED', 'AI_ACCOUNTING_BASELINE_UNVERIFIED', 'AI_PROVIDER_NOT_ALLOWED',
   'AI_PROVIDER_OVERRUN_BLOCKED', 'AI_POLICY_LIMIT_INVALID', 'AI_PRICING_UNVERIFIED', 'AI_PRICING_EXPIRED',
-  'AI_COST_BOUND_INVALID', 'AI_BUDGET_EXCEEDED', 'AI_ADMISSION_EVIDENCE_EXPIRED', 'AI_ADMISSION_WINDOW_CHANGED']);
+  'AI_COST_BOUND_INVALID', 'AI_BUDGET_EXCEEDED', 'AI_ADMISSION_EVIDENCE_EXPIRED', 'AI_ADMISSION_WINDOW_CHANGED',
+  'AI_FUTURE_ALLOWANCE_UNVERIFIED','AI_FUTURE_ALLOWANCE_EXHAUSTED']);
 export function providerUsageReservationResult(value, params) {
   try {
     record(value, ['dispatch_allowed', 'reservation_id', 'status', 'window_start', 'reserved_requests',

@@ -39,6 +39,10 @@ function aiEffects(value) {
       || typeof value.accountedCostMicros === 'string' && /^(?:0|[1-9][0-9]{0,59})$/.test(value.accountedCostMicros));
   result.costStatus = noCost ? 'not_incurred' : accounted ? 'accounted' : 'unknown';
   result.accountedCostMicros = noCost ? 0 : accounted ? value.accountedCostMicros : null;
+  if (value?.accountingScope === 'additional_after_cutover') {
+    result.accountingScope = 'additional_after_cutover';
+    result.historicalExposure = { status:'unknown',costMicros:null,reconciled:false };
+  }
   return result;
 }
 const objectiveError = (code, status = 409) => Object.assign(new Error(code), { code, status });

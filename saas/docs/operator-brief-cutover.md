@@ -1,5 +1,10 @@
 # Governed operator-brief cutover
 
+An optional [future-only additional allowance](operator-brief-future-allowance.md)
+has a separate explicit accounting contract for unresolved historical exposure.
+It never supplies the reconciled-history attestations required by the verified
+opening described below, and remains disabled without its own opt-in and grant.
+
 ## Scope and behavior change
 
 The queued `agent_command` operator-brief enhancement now has one server-side dispatch boundary through the existing stage-5 atomic reservation and settlement RPCs. A configured OpenAI key and enabled flag no longer permit an unreserved request. Missing governance, verified accounting baseline, verified model bounds, pricing, current job lease or durable accounting blocks the paid enhancement. Existing credentials and provider settings are preserved. No policy or model is enabled by this change.
