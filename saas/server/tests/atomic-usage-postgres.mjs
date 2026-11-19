@@ -1190,6 +1190,6 @@ test('future-only allowance integrated with the real reservation and settlement 
 test('real PostgREST opening admission deadlines, rollback and concurrency', { timeout: 180000 }, async t => {
   await runPostgrestTimeoutCases(t, { admin, connectionString, openingFixture, openingEvidence,
     installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects, saveState, waitUntilBlocked,
-    futureFixture: async()=>futureFixture({admin,openingFixture,saveState}),
-    futureRequest:f=>futureRequest(request,f) });
+    futureFixture: (options,patch)=>futureFixture({admin,openingFixture,saveState},options,patch),
+    futureRequest:(f,index,patch)=>futureRequest(request,f,index,patch) });
 });

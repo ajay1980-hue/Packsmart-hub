@@ -92,6 +92,12 @@ writes. Production RPC definitions are unchanged. The cases establish:
 - A deliberately lost acknowledgment after a real HTTP commit remains uncertain
   in SupabaseStore, with one submission and a retained hold. A synthetic
   duplicate cannot regain dispatch.
+- The optional future-only allowance is also exercised under the 15-second
+  hoisted profile with an 8-second connection default. A timed-out holder rolls
+  back new writes while preserving previous consumption and its immutable grant;
+  a concurrent waiter is bounded and another tenant progresses. Grant expiry
+  during a nine-second wait still denies admission. A lost acknowledgment retains
+  the consumed allowance and blocks both duplicate dispatch and an excess call.
 - A separate outer eight-second administrator deadline rolls back the opening and
   seeded counters together, leaving governance disabled.
 

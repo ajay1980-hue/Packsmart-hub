@@ -93,7 +93,18 @@ export async function runPostgrestTimeoutCases(t, api) {
   const stateRow = async f => (await admin.query('SELECT state,updated_at::text AS revision FROM public.saas_workspace_state WHERE workspace_id=$1', [f.workspaceId])).rows[0];
   const snapshot = async f => ({ windows: await windows(f), reservations: await reservations(f), state: await stateRow(f),
     openings: (await admin.query('SELECT * FROM public.runvara_provider_usage_openings WHERE workspace_id=$1', [f.workspaceId])).rows,
+    grants: (await admin.query('SELECT * FROM public.runvara_provider_future_allowances WHERE workspace_id=$1', [f.workspaceId])).rows,
     usage: (await admin.query('SELECT * FROM public.runvara_ai_usage WHERE workspace_id=$1 ORDER BY id', [f.workspaceId])).rows });
+  function assertFutureCounters(rows, r = null) {
+    assert.deepEqual(rows.map(row => row.scope_key).sort(), ['provider:openai', 'tenant']);
+    const expected = { held_requests: r ? 1 : 0, held_input_tokens: r?.input ?? 0,
+      held_output_tokens: r?.output ?? 0, held_total_tokens: r ? r.input + r.output : 0,
+      held_cost_micros: r ? 10000 : 0, settled_requests: 0, settled_input_tokens: 0,
+      settled_output_tokens: 0, settled_total_tokens: 0, settled_cost_micros: 0 };
+    for (const row of rows) for (const [key, value] of Object.entries(expected)) {
+      assert.equal(BigInt(row[key]), BigInt(value), `${row.scope_key}.${key}`);
+    }
+  }
   // Disposable qualification only, not a production config writer or an RPC.
   // Native JSONB merges preserve unrelated numeric precision and missing parents.
   async function prepareDisabled(client, f, revision) {
@@ -299,6 +310,77 @@ export async function runPostgrestTimeoutCases(t, api) {
       assert.equal(result.status, 500); timed(result, '8s role overridden by 15s hoisting', '57014', 14500);
       assert.deepEqual(await snapshot(f), before);
       assert.deepEqual((await strictSettings()).sort(), ['lock_timeout=8s', 'statement_timeout=8s']);
+    });
+
+    await t.test('future allowance under the 15s profile rolls back late writes, bounds a concurrent waiter and isolates another tenant', async () => {
+      const f = await api.futureFixture({ count: 3 }), other = await api.futureFixture();
+      assert.equal((await reserve(overridden, api.futureRequest(f))).value.dispatch_allowed, true);
+      const before = await snapshot(f), otherBefore = await snapshot(other);
+      await slow(f);
+      const pending = reserve(overridden, api.futureRequest(f, 1));
+      try {
+        await sleeping(strictRole);
+        const [waiter, independent] = await Promise.all([
+          reserve(overridden, api.futureRequest(f, 2)), reserve(overridden, api.futureRequest(other))
+        ]);
+        assert.equal(waiter.status, 500); timed(waiter, 'future allowance 5s waiter', '55P03', 4500, 7500);
+        assert.equal(independent.status, 200); assert.equal(independent.value.dispatch_allowed, true);
+        assert.ok(independent.ms < 5000);
+      } finally {
+        const holder = await pending;
+        assert.equal(holder.status, 500); timed(holder, 'future allowance 15s holder rollback', '57014', 14500);
+      }
+      assert.deepEqual(await snapshot(f), before, 'Prior consumption, grant, history and unrelated state survive rollback');
+      const otherAfter = await snapshot(other);
+      assert.deepEqual(otherAfter.grants, otherBefore.grants);
+      assert.deepEqual(otherAfter.state, otherBefore.state);
+      assert.deepEqual(otherAfter.usage, otherBefore.usage);
+      assert.equal(otherAfter.reservations.length, 1);
+      assertFutureCounters(otherAfter.windows, api.futureRequest(other));
+    });
+
+    await t.test('future grant expiry during a wait beyond 8s still denies admission under the 15s profile', async () => {
+      const f = await api.futureFixture({}, { expiresAt: Date.now() + 7000 });
+      const before = await snapshot(f);
+      await slow(f, 9);
+      const result = await reserve(overridden, api.futureRequest(f, 0, {
+        validUntil: new Date(f.installed.futureAllowance.expiresAt).toISOString()
+      }));
+      observations.push({ name: 'future expiry during 9s wait', status: result.status, reason: result.value.reason, ms: result.ms });
+      assert.equal(result.status, 200); assert.equal(result.value.dispatch_allowed, false);
+      assert.equal(result.value.reason, 'AI_ADMISSION_EVIDENCE_EXPIRED');
+      assert.ok(result.ms >= 8500);
+      const after = await snapshot(f);
+      assert.deepEqual(after.reservations, before.reservations); assert.deepEqual(after.grants, before.grants);
+      assert.deepEqual(after.state, before.state); assert.deepEqual(after.usage, before.usage);
+      assertFutureCounters(after.windows);
+    });
+
+    await t.test('future allowance lost acknowledgement under the 15s profile keeps its single consumed hold', async () => {
+      const f = await api.futureFixture({}, { limits: { maxRequests: 1, maxInputTokens: 100,
+        maxOutputTokens: 100, maxTotalTokens: 200, maxCostMicros: 10000 } });
+      const before = await snapshot(f), r = api.futureRequest(f); let sends = 0;
+      const store = createStore({ SUPABASE_URL: overridden.url, SUPABASE_SERVICE_ROLE_KEY: token }, {
+        fetchImpl: async (url, options) => {
+          const parsed = new URL(url); assert.equal(parsed.origin, overridden.url);
+          assert.equal(parsed.pathname, '/rest/v1/rpc/runvara_reserve_provider_usage'); sends++;
+          const response = await fetch(overridden.url + parsed.pathname.slice('/rest/v1'.length), options);
+          assert.equal(response.status, 200); assert.equal((await response.json()).dispatch_allowed, true);
+          throw new Error('Synthetic future allowance lost acknowledgement after real commit');
+        }
+      });
+      await assert.rejects(store.reserveProviderUsage(f.workspaceId, input(r)), /AI_USAGE_RESERVATION_UNCERTAIN/);
+      assert.equal(sends, 1);
+      // Deliberate fixture requests verify refusal, never an application retry.
+      const duplicate = await reserve(overridden, r);
+      assert.equal(duplicate.value.dispatch_allowed, false); assert.equal(duplicate.value.reason, 'AI_LOGICAL_CALL_EXISTS');
+      const next = await reserve(overridden, api.futureRequest(f, 1));
+      assert.equal(next.value.dispatch_allowed, false); assert.equal(next.value.reason, 'AI_FUTURE_ALLOWANCE_EXHAUSTED');
+      const after = await snapshot(f);
+      assert.equal(after.reservations.length, 1); assert.equal(after.reservations[0].status, 'held');
+      assertFutureCounters(after.windows, r);
+      assert.deepEqual(after.grants, before.grants); assert.deepEqual(after.state, before.state);
+      assert.deepEqual(after.usage, before.usage);
     });
 
     await t.test('concurrent workspace waiter hits 5s lock limit; other tenant progresses; late holder rolls back', async () => {
