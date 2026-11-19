@@ -89,11 +89,15 @@ approval. The user must separately approve an actual amount, scope and expiry.
 
 The runtime hashes its actual configured credential, binds grant/account policy in
 the request fingerprint, sends exact `OpenAI-Organization` and `OpenAI-Project`
-headers, and limits the request deadline by grant expiry. SQL independently checks
+headers, and limits admission and transmission start by grant expiry. SQL independently checks
 the installed grant, exact copied policy, credential digest, lease/job creation,
 provider, legacy fingerprint and all ceilings under the existing lock order.
 After reservation, the runtime freshly rechecks policy, credential, activation and
 job evidence before POST. Lost acknowledgements never authorize dispatch or retry.
+Grant expiry blocks new reservations and new transmission. A request already
+transmitted against its full reservation may complete and settle after expiry
+under the existing 45-second transport bound. Uncertainty retains the reservation;
+expiry does not authorize cancellation, refund or replay.
 If the response supplies contradictory organization metadata, it remains uncertain.
 The account headers follow the [OpenAI authentication contract](https://developers.openai.com/api/reference/overview#authentication).
 

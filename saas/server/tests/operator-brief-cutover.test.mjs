@@ -405,3 +405,22 @@ test('contradictory provider organisation evidence retains uncertainty without r
   assert.equal(r.effects.uncertainSubmissions,1);assert.equal(r.effects.costStatus,'unknown');
   assert.equal(f.settlements[0].outcome,'uncertain');assert.equal(f.reservations.size,1);
 });
+
+test('already transmitted future requests can settle after expiry; uncertain outcomes retain exposure',async()=>{
+  for(const uncertain of [false,true]){
+    const f=futureFixture(),send=f.fetch;
+    f.advance(49999); // One millisecond of admission time remains before sending.
+    f.fetch=async(...args)=>{
+      const response=await send(...args);
+      f.advance(2); // Expiry crosses well within the existing transport bound.
+      if(uncertain)throw new Error('Synthetic lost response after grant expiry');
+      return response;
+    };
+    const result=await f.run();
+    assert.equal(result.used,!uncertain);assert.equal(f.posts.length,1);assert.equal(f.reservations.size,1);
+    assert.equal(f.settlements.length,1);assert.equal(f.settlements[0].outcome,uncertain?'uncertain':'complete');
+    assert.equal(result.effects.costStatus,uncertain?'unknown':'accounted');
+    assert.deepEqual(result.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+    assert.equal((await f.run()).used,false);assert.equal(f.posts.length,1);assert.equal(f.settlements.length,1);
+  }
+});
