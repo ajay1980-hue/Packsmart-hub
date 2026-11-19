@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createAiProvider } from '../lib/ai-provider.mjs';
-import { OPERATOR_BRIEF_ADAPTER, OPERATOR_BRIEF_ENDPOINT, OPERATOR_BRIEF_SHAPE } from '../lib/operator-brief-policy.mjs';
+import { createAiProvider, createRoutingBoundAiProvider } from '../lib/ai-provider.mjs';
+import { OPERATOR_BRIEF_ADAPTER, OPERATOR_BRIEF_ENDPOINT, OPERATOR_BRIEF_SHAPE, briefDigest } from '../lib/operator-brief-policy.mjs';
+import { futureAllowancePolicy } from '../lib/future-allowance.mjs';
+import { providerUsageReservationParams,providerUsageReservationResult } from '../lib/usage-governance.mjs';
 
 const NOW = Date.parse('2026-11-01T00:01:00.000Z');
 const MODEL = 'gpt-5.6-luna';
@@ -329,4 +331,96 @@ test('imported evidence wording and model context remain bounded without forward
   oversized.args.run = { summary: '\u0001'.repeat(5000), priorities: Array.from({ length: 8 }, () => ({ agentId: 'finance', action: '\u0001'.repeat(1000) })) };
   assert.equal((await oversized.run()).reason, 'AI_REQUEST_BYTES_EXCEEDED');
   assert.equal(oversized.posts.length, 0);
+});
+
+function futureFixture() {
+  const f=fixture(),g=f.state.aiEconomics.governance;
+  g.accountingStartAt=NOW-1000;g.configuredAt=NOW;
+  g.futureAllowance={version:1,grantId:'synthetic-grant',currency:'USD',scope:'additional_after_cutover',
+    historicalExposure:{status:'unknown',costMicros:null,reconciled:false},evidenceHash:briefDigest('synthetic-evidence'),
+    expiresAt:NOW+50000,legacyDispatchStoppedAt:NOW-60000,credentialDigest:briefDigest(f.env.OPENAI_API_KEY),
+    organizationId:'org_synthetic',projectId:'proj_synthetic',limits:limits(),accountingStartAt:NOW-1000};
+  f.env.RUNVARA_AI_FUTURE_ALLOWANCE_ENABLED='true';return f;
+}
+
+test('future allowance defaults off independently of the existing provider flag',async()=>{
+  const f=futureFixture();delete f.env.RUNVARA_AI_FUTURE_ALLOWANCE_ENABLED;
+  const r=await f.run();assert.equal(r.reason,'AI_FUTURE_ALLOWANCE_DISABLED');assert.equal(f.events.length,0);
+  assert.deepEqual(r.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+});
+
+test('future allowance binds the credential and explicit account headers, caps expiry and retains historical unknown',async()=>{
+  const f=futureFixture(),r=await f.run();assert.equal(r.used,true);
+  const input=f.reservations.values().next().value.input;
+  assert.equal(input.futureGrantId,'synthetic-grant');assert.equal(input.credentialDigest,briefDigest(f.env.OPENAI_API_KEY));
+  assert.equal(input.routeValidUntil,new Date(NOW+50000).toISOString());
+  assert.equal(f.posts[0].init.headers['OpenAI-Organization'],'org_synthetic');assert.equal(f.posts[0].init.headers['OpenAI-Project'],'proj_synthetic');
+  assert.equal(r.effects.accountingScope,'additional_after_cutover');assert.deepEqual(r.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+  assert.equal(r.effects.costStatus,'accounted');
+  const output=JSON.stringify(r);for(const privateValue of [f.env.OPENAI_API_KEY,input.credentialDigest,'org_synthetic','proj_synthetic'])assert.ok(!output.includes(privateValue));
+});
+
+test('future accounting rejects malformed proof, header injection, invented reconciliation and changed credentials before reservation',async()=>{
+  for(const change of [f=>{f.env.OPENAI_API_KEY='different-synthetic-credential';},
+    f=>{f.state.aiEconomics.governance.futureAllowance.historicalExposure.costMicros=0;},
+    f=>{f.state.aiEconomics.governance.futureAllowance.historicalExposure.reconciled=true;},
+    f=>{f.state.aiEconomics.governance.futureAllowance.organizationId='org\r\ninjected';},
+    f=>{f.state.aiEconomics.governance.futureAllowance.expiresAt=NOW;},
+    f=>{f.state.aiEconomics.governance.futureAllowance.limits.maxRequests=NaN;},
+    f=>{f.state.aiEconomics.governance.futureAllowance.accountingStartAt=NOW+1;},
+    f=>{delete f.state.aiEconomics.governance.futureAllowance.projectId;}]) {
+    const f=futureFixture();change(f);assert.equal((await f.run()).used,false);assert.deepEqual(f.events,[]);
+  }
+  const f=futureFixture();let evaluated=0;
+  Object.defineProperty(f.state.aiEconomics.governance.futureAllowance,'projectId',{enumerable:true,get(){evaluated++;return 'bad';}});
+  assert.equal(futureAllowancePolicy(f.state.aiEconomics.governance,NOW).allowed,false);assert.equal(evaluated,0);
+});
+
+test('late acknowledgement, changed grant/account and revoked opt-in retain the reservation without sending',async()=>{
+  for(const change of [f=>f.advance(50001),f=>{f.env.RUNVARA_AI_FUTURE_ALLOWANCE_ENABLED='false';},
+    f=>{f.state.aiEconomics.governance.futureAllowance.projectId='proj_changed';},
+    f=>{f.state.aiEconomics.governance.futureAllowance.grantId='changed';}]){
+    const f=futureFixture(),reserve=f.store.reserveProviderUsage;
+    f.store.reserveProviderUsage=async(...args)=>{const ack=await reserve(...args);change(f);return ack;};
+    const r=await f.run();assert.equal(r.used,false);assert.equal(f.reservations.size,1);assert.equal(f.posts.length,0);assert.equal(f.settlements.length,0);
+  }
+});
+
+test('future SQL DTO requires both binding fields; additional denials survive strict response parsing',async()=>{
+  const f=futureFixture();await f.run();const input=f.reservations.values().next().value.input;
+  assert.equal(providerUsageReservationParams(f.state.workspace.id,input).p_future_grant_id,'synthetic-grant');
+  for(const name of ['credentialDigest','futureGrantId']){const copy={...input};delete copy[name];assert.throws(()=>providerUsageReservationParams(f.state.workspace.id,copy),/AI_USAGE_INPUT_INVALID/);}
+  for(const reason of ['AI_FUTURE_ALLOWANCE_UNVERIFIED','AI_FUTURE_ALLOWANCE_EXHAUSTED'])assert.equal(providerUsageReservationResult({dispatch_allowed:false,reason},{}).reason,reason);
+});
+
+test('dormant routing-evidence contract is not reinterpreted as future-only authority',async()=>{
+  const f=futureFixture();const p=createRoutingBoundAiProvider({env:f.env,store:f.store,now:f.now,
+    fetchImpl:()=>assert.fail('No provider call'),readRoutingEvidence:()=>assert.fail('Unsupported proof must not be fetched')});
+  assert.equal((await p.enhanceCommander(f.args)).reason,'AI_FUTURE_ROUTING_NOT_SUPPORTED');assert.deepEqual(f.events,[]);
+});
+
+test('contradictory provider organisation evidence retains uncertainty without replay',async()=>{
+  const f=futureFixture();f.fetch=async()=>{const r=response();r.headers.set('openai-organization','org_other');return r;};
+  const r=await f.run();assert.equal(r.used,false);assert.equal(r.reason,'AI_PROVIDER_RECEIPT_UNVERIFIED');
+  assert.equal(r.effects.uncertainSubmissions,1);assert.equal(r.effects.costStatus,'unknown');
+  assert.equal(f.settlements[0].outcome,'uncertain');assert.equal(f.reservations.size,1);
+});
+
+test('already transmitted future requests can settle after expiry; uncertain outcomes retain exposure',async()=>{
+  for(const uncertain of [false,true]){
+    const f=futureFixture(),send=f.fetch;
+    f.advance(49999); // One millisecond of admission time remains before sending.
+    f.fetch=async(...args)=>{
+      const response=await send(...args);
+      f.advance(2); // Expiry crosses well within the existing transport bound.
+      if(uncertain)throw new Error('Synthetic lost response after grant expiry');
+      return response;
+    };
+    const result=await f.run();
+    assert.equal(result.used,!uncertain);assert.equal(f.posts.length,1);assert.equal(f.reservations.size,1);
+    assert.equal(f.settlements.length,1);assert.equal(f.settlements[0].outcome,uncertain?'uncertain':'complete');
+    assert.equal(result.effects.costStatus,uncertain?'unknown':'accounted');
+    assert.deepEqual(result.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+    assert.equal((await f.run()).used,false);assert.equal(f.posts.length,1);assert.equal(f.settlements.length,1);
+  }
 });

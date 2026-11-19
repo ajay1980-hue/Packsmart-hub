@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { PROVIDER_ROUTING_LIMITS } from './provider-router.mjs';
+import { futureAllowancePolicy } from './future-allowance.mjs';
 
 export const OPERATOR_BRIEF_ADAPTER = 'openai-responses';
 export const OPERATOR_BRIEF_SHAPE = 'operator-brief:v1';
@@ -35,6 +36,8 @@ export function operatorBriefPolicy({ state, workspaceId, model, outputTokens, e
   if (endpoint !== OPERATOR_BRIEF_ENDPOINT) return fail('AI_ENDPOINT_UNVERIFIED');
   const governance = state?.aiEconomics?.governance;
   if (!plain(governance) || governance.version !== 1 || governance.enabled !== true || governance.currency !== 'USD') return fail('AI_GOVERNANCE_NOT_CONFIGURED');
+  const future = futureAllowancePolicy(governance, now);
+  if (!future.allowed) return fail(future.reason);
   const provider = governance.providers?.openai, adapter = provider?.adapters?.[OPERATOR_BRIEF_ADAPTER];
   if (!plain(provider) || provider.enabled !== true || adapter?.enabled !== true
     || !Array.isArray(provider.allowedAdapters) || !provider.allowedAdapters.includes(OPERATOR_BRIEF_ADAPTER)
@@ -72,14 +75,16 @@ export function operatorBriefPolicy({ state, workspaceId, model, outputTokens, e
   const limitKeys = ['maxRequests', 'maxInputTokens', 'maxOutputTokens', 'maxTotalTokens', 'maxCostMicros'];
   const limits = value => Object.fromEntries(limitKeys.map(key => [key, value?.[key] ?? null]));
   return Object.freeze({ allowed: true, inputTokenBound: proof.maxBillableInputTokens, outputTokenBound: outputTokens,
+    ...(future.policy ? { futureAllowance: future.policy } : {}),
     pricingVersion: price.version, cacheWriteMode: proof.cacheWriteMode,
     jobNotBefore: Math.max(adapter.atomicUsageCutoverAt, governance.accountingStartAt),
-    validUntil: Math.min(proof.expiresAt, price.expiresAt),
+    validUntil: Math.min(proof.expiresAt, price.expiresAt, future.policy?.expiresAt ?? Infinity),
     fingerprint: briefDigest({ model, proof: normalizedProof, price: normalizedPrice,
       tenantLimits: limits(governance.tenantLimits), providerLimits: limits(provider.limits),
       monthlyCostLimitUsd: state.aiEconomics.monthlyCostLimitUsd ?? null,
       configuredAt: governance.configuredAt, accountingStartAt: governance.accountingStartAt,
-      atomicUsageCutoverAt: adapter.atomicUsageCutoverAt }) });
+      atomicUsageCutoverAt: adapter.atomicUsageCutoverAt,
+      ...(future.policy ? { futureAllowance: future.policy } : {}) }) });
 }
 
 export function briefUsageReceipt(body, model, cacheWriteMode, jobId) {

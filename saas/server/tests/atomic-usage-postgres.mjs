@@ -6,6 +6,7 @@
  * npm --prefix saas/server/tests/atomic-usage ci --ignore-scripts, then run:
  * ATOMIC_USAGE_ALLOW_DISPOSABLE_TEST_DB=1 \
  * ATOMIC_USAGE_TEST_DATABASE_URL=postgres://postgres:password@127.0.0.1:5432/runvara_atomic_usage_test \
+ * ATOMIC_USAGE_POSTGREST_BIN=/absolute/path/to/verified/postgrest-14.5 \
  * npm --prefix saas/server/tests/atomic-usage test
  * This runner deliberately fails rather than skipping when PostgreSQL is absent.
  */
@@ -15,6 +16,11 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createAiProvider } from '../lib/ai-provider.mjs';
+import { createStore } from '../lib/store.mjs';
+import { OPERATOR_BRIEF_ENDPOINT, OPERATOR_BRIEF_SHAPE } from '../lib/operator-brief-policy.mjs';
+import { runPostgrestTimeoutCases } from './atomic-usage-postgrest-timeout-cases.mjs';
+import { runFutureAllowanceCases, futureFixture, futureRequest, reserveFuture, futureEvidence, installFuture, enableFuture } from './future-allowance-postgres-cases.mjs';
 
 const require = createRequire(new URL('./atomic-usage/package.json', import.meta.url));
 const { Client } = require('pg');
@@ -157,6 +163,8 @@ before(async () => {
   const migration = await readFile(new URL('../supabase/migrations/20261006190318_atomic_provider_usage.sql', import.meta.url), 'utf8');
   assert.ok(migration.includes('runvara_settle_provider_usage'), 'Atomic usage migration must be complete');
   await admin.query(migration);
+  await admin.query(await readFile(new URL('../supabase/migrations/20261118185735_verified_provider_usage_opening.sql', import.meta.url), 'utf8'));
+  await admin.query(await readFile(new URL('../supabase/migrations/20261119060000_future_provider_allowance.sql', import.meta.url), 'utf8'));
 }, { timeout: 30_000 });
 after(async () => { await Promise.all([...clients].map(c => close(c).catch(() => {}))); });
 
@@ -736,4 +744,452 @@ test('reservation timestamp uses post-lock wall time rather than the outer trans
       throw error;
     }
   });
+});
+
+// Verified openings are administrator attestations, never measurements inferred
+// from these deliberately synthetic fixtures or an empty ledger.
+const O = 'public.runvara_provider_usage_openings';
+const openingBalance = extra => ({ requests: 2, inputTokens: 8, outputTokens: 12, totalTokens: 20, costMicros: 20_000, ...extra });
+const legacyFingerprint = async f => (await admin.query('SELECT public.runvara_legacy_usage_fingerprint($1) AS value', [f.workspaceId])).rows[0].value;
+async function openingEvidence(f, providers = { openai: openingBalance() }) {
+  return { version: 1, workspaceId: f.workspaceId, currency: 'USD', windowStart: monthKey(0),
+    evidenceHash: hash(`SYNTHETIC-NOT-BILLING:${f.workspaceId}`), verifiedAt: Date.now(), legacyDispatchStoppedAt: Date.now() - 1000,
+    legacyDispatchersRetired: true, historicalExposureReconciled: true, monthUsageComplete: true,
+    legacyUsageFingerprint: await legacyFingerprint(f), providers };
+}
+async function installOpening(f, evidence, client = admin) {
+  return (await client.query('SELECT public.runvara_install_provider_usage_opening($1,$2) AS value', [f.workspaceId, evidence])).rows[0].value;
+}
+async function openingFixture(options = {}) {
+  const f = await fixture(options);
+  f.governance.enabled = false;
+  await saveState(f);
+  return f;
+}
+async function enableOpening(f, opening, { freshJobs = true } = {}) {
+  f.governance.enabled = true;
+  f.governance.accountingStartAt = opening.accountingStartAt;
+  f.governance.configuredAt = Date.now();
+  await saveState(f);
+  // Test fixture only: model jobs actually enqueued after cutover. Production
+  // must create new jobs; modifying old jobs is never a cutover instruction.
+  if (freshJobs) await admin.query('UPDATE public.runvara_agent_jobs SET created_at=clock_timestamp() WHERE workspace_id=$1', [f.workspaceId]);
+}
+async function legacyRow(f, { provider = 'openai', occurredAt = new Date(), input = 4, output = 6, cost = 0.01 } = {}) {
+  await admin.query(`INSERT INTO public.runvara_ai_usage (id,workspace_id,task_type,provider,model,input_tokens,output_tokens,estimated_cost_usd,occurred_at)
+    VALUES ($1,$2,'synthetic',$3,'synthetic-model',$4,$5,$6,$7)`, [`synthetic-legacy-${randomUUID()}`, f.workspaceId, provider, input, output, cost, occurredAt]);
+}
+async function noOpeningEffects(f) {
+  assert.equal((await admin.query(`SELECT * FROM ${O} WHERE workspace_id=$1`, [f.workspaceId])).rowCount, 0);
+  assert.equal((await windows(f)).length, 0);
+  assert.equal((await reservations(f)).length, 0);
+}
+
+test('opening installation records real database time, preserves history and stays disabled', async () => {
+  const f = await openingFixture();
+  await legacyRow(f);
+  const before = await measured(f), evidence = await openingEvidence(f);
+  const start = Date.now(), result = await installOpening(f, evidence);
+  assert.ok(result.accountingStartAt >= start && result.accountingStartAt <= Date.now());
+  assert.equal(result.windowStart, monthKey(0));
+  assert.equal(result.idempotent, false);
+  assert.deepEqual(await measured(f), before);
+  assert.equal((await reservations(f)).length, 0);
+  await assertExposure(f, { settled_requests: 2, settled_input_tokens: 8, settled_output_tokens: 12, settled_total_tokens: 20, settled_cost_micros: 20_000, held_requests: 0 });
+  denied(await admit(request(f)), 'AI_GOVERNANCE_NOT_CONFIGURED');
+  const saved = (await admin.query(`SELECT * FROM ${O} WHERE workspace_id=$1`, [f.workspaceId])).rows[0];
+  assert.deepEqual(saved.attestation, evidence);
+  assert.equal(saved.recorded_by, 'postgres');
+  await enableOpening(f, result);
+  assert.equal((await admit(request(f))).dispatch_allowed, true);
+});
+
+for (const scope of ['tenant', 'provider']) {
+  for (const [dimension, ceiling] of Object.entries({ maxRequests: 3, maxInputTokens: 12, maxOutputTokens: 18, maxTotalTokens: 30, maxCostMicros: 30_000 })) {
+    test(`verified opening consumes ${scope} ${dimension} before concurrent admission`, async () => {
+      const f = await openingFixture({ count: 8, mutate(g) { (scope === 'tenant' ? g.tenantLimits : g.providers.openai.limits)[dimension] = ceiling; } });
+      const installed = await installOpening(f, await openingEvidence(f));
+      await enableOpening(f, installed);
+      const results = await race(8, (c, i) => reserve(c, request(f, i)));
+      assert.equal(results.filter(r => r.dispatch_allowed).length, 1);
+      results.filter(r => !r.dispatch_allowed).forEach(r => denied(r));
+      await assertExposure(f, { settled_requests: 2, settled_cost_micros: 20_000, held_requests: 1, held_cost_micros: 10_000 });
+    });
+  }
+}
+
+test('opening aggregates providers and retains the owner lower cap', async () => {
+  const f = await openingFixture({ monthlyCostLimitUsd: 0.05 });
+  const installed = await installOpening(f, await openingEvidence(f, { openai: openingBalance(), xai: openingBalance() }));
+  await enableOpening(f, installed);
+  const rows = await windows(f);
+  counter(rows.find(r => r.scope_key === 'tenant'), 'settled_cost_micros', 40_000);
+  counter(rows.find(r => r.scope_key === 'provider:openai'), 'settled_cost_micros', 20_000);
+  assert.equal((await admit(request(f))).dispatch_allowed, true);
+  denied(await admit(request(f, 1, { provider: 'xai', adapter: 'xai-responses' })));
+});
+
+test('invalid, incomplete, unknown or backdated opening attestations fail without effects', async () => {
+  const changes = [
+    e => { e.workspaceId = 'other-tenant'; }, e => { e.currency = 'GBP'; }, e => { e.version = 2; },
+    e => { delete e.evidenceHash; }, e => { e.evidenceHash = 'not-verified'; },
+    e => { e.historicalExposureReconciled = false; }, e => { delete e.legacyDispatchersRetired; },
+    e => { e.monthUsageComplete = 'true'; }, e => { e.verifiedAt = Date.now() + 60000; },
+    e => { e.verifiedAt = Date.now() - 86400001; }, e => { e.legacyDispatchStoppedAt = e.verifiedAt + 1; },
+    e => { e.windowStart = monthKey(-1); }, e => { e.accountingStartAt = monthStart().getTime(); },
+    e => { e.providers = {}; }, e => { e.providers.openai.costMicros = -1; },
+    e => { e.providers.openai.requests = '2'; }, e => { e.providers.openai.inputTokens = 1.5; },
+    e => { e.providers.openai.totalTokens = 999; }, e => { e.providers.openai.costMicros = 9007199254740992; },
+    e => { e.providers.openai.extra = 'not permitted'; }, e => { e.providers = { 'invalid?': openingBalance() }; },
+    e => { e.providers.xai = openingBalance({ costMicros: Number.MAX_SAFE_INTEGER }); }
+  ];
+  for (const change of changes) {
+    const f = await openingFixture(), evidence = await openingEvidence(f);
+    change(evidence);
+    await assert.rejects(installOpening(f, evidence), /AI_OPENING_/);
+    await noOpeningEffects(f);
+  }
+});
+
+test('opening refuses missing provider, understated measured amounts, changed history and future receipts', async () => {
+  for (const change of [e => { delete e.providers.openai; e.providers.xai = openingBalance(); },
+    e => { e.providers.openai.requests = 0; }, e => { e.providers.openai.inputTokens = 3; e.providers.openai.totalTokens = 15; },
+    e => { e.providers.openai.outputTokens = 5; e.providers.openai.totalTokens = 13; },
+    e => { e.providers.openai.costMicros = 9999; }]) {
+    const f = await openingFixture(); await legacyRow(f);
+    const before = await measured(f), evidence = await openingEvidence(f); change(evidence);
+    await assert.rejects(installOpening(f, evidence), /AI_OPENING_BELOW_RECORDED_USAGE/);
+    await noOpeningEffects(f); assert.deepEqual(await measured(f), before);
+  }
+  const drift = await openingFixture(), old = await openingEvidence(drift);
+  await legacyRow(drift, { occurredAt: monthStart(-1) });
+  await assert.rejects(installOpening(drift, old), /AI_OPENING_LEGACY_HISTORY_CHANGED/);
+  await noOpeningEffects(drift);
+  const future = await openingFixture(); await legacyRow(future, { occurredAt: new Date(Date.now() + 60000) });
+  await assert.rejects(installOpening(future, await openingEvidence(future)), /AI_OPENING_LEGACY_HISTORY_INVALID/);
+  await noOpeningEffects(future);
+});
+
+test('opening cannot reset governed held, uncertain, settled, cancelled or empty window history', async () => {
+  for (const status of ['held', 'uncertain', 'settled', 'cancelled_pre_dispatch', 'window']) {
+    const f = await fixture(), r = request(f);
+    if (status === 'window') {
+      f.governance.tenantLimits.maxRequests = 0; await saveState(f); denied(await admit(r));
+    } else {
+      const held = await admit(r);
+      if (status === 'uncertain') await finish(r, held.reservation_id, status, { jobId: r.jobId, errorCode: 'SYNTHETIC_TIMEOUT' });
+      if (status === 'settled') await finish(r, held.reservation_id);
+      if (status === 'cancelled_pre_dispatch') await finish(r, held.reservation_id, status, { jobId: r.jobId, dispatchStarted: false, proof: 'local_pre_dispatch' });
+    }
+    f.governance.enabled = false; await saveState(f);
+    const before = [await windows(f), await reservations(f), await measured(f)];
+    await assert.rejects(installOpening(f, await openingEvidence(f)), /AI_OPENING_GOVERNED_HISTORY_EXISTS/);
+    assert.deepEqual([await windows(f), await reservations(f), await measured(f)], before);
+  }
+  const enabled = await fixture();
+  await assert.rejects(installOpening(enabled, await openingEvidence(enabled)), /AI_OPENING_REQUIRES_DISABLED_GOVERNANCE/);
+  await noOpeningEffects(enabled);
+});
+
+test('concurrent duplicate opening installs once, lost acknowledgement reconciles and conflict cannot replace it', async () => {
+  const f = await openingFixture(), evidence = await openingEvidence(f);
+  const results = await Promise.all(Array.from({ length: 6 }, () => using('postgres', c => installOpening(f, evidence, c))));
+  assert.equal(results.filter(r => !r.idempotent).length, 1);
+  assert.equal(new Set(results.map(r => r.accountingStartAt)).size, 1);
+  await assertExposure(f, { settled_requests: 2, settled_cost_micros: 20_000 });
+  const before = await windows(f);
+  // Simulated lost reply after a committed transaction: exact readback exists,
+  // and even duplicate delivery cannot increment the opening a second time.
+  assert.equal((await installOpening(f, evidence)).idempotent, true);
+  await assert.rejects(installOpening(f, { ...evidence, evidenceHash: hash('different evidence') }), /AI_OPENING_CONFLICT/);
+  assert.deepEqual(await windows(f), before);
+});
+
+test('opening transaction rollback cannot leave an attestation or partially seeded counters', async () => {
+  const f = await openingFixture(), evidence = await openingEvidence(f);
+  await using('postgres', async c => {
+    await c.query('BEGIN');
+    await installOpening(f, evidence, c);
+    await c.query('ROLLBACK');
+  });
+  await noOpeningEffects(f);
+  assert.equal((await installOpening(f, evidence)).idempotent, false);
+});
+
+test('runtime and tenant roles cannot install or mutate verified opening evidence', async () => {
+  const f = await openingFixture(), evidence = await openingEvidence(f);
+  for (const role of ['service_role', 'anon', 'authenticated', 'atomic_usage_untrusted']) {
+    await using(role, async c => {
+      await assert.rejects(installOpening(f, evidence, c), /permission denied/);
+      await assert.rejects(c.query(`INSERT INTO ${O} (workspace_id) VALUES ($1)`, [f.workspaceId]), /permission denied/);
+      await assert.rejects(c.query(`UPDATE ${O} SET accounting_start_at=1 WHERE workspace_id=$1`, [f.workspaceId]), /permission denied/);
+      await assert.rejects(c.query(`DELETE FROM ${O} WHERE workspace_id=$1`, [f.workspaceId]), /permission denied/);
+      await assert.rejects(c.query(`TRUNCATE ${O}`), /permission denied/);
+    });
+  }
+  await installOpening(f, evidence);
+  await admin.query(`GRANT SELECT ON ${O} TO atomic_usage_untrusted`);
+  try { await using('atomic_usage_untrusted', async c => assert.equal((await c.query(`SELECT * FROM ${O}`)).rowCount, 0)); }
+  finally { await admin.query(`REVOKE SELECT ON ${O} FROM atomic_usage_untrusted`); }
+  const other = await openingFixture();
+  await assert.rejects(installOpening(other, evidence), /AI_OPENING_ATTESTATION_INVALID/);
+  await noOpeningEffects(other);
+});
+
+test('opening baseline cannot be backdated, changed, used by stale jobs or extended to an unattested provider', async () => {
+  const f = await openingFixture();
+  await delay(3);
+  const installed = await installOpening(f, await openingEvidence(f));
+  await enableOpening(f, installed, { freshJobs: false });
+  denied(await admit(request(f)), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+  await enableOpening(f, installed);
+  denied(await admit(request(f, 0, { provider: 'xai', adapter: 'xai-responses' })), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+  const original = structuredClone(f.governance);
+  for (const change of [g => { g.accountingStartAt = monthStart().getTime(); }, g => { g.configuredAt = installed.accountingStartAt - 1; },
+    g => { g.configuredAt = Date.now() + 60000; }, g => { g.configuredAt = String(installed.accountingStartAt); }]) {
+    Object.assign(f.governance, structuredClone(original)); change(f.governance); await saveState(f);
+    denied(await admit(request(f)), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+  }
+  Object.assign(f.governance, original); await saveState(f);
+  assert.equal((await admit(request(f))).dispatch_allowed, true);
+});
+
+test('opening survives settlement and uncertainty without refunding historical balances or enabling replay', async () => {
+  const f = await openingFixture({ count: 3, mutate(g) { g.tenantLimits.maxRequests = 4; } });
+  await enableOpening(f, await installOpening(f, await openingEvidence(f)));
+  const r = request(f), held = await admit(r);
+  await finish(r, held.reservation_id);
+  const next = request(f, 1), uncertain = await admit(next);
+  await finish(next, uncertain.reservation_id, 'uncertain', { jobId: next.jobId, errorCode: 'SYNTHETIC_TIMEOUT' });
+  denied(await admit(next), 'AI_LOGICAL_CALL_EXISTS');
+  denied(await admit(request(f, 2)));
+  await assertExposure(f, { settled_requests: 3, settled_cost_micros: 30_000, held_requests: 1, held_cost_micros: 10_000 });
+  assert.equal((await measured(f)).length, 1, 'Only real mock-provider settlement produced a measured row');
+});
+
+test('late legacy rows in either current or past month invalidate the opening without erasing holds', async () => {
+  for (const occurredAt of [new Date(), monthStart(-2)]) {
+    const f = await openingFixture(); await enableOpening(f, await installOpening(f, await openingEvidence(f)));
+    assert.equal((await admit(request(f))).dispatch_allowed, true);
+    const before = await windows(f);
+    await legacyRow(f, { occurredAt });
+    denied(await admit(request(f, 1)), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+    assert.deepEqual(await windows(f), before);
+  }
+});
+
+test('legacy fingerprint is stable across timezone changes and detects changed old rows', async () => {
+  const f = await openingFixture(); await legacyRow(f, { occurredAt: monthStart(-1) });
+  const original = await legacyFingerprint(f);
+  await using('service_role', async c => {
+    await c.query("SET TIME ZONE 'Pacific/Auckland'");
+    assert.equal((await c.query('SELECT public.runvara_legacy_usage_fingerprint($1) AS value', [f.workspaceId])).rows[0].value, original);
+  });
+  await admin.query('UPDATE public.runvara_ai_usage SET estimated_cost_usd=1 WHERE workspace_id=$1', [f.workspaceId]);
+  assert.notEqual(await legacyFingerprint(f), original);
+});
+
+test('corrupted opening counters fail closed instead of silently resetting the historical floor', async () => {
+  const f = await openingFixture(); await enableOpening(f, await installOpening(f, await openingEvidence(f)));
+  await admin.query(`UPDATE ${W} SET settled_cost_micros=0 WHERE workspace_id=$1`, [f.workspaceId]);
+  denied(await admit(request(f)), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+  assert.equal((await reservations(f)).length, 0);
+});
+
+test('late legacy write during a counter-lock wait denies the same admission', async () => {
+  const f = await openingFixture(); await enableOpening(f, await installOpening(f, await openingEvidence(f)));
+  await using('postgres', async blocker => {
+    await blocker.query('BEGIN');
+    try {
+      await blocker.query(`SELECT * FROM ${W} WHERE workspace_id=$1 FOR UPDATE`, [f.workspaceId]);
+      await using('service_role', async candidate => {
+        const candidatePid = (await candidate.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        const blockerPid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        const pending = reserve(candidate, request(f));
+        await waitUntilBlocked(admin, candidatePid, blockerPid);
+        await legacyRow(f, { occurredAt: monthStart(-1) });
+        await blocker.query('COMMIT');
+        denied(await pending, 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+      });
+    } finally { await blocker.query('ROLLBACK'); }
+  });
+  assert.equal((await reservations(f)).length, 0);
+});
+
+test('failed second counter insert rolls back opening evidence and every counter', async () => {
+  const f = await openingFixture(), evidence = await openingEvidence(f);
+  await admin.query(`CREATE FUNCTION public.synthetic_opening_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF NEW.scope_key = 'provider:openai' THEN RAISE EXCEPTION 'synthetic insertion failure'; END IF; RETURN NEW; END $$;
+    CREATE TRIGGER synthetic_opening_failure BEFORE INSERT ON ${W} FOR EACH ROW EXECUTE FUNCTION public.synthetic_opening_failure()`);
+  try { await assert.rejects(installOpening(f, evidence), /synthetic insertion failure/); await noOpeningEffects(f); }
+  finally { await admin.query(`DROP TRIGGER synthetic_opening_failure ON ${W}; DROP FUNCTION public.synthetic_opening_failure()`); }
+});
+
+for (const scenario of ['complete', 'unverified-opening', 'lost-reservation-ack', 'unknown-provider-outcome',
+  'future-complete','future-lost-reservation-ack','future-unknown-provider-outcome','future-disabled',
+  'future-account-mismatch','future-late-ack','future-policy-change']) {
+  test(`real operator brief + SupabaseStore + PostgreSQL opening, mocked transport: ${scenario}`, async () => {
+    const f = await openingFixture();
+    f.governance.providers.openai.allowedModels = ['gpt-5.6-luna'];
+    f.governance.providers.openai.pricing[0].modelId = 'gpt-5.6-luna';
+    const adapter = f.governance.providers.openai.adapters['openai-responses'];
+    adapter.atomicUsageCutoverAt = Date.now() - 1000;
+    adapter.models = { 'gpt-5.6-luna': { verified: true, allBillableInputTokensCovered: true,
+      outputLimitCoversAllBillableOutput: true, requestShape: OPERATOR_BRIEF_SHAPE, endpoint: OPERATOR_BRIEF_ENDPOINT,
+      maxBillableInputTokens: 4, maxBillableOutputTokens: 64, checkedAt: Date.now() - 1000,
+      expiresAt: Date.now() + 300000, cacheWriteMode: 'reported' } };
+    await saveState(f);
+    let posts = 0, reserveCalls = 0, clockOffset=0;
+    const isFuture=scenario.startsWith('future-');
+    const store = createStore({ SUPABASE_URL: 'https://synthetic-opening.invalid', SUPABASE_SERVICE_ROLE_KEY: 'synthetic-test-key-only' }, {
+      fetchImpl: async (url, options) => {
+        const parsed = new URL(url), path = parsed.pathname;
+        const p = options.body ? JSON.parse(options.body) : null;
+        if (path === '/rest/v1/rpc/runvara_reserve_provider_usage') {
+          reserveCalls++;
+          const result = await using('service_role', c => (p.p_future_grant_id ? reserveFuture : reserve)(c, { workspaceId: p.p_workspace_id, jobId: p.p_job_id,
+            workerId: p.p_worker_id, attempt: p.p_job_attempt, callKey: p.p_call_key, fingerprint: p.p_request_fingerprint,
+            provider: p.p_provider, adapter: p.p_adapter_id, model: p.p_model, input: p.p_input_token_bound,
+            output: p.p_output_token_bound, pricing: p.p_pricing_version, validUntil: p.p_route_valid_until,
+            futureGrantId:p.p_future_grant_id,credentialDigest:p.p_credential_digest }));
+          if (scenario.endsWith('lost-reservation-ack') && result.dispatch_allowed) throw new Error('Synthetic lost acknowledgement AFTER commit');
+          if (scenario==='future-late-ack')clockOffset=310000;
+          if (scenario==='future-policy-change'){f.governance.futureAllowance.projectId='proj_changed';await saveState(f);}
+          return Response.json(result);
+        }
+        if (path === '/rest/v1/rpc/runvara_settle_provider_usage') {
+          const result = await using('service_role', c => settle(c, { workspaceId: p.p_workspace_id, fingerprint: p.p_request_fingerprint },
+            p.p_reservation_id, p.p_outcome, p.p_receipt));
+          return Response.json(result);
+        }
+        assert.equal(parsed.searchParams.get('workspace_id'), `eq.${f.workspaceId}`);
+        if (path === '/rest/v1/saas_workspace_state') {
+          const row = (await admin.query(`SELECT workspace_id,state->'aiEconomics'->'governance' AS governance,
+            state->'aiEconomics'->'monthlyCostLimitUsd' AS monthly_cost_limit_usd FROM public.saas_workspace_state WHERE workspace_id=$1`, [f.workspaceId])).rows;
+          return Response.json(row);
+        }
+        if (path === '/rest/v1/runvara_agent_jobs') {
+          assert.equal(parsed.searchParams.get('id'), `eq.${f.jobs[0]}`);
+          return Response.json((await admin.query('SELECT * FROM public.runvara_agent_jobs WHERE workspace_id=$1 AND id=$2', [f.workspaceId, f.jobs[0]])).rows);
+        }
+        assert.fail(`Unexpected synthetic transport path: ${path}`);
+      }
+    });
+    const provider = createAiProvider({ store, now:()=>Date.now()+clockOffset, env: { RUNVARA_OPENAI_ENABLED: 'true',
+      RUNVARA_AI_FUTURE_ALLOWANCE_ENABLED:scenario==='future-disabled'?'false':'true',
+      OPENAI_API_KEY:scenario==='future-account-mismatch'?'synthetic-wrong-provider-key':'synthetic-provider-key-only', RUNVARA_AI_MAX_OUTPUT_TOKENS: '64' },
+      fetchImpl: async (url,init) => {
+        assert.equal(url, OPERATOR_BRIEF_ENDPOINT);
+        const rows = await reservations(f);
+        assert.equal(rows.length, 1); assert.equal(rows[0].status, 'held', 'Committed hold must precede even mocked provider transport');
+        posts++;
+        if (isFuture){assert.equal(init.headers['OpenAI-Organization'],'org_synthetic');assert.equal(init.headers['OpenAI-Project'],'proj_synthetic');}
+        if (scenario.endsWith('unknown-provider-outcome')) throw new Error('Synthetic lost provider response');
+        const result = Response.json({ id: 'synthetic-response', object: 'response', model: 'gpt-5.6-luna', status: 'completed', output_text: 'Synthetic brief',
+          usage: { input_tokens: 4, output_tokens: 6, total_tokens: 10, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 } } });
+        Object.defineProperty(result, 'url', { value: OPERATOR_BRIEF_ENDPOINT });
+        return result;
+      }
+    });
+    const args = { workspaceId: f.workspaceId, jobId: f.jobs[0], state: f.state, command: 'Synthetic local report',
+      route: { provider: 'openai', model: 'gpt-5.6-luna', tier: 'economy' }, run: { summary: 'Deterministic Commander remains available', priorities: [], urgentRisks: [] } };
+    const originalJob = (await admin.query('SELECT * FROM public.runvara_agent_jobs WHERE id=$1', [f.jobs[0]])).rows[0];
+    args.jobContext = { workspaceId: f.workspaceId, jobId: originalJob.id, type: originalJob.type, status: originalJob.status,
+      workerId: originalJob.worker_id, attempt: originalJob.attempts, createdAt: originalJob.created_at.toISOString(), leaseUntil: originalJob.lease_until.toISOString() };
+    assert.equal((await provider.enhanceCommander(args)).reason, 'AI_GOVERNANCE_NOT_CONFIGURED');
+    assert.equal(posts, 0); assert.equal(reserveCalls, 0, 'Default disabled path does not acquire a reservation');
+    if(isFuture)await enableFuture({admin,saveState},f,await installFuture({admin},f,await futureEvidence({admin},f)));
+    else await enableOpening(f, scenario === 'unverified-opening' ? { accountingStartAt: Date.now() } : await installOpening(f, await openingEvidence(f)));
+    await admin.query("UPDATE public.runvara_agent_jobs SET ai_provider='openai',ai_model='gpt-5.6-luna' WHERE workspace_id=$1", [f.workspaceId]);
+    const job = (await admin.query('SELECT * FROM public.runvara_agent_jobs WHERE id=$1', [f.jobs[0]])).rows[0];
+    args.jobContext = { workspaceId: f.workspaceId, jobId: job.id, type: job.type, status: job.status,
+      workerId: job.worker_id, attempt: job.attempts, createdAt: job.created_at.toISOString(), leaseUntil: job.lease_until.toISOString() };
+    const result = await provider.enhanceCommander(args);
+    if (isFuture){
+      assert.equal(result.effects.accountingScope,'additional_after_cutover');
+      assert.deepEqual(result.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+      if(['future-disabled','future-account-mismatch','future-late-ack','future-policy-change'].includes(scenario)){
+        assert.equal(result.used,false);assert.equal(posts,0);
+        assert.equal(reserveCalls,['future-late-ack','future-policy-change'].includes(scenario)?1:0);
+        assert.equal((await reservations(f)).length,reserveCalls);return;
+      }
+    }
+    if (scenario === 'unverified-opening') {
+      assert.equal(result.reason, 'AI_ACCOUNTING_BASELINE_UNVERIFIED'); assert.equal(posts, 0);
+      assert.equal((await reservations(f)).length, 0); assert.equal(reserveCalls, 1);
+      assert.equal(args.run.summary, 'Deterministic Commander remains available'); return;
+    }
+    const completed=scenario.endsWith('complete'),lostAck=scenario.endsWith('lost-reservation-ack');
+    assert.equal(result.used, completed, result.reason);
+    assert.equal(posts, lostAck ? 0 : 1);
+    assert.equal(reserveCalls, 1);
+    assert.equal((await reservations(f))[0].status, completed ? 'settled' : lostAck ? 'held' : 'uncertain');
+    assert.equal((await measured(f)).length, completed ? 1 : 0);
+    assert.equal((await provider.enhanceCommander(args)).used, false, 'Same job cannot acquire a second dispatch');
+    assert.equal(posts, lostAck ? 0 : 1);
+    assert.equal(args.run.summary, 'Deterministic Commander remains available');
+    if (!completed) { assert.equal(result.effects.costStatus, 'unknown'); await assertExposure(f, { settled_cost_micros: isFuture?0:20_000, held_cost_micros: 10_000 }); }
+  });
+}
+
+test('later months use fresh counters but cannot discard an installed opening or changed legacy history', async () => {
+  const f = await openingFixture({ count: 3 });
+  const installed = await installOpening(f, await openingEvidence(f));
+  // Disposable administrator fixture models an opening installed last month.
+  // Never backdate an attestation or edit production history this way.
+  const previousStart = monthStart(-1).getTime() + 86400000;
+  await admin.query(`UPDATE ${W} SET window_start=$2::date WHERE workspace_id=$1`, [f.workspaceId, monthKey(-1)]);
+  await admin.query(`UPDATE ${O} SET window_start=$2::date,accounting_start_at=$3::bigint,
+    recorded_at=to_timestamp($3::bigint::numeric/1000) WHERE workspace_id=$1`, [f.workspaceId, monthKey(-1), previousStart]);
+  await enableOpening(f, { ...installed, accountingStartAt: previousStart });
+  assert.equal((await admit(request(f))).dispatch_allowed, true);
+  await assertExposure(f, { settled_requests: 0, held_requests: 1, held_cost_micros: 10_000 });
+  await assertExposure(f, { settled_requests: 2, settled_cost_micros: 20_000, held_requests: 0 }, monthKey(-1));
+  f.governance.accountingStartAt = monthStart().getTime(); await saveState(f);
+  denied(await admit(request(f, 1)), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+  f.governance.accountingStartAt = previousStart; await saveState(f);
+  await legacyRow(f, { occurredAt: monthStart(-1) });
+  denied(await admit(request(f, 2)), 'AI_ACCOUNTING_BASELINE_UNVERIFIED');
+});
+
+test('opening installation rechecks disabled governance after waiting for the shared workspace lock', async () => {
+  const f = await openingFixture(), evidence = await openingEvidence(f);
+  await using('postgres', async blocker => {
+    await blocker.query('BEGIN');
+    try {
+      f.governance.enabled = true;
+      await blocker.query('UPDATE public.saas_workspace_state SET state=$2 WHERE workspace_id=$1', [f.workspaceId, f.state]);
+      await using('postgres', async installer => {
+        const installerPid = (await installer.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        const blockerPid = (await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
+        const pending = installOpening(f, evidence, installer);
+        const rejected = assert.rejects(pending, /AI_OPENING_REQUIRES_DISABLED_GOVERNANCE/);
+        await waitUntilBlocked(admin, installerPid, blockerPid);
+        await blocker.query('COMMIT');
+        await rejected;
+      });
+    } finally { await blocker.query('ROLLBACK'); }
+  });
+  await noOpeningEffects(f);
+});
+
+test('explicit zero opening does not loosen a zero allowance and an over-budget opening cannot dispatch', async () => {
+  for (const balance of [openingBalance({ requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costMicros: 0 }), openingBalance()]) {
+    const f = await openingFixture({ mutate(g) { g.tenantLimits.maxCostMicros = 0; } });
+    await enableOpening(f, await installOpening(f, await openingEvidence(f, { openai: balance })));
+    denied(await admit(request(f)));
+    assert.equal((await reservations(f)).length, 0);
+  }
+});
+
+test('future-only allowance integrated with the real reservation and settlement functions', {timeout:60000}, async t=>{
+  await runFutureAllowanceCases(t,{admin,using,openingFixture,openingEvidence,installOpening,request,reserve,windows,reservations,
+    saveState,legacyRow,measured,finish,receipt,waitUntilBlocked});
+});
+
+test('real PostgREST opening admission deadlines, rollback and concurrency', { timeout: 180000 }, async t => {
+  await runPostgrestTimeoutCases(t, { admin, connectionString, openingFixture, openingEvidence,
+    installOpening, enableOpening, request, windows, reservations, using, noOpeningEffects, saveState, waitUntilBlocked,
+    futureFixture: (options,patch)=>futureFixture({admin,openingFixture,saveState},options,patch),
+    futureRequest:(f,index,patch)=>futureRequest(request,f,index,patch) });
 });

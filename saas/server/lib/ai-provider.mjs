@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { AI_MODEL_CATALOG } from './ai-economics.mjs';
+import { futureAllowanceEffects } from './future-allowance.mjs';
 import { routeOperatorBrief } from './operator-brief-routing.mjs';
 import { OPERATOR_BRIEF_ADAPTER, OPERATOR_BRIEF_SHAPE, OPERATOR_BRIEF_ENDPOINT,
   briefDigest, briefSafeCode, briefUsageReceipt, briefExecutionAllowed, operatorBriefPolicy, validBriefJob } from './operator-brief-policy.mjs';
@@ -10,7 +11,8 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
 const DENIALS = new Set(['AI_LOGICAL_CALL_EXISTS', 'AI_JOB_LEASE_INVALID', 'AI_ROUTE_EXPIRED',
   'AI_GOVERNANCE_NOT_CONFIGURED', 'AI_ACCOUNTING_BASELINE_UNVERIFIED', 'AI_PROVIDER_NOT_ALLOWED',
   'AI_PROVIDER_OVERRUN_BLOCKED', 'AI_POLICY_LIMIT_INVALID', 'AI_PRICING_UNVERIFIED', 'AI_PRICING_EXPIRED',
-  'AI_COST_BOUND_INVALID', 'AI_BUDGET_EXCEEDED', 'AI_ADMISSION_EVIDENCE_EXPIRED', 'AI_ADMISSION_WINDOW_CHANGED']);
+  'AI_COST_BOUND_INVALID', 'AI_BUDGET_EXCEEDED', 'AI_ADMISSION_EVIDENCE_EXPIRED', 'AI_ADMISSION_WINDOW_CHANGED',
+  'AI_FUTURE_ALLOWANCE_UNVERIFIED','AI_FUTURE_ALLOWANCE_EXHAUSTED']);
 const exactCost = value => Number.isSafeInteger(value) && value >= 0
   || typeof value === 'string' && /^(?:0|[1-9][0-9]{0,59})$/.test(value);
 const effects = () => ({ submissionAttempts: 0, confirmedSubmissions: 0, uncertainSubmissions: 0,
@@ -88,6 +90,7 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
   const configuration = () => {
     const apiKey = String(env.OPENAI_API_KEY || '').trim();
     return { apiKey, enabled: truthy(env.RUNVARA_OPENAI_ENABLED) && apiKey.length >= 20,
+      futureAllowanceEnabled: truthy(env.RUNVARA_AI_FUTURE_ALLOWANCE_ENABLED),
       endpoint: String(env.OPENAI_API_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '') + '/responses',
       outputTokens: env.RUNVARA_AI_MAX_OUTPUT_TOKENS === undefined ? 500 : Number(env.RUNVARA_AI_MAX_OUTPUT_TOKENS) };
   };
@@ -99,9 +102,11 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
   async function enhanceCommander({ workspaceId, jobId, jobContext, route: proposedRoute, command, run, state }) {
     const route = Object.freeze({ provider: proposedRoute?.provider, model: proposedRoute?.model, tier: proposedRoute?.tier });
     const outcome = effects();
+    if (state?.aiEconomics?.governance?.futureAllowance !== undefined) Object.assign(outcome,futureAllowanceEffects());
     const result = (reason, extra = {}) => ({ used: false, reason, route, effects: { ...outcome }, ...extra });
     const config = configuration();
     if (!config.enabled) return result('PROVIDER_NOT_CONFIGURED');
+    if (state?.aiEconomics?.governance?.futureAllowance !== undefined && !config.futureAllowanceEnabled) return result('AI_FUTURE_ALLOWANCE_DISABLED');
     if (route?.provider !== 'openai' || !AI_MODEL_CATALOG[route?.model] || AI_MODEL_CATALOG[route.model].provider !== 'openai') return result('ROUTE_NOT_SUPPORTED');
     if (store?.provider !== 'supabase' || typeof store.reserveProviderUsage !== 'function'
       || typeof store.settleProviderUsage !== 'function' || typeof store.getOperatorBriefContext !== 'function') return result('AI_USAGE_DURABLE_STORE_REQUIRED');
@@ -111,11 +116,15 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
     const job = Object.freeze({ ...jobContext });
     const policy = operatorBriefPolicy({ state, workspaceId, model: route.model, outputTokens: config.outputTokens, endpoint: config.endpoint, now: now() });
     if (!policy.allowed) return result(policy.reason);
+    // The dormant routing-evidence constructor has a distinct whole-policy proof
+    // contract. Do not silently reinterpret it as an additional-allowance proof.
+    if (policy.futureAllowance && readRoutingEvidence) return result('AI_FUTURE_ROUTING_NOT_SUPPORTED');
     if (Date.parse(job.createdAt) < policy.jobNotBefore) return result('AI_LEGACY_JOB_DISPATCH_UNVERIFIED');
     let deadline = Math.min(policy.validUntil, Date.parse(job.leaseUntil));
     const body = requestBody(workspaceId, route, command, run, config.outputTokens);
     if (Buffer.byteLength(body) > 65536) return result('AI_REQUEST_BYTES_EXCEEDED');
     const accountDigest = briefDigest(config.apiKey);
+    if (policy.futureAllowance && policy.futureAllowance.credentialDigest !== accountDigest) return result('AI_FUTURE_ACCOUNT_MISMATCH');
     const routing = readRoutingEvidence ? await readBriefRouting(readRoutingEvidence, {
       economics: state.aiEconomics, workspaceId, jobId, route, config, accountDigest, now }) : null;
     if (routing && routing.status !== 'selected') return result(briefSafeCode(routing.reason, 'AI_ROUTING_EVIDENCE_UNAVAILABLE'));
@@ -131,7 +140,8 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
     const reservationInput = Object.freeze({ jobId, workerId: job.workerId, jobAttempt: job.attempt,
       callKey: `${jobId}:${OPERATOR_BRIEF_SHAPE}`, requestFingerprint, provider: 'openai', adapterId: OPERATOR_BRIEF_ADAPTER,
       model: route.model, inputTokenBound: policy.inputTokenBound, outputTokenBound: policy.outputTokenBound,
-      pricingVersion: policy.pricingVersion, routeValidUntil: new Date(deadline).toISOString() });
+      pricingVersion: policy.pricingVersion, routeValidUntil: new Date(deadline).toISOString(),
+      ...(policy.futureAllowance ? {futureGrantId:policy.futureAllowance.grantId,credentialDigest:accountDigest} : {}) });
     let reservation;
     try { reservation = await store.reserveProviderUsage(workspaceId, reservationInput); }
     catch (error) {
@@ -175,7 +185,7 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
     const current = configuration();
     const livePolicy = operatorBriefPolicy({ state: { workspace: { id: context.workspaceId }, aiEconomics: context.aiEconomics },
       workspaceId, model: route.model, outputTokens: current.outputTokens, endpoint: current.endpoint, now: now() });
-    if (!current.enabled || !livePolicy.allowed || livePolicy.fingerprint !== policy.fingerprint
+    if (!current.enabled || (policy.futureAllowance && !current.futureAllowanceEnabled) || !livePolicy.allowed || livePolicy.fingerprint !== policy.fingerprint
       || current.endpoint !== config.endpoint || briefDigest(current.apiKey) !== accountDigest
       || requestBody(workspaceId, route, command, run, current.outputTokens) !== body) return result('AI_ADMISSION_CONTEXT_CHANGED');
     if (routing) {
@@ -185,7 +195,7 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
       // The trusted evidence read is asynchronous. It must not conceal a local
       // credential, configuration or payload change while it was pending.
       const final = configuration();
-      if (!final.enabled || final.endpoint !== config.endpoint || briefDigest(final.apiKey) !== accountDigest
+      if (!final.enabled || (policy.futureAllowance && !final.futureAllowanceEnabled) || final.endpoint !== config.endpoint || briefDigest(final.apiKey) !== accountDigest
         || requestBody(workspaceId, route, command, run, final.outputTokens) !== body) return result('AI_ADMISSION_CONTEXT_CHANGED');
     }
     const settleUncertain = async reason => {
@@ -201,9 +211,13 @@ function createProvider({ env = process.env, store, fetchImpl = fetch, now = Dat
     outcome.submissionAttempts = 1;
     let response, responseBody;
     try {
-      response = await fetchImpl(config.endpoint, { method: 'POST', headers: { Authorization: 'Bearer ' + config.apiKey, 'Content-Type': 'application/json' },
+      response = await fetchImpl(config.endpoint, { method: 'POST', headers: { Authorization: 'Bearer ' + config.apiKey, 'Content-Type': 'application/json',
+        ...(policy.futureAllowance ? {'OpenAI-Organization':policy.futureAllowance.organizationId,'OpenAI-Project':policy.futureAllowance.projectId} : {}) },
         body, redirect: 'error', signal: AbortSignal.timeout(45000) });
       if (!response.ok || response.redirected !== false || response.url !== OPERATOR_BRIEF_ENDPOINT) return settleUncertain('AI_PROVIDER_RECEIPT_UNVERIFIED');
+      const returnedOrganization = response.headers?.get?.('openai-organization');
+      if (policy.futureAllowance && returnedOrganization !== null && returnedOrganization !== undefined
+        && returnedOrganization !== policy.futureAllowance.organizationId) return settleUncertain('AI_PROVIDER_RECEIPT_UNVERIFIED');
       responseBody = await responseJson(response);
     } catch { return settleUncertain('AI_PROVIDER_OUTCOME_UNCERTAIN'); }
     const receipt = briefUsageReceipt(responseBody, route.model, policy.cacheWriteMode, jobId);

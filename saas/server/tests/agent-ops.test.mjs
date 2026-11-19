@@ -620,3 +620,14 @@ test('zero-cost effects require explicit cancelled reservation evidence rather t
     assert.ok(run.summary);
   }
 });
+
+test('additional-use effects persist historical uncertainty separately from measured new cost',async t=>{
+  const effects={submissionAttempts:1,confirmedSubmissions:1,uncertainSubmissions:0,reservationId:'future-reservation',
+    usageStatus:'settled',costStatus:'accounted',accountedCostMicros:17,currency:'USD',accountingScope:'additional_after_cutover',
+    historicalExposure:{status:'unknown',costMicros:null,reconciled:false}};
+  const {store,ops}=await fixture(t,{aiProvider:{enhanceCommander:async()=>({used:false,reason:'AI_RESPONSE_TEXT_UNAVAILABLE',effects})}});
+  const job=await ops.enqueue('alpha',{type:'agent_command',payload:{command:'check business health'}});await ops.tick();
+  const {run}=await persistedBrief(store,job.id);
+  assert.equal(run.ai.effects.accountedCostMicros,17);assert.equal(run.ai.effects.accountingScope,'additional_after_cutover');
+  assert.deepEqual(run.ai.effects.historicalExposure,{status:'unknown',costMicros:null,reconciled:false});
+});
