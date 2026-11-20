@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.packsmartsolutions.iconqa">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="36" />
+    <application android:debuggable="true" android:label="Packsmart icon QA" />
+    <instrumentation android:name="com.packsmartsolutions.iconqa.IconQaInstrumentation"
+        android:targetPackage="com.packsmartsolutions.app.multiphoto" />
+</manifest>
