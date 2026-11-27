@@ -52,6 +52,7 @@ import { parcel2GoWorkspaceFingerprint } from './parcel2go-workspace-fingerprint
 import { assertParcel2GoPersistencePermit } from './parcel2go-sandbox.mjs';
 import { compactStateBytes, planCatalogueSaveCapacity, retainedConnectionSyncs, legacyBriefProjection } from './catalogue-save-capacity.mjs';
 import { assertShopifyTokenPermit } from './shopify-token-exchange.mjs';
+import { assertShopifyRuntimeRenewalPermit } from './shopify-renewal-runtime-permit.mjs';
 export { addAudit };
 
 const PERSISTED = Symbol('persisted');
@@ -1692,9 +1693,14 @@ class SupabaseStore {
     return acknowledgedArchives;
   }
 
-  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit, shopifyTokenPermit, parcel2goPermit, parcel2goLivePermit, parcel2goReviewPermit } = {}) {
+  async save(workspaceId, state, { ownedSnapshot = false, beforeCommit, beforeEffects, protectedContentCommit, protectedOrderRecovery, protectedMetaCommit, contentPilotPermit, catalogueImportPermit, shopifyTokenPermit, parcel2goPermit, parcel2goLivePermit, parcel2goReviewPermit, shopifyRuntimeRenewalPermit } = {}) {
     assertWorkspace(workspaceId, state);
     let catalogueCapacityContext;
+    if (shopifyRuntimeRenewalPermit !== undefined) {
+      if ([parcel2goReviewPermit,parcel2goLivePermit,parcel2goPermit,catalogueImportPermit,shopifyTokenPermit,protectedContentCommit,protectedOrderRecovery,protectedMetaCommit,contentPilotPermit].some(v=>v!==undefined)) throw Object.assign(new Error('Mixed persistence capabilities'),{code:'SHOPIFY_RUNTIME_PERSISTENCE_INVALID'});
+      catalogueCapacityContext=assertShopifyRuntimeRenewalPermit(shopifyRuntimeRenewalPermit,workspaceId,state);
+      ownedSnapshot=true;
+    }
     if (parcel2goReviewPermit !== undefined) {
       if ([parcel2goLivePermit,parcel2goPermit,catalogueImportPermit,shopifyTokenPermit,protectedContentCommit,protectedOrderRecovery,protectedMetaCommit,contentPilotPermit].some(v=>v!==undefined)) throw Object.assign(new Error('Mixed persistence capabilities'),{code:'PARCEL2GO_REVIEW_PERSISTENCE_INVALID'});
       catalogueCapacityContext=assertParcel2GoQuoteReviewPersistencePermit(parcel2goReviewPermit,workspaceId,state);
@@ -1715,7 +1721,7 @@ class SupabaseStore {
       assertShopifyTokenPermit(shopifyTokenPermit,workspaceId,state);
       ownedSnapshot = true;
     }
-    const narrowConnectionCommit = catalogueImportPermit || shopifyTokenPermit || parcel2goPermit || parcel2goLivePermit || parcel2goReviewPermit;
+    const narrowConnectionCommit = catalogueImportPermit || shopifyTokenPermit || parcel2goPermit || parcel2goLivePermit || parcel2goReviewPermit || shopifyRuntimeRenewalPermit;
     if (catalogueImportPermit !== undefined) {
       if (protectedContentCommit || protectedOrderRecovery || protectedMetaCommit || contentPilotPermit) throw Object.assign(new Error('Mixed persistence capabilities'), {code:'SHOPIFY_CATALOGUE_PERSISTENCE_PERMIT_INVALID'});
       catalogueCapacityContext = assertCatalogueImportPermit(catalogueImportPermit, workspaceId, state);
@@ -1766,7 +1772,7 @@ class SupabaseStore {
     const automationPlan = existing && this.automationRetentionEnabled ? planAutomationRetention(protectedContentCommit ? source : state) : null;
     // Catalogue imports preserve unrelated exact values. Normal archive/retention
     // and size/CAS guards below still run; no settings or historical upgrade.
-    const upgraded = { ...(narrowConnectionCommit ? source : upgradeState(source)), _revision: crypto.randomUUID(), storageReady: true };
+    const upgraded = { ...(narrowConnectionCommit ? source : upgradeState(source)), _revision: shopifyRuntimeRenewalPermit ? catalogueCapacityContext.nextRevision : crypto.randomUUID(), storageReady: true };
     // Catalogue-only pre-effect guard: measure Node's actual compact UTF-8
     // serialization, including this save's revision, audit and bookkeeping.
     // Required retention success is projected, never treated as acknowledged.
@@ -1783,7 +1789,7 @@ class SupabaseStore {
       briefArchives: Boolean(briefPlan?.candidates.length) });
     // Reuse the existing synchronous owner/deadline validator around each
     // Parcel2Go archive IO. Already-dispatched writes can still settle late.
-    const checkArchive = parcel2goLivePermit !== undefined || parcel2goReviewPermit !== undefined ? () => assertCurrent(upgraded) : () => {};
+    const checkArchive = parcel2goLivePermit !== undefined || parcel2goReviewPermit !== undefined || shopifyRuntimeRenewalPermit !== undefined ? () => assertCurrent(upgraded) : () => {};
     // Archive append-only operational histories before compacting existing hot state.
     // New workspaces have no parent FK row yet and start below retention limits.
     let acknowledgedArchives = [];

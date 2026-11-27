@@ -1,0 +1,3026 @@
+[
+  {
+    "file": "ebay-manager/shopify-products.json",
+    "sha256": "53dcde16e97d3665566d49d8d842a469d343556d7eb055006b9322fde3dc59c4"
+  },
+  {
+    "file": "ebay-manager/strategy.js",
+    "sha256": "681e807f5230ea317ceb08a09bd307696ffb6a83500d777cb0e1379f8d6c7468"
+  },
+  {
+    "file": "saas/README.md",
+    "sha256": "ac582178190a418dbf62b3473acd0d916e309733c35f21b39d9ce51fb0744e5f"
+  },
+  {
+    "file": "saas/activity-ui.js",
+    "sha256": "eff2dccded9f58249e403e4136cb9896c02a58b98f906e80adaa97995aa5d996"
+  },
+  {
+    "file": "saas/app.js",
+    "sha256": "10acb87228605a912793a35b2cb21148a03e670d349e373ba7a4e679e89dbfa3"
+  },
+  {
+    "file": "saas/approval-request-ui.js",
+    "sha256": "8954fee894ea4b2e1ee3cfc06129b5547cf30a080be524b6c4e5eb2e8de4aff9"
+  },
+  {
+    "file": "saas/brief-history-ui.js",
+    "sha256": "2d97bf50a51035641d66bd71c984b646c5c66ca77c1617864db0195196d8bf73"
+  },
+  {
+    "file": "saas/cloud.css",
+    "sha256": "6c11f87f352c9b65023e98716e858dab8738a81ecf60709a578966ff7fcebd73"
+  },
+  {
+    "file": "saas/cloud.js",
+    "sha256": "37a369fbb963e86280d37c81568fae946df4aedb51c2b9607264ed1427642523"
+  },
+  {
+    "file": "saas/connections-ui.js",
+    "sha256": "31f0fc4f56dfbc6ef9276b46d3b1a56fc02f191da9273ef7d44409eb8c47a45c"
+  },
+  {
+    "file": "saas/control-ui.js",
+    "sha256": "4f1aba8c203312ee9e1e0bfe16b6bbbebcb8c14547024c37d8d763afd2b16f1f"
+  },
+  {
+    "file": "saas/creative-allowance-ui.js",
+    "sha256": "39c66e3a17f974c96bf0bc26b7683bac1d9d29e5a8dbb75643ff3be4e7c2b7a1"
+  },
+  {
+    "file": "saas/docs/activity-observability.md",
+    "sha256": "7f8fa7c27eaa5cd1df2b80022241f171f640638b60ea0247ffe82538ac5da2ee"
+  },
+  {
+    "file": "saas/docs/activity-ui.md",
+    "sha256": "f4df26b94da7374fddd23e271c864ccf6510f7ac9f999339f9092d65c9276766"
+  },
+  {
+    "file": "saas/docs/automation-retention-rollout.md",
+    "sha256": "55c1f37faf627453662a9f585edf96d6bf723376e4d66b3dd5c730fe28cf206d"
+  },
+  {
+    "file": "saas/docs/brief-history-storage.md",
+    "sha256": "6ad6527b45badb9be18970353493a6c90ac4c1cfc890af5ddc70d787180ddb6a"
+  },
+  {
+    "file": "saas/docs/business-graph-outcome-evidence.md",
+    "sha256": "095abe3a90ba91779a85316518f8150f6d5ff46147f85b006cdecb7b775d8e00"
+  },
+  {
+    "file": "saas/docs/business-os-acceptance.md",
+    "sha256": "fd7cf956d21d75d7e3777612aef8a6533989c28e44513a99129e0b064de9e9b5"
+  },
+  {
+    "file": "saas/docs/business-os-rollout.md",
+    "sha256": "b504f1e398fb3419b196699d16eff44323ecc7dc032e9291a767d3666edc1f05"
+  },
+  {
+    "file": "saas/docs/business-outcomes-rollout.md",
+    "sha256": "412f042e44e576bdf674cf5bbf7166043ea8214d3cfe425f8e66b5590b46b7ab"
+  },
+  {
+    "file": "saas/docs/catalogue-financial-eligibility.md",
+    "sha256": "a1a1777edf3faab9fa71ee84e600da935ad52a0791f09aa38621c0a18f6a24ef"
+  },
+  {
+    "file": "saas/docs/commerce-acceptance.md",
+    "sha256": "1dd69bc038b6b6bd2a7b5297e8d8518ae30bd487153312d606330767aae309aa"
+  },
+  {
+    "file": "saas/docs/connection-dispatch-safety.md",
+    "sha256": "36e91b6d8f4270bea4ec2919bbc3199ababc399a14fa3e6f470da4782c37b861"
+  },
+  {
+    "file": "saas/docs/connection-health-evidence.md",
+    "sha256": "05b0d0f75b686ce2a13829af9e428ef5459a7f78c6bb5230764d394ed0152bce"
+  },
+  {
+    "file": "saas/docs/connection-read-admission.md",
+    "sha256": "784504eab6e0d7c322b46c7f1a8b53b0bba0765cab0e2e284a85c3d5de7fe4d1"
+  },
+  {
+    "file": "saas/docs/content-jsonb-identity.md",
+    "sha256": "fd7134384f01312b504d4ba7a13c27eed9f575cf89540d5b73cb5b34ea69c507"
+  },
+  {
+    "file": "saas/docs/cost-entry-basis.md",
+    "sha256": "96b78a85f39c6d75c5670c1065003b5dd677739f7d3b0cbd45e977e58b723ceb"
+  },
+  {
+    "file": "saas/docs/cost-source-review.md",
+    "sha256": "e30c5aee751f5743f050bed1658d63275037163ab6c4f15568d7828e0ed30bdd"
+  },
+  {
+    "file": "saas/docs/creative-safety-rollout.md",
+    "sha256": "da51c1274caee65fba670c332484d1314bf98a9410fc249e3fc8b258e364b60b"
+  },
+  {
+    "file": "saas/docs/cumulative-safety-integration.md",
+    "sha256": "f468a24a62747e12771e2169d39a0bd88db8b89688459f5e4cbcd18daff9958a"
+  },
+  {
+    "file": "saas/docs/description-pilot-simulation.md",
+    "sha256": "a819dea449f6127518d0700cfc502242a253a6f30651549cd23627dd765e310c"
+  },
+  {
+    "file": "saas/docs/design-language.md",
+    "sha256": "8b9a0187d8823150a320ac4e95ecccb803eb5d90e5f4013da07c2ea0ae9de80a"
+  },
+  {
+    "file": "saas/docs/doctor-busy-settlement.md",
+    "sha256": "01752676b92c8f572c1048f97f19a9f0e487477d17c07c204e8e705262207cef"
+  },
+  {
+    "file": "saas/docs/ebay-read-cooldown.md",
+    "sha256": "9ab52b7a3dc1c495ba32fbe54afe7ce76e48fd5e1525889804b484d207436c73"
+  },
+  {
+    "file": "saas/docs/generic-action-display.md",
+    "sha256": "ca622e24f9bb017f1f30984b6cd0a8aca856eeede54e5133ecbda28be82bb4f9"
+  },
+  {
+    "file": "saas/docs/governed-record-stage.md",
+    "sha256": "c45456b5640d53a476caa1dde6064a5a86056f2eda664fabbe5d6fe7dc6ad727"
+  },
+  {
+    "file": "saas/docs/historical-financial-evidence.md",
+    "sha256": "fc9898dab2f6ad2091bd240c80a93d514b2aa5946744cfdec6b463451c16f2f4"
+  },
+  {
+    "file": "saas/docs/imported-order-evidence.md",
+    "sha256": "9b043c4dd6e6f409b9d133508f18b3d49d6451c985ea110561b08d8dd57f8e0f"
+  },
+  {
+    "file": "saas/docs/legacy-order-field-semantics.md",
+    "sha256": "74994f7a59f79c9dd005c19e0c7e8b049894da989473a3ffe422f00b47d62d38"
+  },
+  {
+    "file": "saas/docs/lifecycle-drain.md",
+    "sha256": "3dc30d931a51d168c5597ef32130d8e3864c59b7f8d12896271dc7558aca98e2"
+  },
+  {
+    "file": "saas/docs/local-jpeg-review.md",
+    "sha256": "cb5c6c83dd47e6a12a7973f7cdbc450c33617ca401cb3a55e9c22068b4244a6c"
+  },
+  {
+    "file": "saas/docs/manual-content-preparation.md",
+    "sha256": "0b24f56387844f0407ea679853e767d3d6469aa5116051734820a234a38cfa3d"
+  },
+  {
+    "file": "saas/docs/marketing-campaign-review.md",
+    "sha256": "154737eef72404a718309222734d36eb2663c958a35f918a2f46efc0684e89d3"
+  },
+  {
+    "file": "saas/docs/marketing-publication.md",
+    "sha256": "2481b2f9041fa86efa3f7526945efd2404954f573e1d38a48cd5a78e9b452e0d"
+  },
+  {
+    "file": "saas/docs/meta-container-observer.md",
+    "sha256": "e50d2e97d7449a583b3fa01b89aae11c2952d589a0168a49b9d239ec2743d5b6"
+  },
+  {
+    "file": "saas/docs/meta-production-release.md",
+    "sha256": "919ba6197f0e47da3416e7a733adb2219e0939e33abcc1649c4c366020e9cce6"
+  },
+  {
+    "file": "saas/docs/meta-production.md",
+    "sha256": "6f12024447ef233be8b5ee8b7f3ca23e3661fc5005d2580baa612ac294b568aa"
+  },
+  {
+    "file": "saas/docs/meta-publication-ledger.md",
+    "sha256": "cbe257879c95bddd6ecbc706d6c61a3b465a59ac466020ea648a4709c16eb8c8"
+  },
+  {
+    "file": "saas/docs/meta-single-image-flow.md",
+    "sha256": "fabafbaf23b4c3a51b68513429c248339e0539f82d25ca528334f375c60f17c9"
+  },
+  {
+    "file": "saas/docs/objective-budget-comparison.md",
+    "sha256": "bb40f970898f0f3935e81cf8add2e880429fdf942ae758baea2432add08374ed"
+  },
+  {
+    "file": "saas/docs/objective-content-bridge.md",
+    "sha256": "30cc78b988fe2e4841e68f1388b4875a050ea5038f68237c806c23afce70c4ee"
+  },
+  {
+    "file": "saas/docs/objective-dispatch-policy.md",
+    "sha256": "63741e62f94be7cd5cd5436f377d1ff822286d6686c6a0fab2a731c4a09e48dc"
+  },
+  {
+    "file": "saas/docs/objective-review-rollout.md",
+    "sha256": "e95b7f829e4aa044b48ecb6ef7d9cd4d1881ff095afd3f221b904ab76fbb5e61"
+  },
+  {
+    "file": "saas/docs/operator-brief-admission-timeout.md",
+    "sha256": "141105c291ef871b5b7fa69973fe1e01bfd22448e3a3378a64394e2e816c4ab9"
+  },
+  {
+    "file": "saas/docs/operator-brief-cutover.md",
+    "sha256": "015f83144804187104ae8abbc95b6c5ee792e6b4fb8334fc434e80418385acfb"
+  },
+  {
+    "file": "saas/docs/operator-brief-future-allowance-design.md",
+    "sha256": "47a9164b99b8cf873196799e90ebf5d15834204f488ed6262c1c9b480d86b183"
+  },
+  {
+    "file": "saas/docs/operator-brief-future-allowance.md",
+    "sha256": "3605395b3b65bc0ff297d96711306af4e2d38b7cd738d04ed9b1a3ab8689108a"
+  },
+  {
+    "file": "saas/docs/operator-brief-routing.md",
+    "sha256": "0b588dcd6251d30c989e79775149f27b46984a9e6d23760c2f9bb427c3f1bbaa"
+  },
+  {
+    "file": "saas/docs/original-os-compatibility.md",
+    "sha256": "8d2a25989ebfa27f1941f39b6914ea30e25925909be6b2ec413ad8b6ede4ebc5"
+  },
+  {
+    "file": "saas/docs/parcel2go-api-mocked-acceptance.md",
+    "sha256": "001df750bc15dd7fea2053e935e2a3a59c3a23896cd3d6aa9742d87a4064cc87"
+  },
+  {
+    "file": "saas/docs/parcel2go-owner-entry.md",
+    "sha256": "a1b2bf7d4b6bba8f631474574da8aabfa1ce3c4249ff00443a4480f8ed593fc6"
+  },
+  {
+    "file": "saas/docs/parcel2go-owner-quote.md",
+    "sha256": "cf883a273294bafc354b3804c6f62124026bcc1f05c35173ed712ed1b04f9e78"
+  },
+  {
+    "file": "saas/docs/parcel2go-owner-review-persistence.md",
+    "sha256": "42f78d648a6687f4a081684295947f31d8474ec9adce8b3ede8372c73bafefea"
+  },
+  {
+    "file": "saas/docs/parcel2go-quote-foundation.md",
+    "sha256": "99f3279177e59ae01a78fec6229a5edc14fcb92a028033cf1b13c5e0a00f5bfa"
+  },
+  {
+    "file": "saas/docs/parcel2go-release-review.md",
+    "sha256": "49eea52a30404b31d6b8ac2cd381a82578a6e044acc298203c9ca00d789539a9"
+  },
+  {
+    "file": "saas/docs/parcel2go-reserved-credential-reconciliation.md",
+    "sha256": "65d91bf04fe3fb1b570616ec4416097f0c9c678224b50fc89022c4dfd76bf1a4"
+  },
+  {
+    "file": "saas/docs/parcel2go-sandbox-candidate.md",
+    "sha256": "513220996d35773901070e4f7aecddc5cc92b48c9b478e1842000c92db577ab7"
+  },
+  {
+    "file": "saas/docs/parcel2go-sandbox-http.md",
+    "sha256": "aa82cb90874d095e40a15541c42e0bd031703ea509675302a3f05a5e2e753205"
+  },
+  {
+    "file": "saas/docs/production-health-verifier.md",
+    "sha256": "83f1324506904c39cd89a99914315232581312ee3c27a4e03fc42b4365694c38"
+  },
+  {
+    "file": "saas/docs/protected-content-receipts.md",
+    "sha256": "dc8619053f10e07fcb45b34cd179cf8a2f7e4cbf6a6ef7a0965beffd4dd0d8bd"
+  },
+  {
+    "file": "saas/docs/published-action-graph.md",
+    "sha256": "940f01c59d73bfaa08093ea001e48312d0ae98e1a9fb8dcc268f5683eb5b8fb8"
+  },
+  {
+    "file": "saas/docs/quiet-public-support.md",
+    "sha256": "8329fd4812cabddd32b34d5df1c0314400b2e5d4546d794aa5e171f836ad53d0"
+  },
+  {
+    "file": "saas/docs/quiet-startup-cutover.md",
+    "sha256": "e6805101ce0bf86e8c901d0be0f20f7d911acefeee76cdebed59bf2250803376"
+  },
+  {
+    "file": "saas/docs/receipt-outcome-consumer.md",
+    "sha256": "b3e244ecd9bb39f9102e0f60bcbd7ebd91acb633ade4eea8c6a9401cfb968597"
+  },
+  {
+    "file": "saas/docs/recorded-cost-validation.md",
+    "sha256": "d16638ed37fbd095bb1ef490ebd7c76ce6469210d3a3dbb024e3b71423cc332e"
+  },
+  {
+    "file": "saas/docs/release-6.7.0.md",
+    "sha256": "be8a8583b9c81166562dbc34ff9f59a0659f25b37e6bba5b33c27a48c1a5c4f2"
+  },
+  {
+    "file": "saas/docs/release-6.9.0.md",
+    "sha256": "1c2154b40f050f72b87665cd0ec12c883d3dcc1f36a52a457aa16625f08a4326"
+  },
+  {
+    "file": "saas/docs/reporting-cas-usage.md",
+    "sha256": "789bf54a3611e8c273369f5cfc8a1932c8f3f97067f0261c937532f70cf2c109"
+  },
+  {
+    "file": "saas/docs/retained-goal-request-graph.md",
+    "sha256": "dff735f57e5fc0e5b493db084749905d68f692a87abd2401aeab54908412ff4a"
+  },
+  {
+    "file": "saas/docs/reviewed-action-outcomes.md",
+    "sha256": "38d6e8c319e648c8508e64039fc9b923c90679980cc310c9cb8be857171b2a4e"
+  },
+  {
+    "file": "saas/docs/selected-outcome-relationships.md",
+    "sha256": "c3f881710e0449666d828c2a7d9ace97d2bbc1d2ff1f73293dc91f0881cd7027"
+  },
+  {
+    "file": "saas/docs/shopify-catalogue-integrity.md",
+    "sha256": "0a2a30c2bcaa4972f94c948d28b70eea6c3008f2e8d5c878be4b7643fabef9f2"
+  },
+  {
+    "file": "saas/docs/shopify-order-read-admission.md",
+    "sha256": "59790f79db34c725a00f150a4d20626aa4e6f4003913c8f8e1a6de09f41ec7ef"
+  },
+  {
+    "file": "saas/docs/shopify-order-recovery.md",
+    "sha256": "c0129c8cd80d4087888b1eb8376fdf4a324a85a8dc08de72322d8ef1d8247774"
+  },
+  {
+    "file": "saas/docs/shopify-order-source-capture.md",
+    "sha256": "577fbfd4c26a157c11955478ee6abdbeb4b5e38f8ea670f60ecb404e41247eea"
+  },
+  {
+    "file": "saas/docs/shopify-updated-order-window.md",
+    "sha256": "0d9bb5786096674bea32a8b683435fcd5a9db51c8ca51727a0e04f3da08b8212"
+  },
+  {
+    "file": "saas/docs/single-content-pilot.md",
+    "sha256": "586d9505862c1f4a7962fb5f7f9b3c78e4a63673b9a2e4a4cdd2b240b59a7cb3"
+  },
+  {
+    "file": "saas/docs/source-selected-outcome-compatibility.md",
+    "sha256": "3c396535572e85c00951c177fa45617d849a2cfbaf8a1ce4d29427f840a69b4d"
+  },
+  {
+    "file": "saas/docs/static-revalidation.md",
+    "sha256": "6708be17f56873e598c031dfd6e62ea824db367d24881edb22f82703b8476042"
+  },
+  {
+    "file": "saas/docs/store-health-usage-correctness.md",
+    "sha256": "752af159c5043802dbb4cacd8c712a7d27e4867f385bffdcf22ace2da2803445"
+  },
+  {
+    "file": "saas/docs/web-intelligence-safety-rollout.md",
+    "sha256": "9dcf152027e31b3378ef802c75f02f1923cc4ac1c24b5ff830a61805407cb23d"
+  },
+  {
+    "file": "saas/docs/wholesale-consignment-review.md",
+    "sha256": "43a5e65e2cc70c55eb4142288243030832f0ad884ab0999b23b3521201119a8d"
+  },
+  {
+    "file": "saas/docs/wholesale-contribution-review.md",
+    "sha256": "53c68abf701de8513f83ae43861e7ef56429e4ec2d4b5bd33d6c73b8685d744c"
+  },
+  {
+    "file": "saas/docs/wholesale-order-review.md",
+    "sha256": "7fad791aaa47a6795dfae518b65e41dd8e97035a591732b19559a0a4d00f2c1a"
+  },
+  {
+    "file": "saas/docs/wholesale-planning-fixtures.md",
+    "sha256": "befc82a520d97f68d03753bbd78f9cedd9363a91ce773dda949db90c503d637e"
+  },
+  {
+    "file": "saas/docs/wholesale-readiness-map.md",
+    "sha256": "42a190c88442152102dc22410f49ad1afa65e058bc372e39dd41bdc2fa111d5b"
+  },
+  {
+    "file": "saas/favicon.svg",
+    "sha256": "b3463c0684a3fa60eb788b71242dba3f300e76e061ae94c3d0c6e1be0d2f99c2"
+  },
+  {
+    "file": "saas/index.html",
+    "sha256": "e25f3b7d9f696ccff55108df236135cb667187fb4df7eb07fff1c51088930af3"
+  },
+  {
+    "file": "saas/maintenance-approval-ui.js",
+    "sha256": "7806a43b5ace0ef29ec0bba639d35fc846592e9b3f90b6bc46826bee991fbc93"
+  },
+  {
+    "file": "saas/maintenance-creative-ui.js",
+    "sha256": "26f36931da3fe603e9374a15d4d4b395e274eb1d2aae0960418594dc0fc29d64"
+  },
+  {
+    "file": "saas/meta-production-ui.js",
+    "sha256": "9cd9aaff04c096c57882d01ba203b2af5c8371f1ac31be61c66a9af3260a0494"
+  },
+  {
+    "file": "saas/outcomes-ui.js",
+    "sha256": "1ee4223df824bb35ac4a4a3d555a1da0465e775b52e621d4c87beeab76f25523"
+  },
+  {
+    "file": "saas/parcel2go-approval-review-ui.js",
+    "sha256": "899e92c4e140b5bc5b60b19fb57b3fa51ad47fcf2785b0680a3872040f0aa2b3"
+  },
+  {
+    "file": "saas/parcel2go-entry-preflight-ui.js",
+    "sha256": "fa5c0e1a8f3642650cf5415f5fe830cb46c6c0410f4623e7126f50e74778858f"
+  },
+  {
+    "file": "saas/parcel2go-entry-preflight.html",
+    "sha256": "8f9e7b98bb142b859d40893c1d62eb2704dc36d2eac5c4e2735fd2cf7d442e84"
+  },
+  {
+    "file": "saas/parcel2go-entry-ui.js",
+    "sha256": "f0c50f175d95fdc6a4a198314fee522f85c9cfe48c5a8447bc386b02efdac789"
+  },
+  {
+    "file": "saas/parcel2go-exact-owner-ui.js",
+    "sha256": "a74435fd2944a144750bc02ac16b12a4968a7d0d20b2eaeb5831fb791f6ad2f8"
+  },
+  {
+    "file": "saas/parcel2go-live-entry-ui.js",
+    "sha256": "62b5a29feb22ece9b96d1aa8453328dea0b9831e23384e70ff14559a87329fba"
+  },
+  {
+    "file": "saas/parcel2go-live-entry.html",
+    "sha256": "a858c85c80448bad8483eac3cc2e397e87c2536ae0f17026a60f9864c81c577e"
+  },
+  {
+    "file": "saas/parcel2go-live-review-ui.js",
+    "sha256": "5be52e5d48fc2ba63181c78043ebed1efa1cc89974c523db6ec97aa8f88f82e3"
+  },
+  {
+    "file": "saas/parcel2go-live-setup-ui.js",
+    "sha256": "075acff55bd8d94f09b46a0ce6914237486f9c1305b2f6a26fdcbf3fda29a8ba"
+  },
+  {
+    "file": "saas/parcel2go-live-setup.html",
+    "sha256": "f01cea59bb658edde0b1bf975e551eaa23ef5d483c300a4b90679fee51e42681"
+  },
+  {
+    "file": "saas/parcel2go-owner-quote.html",
+    "sha256": "8d2b1d1636f35da439856c85d156ca9098549614917033590f0c5d1e102bcc4a"
+  },
+  {
+    "file": "saas/parcel2go-quote-ui.js",
+    "sha256": "547b0026eeb1afc25abf7efcd76b9a42e2969f45fcd902895680502f12056d8a"
+  },
+  {
+    "file": "saas/presentation.js",
+    "sha256": "a764d8293932d57d8803f2b214c6a8f23e5b6cc923373da98f8a83de3f37427c"
+  },
+  {
+    "file": "saas/server/.env.example",
+    "sha256": "14c143e05d8d735c983ed49f19dcd4b23a7183c0cfa8d05eae79b7770ffdd212"
+  },
+  {
+    "file": "saas/server/.gitignore",
+    "sha256": "bb82247e9fdb83f9d602f4e15e4d205ebf7321b0bbf67bc5832f31d14a9c910f"
+  },
+  {
+    "file": "saas/server/AUDIT-2026-09-20.md",
+    "sha256": "73e60e7a73210327848d88e688beeb8ec61585a37a2cf650a3540bff7d74b9d9"
+  },
+  {
+    "file": "saas/server/DEPLOYMENT.md",
+    "sha256": "4021f5bc8f45741942c89ec623731b2ce1d6e93149efb5e91fbde8655e6a53a7"
+  },
+  {
+    "file": "saas/server/Dockerfile",
+    "sha256": "0e0f65e482dba277c82e8589fd6e29de698523efa35832ccccdd7a1f343b1731"
+  },
+  {
+    "file": "saas/server/Dockerfile.dockerignore",
+    "sha256": "b9fd2d84bbe2bd9a9a86a636071b92ccc8e60e8beee224889946978613a7a561"
+  },
+  {
+    "file": "saas/server/GOOGLE-PRODUCTION-SETUP.md",
+    "sha256": "4b55b237dd551451fc1133c3cbfb59e1ee777d5a1f8863a3a6c599a13c23cf46"
+  },
+  {
+    "file": "saas/server/LEGACY_AI_USAGE.md",
+    "sha256": "c517cb227316f878232563df131c865bb97d9f4c8e26d263f70f907688445f67"
+  },
+  {
+    "file": "saas/server/META-FACEBOOK-LOGIN-AUDIT.md",
+    "sha256": "ffa9954978cbfb4855f8575bc0c08011e24e23dd4a1b8021e5cee775011af468"
+  },
+  {
+    "file": "saas/server/RELEASE-6.0.0.md",
+    "sha256": "420ecc3a321c3302b9186131fef7fa9d54e6d33e9aa9ba2940855e8a870ff15a"
+  },
+  {
+    "file": "saas/server/RELEASE-6.1.0.md",
+    "sha256": "8e06aac01483904d907b19bf0d17fa3f93061b483512ec0a4b2d9f1bd3ed1cfb"
+  },
+  {
+    "file": "saas/server/RELEASE-6.2.0.md",
+    "sha256": "811e019604bade59a4be05149aa510851a7a71d1d94c9721ce930beec76db469"
+  },
+  {
+    "file": "saas/server/RELEASE-6.2.1.md",
+    "sha256": "4fbc1a5a04b11ec4704f452d291620c161b116071ec9e34d14f7ca18da1315a0"
+  },
+  {
+    "file": "saas/server/RELEASE-6.3.0.md",
+    "sha256": "cf876b1bcc11cacd5850693038b576d6004ccb616f923e6b13566d897a60d405"
+  },
+  {
+    "file": "saas/server/RELEASE-6.3.1.md",
+    "sha256": "b6c99db02a34360251ebc073da1f8b6bb7a4d12a1dfae62de394bfced606d770"
+  },
+  {
+    "file": "saas/server/RELEASE-6.4.0.md",
+    "sha256": "74aa2aaace178cdd33ba47d6c266b8066e16cb327f392275bd4405bc8df27e66"
+  },
+  {
+    "file": "saas/server/lib/action-display.mjs",
+    "sha256": "a613cadd128b3ebdfb2ede77975889dd25afee5a8d8417750e7cff115a92dd1d"
+  },
+  {
+    "file": "saas/server/lib/activity-meter.mjs",
+    "sha256": "de3b27b447eefe67e27ee0f516926eab7c7c4155884f8a5b15ee53a225bca449"
+  },
+  {
+    "file": "saas/server/lib/agent-ops.mjs",
+    "sha256": "797fc10efbdf9a03bdccf98294c741529bc49276aa27fd731d03d9b968092e87"
+  },
+  {
+    "file": "saas/server/lib/agents.mjs",
+    "sha256": "98c1bd2d7c59cf7566aa501bcdc27689c79f3d5830957ab061b85e10955755e6"
+  },
+  {
+    "file": "saas/server/lib/ai-economics.mjs",
+    "sha256": "d8b4e2ab19ea5712e586bc2c7fbce6d59bbe914a0ba21af285cb00b96176705d"
+  },
+  {
+    "file": "saas/server/lib/ai-provider.mjs",
+    "sha256": "39bfae59fa0b7978eb0f1c216cd252203c55617c35f1bb669289268deb9152c2"
+  },
+  {
+    "file": "saas/server/lib/approval-request.mjs",
+    "sha256": "77de1413d21f24b4aab415e0bb25e660d29b074acf23c26b9c039a4ad5b1294e"
+  },
+  {
+    "file": "saas/server/lib/automation-retention.mjs",
+    "sha256": "5502efb06179d20a14db8b0972aeea658e935f63b4a2e83dbfe4bc31b285c9d6"
+  },
+  {
+    "file": "saas/server/lib/brief-history.mjs",
+    "sha256": "221b4662dac466a971de0a74dce1bb9c688be6f58216e51a7c87b2ead1573395"
+  },
+  {
+    "file": "saas/server/lib/business-evidence-scope.mjs",
+    "sha256": "cd773e10dfbf2e7c601f1b31eb9c898da0b4e0e5965b8558243ce27c8ac009cd"
+  },
+  {
+    "file": "saas/server/lib/business-graph.mjs",
+    "sha256": "b9f2d6e56acd4e604fbfa4f7f336a9f57fda8db09aa8f27149109aa2db1a3998"
+  },
+  {
+    "file": "saas/server/lib/business-objectives.mjs",
+    "sha256": "19c6325c806c4c94550b50564f687c776eceb23b3740437760359ed31f6a263c"
+  },
+  {
+    "file": "saas/server/lib/business-outcome-store.mjs",
+    "sha256": "5591dce5365e4be3f37bad49364f5658f19a79140c6734942a6715d4fc4a49f1"
+  },
+  {
+    "file": "saas/server/lib/business-outcomes.mjs",
+    "sha256": "8953f5478fadc3d40215b1312b208e33859a03f11be88643f26cc81edc5dc13c"
+  },
+  {
+    "file": "saas/server/lib/business-state.mjs",
+    "sha256": "ff3586b4a5cd7738a281348f5572643130a97a3bedd5d09330d68b41c6c67e81"
+  },
+  {
+    "file": "saas/server/lib/catalogue-save-capacity.mjs",
+    "sha256": "b3a643d11278130ad56820a6a8d94f3d30171f988998a278b77131e9f540fe14"
+  },
+  {
+    "file": "saas/server/lib/connection-centre.mjs",
+    "sha256": "20b690f29c0ee11c20cf55b03c626b28b89edc71ef890d6d44b47ab013132834"
+  },
+  {
+    "file": "saas/server/lib/connection-dispatch.mjs",
+    "sha256": "5188e401d456b44c3d77fb217c34940b966d4a341230bbee5574c082ec2ad19e"
+  },
+  {
+    "file": "saas/server/lib/connection-doctor.mjs",
+    "sha256": "422f11c37eb8a65d70bf0f9b4e4b20bfd4758ddaa315d8bc62cb1bf13d4607b6"
+  },
+  {
+    "file": "saas/server/lib/connection-intelligence.mjs",
+    "sha256": "18a4c01d962d376a0c341908b029a3e3db2bb8ccd7ece066c535222063da3009"
+  },
+  {
+    "file": "saas/server/lib/connection-writes.mjs",
+    "sha256": "f50d29fdc7bba33c5bad3934627095ede8e66995e1e19c94b19b8fc85f0e5e23"
+  },
+  {
+    "file": "saas/server/lib/connector-oauth.mjs",
+    "sha256": "5cede482a0361c13c2572fc1c6161970f1b911c06c8070d58a42b5148c239d57"
+  },
+  {
+    "file": "saas/server/lib/content-execution-receipt-store.mjs",
+    "sha256": "a922a451aa0fed484a9ac39d2fbbb0be2d8dd1450d63236ba318e18713fa54e3"
+  },
+  {
+    "file": "saas/server/lib/content-execution-receipt.mjs",
+    "sha256": "1fecf6511baa9683d31e4454a6a8996f6c5db74d22af4d82d8443e566daa0adc"
+  },
+  {
+    "file": "saas/server/lib/content-pilot.mjs",
+    "sha256": "8c632352f8c61614a78e05c08863c1b28904c49f02ffc4f100dedcf13bc5e5fc"
+  },
+  {
+    "file": "saas/server/lib/content-write-identity.mjs",
+    "sha256": "2f1500f73718d8f463901048d3eb86d86fed5d74fe49860aab9530692a84292d"
+  },
+  {
+    "file": "saas/server/lib/control.mjs",
+    "sha256": "dc4b4bcd1d84a9f78466d025ab9edc5c1f6e7ff37572e86e5d32e1f897b21546"
+  },
+  {
+    "file": "saas/server/lib/cost-source-review.mjs",
+    "sha256": "dd4064d3bd4c26f84ba9829799176383a62e14ff1378238d111ea204c001fb94"
+  },
+  {
+    "file": "saas/server/lib/cost-source-stage.mjs",
+    "sha256": "a8a397ade674f136b4d70cc176e65918a169bfd0702671765b649f2de684e01e"
+  },
+  {
+    "file": "saas/server/lib/creative-allowance.mjs",
+    "sha256": "084568e98b746c0618173b0180682803ab0dd4b64268c76f9132eaa6f9197d9e"
+  },
+  {
+    "file": "saas/server/lib/creative-safety.mjs",
+    "sha256": "f850cfcec80fb75b1387226ee5ca74e3ad0fd1bae0a38abb535a31f580be6ef0"
+  },
+  {
+    "file": "saas/server/lib/customer-support.mjs",
+    "sha256": "d790e0fe347ef5a562c4b3e8d52495f7bd29ee823a5d2140ccecbcc7527700ff"
+  },
+  {
+    "file": "saas/server/lib/description-edit.mjs",
+    "sha256": "961600693429c38894d469d8d3cb4c02062b013fad4127f93515d70a3eab7794"
+  },
+  {
+    "file": "saas/server/lib/ebay-read-cooldown.mjs",
+    "sha256": "fb75d3ceef5f7b808780981137cbd69c5ce6345b7fe3f0bec8660bc5d7519090"
+  },
+  {
+    "file": "saas/server/lib/email-branding.mjs",
+    "sha256": "ec7b60391e48da0800bc08a6b731422284b79e16c039cd99a097343493ef1778"
+  },
+  {
+    "file": "saas/server/lib/events.mjs",
+    "sha256": "384cd5f6e4b21c4767b1c74f671fce157713a8eb33ec2eca1969fc29e143a85c"
+  },
+  {
+    "file": "saas/server/lib/execution-plan.mjs",
+    "sha256": "a58a394a1963b1e8258ae2fc1a2d720374a6618891977a5b91686ff0a66ee9d3"
+  },
+  {
+    "file": "saas/server/lib/experiment-measurements.mjs",
+    "sha256": "f9c53a784448da3b7ec2ea89049e852c4e0405e12da5245702cd22b83e8056cf"
+  },
+  {
+    "file": "saas/server/lib/future-allowance.mjs",
+    "sha256": "8457996e26436ffb359e4db095aadb374b7952ec269b0c4c0a2a237a7b161c27"
+  },
+  {
+    "file": "saas/server/lib/governed-record-stage.mjs",
+    "sha256": "f485b45324de7e8401c51e7b15e899a1b36b725e8bdb49a354348aa4361c2157"
+  },
+  {
+    "file": "saas/server/lib/growth-council.mjs",
+    "sha256": "120bc5f85a62955f432e655379525ec23327c618daca69fbb98085d49f6a2f01"
+  },
+  {
+    "file": "saas/server/lib/historical-financial-evidence.mjs",
+    "sha256": "f2f48fd3f317504dfd6393123cb49748a13d8aecab22bb6fc502ec558cbdfe02"
+  },
+  {
+    "file": "saas/server/lib/impact-engine.mjs",
+    "sha256": "364de6bab6bd5152dc692c3b493f69b481a9a4f430771057fd18c264aa866305"
+  },
+  {
+    "file": "saas/server/lib/imported-order-evidence.mjs",
+    "sha256": "a8abddbfe390f38e301f4ad94e138cbd9f4b31bca7d2e12f621851dc75202cc6"
+  },
+  {
+    "file": "saas/server/lib/integrations.mjs",
+    "sha256": "b13390b6764ee71f3f87a9ffedc98eff4ff91c49ed92f767ee405c7b93fd7992"
+  },
+  {
+    "file": "saas/server/lib/launch.mjs",
+    "sha256": "14388baaa00ff9b209db86efcce58b97659b9229e20becd066ec435e92d1c5e0"
+  },
+  {
+    "file": "saas/server/lib/learning-engine.mjs",
+    "sha256": "dfa4175fdf5ab51d058a2af9333514bb23df1c0b6908bd1a4f6dbbf27fced289"
+  },
+  {
+    "file": "saas/server/lib/legacy-ai-usage.mjs",
+    "sha256": "d0dfdc59f042171bafebe1723a9f812c7e5f447cfa87aed6ba42f5f769b30eeb"
+  },
+  {
+    "file": "saas/server/lib/local-file-transaction.mjs",
+    "sha256": "ba7afac59b942c32927c3e6b140ce95ece87f609ac320b73ed170a70b4ee64e0"
+  },
+  {
+    "file": "saas/server/lib/manual-content-target.mjs",
+    "sha256": "58fcf4c27da513ba0180257fee9a2cd9aa5a0102f6d3d64d12bceb47a98e53b5"
+  },
+  {
+    "file": "saas/server/lib/marketing-campaign-review.mjs",
+    "sha256": "a9e466d87246568c5e5833d03755774bc01bdd798d7de66daf3c705aefd8ad13"
+  },
+  {
+    "file": "saas/server/lib/marketing-jpeg-worker.mjs",
+    "sha256": "6347a1d07dfd30f54dd540427cdfa3444f350471bebbf1affd9f4e9d50928daf"
+  },
+  {
+    "file": "saas/server/lib/marketing-jpeg.mjs",
+    "sha256": "13d9e3867b604f13b4a77b538be75a892b8e8469a6bbbe57b7cc78e3748225d0"
+  },
+  {
+    "file": "saas/server/lib/marketing-local-draft.mjs",
+    "sha256": "dd0a44e8a5f6929f48844e0582965b3b6117874d225dfbd99b913f07cb7cace4"
+  },
+  {
+    "file": "saas/server/lib/marketing-oauth.mjs",
+    "sha256": "a816dd2f91391b3409dbdfe718fb25acbc45084465b89192a696a64a10bcd2eb"
+  },
+  {
+    "file": "saas/server/lib/marketing-providers.mjs",
+    "sha256": "d1bdcb62ae32da827d0d7682ce3c056965c2b6b238edf20ad695bc0cbc3bc963"
+  },
+  {
+    "file": "saas/server/lib/marketing-publication-asset.mjs",
+    "sha256": "5529dd22fc93046a2cc5122f96eaccabd6bd92e3e14ac08db6a4c8c012c81497"
+  },
+  {
+    "file": "saas/server/lib/marketing-publication.mjs",
+    "sha256": "f8a4f8a876f3fc57185d09862717cd6e5c1515e39ef3f36cec0f1eb80eb6af7f"
+  },
+  {
+    "file": "saas/server/lib/marketing.mjs",
+    "sha256": "7777b6014644b871b9f06c04ba93162929fffd20559f0f78e36c60175c828dc9"
+  },
+  {
+    "file": "saas/server/lib/meta-capabilities.mjs",
+    "sha256": "c4a3b8fc1ad964eaa30dca65d1c360a70fa39362fd8a10e387ada5c6a7d01656"
+  },
+  {
+    "file": "saas/server/lib/meta-commerce.mjs",
+    "sha256": "a0d748a9aca1a0cd87ec33ffec2aedde1f9ae74a39ed39b56c2fc2b3e81c9eb8"
+  },
+  {
+    "file": "saas/server/lib/meta-container-observer.mjs",
+    "sha256": "19d54bab30548838d918a9318c33b441836a4e3e246135ac463985f3da595b65"
+  },
+  {
+    "file": "saas/server/lib/meta-container-response.mjs",
+    "sha256": "5439fe216e3f182b403fbc3ce6287fbe7a2a740b308c8a392c77c154007a98c8"
+  },
+  {
+    "file": "saas/server/lib/meta-production-delivery.mjs",
+    "sha256": "89a93621c5edfffff162608bc400116b4d18bbc0761c58603d53dae55ba24dc7"
+  },
+  {
+    "file": "saas/server/lib/meta-production-flow.mjs",
+    "sha256": "bfe88e104103400a97189fe1bc34bfa68dcce60757d9f0536f09cf86d2947758"
+  },
+  {
+    "file": "saas/server/lib/meta-production-ledger.mjs",
+    "sha256": "5cce8e6c695957a42c0784c9df636ec4bc83edd166a4fd895671f08a29ae7747"
+  },
+  {
+    "file": "saas/server/lib/meta-production-readiness.mjs",
+    "sha256": "e648a31802ea8e0ef3fabfacaa74f6ef61b50a9b7dcf162eaa6a904cb3efc55b"
+  },
+  {
+    "file": "saas/server/lib/meta-production-transport.mjs",
+    "sha256": "be05750e661154d604415b1a4674aa0cb728438b5d2a2b86ae9aa802abbadc74"
+  },
+  {
+    "file": "saas/server/lib/meta-production.mjs",
+    "sha256": "48d0306ff6f0bc9414380dae7e72d6609840f32ed5b5bf73ae1c058d08f1c256"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-bounded.mjs",
+    "sha256": "67c4d776236c015197b4592df94a5b9364d5ed20e25b92b72983a70e467bc70b"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-delivery.mjs",
+    "sha256": "890f1996963fa1258da8973e6082c11081ab4dea07e531f929c902678489defc"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-flow.mjs",
+    "sha256": "73eec88e042aea2c8d2cb6502707a520d0b37a918fa72147d45a6bae9d1a58bb"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-ledger.mjs",
+    "sha256": "50653efbc54fe4524b2800e60ebd845705b4ed4bdf600f6872e13ddaaef31180"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-observation.mjs",
+    "sha256": "9ab9d0bfd7c3b74b438be4d4242be19d05fd5edf05525efe3e86bb7c1bf5c15b"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-readiness.mjs",
+    "sha256": "24c20cd465c2c4ab7821aebfd8184e0a8dd6f910d1b9fa50f5a2cf18d4e51b95"
+  },
+  {
+    "file": "saas/server/lib/meta-publication-receipt.mjs",
+    "sha256": "999713e9a45a97d84617ee2371985533278d1aecaaa01f0eed207168f1f261d5"
+  },
+  {
+    "file": "saas/server/lib/objective-content-source.mjs",
+    "sha256": "cf685fd97ce71ce8caea880d0208fdb8a90ecc248be0464a646ecc4dcbc5e5d0"
+  },
+  {
+    "file": "saas/server/lib/objective-dispatch-policy.mjs",
+    "sha256": "dbffd22d8d547f9d29e092818ba6a32e5316142852958de4024e87eb3206ece6"
+  },
+  {
+    "file": "saas/server/lib/objective-review.mjs",
+    "sha256": "c362c4fec7c5b0ebc9758ff85f46710b059301e9534d355abf393b2ce775f35f"
+  },
+  {
+    "file": "saas/server/lib/onboarding.mjs",
+    "sha256": "865976a1f597e45abb0943685dc2e7c18a4c6a95f8c0dc48020e9dcddf31e412"
+  },
+  {
+    "file": "saas/server/lib/operations.mjs",
+    "sha256": "2ff4cf8b3b872df7a29dace4377d410ed8440061b2d0c1cf6a3dbb500c89104f"
+  },
+  {
+    "file": "saas/server/lib/operator-brief-policy.mjs",
+    "sha256": "c5b67f6009b14831b5b5e864e61278262056d6b6c4373230dbbe2cca32e20bc4"
+  },
+  {
+    "file": "saas/server/lib/operator-brief-routing.mjs",
+    "sha256": "312612dfebfa134b5eadffb272c304ed0db30eedf49a09b2f23e91b15f2c443b"
+  },
+  {
+    "file": "saas/server/lib/opportunity-engine.mjs",
+    "sha256": "214c42f8e778d540b573ab7a1ec218fa0d7cf1d6a3c08636ae80292222ae47f0"
+  },
+  {
+    "file": "saas/server/lib/order-analytics.mjs",
+    "sha256": "d61d7d9c9882e7b75eee9a617923869de4c955170644ed087ce8ff6db6d122e4"
+  },
+  {
+    "file": "saas/server/lib/owner-product-readiness-window.mjs",
+    "sha256": "4928cafb8350c9b60d41ad77cd07a51d6d16c425c2e3963cd1b5af727a339a3f"
+  },
+  {
+    "file": "saas/server/lib/owner-product-readiness.mjs",
+    "sha256": "6c69e57ad3c2f8a27ad5b13c96182a97993b973aec118080542bf02b3dd1af90"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-approval-owner-http.mjs",
+    "sha256": "efaecf260dca4783d7364ba84d319bde7e5aa9444efbc4c251d762f0f08e4777"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-authoritative-evidence-reader.mjs",
+    "sha256": "f287704a31b4349300748ad554638ac22c0fd716f8481343eabf7e6b4130cddb"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-credential-entry.mjs",
+    "sha256": "9fef1b2ed992f84bb5d4a2ca52d2bba7127a37d6356f6f0bc6c13b80ee862e5e"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-credential-http-boundary.mjs",
+    "sha256": "88cf0824d70d1fc3b4eed4a1e95c164deb91f561d9e4d2969be2c2f9d7536a2f"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-credential-owner-auth.mjs",
+    "sha256": "d23746e4051faebcb6ce5ccbfa7dc4f09d4f491e9c05d8cb644ffe2ffb02efe2"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-entry-diagnostic.mjs",
+    "sha256": "825b580f5112e9ca07a41d4fc962944c587112c6277728df6301929dbe28405a"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-entry-preflight.mjs",
+    "sha256": "b8b82584183bdfbb08425abaf361798bf76b340ebd1ca193f6685b00a993a034"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-exact-approval.mjs",
+    "sha256": "a79bc51777f46160b853012d0aa7c0d01ff064cbd1a1110c0c9043c2eb1b4ea5"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-exact-input-producer.mjs",
+    "sha256": "0b9d816f1c28cb844e4c89b7dc0b91a7591889893fa5312b7082d5654bc8d9fb"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-exact-owner-http.mjs",
+    "sha256": "de2b736abebff1b22286c4232d08b4b4cf93dffdf81db8b368fcfbc2d8778181"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-exact-owner-panel.mjs",
+    "sha256": "c9081961e4fac7bccc7bd85426e6dc2f4c696eaf1e3282498912859dafe73f09"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-admission.mjs",
+    "sha256": "e150b3a0f182ebad5f15e0002c8a59c9c1951c0d0a33cdec37a484dcb00f18c0"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-canonical.mjs",
+    "sha256": "a8d6ab408e21abad4a0daa00eb55a274a1cd0e89394df38aa2bbb47cc0c34441"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-credentials.mjs",
+    "sha256": "dc0a17d028b04dae1aa33a01f73f7b7631d0fb5c580e7a6d4fd24a46b5c007d4"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-entry-controller.mjs",
+    "sha256": "ff2a2e8b5f8e19c897137f81545acbe36c21c5eba635055fedcff7fd34c2c361"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-entry-disabled.mjs",
+    "sha256": "f9e2db9ecdef27300c0d9be5094de68ccb620cb9aee5e0a93bb0b50392af8ac1"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-entry-window.mjs",
+    "sha256": "23e9b8b1f70954ba31118acc0b7edb8d2606501f403c61c2581e21bb4f4c9300"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-https-candidate.mjs",
+    "sha256": "20c808c40dc97f59697b8f6f7ad2fa97f9beb0cfca8bd9fbd93ed0694f2ec5d8"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-mock-http.mjs",
+    "sha256": "f07914618b0084addb3f903711947138de037f5143c85f7d94f3c72d5b4c0b42"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-orchestration.mjs",
+    "sha256": "c1e7c4a24053f62f87280b106233d768091ea402f50ab2f23af81931c6081815"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-owner-route.mjs",
+    "sha256": "f05193a4dd99fd9b00a8068548d8361a04ec1387bd8bc4731e6d3c110217aa5d"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-quote-plan.mjs",
+    "sha256": "9a4f8c516c28b245ac6172211fe0a92ea7b483a8d61094e3df5322b965daa936"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-quote-wire.mjs",
+    "sha256": "f73725cadf0f7058944aa7b290218c229f2bb93099588c56c1083900be831ff6"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-setup.mjs",
+    "sha256": "9095b32e36dbc1ed5c4e6b87ccb44e21235ff9427e63e3f76992d6ec5aee61e8"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-live-sync-guard.mjs",
+    "sha256": "66bf86e75d98ac6326d478a9467d97830a272a913de1965491906ba4673bf444"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-operational-approval.mjs",
+    "sha256": "5e2d460e683ad7e7ac7c6219be4d6cf8bb5c56e21b51960086cd3d78d1e52e18"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-owner-quote-mount.mjs",
+    "sha256": "1e2e2e4293586a8c60c911356ae69006f2bb14f77e18baeb5bfbd9dfd47fb9b1"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-owner-quote-surface.mjs",
+    "sha256": "2b3f6bbc9781d99013384b4848ee97df05ec0187d4795b6588b28e2c13c0e5e7"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-quote-foundation.mjs",
+    "sha256": "4e364c9510a80655cfff9c8bfa5cdbdc193e1788214742c4996369618f330fce"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-quote-owner.mjs",
+    "sha256": "3033db80e0cc5eb6fa2533ddfeeb4439133414d13c44ca35d6ac30a8db4ea091"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-quote-schema.mjs",
+    "sha256": "92a75af4510fa3e33b8f9d80fb193361b2e26c5fb0a2b5e06e5cca491d69ef16"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-recorded-owner-review.mjs",
+    "sha256": "dfdd82d120403ac59fc2bb85a0b5212b0dc78b720b8ddfd3133da643ca0ccef2"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-sandbox-http.mjs",
+    "sha256": "2c5f4c300588ba8d81e0e2e69af2133450dd00d94b0310b546b10f98b9112f2c"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-sandbox.mjs",
+    "sha256": "4c1b99c527a0dd0a7f79be7cc30c1232a0d4b48be886da68837c4c319c3bb030"
+  },
+  {
+    "file": "saas/server/lib/parcel2go-workspace-fingerprint.mjs",
+    "sha256": "a828a659f88ee4294a88b7fc6d6b5e1f2e71b7ec6865e12542677f7ab3e098cc"
+  },
+  {
+    "file": "saas/server/lib/portfolio-engine.mjs",
+    "sha256": "aeacde862149dcef384a590bd6ca13836b9e4bea5d7cea06c694e9a70ca3e116"
+  },
+  {
+    "file": "saas/server/lib/production-health-verifier.mjs",
+    "sha256": "5124fbef4f0e7e03c82acdd0d10015d1fcc7dc90dd2673714f27ae6da27ad4c1"
+  },
+  {
+    "file": "saas/server/lib/profit.mjs",
+    "sha256": "c38ff76f34f9c3928a07e7ce7e7fd9341cb3073e6910ab76c737433fe4acd7e8"
+  },
+  {
+    "file": "saas/server/lib/protected-receipt-source.mjs",
+    "sha256": "6bac28afd300bf11d5e9d4d47b4674fbefe18bb15294c973af7e89932bc11fa5"
+  },
+  {
+    "file": "saas/server/lib/provider-router.mjs",
+    "sha256": "d156b3712bdeb720b7de25fc6fadacfaa7a952ec9384335cfa9be0683cc5e69f"
+  },
+  {
+    "file": "saas/server/lib/quiet-approval-pilot.mjs",
+    "sha256": "b836d5336f7b6510d3d75f930ea9d06f20cf1fa1c39af7c7ef916a6a68b511e4"
+  },
+  {
+    "file": "saas/server/lib/quiet-commerce-preview.mjs",
+    "sha256": "f958ab2ace824b90057b2d547b84a59b949ac6234e6556988b91a9004756f74e"
+  },
+  {
+    "file": "saas/server/lib/quiet-creative-pilot.mjs",
+    "sha256": "25066fa18d1c0abf9dc406b179443e6a4319857c429137b4882bd6d0ffd802cc"
+  },
+  {
+    "file": "saas/server/lib/quiet-owner-workspace.mjs",
+    "sha256": "2667ace704e145f5924c6ed6e10e43b26c76dc0494570e1b6a12d766d50bc62f"
+  },
+  {
+    "file": "saas/server/lib/reporting-status.mjs",
+    "sha256": "b4c01b4ad27f3f6bd6dc35d87d02a2ed81f7c11155b020342e8a4296721a3c41"
+  },
+  {
+    "file": "saas/server/lib/retained-request-graph.mjs",
+    "sha256": "860a43f40eb7ac8eca4c8b3ab75e866090193d6d9e324a5dddf2256fbb59e426"
+  },
+  {
+    "file": "saas/server/lib/revenue-engine.mjs",
+    "sha256": "bff7b562b28272714545a008ecc476337e47326580ecafc8298e4973df0d7df6"
+  },
+  {
+    "file": "saas/server/lib/reviewed-action-evidence.mjs",
+    "sha256": "e908f08d8680a32b18d9e96b80f33c28e460944742484a6473af332955c53c90"
+  },
+  {
+    "file": "saas/server/lib/scheduler.mjs",
+    "sha256": "37956ba25863488ab8b37b4ccb792cd971791ce3eac1cb2b461cdf903eb7bc18"
+  },
+  {
+    "file": "saas/server/lib/security.mjs",
+    "sha256": "472a7489f67d76c74fbbc8e3131426f0ffeadb7fc41fa448545724c027f8178e"
+  },
+  {
+    "file": "saas/server/lib/server-shutdown.mjs",
+    "sha256": "11f2048584a6ba3a6c19ca52508fa9ef6be2d98ab1f6838eea2dc036c182e14d"
+  },
+  {
+    "file": "saas/server/lib/shopify-catalogue-evidence.mjs",
+    "sha256": "98f2b4bf71fa2be688326386c604e677744710a2667c37886c4c37ed7b785b3a"
+  },
+  {
+    "file": "saas/server/lib/shopify-catalogue-import.mjs",
+    "sha256": "a6acc43e5e69fb170ae35a46d8c15312ae34f9487fbd48d8b1c47554663873ef"
+  },
+  {
+    "file": "saas/server/lib/shopify-catalogue-preservation.mjs",
+    "sha256": "645376258742aa68471a8245aeb4aa3840243edc74c5303837c2011fe30e3640"
+  },
+  {
+    "file": "saas/server/lib/shopify-catalogue-read.mjs",
+    "sha256": "c5de133f4528d788e61b8cc2ca22abef8009a8f59bfeaaad855ac905a0b36bf2"
+  },
+  {
+    "file": "saas/server/lib/shopify-credential-metadata.mjs",
+    "sha256": "ce786d6729bd98d5454eea40c57107e9d98890666c0ba3c654457ff1bd020867"
+  },
+  {
+    "file": "saas/server/lib/shopify-order-recovery-run.mjs",
+    "sha256": "debf32463d51c7159c159851533aa1635b26371ba7a56aff0bd6610c970ef4ce"
+  },
+  {
+    "file": "saas/server/lib/shopify-order-recovery-store.mjs",
+    "sha256": "b4a57cc4bd8833b3504515bf18f855ee06f461d0797b62b70cce8a9c09807280"
+  },
+  {
+    "file": "saas/server/lib/shopify-order-recovery.mjs",
+    "sha256": "3518616159c320c2e34600ef8d8b78f56df9bd4abae7b63817548062b261c8d2"
+  },
+  {
+    "file": "saas/server/lib/shopify-order-source.mjs",
+    "sha256": "a0fcc50bb2e4eee603bdff05ed41a678c8ea96e64c9be793987b8f7641a2144f"
+  },
+  {
+    "file": "saas/server/lib/shopify-renewal-runtime-permit.mjs",
+    "sha256": "e9579d79e8ea14cd6ad80176f6c4e38435ae94ef07b91e97d82dc35eb970c52a"
+  },
+  {
+    "file": "saas/server/lib/shopify-renewal-runtime.mjs",
+    "sha256": "84660e01d3e3188616da8adbd7fcea09af94f21ee15d7602a20e576c0add3296"
+  },
+  {
+    "file": "saas/server/lib/shopify-token-exchange.mjs",
+    "sha256": "e4f4c010380ce3222df34bf221f18b0d9fd2e63eeb8f20bd1997a6b4e69b9e7d"
+  },
+  {
+    "file": "saas/server/lib/startup-mode.mjs",
+    "sha256": "1d73744048a3bd869666bc91b7ba8d5e0494618a5c8a2c546854f3cb6bfa6a5f"
+  },
+  {
+    "file": "saas/server/lib/store.mjs",
+    "sha256": "b0f8ff196980bc601c27490dd03bab232a79ef60619afdbe4ada8d8cdb51ea3f"
+  },
+  {
+    "file": "saas/server/lib/support-bundle-policy.mjs",
+    "sha256": "1f980498e0b4d3f4829b02ea6ebd3974288b9ec4c4e70772024be04f283fece8"
+  },
+  {
+    "file": "saas/server/lib/support-product-facts.mjs",
+    "sha256": "097d3d6669938a58f0aaabd24de33d23d2e3a1cb7c8ef30f9f0283b97bb3474f"
+  },
+  {
+    "file": "saas/server/lib/usage-governance.mjs",
+    "sha256": "a9b779ce9bc2d11458484279b4318da470ebd6388a3d17195c33b29fa41aa16a"
+  },
+  {
+    "file": "saas/server/lib/web-intelligence.mjs",
+    "sha256": "6bf19953c441c2a7e638a9a19ff8f2f30f7f28f36900f3db19e21f8a54389a67"
+  },
+  {
+    "file": "saas/server/lib/wholesale-consignment-review.mjs",
+    "sha256": "faf27fe8894b6a9abc699e7ca1584881da0cd02ef0795224f9814fcc39d2e0c1"
+  },
+  {
+    "file": "saas/server/lib/wholesale-economics.mjs",
+    "sha256": "6671599f0d3bedc9ae2c4f945f3a1103cd23e09c0d6355f5cde5be1268ec324b"
+  },
+  {
+    "file": "saas/server/lib/wholesale-order-review.mjs",
+    "sha256": "a77594aa5c12c4930f871c9578bd20e6447dd4ebc76e511c92a67006ecf2506b"
+  },
+  {
+    "file": "saas/server/lib/wholesale-planning.mjs",
+    "sha256": "df88d4ad062103b66eb401703528cc7a8bff9ababe6f03822298c7c950e5287d"
+  },
+  {
+    "file": "saas/server/lib/workspace-lock.mjs",
+    "sha256": "b7d9a1692eb0c977a7e5ad11ae052fdc20520498317d0937f5996a4f37bc1c33"
+  },
+  {
+    "file": "saas/server/package-lock.json",
+    "sha256": "41253c6d96dc5da63c0eed17dee38b28de851cc05bb85382c8752630d7cb4385"
+  },
+  {
+    "file": "saas/server/package.json",
+    "sha256": "6f4fc43915944b8c34ccb37af6fcf10e84abf7bcf91f4ba42f8610d6f61c1c02"
+  },
+  {
+    "file": "saas/server/scripts/description-edit-helpers.sql",
+    "sha256": "3f7d22d90b8b6dc367a888779c732b6816fdcc7ed89253e65d6d94b751c84468"
+  },
+  {
+    "file": "saas/server/scripts/prepare-description-edit-sql.mjs",
+    "sha256": "ea62206ad77f72743c1b5a57e8ec6a983f1b69dbe609049b6aa831e1c5136303"
+  },
+  {
+    "file": "saas/server/scripts/simulate-description-pilot.mjs",
+    "sha256": "4e0ca0fadb56dbe1a832f3ba78c1b17c61f081452ec8e79994406893811953f0"
+  },
+  {
+    "file": "saas/server/scripts/simulation-attempt.mjs",
+    "sha256": "fd27b913b0d0338aee2df3a8656b3fa2a8e2f1f2ed65da6503f430701d1b3c36"
+  },
+  {
+    "file": "saas/server/server.mjs",
+    "sha256": "c54e5aeba5377b69f4b3d6b212982dfb95c9dbf5bf82a1a0650a848f30c84deb"
+  },
+  {
+    "file": "saas/server/supabase/migrations/004_business_hub.sql",
+    "sha256": "549088caeed631e20a2476cb2f21e0ab9dc60123940447dc0c1dd9e4d7b7153d"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20260920201552_runvara_control_and_reporting.sql",
+    "sha256": "a9c11f1730cbf5c4a6935402fc796d7351fb6cfa9e03763ece2018fa131a00c4"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20260927113000_runvara_agent_operations.sql",
+    "sha256": "349e0ecbd1bc58eacf85f714738241ddc266dff45992c7e48d968604fb22b15f"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20260927122500_ai_usage_economics.sql",
+    "sha256": "18bdfdb9e631a080d8345fd90dfc899c28e196afb02ca38e2f28c60106920984"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261006190318_atomic_provider_usage.sql",
+    "sha256": "13c421d26f00c4a2a231c14a9196c58910be96e997e2ee42e5a91fc8e8133016"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261006194326_objective_prepare_job_guard.sql",
+    "sha256": "d065af48df400644d126ab7e77bea7076c6a90042bfabaa36449b14fb238e516"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261007074031_reporting_status_cas.sql",
+    "sha256": "0e8e7124c9c152ff0f3f530f748eb6d97fca50a83f230bda7cb59f249cbe699f"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261007100823_business_outcome_publication.sql",
+    "sha256": "7f642f8d22b7827185998d4847fa3890992a8c0569c3100efe3b69d9c07c179f"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261007175355_reviewed_action_outcome_snapshot.sql",
+    "sha256": "16edaef11d430d0b43649690d39775104253aa77a6cce4ca4464d479dcd98736"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261008055400_objective_action_outcome_snapshot.sql",
+    "sha256": "61538e9d27e90305c3928fe174a11eda3f631eb7038d388472b9d568107e0a32"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261008144414_protected_content_execution_receipts.sql",
+    "sha256": "d3fd084f492434de1594c8c1514be9291fcafc3fca96406c30f74e400fdf343f"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261008163558_receipt_outcome_consumer.sql",
+    "sha256": "90c563bc1790a9dcc8bc558e6197de55f2be96f65b759bf3cea7303906a460d8"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261009053240_bounded_shopify_order_recovery_rebuilt.sql",
+    "sha256": "215a498ff5e5da4b1eac1c91ad871f1c2663eaa21cbeae2918a1f15d14da99e5"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261025131500_creative_allowances.sql",
+    "sha256": "150e203d61eacb8a8e6e902fc997168fbfedcb3840dd94793718200bddd529a1"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261118185735_verified_provider_usage_opening.sql",
+    "sha256": "691f56569f84b3e24e59fd8c7e0e8af7517efdace283df2d06b9564b823cf2a8"
+  },
+  {
+    "file": "saas/server/supabase/migrations/20261119060000_future_provider_allowance.sql",
+    "sha256": "bbd22bee2b0cd5d762947ff741eeeab1a95efddde06be66a257022b43e1a992e"
+  },
+  {
+    "file": "saas/server/supabase/prepared/description-edit-contract.sql",
+    "sha256": "1e48bf24ef80a982b273c36ff166ba2b05007c4d15416d3b3021a6399757d2c1"
+  },
+  {
+    "file": "saas/server/supabase/prepared/meta-production-v1.sql",
+    "sha256": "b5ab98fe5de09486a350c4e9a2c9a87f68fff8538b8faa8c52d5f25990374e0d"
+  },
+  {
+    "file": "saas/server/supabase/prepared/meta-publication-delivery-v1.sql",
+    "sha256": "b682d8adb6b01638959f3d874fbc32177260f1d2e01660ddf6732dde6b8abb17"
+  },
+  {
+    "file": "saas/server/supabase/prepared/meta-publication-ledger-v1.sql",
+    "sha256": "79821224b8fe8df9b1ccbdde5cf43d200cb39e40b268a8ec94760cb9d9c408c5"
+  },
+  {
+    "file": "saas/server/supabase/prepared/meta-publication-readiness-v1.sql",
+    "sha256": "c2e20dcf368a7139c766790125facc32f3fd16251b00778d37e6de028f37eede"
+  },
+  {
+    "file": "saas/server/supabase/prepared/synthetic-meta-observations.sql",
+    "sha256": "29659111eec1c200351d502c4bc405bd0184247255fb5d9765f89d0b15967d31"
+  },
+  {
+    "file": "saas/server/supabase/prepared/synthetic-meta-receipts.sql",
+    "sha256": "ab1897addeb3f1997043224e370285d1fd911792229ea251f82ce4d72fe2aed7"
+  },
+  {
+    "file": "saas/server/supabase/schema.sql",
+    "sha256": "fbbbaa345c0b950b00dd834f980620d01dcd5395e182b26e885ead70cfab115c"
+  },
+  {
+    "file": "saas/server/tests/action-display-ui.test.mjs",
+    "sha256": "2a3ef17afb85ef7f986e84ebe7b4663f4e1a37320aa0281535d760410e8cfc93"
+  },
+  {
+    "file": "saas/server/tests/action-display.test.mjs",
+    "sha256": "864342ff440a5a9f0f93bfeb957bdb0d55cfe21231481ee8481619f24362442c"
+  },
+  {
+    "file": "saas/server/tests/activity-api.test.mjs",
+    "sha256": "f1bf209bb55148af4fab90e86f66dba32bc1ba2b77465c72a3f8ca89bfdac5fb"
+  },
+  {
+    "file": "saas/server/tests/activity-browser-check.mjs",
+    "sha256": "1ddcca54de8430748a8069c29531d01cd4d52dfd1281f545b2b100a89d2b9e89"
+  },
+  {
+    "file": "saas/server/tests/activity-meter.test.mjs",
+    "sha256": "a7543e225f8744e7f95ea3946dee203e1182e7c8566143947efb1d54a988e9b9"
+  },
+  {
+    "file": "saas/server/tests/activity-store.test.mjs",
+    "sha256": "dc2683c603b374b12376f9755b235b335efa20d3f8be11accc8cf5dda4a14ba6"
+  },
+  {
+    "file": "saas/server/tests/activity-ui.test.mjs",
+    "sha256": "c024a20ff18e673e1f9c3a7f27e9bf8e1134b13cbf710edb279f5506b84d5c26"
+  },
+  {
+    "file": "saas/server/tests/agent-claim-budget.test.mjs",
+    "sha256": "4600f9bd52ecfa11e04e2e56e5dd01270ed2315930b7ee624ea660697a5df16c"
+  },
+  {
+    "file": "saas/server/tests/agent-doctor-busy.test.mjs",
+    "sha256": "1be4d11e6b325002dbc16267dede4a7a7b3ee73b15a8208f06e86c5852724aca"
+  },
+  {
+    "file": "saas/server/tests/agent-ops-integration-lifecycle.test.mjs",
+    "sha256": "612bc6332a126bda6e5792c9901697e73c8384e7e142d8b1fd6a072298bca0e1"
+  },
+  {
+    "file": "saas/server/tests/agent-ops-lifecycle.test.mjs",
+    "sha256": "5bffcac7c1edf07a92b754ecbe74a1048d8afdfa94766dc7d8b5db79f3021504"
+  },
+  {
+    "file": "saas/server/tests/agent-ops.test.mjs",
+    "sha256": "6232f48576183f6c094117227aa39ba48d6e90e80fe6b20ee8f99b9540de49d2"
+  },
+  {
+    "file": "saas/server/tests/agents.test.mjs",
+    "sha256": "b61c1b015bd702f988397d5c01c0be587eea912f230be5237bfaa673c648fa2a"
+  },
+  {
+    "file": "saas/server/tests/ai-economics.test.mjs",
+    "sha256": "c75381dc0b9ce68668d4c6766545969e1af17036ad038863a2124a9f232a448f"
+  },
+  {
+    "file": "saas/server/tests/approval-request-browser-check.mjs",
+    "sha256": "4d947b0377803b985b0ca7667ce9cef241c2adc0894415fcacc90dc803d94438"
+  },
+  {
+    "file": "saas/server/tests/approval-request-fixture.mjs",
+    "sha256": "f64953099b5c42f0c9ff4cb9157f5d67127bf079f9de0ed2e76aef14ff470be6"
+  },
+  {
+    "file": "saas/server/tests/approval-request-store.test.mjs",
+    "sha256": "792000ba2c6fa0a6eca03517ca507a5d9ff2650f5e7f2192b3e731889320ffe1"
+  },
+  {
+    "file": "saas/server/tests/approval-request-ui.test.mjs",
+    "sha256": "8edaf4a3a8a6653684c34f7777b4bb7d8f026cd882281bae1f625f016e04db2a"
+  },
+  {
+    "file": "saas/server/tests/approval-request.test.mjs",
+    "sha256": "9e6851ed4e16ad6cb72f5062cab9ad5ce19be4e38293ab2208861e1ccf18e010"
+  },
+  {
+    "file": "saas/server/tests/atomic-usage-postgres-fixture.sql",
+    "sha256": "f9338d0ca84671b868d716d17ee9641f4fe684f0ebe888491f59e04ac22d1979"
+  },
+  {
+    "file": "saas/server/tests/atomic-usage-postgres.mjs",
+    "sha256": "d637dc27742251dd3e8f1a8a70a4fb7f0f886d8a4105a2d7401e6351c1803149"
+  },
+  {
+    "file": "saas/server/tests/atomic-usage-postgrest-timeout-cases.mjs",
+    "sha256": "c98c4dfb0cdde32cf03a566fabab0339bd73ac397537a223c0c9f2685e0b4936"
+  },
+  {
+    "file": "saas/server/tests/atomic-usage/package-lock.json",
+    "sha256": "b3db5ce9579e55e63e01d39b008c07fe93e20429a4bf068122acb7c90ce025d8"
+  },
+  {
+    "file": "saas/server/tests/atomic-usage/package.json",
+    "sha256": "35a50d7b3d0cf39d7605bbc97eeebcda2ea2b71a364165b818f4abb32bd514fe"
+  },
+  {
+    "file": "saas/server/tests/automation-archive-api.test.mjs",
+    "sha256": "eda1c00190525c08bed9a6731f3e26fc32655c03ffbb91e7dd4dd40703ad9bbe"
+  },
+  {
+    "file": "saas/server/tests/automation-history-browser-check.mjs",
+    "sha256": "2a846629ef95d6881be1779d9844e0236652e117039c16d485302432b3cd432a"
+  },
+  {
+    "file": "saas/server/tests/automation-history-ui.test.mjs",
+    "sha256": "b513e6aa8766fcb66cdb41b278c37e8eb90fdaa747e09f1adf6200cb4270c45f"
+  },
+  {
+    "file": "saas/server/tests/automation-retention-postgres.mjs",
+    "sha256": "f8c8805bcc69c0e87b7096c12db988cf211405d5ce34129223e9f81fecf298ad"
+  },
+  {
+    "file": "saas/server/tests/automation-retention-store.test.mjs",
+    "sha256": "cf3000816db1b3aaafe876bddacd128470463c9a65a8f0e44ff749b91e9e84f8"
+  },
+  {
+    "file": "saas/server/tests/automation-retention.test.mjs",
+    "sha256": "23447b835ccad7da42323e21de7273cbda375c9c31088ca59929e895b1071f2e"
+  },
+  {
+    "file": "saas/server/tests/beta-readiness.test.mjs",
+    "sha256": "368a3aa7a28e382fbeebd1d2d39a3df8e6d8ca6dfbbfa9d942f930807cac732e"
+  },
+  {
+    "file": "saas/server/tests/brief-cache-version.test.mjs",
+    "sha256": "2005cf9d5bf61761eb52a7a3a932bef8157f750be079ae99a6714cb7bf04e1c7"
+  },
+  {
+    "file": "saas/server/tests/brief-history-api.test.mjs",
+    "sha256": "f3846214e5784f2b0a19cc00ee4b59cf852eeddbb5fe5575538e71bbec210255"
+  },
+  {
+    "file": "saas/server/tests/brief-history-browser-check.mjs",
+    "sha256": "d75cb76643d23ab1288922acc2f5f4a89c30c4d5164090cfec97f61f3d533bb0"
+  },
+  {
+    "file": "saas/server/tests/brief-history-store.test.mjs",
+    "sha256": "894edcb30425a822dc32c176205d830edc4fdecea0ef0cb91adf5ac39586099e"
+  },
+  {
+    "file": "saas/server/tests/brief-history-traffic.test.mjs",
+    "sha256": "9bec816cbf2e144b98c09e8f84f7f36163747adffc98ef456d26fe92dad3c983"
+  },
+  {
+    "file": "saas/server/tests/brief-history-ui.test.mjs",
+    "sha256": "a73ecefade455869af2a81df0b048ee423c4de1d61efd7957263318dbc04844e"
+  },
+  {
+    "file": "saas/server/tests/brief-history.test.mjs",
+    "sha256": "cd3dd40f6f1072fe623924634a3aed15ff91fabe018dc31f96e56bfca87d4ac3"
+  },
+  {
+    "file": "saas/server/tests/business-evidence-scope.test.mjs",
+    "sha256": "87d1544e59edd25926097abd0d0eac7239133a7ee855687d0e2aac1990c32c9a"
+  },
+  {
+    "file": "saas/server/tests/business-graph-browser-check.mjs",
+    "sha256": "089ec9d85802fb8a2570ed8751bd89e63bd77af250cff1050a3756d213483c3c"
+  },
+  {
+    "file": "saas/server/tests/business-graph.test.mjs",
+    "sha256": "62475e75833eb2b65f9dfc61108afafafdd5b44ec9e3465ebb937e3b169e9de0"
+  },
+  {
+    "file": "saas/server/tests/business-objectives-api.test.mjs",
+    "sha256": "96788d1dc1f192bca5969009847753b577f7d295f582d3a0ffb7772b2c4c8afd"
+  },
+  {
+    "file": "saas/server/tests/business-objectives.test.mjs",
+    "sha256": "5bb1d6f5d44a95d1454f507070ca44c91774e4738307cca2ef3eb33a73098b35"
+  },
+  {
+    "file": "saas/server/tests/business-outcome-postgres-fixture.mjs",
+    "sha256": "f8a9073ace49591d5354ca83a550faa754d48d503a7697305bcab8b178b648bf"
+  },
+  {
+    "file": "saas/server/tests/business-outcome-postgres.mjs",
+    "sha256": "8313a6b7547452ce5663432db9287189c57a420a73e11a866c1638f1df10a40a"
+  },
+  {
+    "file": "saas/server/tests/business-outcome-store.test.mjs",
+    "sha256": "54c40ea99abcfed1ef2082f0f6416cbbc9a9bbac319213bc351851229eb01006"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-action-ui-fixture.mjs",
+    "sha256": "1bed5be19ac32df70931c9316df2ed390664df0b2098fe0f3dbe0aaa0ef0a991"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-api-fixture.mjs",
+    "sha256": "0886911f0cf78a562c2c7ce0320c310aacc611d4705bd723b22a5a27e78ccfbf"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-api.test.mjs",
+    "sha256": "48dac68bcb11a4a4f8c5a72c016b6a9dd8f6334510f4f7e91ce67a58f0bd836d"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-app-lifecycle.test.mjs",
+    "sha256": "ee9d8f55c1aef277e6d596558d1067af2751c7a0d0f0a23335a580819f3ea259"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-browser-capture.mjs",
+    "sha256": "8fb31f8085741e568631954ea51168d39bcfa4b38ae3a3258a7a83070b29dbb7"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-browser-check.mjs",
+    "sha256": "1a437e8774e245906cd3fcc66b7d57c204403056b9bf4e79ef220bcea23cd1db"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-objective-ui.test.mjs",
+    "sha256": "5f73cd8c8815736d203a22676c774a1fb064ad52e863e655de4bc6243688b9a7"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-receipt-browser-check.mjs",
+    "sha256": "74d026f75e235d30dc6ca860728ae91320840fbfdf67c68ad0a730c17d85bf0c"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-receipt-ui-fixture.mjs",
+    "sha256": "3e09db366722701886f1ebf5b03f98e57629da447fc6fdecc9e4c9a9143f00a4"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-receipt-ui.test.mjs",
+    "sha256": "95fb3d37ed872a926c9cdd8d26b9e345b1791c90440112951c735a75d1e829cf"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes-ui.test.mjs",
+    "sha256": "7c268616b189c8c9baa8fa7842bc1cbffcea753fa543114728e9668b95ee7f27"
+  },
+  {
+    "file": "saas/server/tests/business-outcomes.test.mjs",
+    "sha256": "6450a9dfe7643a4e379072cec721742dc204f124bb8e60261013d73444ff5aae"
+  },
+  {
+    "file": "saas/server/tests/business-state.test.mjs",
+    "sha256": "a92fe9c8a013a6f46d7c4ba5c84948545c66152152b093a0a6ad85c9c19aa497"
+  },
+  {
+    "file": "saas/server/tests/canonical-opportunities.test.mjs",
+    "sha256": "61662b41f1da42fc99a3189c122f874a77622199bd67402b19d051785610111a"
+  },
+  {
+    "file": "saas/server/tests/catalogue-financial-eligibility.test.mjs",
+    "sha256": "75c0a1cedb41c5ff7da4b23105e7b70b1f34dde50576b9ec977f60d987f488a6"
+  },
+  {
+    "file": "saas/server/tests/catalogue-margin-boundary.test.mjs",
+    "sha256": "84b85199a9150bc53e79a12a256c0747f755c7a2654713d26db65f0c6e32c4c9"
+  },
+  {
+    "file": "saas/server/tests/catalogue-save-capacity.test.mjs",
+    "sha256": "619d9cd4b2ef454aa10bc71698b414b4cb890bef57dc8e01a5139d9a063fec1d"
+  },
+  {
+    "file": "saas/server/tests/cockpit-dom.test.mjs",
+    "sha256": "0154cbd80c92a0a65ca4970fc98baf200c747ae2da0f1fd8e29e2098fab01d25"
+  },
+  {
+    "file": "saas/server/tests/connection-centre.test.mjs",
+    "sha256": "b8b9dce8d307e1a1f8e9048e74f6b559922d429da771b25848bcec3ab99a631c"
+  },
+  {
+    "file": "saas/server/tests/connection-dispatch-context.test.mjs",
+    "sha256": "aca82c70ab9ffddaaa4f5a265ba5944e8c561cef35d1fa989a83cb884aa27f5f"
+  },
+  {
+    "file": "saas/server/tests/connection-dispatch-safety.test.mjs",
+    "sha256": "ee0174576fda6a34e5d2b4264e323058bb328d69615eb62f64b450eead5e650b"
+  },
+  {
+    "file": "saas/server/tests/connection-doctor-busy.test.mjs",
+    "sha256": "9dbac93261400c3571746005f889e6c28e7cdd3201e1f99a51cd7487c9110525"
+  },
+  {
+    "file": "saas/server/tests/connection-doctor.test.mjs",
+    "sha256": "7d9c84b52f4c9d381a8fb1f14b31f901a3db765f276ec6531284371f3965a9e2"
+  },
+  {
+    "file": "saas/server/tests/connection-health-evidence.test.mjs",
+    "sha256": "faf393878902bf91ef16b68811ca455745066515941566f352e5d17a0736bbc1"
+  },
+  {
+    "file": "saas/server/tests/connection-read-admission.test.mjs",
+    "sha256": "594d3015878f75739a29803cca917f552b8e68abb94f9b64dc767f0024566bdd"
+  },
+  {
+    "file": "saas/server/tests/connection-toolbar-layout.mjs",
+    "sha256": "ea1ab63d3495bc1d3078b5fc426ecf39d8418efe913a448dc5245ab19b0852cf"
+  },
+  {
+    "file": "saas/server/tests/content-execution-receipt-dispatch.test.mjs",
+    "sha256": "9e56e22a997acc3ea1d59e7858329a9e695039ab1e053d3c53ef07165ba99e9e"
+  },
+  {
+    "file": "saas/server/tests/content-execution-receipt-messages.test.mjs",
+    "sha256": "7ddccc09bee0356a152616d0403d644ee42429b96c1b1a2293af0c43b0557e9c"
+  },
+  {
+    "file": "saas/server/tests/content-execution-receipt-pg-dispatch.mjs",
+    "sha256": "fcecfd2ee415508c3f1ccbf184bc1b183a9c0ba7c16d6a391d26bdc7d55a3e6e"
+  },
+  {
+    "file": "saas/server/tests/content-execution-receipt-postgres.mjs",
+    "sha256": "fe03bde97e4687a870f479082a6e54d559c621df5d402c9109dbdc7b18c6a030"
+  },
+  {
+    "file": "saas/server/tests/content-execution-receipt-store.test.mjs",
+    "sha256": "fc3228754e9bb9e28250ff5f3d0db457fb940355660a978571b6788816c7fa61"
+  },
+  {
+    "file": "saas/server/tests/content-execution-receipt.test.mjs",
+    "sha256": "f702875030fa75d255e15f34261223102f6ca60669212e9138fe42fdd0d2c0de"
+  },
+  {
+    "file": "saas/server/tests/content-jsonb-dispatch.test.mjs",
+    "sha256": "1bf4be47ae617ab486d18bcd903f72823d7e202cf645bc1db7d80c455ed39a16"
+  },
+  {
+    "file": "saas/server/tests/content-jsonb-postgres-fixture.mjs",
+    "sha256": "caa5717d1cb7b170ce086751a40ace45165c344d8f5356c93d353e4bfee5cb55"
+  },
+  {
+    "file": "saas/server/tests/content-jsonb-postgres.mjs",
+    "sha256": "b80e6c14550c15ba244c79a53c4bf7656267bb6a07a4de90543a7796a74afcfc"
+  },
+  {
+    "file": "saas/server/tests/content-jsonb-test-fixture.mjs",
+    "sha256": "63825a96277020dbb52b094a8d47757ea845a6f8af54cedab55d51ad00aaefdd"
+  },
+  {
+    "file": "saas/server/tests/content-pilot-api.test.mjs",
+    "sha256": "b8e51d7eefccbadc0fb1d19e973d51074724c9545a22fc25489e589f284830ad"
+  },
+  {
+    "file": "saas/server/tests/content-pilot-test-fixture.mjs",
+    "sha256": "8d170e6dea002c00b43498b67301e3046147237de94be91dc100c9146ad963f5"
+  },
+  {
+    "file": "saas/server/tests/content-pilot.test.mjs",
+    "sha256": "aa25d38b0c6395958251e063ab5189978acef351087fc7579387967e16bf5388"
+  },
+  {
+    "file": "saas/server/tests/content-write-identity.test.mjs",
+    "sha256": "71d3f930cc22dc646dcca0acb2c0a8f2e374cd4200bfc09bc9059932e6b7d958"
+  },
+  {
+    "file": "saas/server/tests/control-api.test.mjs",
+    "sha256": "e2f6175c251233ee1a25426f37832e98a784d30d2d1698f4fe76ca9b101a0c0c"
+  },
+  {
+    "file": "saas/server/tests/control.test.mjs",
+    "sha256": "7ad2926c51c52593b94e40c3c1ecd0aa04271f6375657d71167752024e14e166"
+  },
+  {
+    "file": "saas/server/tests/cost-entry-basis-ui.test.mjs",
+    "sha256": "eadacd36fa61658b0c0a4f5b64ad740ae763397779d6b53467b505515c55710e"
+  },
+  {
+    "file": "saas/server/tests/cost-source-api.test.mjs",
+    "sha256": "66087d2b5f93ba70e483195c66c1cad87faba2e81043814484518c789881adff"
+  },
+  {
+    "file": "saas/server/tests/cost-source-browser-check.mjs",
+    "sha256": "fe4401feefde9a09260418bb091bb9f926c7925ceaa2a454465c5fa5915bfaa6"
+  },
+  {
+    "file": "saas/server/tests/cost-source-persistence-fixture.mjs",
+    "sha256": "b7ae959b6615995233c11ea7a4d1f6e4b04274b176b72f0030f63b3dd25711f8"
+  },
+  {
+    "file": "saas/server/tests/cost-source-persistence-postgres.mjs",
+    "sha256": "07f9328f12cf0737f9f21378078848001b552a4c52090a79e9d0da477a5a4028"
+  },
+  {
+    "file": "saas/server/tests/cost-source-persistence.test.mjs",
+    "sha256": "5bb9e2acd8145c9b253d216e46e756ba31bb0475dd2c8bd83a21d5565b031ee1"
+  },
+  {
+    "file": "saas/server/tests/cost-source-review.test.mjs",
+    "sha256": "cc580468ecd584e80a2a39f4d4f655e9b6e62569dc2300ad3785e1f2446fbf64"
+  },
+  {
+    "file": "saas/server/tests/cost-source-stage.test.mjs",
+    "sha256": "e988f632328f259e03376fa379c4ea771e3dd71c9615edb58e90aea908191d5d"
+  },
+  {
+    "file": "saas/server/tests/cost-source-ui-fixture.mjs",
+    "sha256": "e069073aac4e6a08fc523354d73674b8922becc28f45b0333c91f6448a6c6638"
+  },
+  {
+    "file": "saas/server/tests/cost-source-ui.test.mjs",
+    "sha256": "134b8fb46cec4fa4ecbccd70b3c00fdc407e3a70906826e4cd18dc6e334682d7"
+  },
+  {
+    "file": "saas/server/tests/creative-allowance-api.test.mjs",
+    "sha256": "2066e1fea1659fe4e154bf0bb03f7dc09aa917d8cf6c69bf47ea519c1064a05a"
+  },
+  {
+    "file": "saas/server/tests/creative-allowance-browser-check.mjs",
+    "sha256": "a49867635d4ee322a6b058bbec6aca946489248a36e2af0e67a71ab92d9c237a"
+  },
+  {
+    "file": "saas/server/tests/creative-allowance-postgres-fixture.json",
+    "sha256": "24b29581604ecf060c725a164cc8f2c6122d0ad94943be19e0ee4e6342af815e"
+  },
+  {
+    "file": "saas/server/tests/creative-allowance-postgres.mjs",
+    "sha256": "012b00a03621d804234011d5eef9ac060b010efb6535931bd402ac44ae18af72"
+  },
+  {
+    "file": "saas/server/tests/creative-allowance-ui.test.mjs",
+    "sha256": "68d41c7f9b6747e23a7cb7b2aaa7abac76b0af74fbcb9daedd3202eaf850826c"
+  },
+  {
+    "file": "saas/server/tests/creative-allowance.test.mjs",
+    "sha256": "519468efd63bfd4a83a1cb0c04cf4866f8ba3218c999204467fbe852e57bff64"
+  },
+  {
+    "file": "saas/server/tests/creative-safety-api.test.mjs",
+    "sha256": "bddefa393dfe59c5e1f6f72290e5bd93aa36b9fd4febc0f89ff687e298c7d6e6"
+  },
+  {
+    "file": "saas/server/tests/creative-safety.test.mjs",
+    "sha256": "23ef764ea5178a36c2d65a4707625fbddba1ff300c222b78a6d8c5a7ac0c36c8"
+  },
+  {
+    "file": "saas/server/tests/cumulative-shutdown.test.mjs",
+    "sha256": "5005bd8a202e1adb2dac7824b27e6d0a9ee41c7a74a5cc1cafc4fe3f348d5372"
+  },
+  {
+    "file": "saas/server/tests/customer-support-http.test.mjs",
+    "sha256": "cc106e794e027f9727e5f78e92d75106da4efd6409b42808411862029af50b11"
+  },
+  {
+    "file": "saas/server/tests/customer-support-uncertainty.test.mjs",
+    "sha256": "ae9a4e8b4d0cc7be21e469ceb5d876de2e8e264d54d16867d54d6591626f20a2"
+  },
+  {
+    "file": "saas/server/tests/customer-support.test.mjs",
+    "sha256": "5197a49666be3e4209789969ffaacd87c306b9baf8c547d1d30df5e95f4c2858"
+  },
+  {
+    "file": "saas/server/tests/description-edit-fixture.mjs",
+    "sha256": "b6d4d5c09689c4d85bf0b2e8207f911574ad86cc7a57426731941a63d2cb1c4c"
+  },
+  {
+    "file": "saas/server/tests/description-edit-pg-lifecycle.mjs",
+    "sha256": "72e0d0ddbe1e63c95450684fdea35ccb045d3c8f642dc29d8ba90124c06eb57f"
+  },
+  {
+    "file": "saas/server/tests/description-edit-pg-process.mjs",
+    "sha256": "e76441acd4608646aa677932472b34e107e7c5e0b517e4eb123ce53678ce8195"
+  },
+  {
+    "file": "saas/server/tests/description-edit-pg-proof.mjs",
+    "sha256": "7d35ce3ff738fb4a9d3b3c4061eb5cb015460702d882dc35e5caba7363b4528d"
+  },
+  {
+    "file": "saas/server/tests/description-edit-pg-worker.mjs",
+    "sha256": "2d2d983f2995674bee3928d14570279b5295616ae9decb34e9522b8d52a59d25"
+  },
+  {
+    "file": "saas/server/tests/description-edit-postgres.mjs",
+    "sha256": "b7107a99748d9101df244e7855b7f81636cb3b642872105056a8f58f61569689"
+  },
+  {
+    "file": "saas/server/tests/description-edit-store.test.mjs",
+    "sha256": "6937f141fcc5cb1082e99acd6b4e691260a59044bccbeb52f523001779decdbd"
+  },
+  {
+    "file": "saas/server/tests/description-edit.test.mjs",
+    "sha256": "3b9d89a76b3367c1832013815529809396f73b70e37f976c184b22ccc11b4e3f"
+  },
+  {
+    "file": "saas/server/tests/description-pilot-process-worker.mjs",
+    "sha256": "d044869cf205afd2fb174d449a95448ed3522e02ac05e723153ecd0c5824f0f6"
+  },
+  {
+    "file": "saas/server/tests/description-pilot-restart.test.mjs",
+    "sha256": "ba60ca02aa54f8009093d57a27e76ebe488d71f74f792b63a9e98f3a782a2812"
+  },
+  {
+    "file": "saas/server/tests/description-pilot-simulation.test.mjs",
+    "sha256": "21fab0fa5fa0287f26732158c7454a8bcec68560fd7a506008f5ee7f390ed21f"
+  },
+  {
+    "file": "saas/server/tests/ebay-cooldown-admission.test.mjs",
+    "sha256": "bba714484175db15b12d7151fe503fc896916f560c67497edac4e40e5ffbd861"
+  },
+  {
+    "file": "saas/server/tests/ebay-cooldown-health.test.mjs",
+    "sha256": "4ab81477ff6f777add631495ae0d0562f488557a2655e4e1608d38d0438410ff"
+  },
+  {
+    "file": "saas/server/tests/ebay-cooldown-importer.test.mjs",
+    "sha256": "63b5ffab125606d5e50ed52cd6ccb120dfe067a1caa5eeb9451279de9cac49aa"
+  },
+  {
+    "file": "saas/server/tests/ebay-diagnostic-age.test.mjs",
+    "sha256": "6e22cd6ff424925541d498ed2a67cd59da9835bb158ad4ecd8c609b0c5bea727"
+  },
+  {
+    "file": "saas/server/tests/ebay-recorded-costs.test.mjs",
+    "sha256": "fba5cb1a3f7dc9510d166feb3db5ef44e2d24d6776194939a338ed7807479e59"
+  },
+  {
+    "file": "saas/server/tests/email-branding.test.mjs",
+    "sha256": "af03c0f8c26a078e39ebe4a28b14d457bb7d8ac8746f22e4034d02718c69d3a4"
+  },
+  {
+    "file": "saas/server/tests/execution-plan.test.mjs",
+    "sha256": "8d7b3af70e5091c578cbe75a1babc4f73c347f6b6227be40d945d2bf435b4f01"
+  },
+  {
+    "file": "saas/server/tests/experiment-measurements.test.mjs",
+    "sha256": "7d19aa3d16c2a237b13ab0beb951d0628a7bf9247058c6b7fef877f12260dd27"
+  },
+  {
+    "file": "saas/server/tests/fake-supabase.mjs",
+    "sha256": "9ef36f5947893c794e129e098399081f72e583d2e79e5587796dc27338d73d13"
+  },
+  {
+    "file": "saas/server/tests/fixtures/business-outcome-measurement-golden.json",
+    "sha256": "a5ca256ca135c74d5d0cbe4c22668fb8245c6de209bfbe3d105aa5a30a6f2e93"
+  },
+  {
+    "file": "saas/server/tests/fixtures/objective-publication-legacy-golden.json",
+    "sha256": "4c57522280bbf1c5c860eb7c76544ac4bf9a276d320988e8127d49f48049882c"
+  },
+  {
+    "file": "saas/server/tests/fleet-doctor-busy-ui.test.mjs",
+    "sha256": "3b012dcb845c16e52d2ef74686b1baea56480cd460dc0de918ecc1bfc33b0191"
+  },
+  {
+    "file": "saas/server/tests/future-allowance-lab/design.sql",
+    "sha256": "85ad6d3e65392de290f27b150ebd0643b7e4801fff4420d0a808936bb0f50f62"
+  },
+  {
+    "file": "saas/server/tests/future-allowance-lab/design.test.mjs",
+    "sha256": "5820721ad8cbb1d7ce75228eb87366caf36e6a2020954a14defbb126c04ef1c9"
+  },
+  {
+    "file": "saas/server/tests/future-allowance-postgres-cases.mjs",
+    "sha256": "10819bbaad0025315b582def9da219d3417daae9bc41c08f732523b6d4a54c38"
+  },
+  {
+    "file": "saas/server/tests/generic-action-display-api.test.mjs",
+    "sha256": "15a3bd8d5b3bd90a42cb1aac3a1ddd5c6d91b229431077a2dc722f63ce76e15c"
+  },
+  {
+    "file": "saas/server/tests/governed-content-stage.test.mjs",
+    "sha256": "59623951ad3d7090036697415696af56c40c6ee13363586059a784689744237c"
+  },
+  {
+    "file": "saas/server/tests/governed-generic-approval-stage.test.mjs",
+    "sha256": "168e57f8604953b8dff6dfb81461bd2e3c0c7dae3c8788e246e8ae6620a3b136"
+  },
+  {
+    "file": "saas/server/tests/governed-objective-stage.test.mjs",
+    "sha256": "036583c8644ac67946cec23782c554280478c5e8350a9ba4774b6898fe79fa23"
+  },
+  {
+    "file": "saas/server/tests/governed-paused-browser-check.mjs",
+    "sha256": "01bb9835749ffdf0180f580e758e282cb711888a59f0b58f7f86fdd72e16dc77"
+  },
+  {
+    "file": "saas/server/tests/governed-record-stage.test.mjs",
+    "sha256": "1d2dd2566641003cba0fe34ce1b7e4bf6630cebc38f542288e0b8864421e4e64"
+  },
+  {
+    "file": "saas/server/tests/governed-stage-api.test.mjs",
+    "sha256": "490b2d26266f05577648f55aada0f69586c812e92a509c84f66ff94478d649c7"
+  },
+  {
+    "file": "saas/server/tests/governed-stage-process-fixture.mjs",
+    "sha256": "d87818248f69de36969ec85503cdd644f63603f4063526de7f98e04fa5d77234"
+  },
+  {
+    "file": "saas/server/tests/governed-stage-process-pair.test.mjs",
+    "sha256": "37893aa90d375901fcb5219fe3cc3c36988e1c7ecb2a1f2c26e29797a239fcfe"
+  },
+  {
+    "file": "saas/server/tests/growth-council.test.mjs",
+    "sha256": "da693aca20760c90deb7dfa3fdc702999616976bd3d87c52d04bdf2708594526"
+  },
+  {
+    "file": "saas/server/tests/historical-financial-evidence.test.mjs",
+    "sha256": "ed70afea0a4d4d9d278a199bc04ec835b7861f6e45bbe95098d32b581d8efeff"
+  },
+  {
+    "file": "saas/server/tests/impact-engine.test.mjs",
+    "sha256": "c1c0038149ab14f3a3c55412d11bb135c864eba5d9d37a26881ac92a7d8171ee"
+  },
+  {
+    "file": "saas/server/tests/imported-order-consumers.test.mjs",
+    "sha256": "f5c51d24f08a16950dacc01779730cde5a0e2c66cf7df45d0ae552f9fe45bd0f"
+  },
+  {
+    "file": "saas/server/tests/imported-order-evidence-browser-check.mjs",
+    "sha256": "9f402c2861212b88d2ce1d4b8bddc417e3b7d1266d97a7de867b607dcc58e0fe"
+  },
+  {
+    "file": "saas/server/tests/imported-order-evidence-ui.test.mjs",
+    "sha256": "fcfe3cd324524b6789a9081df94778d9a05a345c89ea990be0eb8374cd09121a"
+  },
+  {
+    "file": "saas/server/tests/imported-order-evidence.test.mjs",
+    "sha256": "64e29bdb6c40f90abfbd5a49f0c84e7466c40268d20ad0a7523cbda0497a6c97"
+  },
+  {
+    "file": "saas/server/tests/imported-order-payload-check.mjs",
+    "sha256": "d0aa9ae0ff97085493881e70be4c416daa67379dc577d9ed2bca93897beacb75"
+  },
+  {
+    "file": "saas/server/tests/imported-order-source-semantics.test.mjs",
+    "sha256": "04a662ab3fcce5734e0ccbbfe07debf88ffbe28289bac90baf53dd3ae84cbd6c"
+  },
+  {
+    "file": "saas/server/tests/integrations.test.mjs",
+    "sha256": "be5155c0ef87b142435465bd6c7affe702611659eaed0f21aa1ec83a36959913"
+  },
+  {
+    "file": "saas/server/tests/learning-engine.test.mjs",
+    "sha256": "b64e912742b08895b4404065e6ad503e1c0229ffae138c84d6cfb9c452c5a8d9"
+  },
+  {
+    "file": "saas/server/tests/legacy-ai-usage-browser-check.mjs",
+    "sha256": "4d7fa3f4fef2806a402b18e6136c96bcb4892c3afd8bc7b259bfa4f1f85a9065"
+  },
+  {
+    "file": "saas/server/tests/legacy-ai-usage-ui.test.mjs",
+    "sha256": "3a3321bb8481703fa5a9854569dbd00bd8abf1305366b0469095233f1bf85e59"
+  },
+  {
+    "file": "saas/server/tests/legacy-ai-usage.test.mjs",
+    "sha256": "281bf260bf56001e83946ccb7d420a2a6524358ea6636a0cb8b93df241eaed35"
+  },
+  {
+    "file": "saas/server/tests/local-file-replacement.test.mjs",
+    "sha256": "b9e0c8bcd675b1f112c7b292d48697c2266692cf53141111b60156d14e0f4d7d"
+  },
+  {
+    "file": "saas/server/tests/local-file-transaction.test.mjs",
+    "sha256": "be48dab803bf80820d1344ca1e1d03d0774e666f88f49ae6ee1198ab6c06e7e7"
+  },
+  {
+    "file": "saas/server/tests/maintenance-approval-ui.test.mjs",
+    "sha256": "815122a4c5fce1b6c2e09db5f504ad1f11d5177d931852bab4ca2f29034386cc"
+  },
+  {
+    "file": "saas/server/tests/maintenance-creative-ui.test.mjs",
+    "sha256": "8a4191273ce160c26d5389ad9158d1fa3c9b8293b76696c52dd07b8dffa07ad2"
+  },
+  {
+    "file": "saas/server/tests/maintenance-login-browser-check.mjs",
+    "sha256": "1ded2fdcd85f3bfb2523f54136654e30b6444271efe5d58215167e681d21cbba"
+  },
+  {
+    "file": "saas/server/tests/maintenance-login-fixture.mjs",
+    "sha256": "aa6c7fef5d59296a83199547537a63cf798b90a3c6a37a565cb13be896633065"
+  },
+  {
+    "file": "saas/server/tests/maintenance-login.test.mjs",
+    "sha256": "e57e743970f879737e0a6d47d113978df8c0c69027a36c30977966086f05823f"
+  },
+  {
+    "file": "saas/server/tests/manual-content-app-lifecycle.test.mjs",
+    "sha256": "d1bf272532d8c2c8788213012a10fa2bafba28d42a69da568283e648a63fb021"
+  },
+  {
+    "file": "saas/server/tests/manual-content-browser-check.mjs",
+    "sha256": "13be8b51598d1853eb2ef4d770493d5dc698d08711c0af800fb3bf1ba7c34898"
+  },
+  {
+    "file": "saas/server/tests/manual-content-target.test.mjs",
+    "sha256": "90e960eb1fa8194c19b32d0db6b707e05c8aa68f76f94860d8cc8e464c6c0653"
+  },
+  {
+    "file": "saas/server/tests/manual-content-ui.test.mjs",
+    "sha256": "e5e7e85391370e3ee7e820a156f7a0e16a0a975a378cc4a592782eead7f8cd02"
+  },
+  {
+    "file": "saas/server/tests/marketing-campaign-review.test.mjs",
+    "sha256": "2a4b4221ee8fe0fc093f00ebe73d6fa2bbf9b6cdf23575799cc340cc4b17d2e0"
+  },
+  {
+    "file": "saas/server/tests/marketing-local-draft-api.test.mjs",
+    "sha256": "dfd4690633b91b6b85e14a4eb72c50c7228c6cca1343508e4e55d74e1a83abc1"
+  },
+  {
+    "file": "saas/server/tests/marketing-local-draft-ui.test.mjs",
+    "sha256": "f788734c48bd921d3bfbbd90366717d34c30597987a700c57d095bd4d9caa1b7"
+  },
+  {
+    "file": "saas/server/tests/marketing-local-draft.test.mjs",
+    "sha256": "2b4e6394656d18168440af212389592614383f6dba615fe0259b188d921008bb"
+  },
+  {
+    "file": "saas/server/tests/marketing-local-jpeg-fixture.mjs",
+    "sha256": "8fab150b9c2e601c230a78825f2c56844644922b08e99063985ae3a5af1109cc"
+  },
+  {
+    "file": "saas/server/tests/marketing-local-state-worker.mjs",
+    "sha256": "9f852c36a3174ed76a1827005084f06a25b31fbe8a6f6c448f42b8c5cbc7b3c1"
+  },
+  {
+    "file": "saas/server/tests/marketing-provider-lifecycle.test.mjs",
+    "sha256": "774bfb16730243b4472df5eb6794263f654fbf97d85fbe90b0692b699faf5cd2"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication-api.test.mjs",
+    "sha256": "7a2088616a6874d1e08d565e60fa6281e87dfd4710302fad91e0c1d114cbe9bb"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication-asset-fixture.mjs",
+    "sha256": "418f07d6694ffca3bfc17eaeff30c728dbab269baaeb41bb135e337f4410d740"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication-asset.test.mjs",
+    "sha256": "dffe759b68a5a4f1b5b6e59684d3a1374e2d78c7b54bc2d8cf160beddbc7dd7e"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication-fixture.mjs",
+    "sha256": "8c78f60b4f443913677403cbdd55aac4760d92ea22f11f66ebf4fcf89c8c037d"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication-pg-proof.mjs",
+    "sha256": "26fe8a3f726bbe93f8271486a486f364031d1f2f2b7bc3c416ec9928f8c4b1cb"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication-ui.test.mjs",
+    "sha256": "7204739f09589c5858e4f322887d97d9e67ba8a704b9821091455c2447f3fe89"
+  },
+  {
+    "file": "saas/server/tests/marketing-publication.test.mjs",
+    "sha256": "00c26d0214d6c29096347bcaca7b7231e7217cd763ecd2963f98f6892fbacd86"
+  },
+  {
+    "file": "saas/server/tests/marketing.test.mjs",
+    "sha256": "abee033c5bda91ee63d3294cf46ea0b35c8747fe34215f6c8f2662a1e7b882a2"
+  },
+  {
+    "file": "saas/server/tests/meta-container-observer-admission.test.mjs",
+    "sha256": "ec7f0492529726e02fa120aa991e40dbf6d330af1f7b74f1647286861bbecf84"
+  },
+  {
+    "file": "saas/server/tests/meta-container-observer-api.test.mjs",
+    "sha256": "6b128d6bccab4bd09b85ca09ef961f3149dd6594afe1e4fbe626a1d7d7994ddc"
+  },
+  {
+    "file": "saas/server/tests/meta-container-observer-fixture.mjs",
+    "sha256": "39df50e07fa65b29cd331fe61044be87c46f10b72dd8c1d4cf0bdb2ab9a220b9"
+  },
+  {
+    "file": "saas/server/tests/meta-container-observer-process.mjs",
+    "sha256": "11d325178bf3216aaa0387af801c22b6f5a727fd5f08da3fd2c3718afa83d907"
+  },
+  {
+    "file": "saas/server/tests/meta-container-observer.test.mjs",
+    "sha256": "131cb00e651cc566782e2750053158284e1e0a93939e8a6f0a5917e7170f3794"
+  },
+  {
+    "file": "saas/server/tests/meta-container-response.test.mjs",
+    "sha256": "750ec29fb06a63b98b6f29a234f395b275aeb79fc87eb3001a83c60ed6c9368f"
+  },
+  {
+    "file": "saas/server/tests/meta-production-api.test.mjs",
+    "sha256": "217400cf36e1b2527d79e08470f8c1aba828361069f594cd604f160f91d5ae0a"
+  },
+  {
+    "file": "saas/server/tests/meta-production-authorization.test.mjs",
+    "sha256": "6820939731ec9c2a9afa9b904b3743d0485b01c6807b30fe4dccde4e461e992d"
+  },
+  {
+    "file": "saas/server/tests/meta-production-browser-check.mjs",
+    "sha256": "32af83abc11d30c0fc42e892e1595eee14d0e6182ede8bbef866ce7b7018fac8"
+  },
+  {
+    "file": "saas/server/tests/meta-production-fixture.mjs",
+    "sha256": "44c9f68871c67f70fd76ccecd135f36ad295b7c1109b7326f1dbfe51d230c234"
+  },
+  {
+    "file": "saas/server/tests/meta-production-postgres.mjs",
+    "sha256": "41337c389419246385e79a2a150296ddfa9de88d81b2dd870667b567c30e28a4"
+  },
+  {
+    "file": "saas/server/tests/meta-production-ui.test.mjs",
+    "sha256": "a86fb2c1cdbc46b8aaae90980e0fd0f1accf7dfa2398d9adb25bd62b21719958"
+  },
+  {
+    "file": "saas/server/tests/meta-production.test.mjs",
+    "sha256": "f322b7efe0063535e73ec478791eee5ccc4585ba471b412a1e4bef14da0d67aa"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-delivery-postgres.mjs",
+    "sha256": "04cf27d76dd83cad2a8c1ca134f426ec92cebbbbf7a5e012d3464c7a9e36eaad"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-delivery.test.mjs",
+    "sha256": "b82972f01a6c01eacb334a680ef1d71527ece86f02463d2e1191a70081371fcc"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-flow-fixture.mjs",
+    "sha256": "daa4fa831c5a178d1767be0381cdc484f89dbb826283efad8fbef728fbaac0fc"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-flow.test.mjs",
+    "sha256": "17de62578c9bd36c688484cfc602d1386446afa8904982c0ec2bea8bfe820d9a"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-ledger-fixture.mjs",
+    "sha256": "7509623b12c56c842e5a8aece669169ad77658e3b26d668aca12a0c0c1f293d7"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-ledger-postgres.mjs",
+    "sha256": "91bba84c5559ba26d19a941fa4ed4e81b2f208d09abc05e34290ecd459441633"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-ledger.test.mjs",
+    "sha256": "819e7baa1b6fdbb5d086a9fce6c5b6a575547422f8ce0bf4f90e6319edd5b828"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-observation-api.test.mjs",
+    "sha256": "6fb0ba151fcb44afce4784e111f7c087e527451951b7440d01eab48a5ed21a13"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-observation-fixture.mjs",
+    "sha256": "0a22d5278201ed26f4bcd1e29254d7e7854e9f92317796a205a68cef5d44ee07"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-observation.test.mjs",
+    "sha256": "0254cb05611acb89daa6957acbced73f8211d5332d3c6d60a2ad3abc33ac9935"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-receipt-postgres.mjs",
+    "sha256": "cca94dba1acc871cd1bf8edbd055bd7c5786cf2315c39d4065e84e617f31cb0c"
+  },
+  {
+    "file": "saas/server/tests/meta-publication-receipt.test.mjs",
+    "sha256": "f747a10fd30a4da519d52391bb00593b3a3fa1eab8b117a9b233f07b4a28e0a8"
+  },
+  {
+    "file": "saas/server/tests/mobile-connection-check.mjs",
+    "sha256": "752a037fe78a61bf3084632b5555da0c7675c6a432984d86eab46decbe31f619"
+  },
+  {
+    "file": "saas/server/tests/objective-browser-typography.mjs",
+    "sha256": "38545ff0f30c59cca405480d959f2b0034e5bbf39c805ee7a1b7cc80eb2bac8a"
+  },
+  {
+    "file": "saas/server/tests/objective-browser-typography.test.mjs",
+    "sha256": "846120fd28e059676c784b30b3a65173460784473eac785e151a2404a748f1d9"
+  },
+  {
+    "file": "saas/server/tests/objective-content-api.test.mjs",
+    "sha256": "098919034c9c82871d3b44049887e2f4835fe16d4f705a27fcc7e17e1ff05a52"
+  },
+  {
+    "file": "saas/server/tests/objective-content-browser-check.mjs",
+    "sha256": "929821fe372ab3410e3f0c9e3a06d290de92e70b71a413882f27c4f90447853d"
+  },
+  {
+    "file": "saas/server/tests/objective-content-dispatch.test.mjs",
+    "sha256": "cc34cabbe75568f265a6c2c774d05408f2a55247d8b754d9e440175314ae41cb"
+  },
+  {
+    "file": "saas/server/tests/objective-content-fixture.mjs",
+    "sha256": "599178f4d1165ff3d3dc98c215f67846598692f1f90bc029f9acfbde2ec4f610"
+  },
+  {
+    "file": "saas/server/tests/objective-content-source.test.mjs",
+    "sha256": "768f0a10ce5c996f372cebc1f4f973900d8de81d50408457f9e69863b84b3140"
+  },
+  {
+    "file": "saas/server/tests/objective-content-test-fixture.mjs",
+    "sha256": "108422227efef6add0df4eb95c60fc4b5d0d635668cafd68c323212b441d674c"
+  },
+  {
+    "file": "saas/server/tests/objective-content-ui-fixture.mjs",
+    "sha256": "5787bc2e049e18674c6a7d0daaddb7233440a0793a6f3a6eff1327e0d406448a"
+  },
+  {
+    "file": "saas/server/tests/objective-content-ui.test.mjs",
+    "sha256": "0948a3ebe166dec4421ce4d89e02e321f5431d79c436ec3fb64d34a3c3d60d00"
+  },
+  {
+    "file": "saas/server/tests/objective-dispatch-policy.test.mjs",
+    "sha256": "fc880ba50712b84feab638043c8bc6374b93741109a84e5ad02abd5f03dcb549"
+  },
+  {
+    "file": "saas/server/tests/objective-job-postgres.mjs",
+    "sha256": "f9759f6ad69651da3e013c51221ea006ddc0e83a413707dd1ed3e6130be70256"
+  },
+  {
+    "file": "saas/server/tests/objective-publication-api.test.mjs",
+    "sha256": "85eafda5258699ec932b230b135611a5ffa6717e848b300a96c80f7337fad09a"
+  },
+  {
+    "file": "saas/server/tests/objective-publication-evidence.test.mjs",
+    "sha256": "179c99c0086093355e4fe287330b54c6a6f2579d769349c811eb2de076406938"
+  },
+  {
+    "file": "saas/server/tests/objective-publication-fixture.mjs",
+    "sha256": "9dbc8634e95f0d23cdef0a409096377155c8bba92cee04e5a1572d3468f048f4"
+  },
+  {
+    "file": "saas/server/tests/objective-queue.test.mjs",
+    "sha256": "20aaebc44e51878169c5fb63bfcd08464e53d31366163a70183e19d19d8218d7"
+  },
+  {
+    "file": "saas/server/tests/objective-restriction-ui.test.mjs",
+    "sha256": "99c502cadfbe9e3b7730b53b95c97cecd6513f2ca45692d6ebac4356622359c6"
+  },
+  {
+    "file": "saas/server/tests/objective-review-api.test.mjs",
+    "sha256": "4f91c0573c16cdae3ae980fbbfe2ac3eb5fede2979e5ce205750949cff67905d"
+  },
+  {
+    "file": "saas/server/tests/objective-review-browser-check.mjs",
+    "sha256": "9724107d27f04f9356633f495a8bbb024e34315c9564afcc0e69c9bce6d93824"
+  },
+  {
+    "file": "saas/server/tests/objective-review-ui.test.mjs",
+    "sha256": "938d2785db2988eee55f5b761b95e82bc4f70edcfa2134a380f725ab2ac754cc"
+  },
+  {
+    "file": "saas/server/tests/objective-review.test.mjs",
+    "sha256": "8442aaf5efd8fd1be8de13b437ce3956c76e6c79255bb6ae87e91383f1a152b5"
+  },
+  {
+    "file": "saas/server/tests/objective-store.test.mjs",
+    "sha256": "3201385227dd3ff1563c76afc338a3a9496335e33a8970ebe6c20c71ddb87f6a"
+  },
+  {
+    "file": "saas/server/tests/operator-brief-admission.test.mjs",
+    "sha256": "5744625ea9429a6ae806449ee5e4fbf0782d2595106ea73a71dc998bee77ab3b"
+  },
+  {
+    "file": "saas/server/tests/operator-brief-cutover.test.mjs",
+    "sha256": "e64f95484843788ca2ceba594f2bb83a34a0680efa64172181ab7035fc96aac2"
+  },
+  {
+    "file": "saas/server/tests/operator-brief-routing.test.mjs",
+    "sha256": "7b442461a92668fec2425a4d1aec15526def9bab85826ff2c337928240c9cbf4"
+  },
+  {
+    "file": "saas/server/tests/operator-fleet.test.mjs",
+    "sha256": "07fbd58c565b85e4fe1a27894b74b64e971a3cb5f42dcd0668dd69684931b7f1"
+  },
+  {
+    "file": "saas/server/tests/opportunity-engine.test.mjs",
+    "sha256": "a61f26a33542367af2cfbbba00bccfbcbf80b1232e84bc7d4673e51d8e499837"
+  },
+  {
+    "file": "saas/server/tests/order-recovery-browser-check.mjs",
+    "sha256": "e1beb03934f1ad9f992d9174b6ac8e27b247ec8e600bac45262c86b90ee20423"
+  },
+  {
+    "file": "saas/server/tests/order-recovery-ui-fixture.mjs",
+    "sha256": "318b7a07815070462e20a0c32cf5ab8057ccf19c9a9009853c375f2c1efa9c44"
+  },
+  {
+    "file": "saas/server/tests/order-recovery-ui.test.mjs",
+    "sha256": "7f7b7cfd5c4fae9efe33d530f4684fb548b228aae3d5680f474c8cfd0df2814f"
+  },
+  {
+    "file": "saas/server/tests/owned-save-snapshot.test.mjs",
+    "sha256": "99f0b237517ac0779b97b7cdbd75f05ef61098dc8a202080cbf8ff982254b1b1"
+  },
+  {
+    "file": "saas/server/tests/owner-product-readiness-browser-check.mjs",
+    "sha256": "9083157e63564e92041c6ae800c10589767e36c0058558aeca2bf7cf4e924b86"
+  },
+  {
+    "file": "saas/server/tests/owner-product-readiness-route.test.mjs",
+    "sha256": "b62e6bee3b075deb74cbaea93f6fc8a59828fb87f5b58f0798a91198a9b72e21"
+  },
+  {
+    "file": "saas/server/tests/owner-product-readiness-window.test.mjs",
+    "sha256": "9758461fada62feebdccd533346889e86f710b1d4632874cd89a258f6fdde9a7"
+  },
+  {
+    "file": "saas/server/tests/owner-product-readiness.test.mjs",
+    "sha256": "1359a5c5600f78772d80f066d7957bdc7a19dd1505f2cadd7961495112baf8a9"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-approval-http-fixture.mjs",
+    "sha256": "675561fd8a219e03153ce4eccb11e0c2203e629816e5a5427d782a72a58fe3fc"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-approval-owner-http.test.mjs",
+    "sha256": "59aa2b2b9cfd9732f7bd8fc5969bb185bb1d7e9b4eacb0905c934ce46e25f438"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-approval-review-ui.test.mjs",
+    "sha256": "9378e8892791952ac3c3bbf96bc82bf76b32844ac09347bf9f56427f6e0f256c"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-authoritative-evidence-reader.test.mjs",
+    "sha256": "9441228cdada26e53bf1612cf68443b8a8ac34dc3cee91beabc086f97babfc1c"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-entry-browser-check.mjs",
+    "sha256": "6e8ea1ddd98375e63a4668bce6f9d8756aa35ad845e5fbccecf536e1e1170979"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-entry-fixture.mjs",
+    "sha256": "fcc7771396e8e7b83e116e0671c7b164c39ee45c946b9a2d2872f43c85934346"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-entry-preflight-ui.test.mjs",
+    "sha256": "7061486e521bd06b9d2e1a7d067c976e138568e915a6b21023aefea804b89741"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-entry-preflight.test.mjs",
+    "sha256": "b014b60cbafa1d0aa967133df0d7b12d99ffd15ee64a7d9bb08e1710041fc978"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-entry-ui.test.mjs",
+    "sha256": "06368dd90cc8b475ac7a20bd17267dcf74b1ff8cf2c49ac710593a7f3a7a16ba"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-entry.test.mjs",
+    "sha256": "330b2b155a94ee59c7b9ab546a638e08052e18c9b21e26219ae4bcdce5829715"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-approval.test.mjs",
+    "sha256": "cfa8fd610ca8a3f1fed4e58a9d8aa1b466d7942bf4265be1421eb1d89ae10089"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-input-producer.test.mjs",
+    "sha256": "599f13aa9e8efafdf08b5be47c2e44dbb7fb2c1e01de36b2142026785d155802"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-native-admission.test.mjs",
+    "sha256": "5bc6457f91df6e790322374bd6916a1f1a719fabef350f79853e65c618ac5001"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-owner-http.test.mjs",
+    "sha256": "220bf5a22d5a831c34ec16b3ef8be71336772125912285c0ad4243e7b7fe7044"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-owner-panel.test.mjs",
+    "sha256": "bfdaab1162974e60747ad0fe9e8eba77550b2adae959f89ba2d44888493e1588"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-owner-ui.test.mjs",
+    "sha256": "b593e313a9c5f758901a4bf7eb17f2a8fda6fb416bcc5b4113bc15c993519f18"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-exact-panel-fixture.mjs",
+    "sha256": "7287fb94b243e4c496ee30b2caf116ccaa913f58de44fa97348695702f60fe2c"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-https-orchestration-acceptance.test.mjs",
+    "sha256": "b6970a0da5a79f9ffad71b2fdea0f686ca067a32c53279c4f5d7abcd8417b32d"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-admission.test.mjs",
+    "sha256": "68de2271f037616a5e08c77660fcc65ff8467ac64d2d1ba9329f7979a625ff91"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-canonical.test.mjs",
+    "sha256": "43a70b6a89524d6d99c2d5effd4baecec4537913240666064d8981c4ecfdee04"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-entry-browser-check.mjs",
+    "sha256": "114d8331f5f2b3a8e4ce6c28cdd1493859735bb8ab60c63b39684400e713fe6c"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-entry-diagnostics.test.mjs",
+    "sha256": "1190bdbfb7c3bd753b9775b67e89aa6621542bbbefceb0be78cc3846589e9938"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-entry-disabled.test.mjs",
+    "sha256": "31ef27ef430b816e34f52fcd07224025e485de1116905540201bf62d921fae5d"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-entry-production.test.mjs",
+    "sha256": "8d893623a673a6a3e97cca9c6302fca04161bdb9381ce4e3ee7be60af968e3ac"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-entry-ui-diagnostics.test.mjs",
+    "sha256": "eb0f3c910f83d1d16ae910af55b4d61bd5bc51e303dacb1b1aaf927be161f738"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-entry-ui.test.mjs",
+    "sha256": "a17346222af20d8efe8f514866825a48be9f429ea22281c974cb5ca657c0828b"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-foundations.test.mjs",
+    "sha256": "d10914e03c3dac30eaec30b78ce258938547088f15f24d8cc2e0a53baf3f8775"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-https-candidate.test.mjs",
+    "sha256": "cc158f8d20aac444b789fb9a64c36f06b324d78e7c5298867f693d7475488a15"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-integrated-fixture.mjs",
+    "sha256": "14301b531c7e73f969936004d66abdf78f86d41129581459d0673e30c785e21e"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-owner-route.test.mjs",
+    "sha256": "a9c7bf8a5f16e7b86e484838537ac36172687dc0c0ccc835deabd17ec3ee8fb9"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-review-browser-check.mjs",
+    "sha256": "3da553abd84b2714a701841f3fe09e24cdd67b2070951e0aa57a642ef023a11e"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-review-ui.test.mjs",
+    "sha256": "f5cde416d6f764aed07d850d5e5708194c6e93efbef2ea45fa2cfbd836af47b5"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-setup-diagnostics.test.mjs",
+    "sha256": "e67e5dea0e3ec866fb01e3701f737f8130a57b293b261d8011510a795f6366a8"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-setup-ui.test.mjs",
+    "sha256": "48989e03ab9b0943e2faba3bb1fc895ea041c327e85cca11425923cd2008f95f"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-setup.test.mjs",
+    "sha256": "badcbe8fc34c9a86e8759ac84b3595ce0eca4ebc4bccb8874a69627f9fd1eb90"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-live-sync-guard.test.mjs",
+    "sha256": "93d2e71c0654782f7ab918296149d38dd13625c4301e0fd7bf60346aa392828b"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-native-http-fixture.mjs",
+    "sha256": "2e8ba276feffd2e5274c9288f7824d6f127284c78510b6b55abd041a3f131776"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-operational-approval.test.mjs",
+    "sha256": "2df8c77467c36734545ced2f9b61cbaa697ad25ae1a3e24e5365da6b234928a6"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-owner-input-quote.test.mjs",
+    "sha256": "b34c9844819eec412139bac5aef0514a10bad5cec6115834752df63ce7d8635b"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-owner-input-ui.test.mjs",
+    "sha256": "a58280eaab40b5887f4da1285c22c7392a843d2800d7423c5f129f6d57879190"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-owner-quote-browser-check.mjs",
+    "sha256": "7be6a2f2d10329e6cf36bde4540ae2afcf176bb4d86fafa0d3fcf8f91b33ce52"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-owner-quote-mount.test.mjs",
+    "sha256": "857293de88c34f426eb382871afad11e61b6cfc64c943d09aa818f0127af9d2b"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-owner-quote-surface.test.mjs",
+    "sha256": "64be5e5a1bcdf46c475ce39a906cdd3bfd9f673e7d1e7799144dd0245eec153d"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-owner-surface-fixture.mjs",
+    "sha256": "12dc0bf072cebee6ff95cd7b4e8d64b8db187a493971e09e32a97260ea33986e"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-quote-foundation.test.mjs",
+    "sha256": "ad7a24cd328f186bdedd9751e5fa65eca7bbf7ae0ca79da0691472543dbf6768"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-quote-owner-browser-check.mjs",
+    "sha256": "fc657728f46bad02b57ad52b83faa6e5998ef7cab68d9b9c480cbcd334099b63"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-quote-owner-fixture.mjs",
+    "sha256": "fc69886aecdf52a2940880f993d12a80e65ed4a3eee428840e7f3d92c1d6ab52"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-quote-owner-ui.test.mjs",
+    "sha256": "300b94578c4612165e0e099f61d9267d657363f9efb820da694bd921301abe23"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-quote-owner.test.mjs",
+    "sha256": "6c818795c8fc154374a28924c5aa63526bff3a58b0468f2cf4a60816864f0333"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-recorded-owner-review.test.mjs",
+    "sha256": "a67cc25c9c46101fea821fd16899412d32270b7e195c07a17df49cae20e377f1"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-review-latency.test.mjs",
+    "sha256": "e13906671a9a67bb3d531c8eca3fa4d5e2a9c9349635bf5450dd2693001f7ea4"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-sandbox-fixture.mjs",
+    "sha256": "62612978e3e67b36719fd4518aa215a77443e50f976f88ee7f6bd8265c76ca3e"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-sandbox-http.test.mjs",
+    "sha256": "3fa82d5e6ac749a221dfe59f8be581882a8537941b000e03ba463d9400d291fc"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-sandbox.test.mjs",
+    "sha256": "7d85771a8917ef9f40300ec495134a6d7057eaad86e378852b7409d4605a833f"
+  },
+  {
+    "file": "saas/server/tests/parcel2go-workspace-fingerprint.test.mjs",
+    "sha256": "4016a44386ed784d915ab04ee76a98d888c49697b49a5a971a4f13ccc567991d"
+  },
+  {
+    "file": "saas/server/tests/phase2.test.mjs",
+    "sha256": "7750b5acf72d27ecfa34eb1cba7327c52ec50302b8d8341fb0b5100ebf255058"
+  },
+  {
+    "file": "saas/server/tests/portfolio-engine.test.mjs",
+    "sha256": "c7aa0f5aea1086a682fc85391738c93493a23f568ce10df018c06b86b7c139cb"
+  },
+  {
+    "file": "saas/server/tests/presentation.test.mjs",
+    "sha256": "c73431a480600d9825335daf37302f0b4a3e3f550856ae831dbcba99ff3d682c"
+  },
+  {
+    "file": "saas/server/tests/product-only-support.test.mjs",
+    "sha256": "e9f2765dd35802ef5d7035bf1772ea4a1112fa4dba0e50c34e7f2116ef95ce7a"
+  },
+  {
+    "file": "saas/server/tests/production-health-verifier.test.mjs",
+    "sha256": "129029271532fc848b7e4aedd2191bb93a0f247e9b2167b6ab9dc86ed5d83064"
+  },
+  {
+    "file": "saas/server/tests/profit.test.mjs",
+    "sha256": "86533c0bbc35976bd012cf90e3fcffcaead87e2bfc11b24bdafd59fab33145ee"
+  },
+  {
+    "file": "saas/server/tests/protected-receipt-outcome-api.test.mjs",
+    "sha256": "ff45d2d4e5e85db8c595f2b253e3bbfa5940e2097a379d67cbf23657c75cda07"
+  },
+  {
+    "file": "saas/server/tests/protected-receipt-outcome-store.test.mjs",
+    "sha256": "25c649cfe5f312c1f3cf9d7cb14934b5bc4b28b3181da045cd760d54b8f4fa3b"
+  },
+  {
+    "file": "saas/server/tests/protected-receipt-source-fixture.mjs",
+    "sha256": "8a95723cdf7c824d1a9755478ee6bec970104ce426d7a97f21e0417f306ba71a"
+  },
+  {
+    "file": "saas/server/tests/protected-receipt-source.test.mjs",
+    "sha256": "656e2b31d78844d9b3fbb24ec89c15c69d78edb5de670711a18f330b09a0ff4a"
+  },
+  {
+    "file": "saas/server/tests/provider-router.test.mjs",
+    "sha256": "6310377cfc97405d1a36245419cd6baa8ceb3eafa3ef81de934565945e29f0e0"
+  },
+  {
+    "file": "saas/server/tests/provider-usage-browser-check.mjs",
+    "sha256": "ed59567b9dee5908b6653238c90612abfa93610b4f5e8009c669f02025eaf999"
+  },
+  {
+    "file": "saas/server/tests/provider-usage-store.test.mjs",
+    "sha256": "bed190451316121f3e28134342e471ef70bf68cb23fa724a7b85685ab7a854da"
+  },
+  {
+    "file": "saas/server/tests/provider-usage-ui.test.mjs",
+    "sha256": "bd39169db73b2f1388a06fdb1b45936250219a2f614e46337dfbd30c0889b033"
+  },
+  {
+    "file": "saas/server/tests/public-ai-settings-api.test.mjs",
+    "sha256": "f40415da10c2d60b88e9d528b02aeb108550098b7c8d18de1ec2c42964eecb9c"
+  },
+  {
+    "file": "saas/server/tests/public-support-store.test.mjs",
+    "sha256": "6e1e2b930346fedc62d0652d8c26c78349e55ad0d7b80b2c3058043e91d7a918"
+  },
+  {
+    "file": "saas/server/tests/publication-stage-fixture.mjs",
+    "sha256": "2b795858b8d9f75ee254f8b364b3dc3defe6c9f4934d59dc467079fc8d4d1aae"
+  },
+  {
+    "file": "saas/server/tests/publication-stage.test.mjs",
+    "sha256": "665eca4deafcaf36b03c68d82b47da58267024d46fad63d3ff6bd3a8f04b272a"
+  },
+  {
+    "file": "saas/server/tests/published-action-graph-fixture.mjs",
+    "sha256": "fbc3332337a596524ad0284f82ca95a9a55f8e47dee5425f4c818648935a34b1"
+  },
+  {
+    "file": "saas/server/tests/published-action-graph.test.mjs",
+    "sha256": "50ac1feb21266fddf4bde0d160747cf17b1f1707e4d57716df8f8ce8ab8dca77"
+  },
+  {
+    "file": "saas/server/tests/qualified-outcome-consumers.test.mjs",
+    "sha256": "98d89a0824bde364f60209abcaec4c74f4ee471c613e7152b47db9030a42a6fe"
+  },
+  {
+    "file": "saas/server/tests/quiet-approval-pilot-browser-check.mjs",
+    "sha256": "26c03487f9456d4b410f9f8aad2b199bd5477b540f5e5c13d25e4312f50846ad"
+  },
+  {
+    "file": "saas/server/tests/quiet-approval-pilot.test.mjs",
+    "sha256": "81fdd990cda9b89ca57596613dffd16322c6a3e75e97d717aa469027a04e9472"
+  },
+  {
+    "file": "saas/server/tests/quiet-commerce-preview-browser-check.mjs",
+    "sha256": "ed0e2cf2760eeaf02392f1c3d184d754d6ab7cb26274f0628e55f90e3fc78384"
+  },
+  {
+    "file": "saas/server/tests/quiet-commerce-preview.test.mjs",
+    "sha256": "cb15320df2b8d650ba79e3c7b6840b8ba3001a577cc28570a9160459552afac2"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-api-fixture.mjs",
+    "sha256": "8bd2ebc5e14425bf0ff31f59abcd45f8ef67b57f16d28ea5e5f6ae4b1165cbac"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-api.test.mjs",
+    "sha256": "b97f79a61223521333a2813f830df5a691f5f3f7c0519d00ba81e8d99681f866"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-browser-check.mjs",
+    "sha256": "ad0eecd3de7775665f6b817f05468550895bca324f9d8050af195bc2e3c1fba4"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-fixture.mjs",
+    "sha256": "61667ed9c05191a65481daa387947349c747a6e0a9c247ec01735ac08be7ba15"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-pilot.test.mjs",
+    "sha256": "f324d431d6579daa4104b2a554560f428ce61b931d9bc56de5372051c4ae70ba"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-postgres.mjs",
+    "sha256": "1b40778e00b080098a9ff42b35415417f28041beca2e0baa9a726176c82e172e"
+  },
+  {
+    "file": "saas/server/tests/quiet-creative-review.test.mjs",
+    "sha256": "c9e0686a0b2a283b77cd317d387c9201b236638b0427fdcbe5cd44ee3701f5cb"
+  },
+  {
+    "file": "saas/server/tests/quiet-owner-fresh-login-browser.mjs",
+    "sha256": "ff14a77e7e239b173d596f6b0830bb17132af3ea2777f605817b64b8c5561d09"
+  },
+  {
+    "file": "saas/server/tests/quiet-owner-workspace-browser-check.mjs",
+    "sha256": "be60be1dc7d1e1012186b9d8db0c794d29633e566c25ab763921ac8be6a1b494"
+  },
+  {
+    "file": "saas/server/tests/quiet-owner-workspace.test.mjs",
+    "sha256": "537713b404fff64e1483502a52f9751bce968fd895cd2eb4ec0a0741e4bf6e4a"
+  },
+  {
+    "file": "saas/server/tests/quiet-public-support.test.mjs",
+    "sha256": "fca70ff76733c6f12d1c819ed9572281a00f7a69ee93095a1b5fc0d680f07eaf"
+  },
+  {
+    "file": "saas/server/tests/quiet-startup-browser-check.mjs",
+    "sha256": "ecca5fb469761318bd3ce630ea2bcf91c168d17f0c1be91bb768698022ad3797"
+  },
+  {
+    "file": "saas/server/tests/quiet-startup-process-cutover.test.mjs",
+    "sha256": "0d943ecf7d84ab168124f3b5da3fee7eb84816a01f7c5a1de8718d1c8edfd534"
+  },
+  {
+    "file": "saas/server/tests/quiet-startup-process-d32.mjs",
+    "sha256": "d017a7642bc7be9615bd21491c6a6018184de26c309e4a1d374257129787d767"
+  },
+  {
+    "file": "saas/server/tests/quiet-startup-process-fixture.mjs",
+    "sha256": "5e9793325d13ec1775c2ec56ad19d236b6fa88b8732b83ea98c3ebf93a4d65e9"
+  },
+  {
+    "file": "saas/server/tests/quiet-startup-process-harness.mjs",
+    "sha256": "dc4d45b8a2ad8b33e58463c6c8c412ca0a7145aff5d4831957f7ee3c4c8cf3d3"
+  },
+  {
+    "file": "saas/server/tests/quiet-startup.test.mjs",
+    "sha256": "36e407d476a1fc7f9ba22fe8515a824eaa09255c6bc11a27e7b3a54a61c1b5ab"
+  },
+  {
+    "file": "saas/server/tests/receipt-outcome-consumer-postgres.mjs",
+    "sha256": "4390c2c1d13124762dbc28f66ca9e70cb67eb39895fedab1ced20bee83e15b44"
+  },
+  {
+    "file": "saas/server/tests/receipt-outcome-error-privacy.test.mjs",
+    "sha256": "6591d42d9959dad7747b5a9c034ffb1833ae55caf6ff13babf6d77166a35220f"
+  },
+  {
+    "file": "saas/server/tests/recorded-amounts.test.mjs",
+    "sha256": "01747b40e7a2d22d7ea353a1384e3444aeeff1b1bbb1c8985bfbc5ffe2220cbb"
+  },
+  {
+    "file": "saas/server/tests/recorded-cost-cache-dispatch.test.mjs",
+    "sha256": "7f4fe24d327adb74947a43943474648571f2f80261a75a8b7cf08b42884021c1"
+  },
+  {
+    "file": "saas/server/tests/recorded-cost-inputs.test.mjs",
+    "sha256": "272a01705b75b5c90977faf77274e0b60918edcd18f5f4b2de997ac47f7980cb"
+  },
+  {
+    "file": "saas/server/tests/render-connection-preview.mjs",
+    "sha256": "4b39ac50b3867175e6d569c9cf9be98c45973ff49a279d021ccadf0fd898c257"
+  },
+  {
+    "file": "saas/server/tests/reporting-status-postgres.mjs",
+    "sha256": "37cd781b27e30b78e4d587fec77addaaa6da7c6e60c5eae49b2bee74b7069f3e"
+  },
+  {
+    "file": "saas/server/tests/reporting-status-store.test.mjs",
+    "sha256": "f8b39215acefb69a2b6f743266b1a13d936f974f53a112f853d08bec1bb74d28"
+  },
+  {
+    "file": "saas/server/tests/retained-request-graph.test.mjs",
+    "sha256": "b94fc37306e123e85da29736151d891b69f738e55fd2d871e1a78d94040e7a1f"
+  },
+  {
+    "file": "saas/server/tests/revenue-engine-imported-evidence.test.mjs",
+    "sha256": "d072c6c6b72c26a0b0f352ce9c2dbe452ec2c4a0dab5475580d3eb3ee7607828"
+  },
+  {
+    "file": "saas/server/tests/revenue-engine.test.mjs",
+    "sha256": "005ec9e281833d2f5beb2a2c80db9bb0d9d21185ac0561a03d58181a53f0c539"
+  },
+  {
+    "file": "saas/server/tests/reviewed-action-evidence.test.mjs",
+    "sha256": "36854b9e6963e805e530410ea7e0504eb29057fe6a343bb2e94ebea3a582fb07"
+  },
+  {
+    "file": "saas/server/tests/reviewed-action-test-fixture.mjs",
+    "sha256": "a7e993299490156fcb50bdbe242808fbb46b94541bc1c4e6d47fb7b8d5f86c29"
+  },
+  {
+    "file": "saas/server/tests/run-content-execution-receipt-postgres.sh",
+    "sha256": "10d81542c206f901c038d6d4cb9e4a6a6e79283faf53cd66d14679efc11bcf60"
+  },
+  {
+    "file": "saas/server/tests/run-content-jsonb-postgres.sh",
+    "sha256": "d77e491b83570fd1f81bdb36661e47a9865bc39a21ff4c231ee9b3f245919ecf"
+  },
+  {
+    "file": "saas/server/tests/run-receipt-outcome-consumer-postgres.sh",
+    "sha256": "b284fbd5b9325e0fa8abcad31abd76fce2c45b5109eb185980a3a57277d60183"
+  },
+  {
+    "file": "saas/server/tests/run-shopify-order-recovery-postgres.sh",
+    "sha256": "f6a4527d84c866fb0ec156fd8e926bbd04e0d40413cd91dd17f1846af0a20c68"
+  },
+  {
+    "file": "saas/server/tests/run-staged-reader-postgres.sh",
+    "sha256": "d7a28b31687c2ae51b5a471b8c2cd94aec49e08cd2d182ea7a8b09420cdcb80b"
+  },
+  {
+    "file": "saas/server/tests/run-staged-reader-postgrest.sh",
+    "sha256": "8f06b913d9434faf1234c852334fe260790296fff7dafe42bf7580ca42c45115"
+  },
+  {
+    "file": "saas/server/tests/scheduler-creative-effects.test.mjs",
+    "sha256": "66475402af94e26685aef3f57d35e57c9fb365b183ed70a84f08ab324b963264"
+  },
+  {
+    "file": "saas/server/tests/scheduler-creative-readiness.test.mjs",
+    "sha256": "04262eb233b87faf7cd98ffb3e329f45558a09b7d4e1b720e00e2ec25934dbd2"
+  },
+  {
+    "file": "saas/server/tests/scheduler-lifecycle.test.mjs",
+    "sha256": "8bd5a5855c73e0a80459ebbd1034029f54eeac87a26478889c56e101d0f83804"
+  },
+  {
+    "file": "saas/server/tests/scheduler-web-effects.test.mjs",
+    "sha256": "a066de1fd48dffc13256ca8c2a850c2e54ee4fb8f2a23da6136db1f29981ca73"
+  },
+  {
+    "file": "saas/server/tests/seo-review-browser-check.mjs",
+    "sha256": "e37911d9849dc4b73ad7fcb3e236a0902126741bd9f484137f04266620de0cdc"
+  },
+  {
+    "file": "saas/server/tests/seo-review-ui.test.mjs",
+    "sha256": "d4bbeedecbf585e03f2893f37d4cc72db41926841d15e595f6faf5f9ea227c82"
+  },
+  {
+    "file": "saas/server/tests/seo-review.test.mjs",
+    "sha256": "0bdee96670e3bca16d2e0d1d77f4dcc3c084139e24acb7702aa357d06b57dd04"
+  },
+  {
+    "file": "saas/server/tests/server-auth-tenancy.test.mjs",
+    "sha256": "9845fd3d20c0c1bb6d1fad04de1e5b88a1d0eb621bbdf6005b09f43c63ebe153"
+  },
+  {
+    "file": "saas/server/tests/server-revenue-engine.test.mjs",
+    "sha256": "6e54d8cedf06c7532bcc3aad92d33fd4791214e17a55aaba4d932d28643bebba"
+  },
+  {
+    "file": "saas/server/tests/server-shutdown.test.mjs",
+    "sha256": "a9e778fc5020cd00ce6aecf212eb687e92a72b65c38e68203cf650dd49655710"
+  },
+  {
+    "file": "saas/server/tests/shopify-catalogue-evidence.test.mjs",
+    "sha256": "4e64af142fc761da080731c97c8a4f36c7ba96e3125a3b0287b71fe7b680891b"
+  },
+  {
+    "file": "saas/server/tests/shopify-catalogue-import-browser-check.mjs",
+    "sha256": "0adf3bd499ea349fe4b3e60558c24adb70df70af0533f0794774474ac3d1704f"
+  },
+  {
+    "file": "saas/server/tests/shopify-catalogue-import-fixture.mjs",
+    "sha256": "054ef5b8dd92f438c90ae82bf0049b7cd1f5290d821f7958ce6d276e2a73a881"
+  },
+  {
+    "file": "saas/server/tests/shopify-catalogue-import.test.mjs",
+    "sha256": "5afc4543a727f898b301af04429a5cf4f660fff774479f0877a29214337daa34"
+  },
+  {
+    "file": "saas/server/tests/shopify-catalogue-preservation.test.mjs",
+    "sha256": "7584add6f6f4a9a03eb66b09e790fc0e7d5a58ff955f54b281dc87e3bd801c70"
+  },
+  {
+    "file": "saas/server/tests/shopify-catalogue-read.test.mjs",
+    "sha256": "b6312c25bd6e135fd7972801a8ace3949811c39374c4c78c1425feace27e5b0b"
+  },
+  {
+    "file": "saas/server/tests/shopify-credential-metadata.test.mjs",
+    "sha256": "01e30048f73c683d8f157c798cca635338409dfd8bccf284414bf39c9cb74234"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-admission-api.test.mjs",
+    "sha256": "ff847ed49324a0faebf94c263fc1508ba540cf4db508a1779923413cf564e351"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-admission.test.mjs",
+    "sha256": "cd8e433abe0a1ebf50dc4b202a66b68d60cc8bd02263e2c532463b01dd9d5ceb"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-api.test.mjs",
+    "sha256": "518c9153a3441553151cb7e47e2890734cb675c4148a78d40611eedd248b041c"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-budget-check.mjs",
+    "sha256": "dc67ed3b736246db4e2b207263e80efff380d234799feeb79b9782529e9bc500"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-contract.test.mjs",
+    "sha256": "e61d7a394533981a01af616bafa35085092a38715e0ff81e21706cd07a4accd1"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-fixture.mjs",
+    "sha256": "24dfcf0b4c9860b42d40b8ef56656ebfe2fb7d27912f34d772de2a3c3caebdf7"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-postgres.mjs",
+    "sha256": "7d37edd39034eab4293ca5cc19abe51419c0020b41017197384469007fdeba48"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-store.test.mjs",
+    "sha256": "7720a7269d9356babfecec95ff0db3fcb53b2afb40e70c432c2893203a4443cb"
+  },
+  {
+    "file": "saas/server/tests/shopify-order-recovery-transport-postgres.mjs",
+    "sha256": "40b122606d469c628b9f59422a5f52023a3b9735b538345ccac48465d2e3acc1"
+  },
+  {
+    "file": "saas/server/tests/shopify-product-price.test.mjs",
+    "sha256": "81c18be25fec4248dc9935b4bb274cb9e095268414aec2353ae50e885879697f"
+  },
+  {
+    "file": "saas/server/tests/shopify-renewal-runtime.test.mjs",
+    "sha256": "e40b810c932f751c39beaecff05bcf23cd1d505e05e0467fd9910bbfa9759ec6"
+  },
+  {
+    "file": "saas/server/tests/shopify-runtime-owner-browser-check.mjs",
+    "sha256": "fe9cf3c65b9afa774bccaf76a34f2bbb3f8e8cffe1c027c72d241dca404067df"
+  },
+  {
+    "file": "saas/server/tests/shopify-runtime-owner-fixture.mjs",
+    "sha256": "e2a0010c3bd483091fe46048cc1bf86828932b9cec74e0cc6b2afd11b69f2a57"
+  },
+  {
+    "file": "saas/server/tests/shopify-runtime-owner.test.mjs",
+    "sha256": "63522cdcbc795a34cf7a719b0cee702db965240ff6bab6a7746dedd24804c415"
+  },
+  {
+    "file": "saas/server/tests/shopify-runtime-v1.test.mjs",
+    "sha256": "838fd734f1fc26f47c300a975ba3eee2166d5d984e0ddfb4e8a10b30967930bb"
+  },
+  {
+    "file": "saas/server/tests/shopify-runtime-v2.test.mjs",
+    "sha256": "4fee6a0a1e869bcde0637cbbffbca341753a0ff245964b1b1b0857f3819ad2f2"
+  },
+  {
+    "file": "saas/server/tests/shopify-source-budget-check.mjs",
+    "sha256": "2eb8342e88a33b7ed7d691f3ee2f9b32bc7444cd9df693e786ac6f202eaa4eb9"
+  },
+  {
+    "file": "saas/server/tests/shopify-source-capture.test.mjs",
+    "sha256": "49aefac2a38185226593ab5a6928b8ac93418476b25f751d06b05bc8e1bddf9b"
+  },
+  {
+    "file": "saas/server/tests/shopify-source-consumers.test.mjs",
+    "sha256": "de1a7d73c4ce01c0499529c07f728301172a4efa794caf4a1c1bc65f3c593eb6"
+  },
+  {
+    "file": "saas/server/tests/shopify-source-job.test.mjs",
+    "sha256": "e032efa92884b506b73ffe49a67ef89a9d0dc3fd9cc90e7de88458fe067ca940"
+  },
+  {
+    "file": "saas/server/tests/shopify-source-retry.test.mjs",
+    "sha256": "560b6343b57a4cb15ad2e1a7cbdbec0e584f4d4550ff14fb1739c88a3d3a0970"
+  },
+  {
+    "file": "saas/server/tests/shopify-token-exchange-browser-check.mjs",
+    "sha256": "65ea5e3ceecb5342270c131689d1be94ff8e44c8b1e6cb6346e0aae52ec43f1c"
+  },
+  {
+    "file": "saas/server/tests/shopify-token-exchange.test.mjs",
+    "sha256": "4cb080fb4bf77b410c460773d8a3d27acac2d5999a94b3d3efe18575b4692c01"
+  },
+  {
+    "file": "saas/server/tests/shopify-token-renewal-fixture.mjs",
+    "sha256": "1d440f1d4e3f310bc7e10fbef45a64f65166cacc7934c3e875a6dc27096e3ce2"
+  },
+  {
+    "file": "saas/server/tests/shopify-token-renewal.test.mjs",
+    "sha256": "e8b1d261bfb42ee5a10aaace76f8b01ed7f0a37809422f40755a18437aff02e2"
+  },
+  {
+    "file": "saas/server/tests/simulation-runtime-guard.mjs",
+    "sha256": "641d6325870c2668b92e407b245a2ad8f251a8d63c2844b3e6ee3f1e21c7ac65"
+  },
+  {
+    "file": "saas/server/tests/staged-reader-postgres-fixture.mjs",
+    "sha256": "15761eee7b3f4165d43f73aeef1a6813a1a1d5af6cac3544f332d52ffc56eceb"
+  },
+  {
+    "file": "saas/server/tests/staged-reader-postgres.mjs",
+    "sha256": "854ad81def05378670258b75927b54cef4fa5759ab11dac909a7ee0be396cefc"
+  },
+  {
+    "file": "saas/server/tests/staged-reader-postgrest-guard.mjs",
+    "sha256": "4361af8196c964eb5a4d07748112fc1bd24719d1a82363df453e946fe6f4d3f3"
+  },
+  {
+    "file": "saas/server/tests/staged-reader-postgrest-guard.test.mjs",
+    "sha256": "b7ca72e9573356632970f729d63e26b395eb26e6c15f3fd97cd20fe745ce23ce"
+  },
+  {
+    "file": "saas/server/tests/staged-reader-postgrest.mjs",
+    "sha256": "b2544586a8d8659d99a8e00887252586342b93ccb5893b5ecc25cb8b194be878"
+  },
+  {
+    "file": "saas/server/tests/staged-reader-receipt-dispatch-postgres.mjs",
+    "sha256": "edbedcfa0e51ff7651e26653793cba2f6d5e18ea22e54bdb2f4902f005352e75"
+  },
+  {
+    "file": "saas/server/tests/startup-mode.test.mjs",
+    "sha256": "5cf5079b9815315262dca8bc63f82e8351ea18d3c8933a0ef06f5ef617e0c869"
+  },
+  {
+    "file": "saas/server/tests/static-revalidation.test.mjs",
+    "sha256": "15de56353aff0a4dcb7a2b6fdbd4b7922d7528a7ebac512bd89390b78d017954"
+  },
+  {
+    "file": "saas/server/tests/store-health-safety.test.mjs",
+    "sha256": "68e0910057f515e47935a4984aedcc38fc1c2100fbe5dd1241a59c8fc6007fff"
+  },
+  {
+    "file": "saas/server/tests/store-supabase.test.mjs",
+    "sha256": "56f665bc78beb6e659c3598c9d8de1f86c104e97338ab8713191bb68f7f64b54"
+  },
+  {
+    "file": "saas/server/tests/support-bundle-fixtures.mjs",
+    "sha256": "ae313d0aab8020b3cec8129fce13cdcb81648ae0cf08a105c8c1735665967e63"
+  },
+  {
+    "file": "saas/server/tests/support-bundle-policy.test.mjs",
+    "sha256": "e938aea7ed0b87d3f9cc920a1a1f363bc30cd999c5648b1356f97027b7def17f"
+  },
+  {
+    "file": "saas/server/tests/support-product-facts.test.mjs",
+    "sha256": "61d907ceab5a34c5f6d1131868b6c110b1f75c3fe3ddcbb343e930edf5adfbdd"
+  },
+  {
+    "file": "saas/server/tests/support-product-fixtures.mjs",
+    "sha256": "a4acfb19f028d041db050c2741782a45f25545cd267a86a0676ef647f0c65a8a"
+  },
+  {
+    "file": "saas/server/tests/support-product-http.test.mjs",
+    "sha256": "396a0e6cf16c210cf29a3945265211e75df3ea2c24aafb8ffa2aa48c16873d34"
+  },
+  {
+    "file": "saas/server/tests/support-product-store.test.mjs",
+    "sha256": "525dabc8d526a87dec561aa35eb297343397bc2c2031f65003cf13c5bc177360"
+  },
+  {
+    "file": "saas/server/tests/web-intelligence-safety-api.test.mjs",
+    "sha256": "08e94e19189e2266b444e83c2e35d69bc6b2ad7355351e3b34e716d8a18f4e87"
+  },
+  {
+    "file": "saas/server/tests/web-intelligence-safety-ui.test.mjs",
+    "sha256": "797f3c6ad4ca2efa63d85c1483b383703fee9c86fed76d1354d6a094eb685a9f"
+  },
+  {
+    "file": "saas/server/tests/web-intelligence.test.mjs",
+    "sha256": "4fafce6b5779d9909592da98f77b36315dd018ac1f42f38d1e5a11eb472bfacd"
+  },
+  {
+    "file": "saas/server/tests/wholesale-consignment-review.test.mjs",
+    "sha256": "56e24f3b128ebc9bbb0d3b4a35e8353ee6881018c47c59b537f3470bd7cd421b"
+  },
+  {
+    "file": "saas/server/tests/wholesale-economics.test.mjs",
+    "sha256": "9abf14e05da8d6c77f675e63d909603ec7b31207add967ad5f13969d6054467f"
+  },
+  {
+    "file": "saas/server/tests/wholesale-fixture.mjs",
+    "sha256": "1ae79f47064fe539a13ea8b518bc586d1ff62c4f2fcef471e3b65b0ce50c6e23"
+  },
+  {
+    "file": "saas/server/tests/wholesale-order-review.test.mjs",
+    "sha256": "d838bb08c8f6f9aed9caeda4f6376796e7ea0b3df8717e1060f86651c62df60d"
+  },
+  {
+    "file": "saas/server/tests/wholesale-planning-fixture.mjs",
+    "sha256": "0dba83b5ef4a389a8f6851f91e43cfae5d2d21d6b68cddc201f019ca6eefe08d"
+  },
+  {
+    "file": "saas/server/tests/wholesale-planning.test.mjs",
+    "sha256": "d6cb2d32d018ecfdc4543284628063fefa5865de713767e2a9637a1a10c3a90f"
+  },
+  {
+    "file": "saas/shopify-runtime-renewal-ui.js",
+    "sha256": "dbd0887894daf7a1ccac43c094ae82b5e73f8fe24130d17220e8ed48c1580d4b"
+  },
+  {
+    "file": "saas/styles.css",
+    "sha256": "9a8b86f71e59fe3f49c618100286b586b2d80b74666049f8b06616c877627e31"
+  },
+  {
+    "file": "saas/tests/saas-guard.test.cjs",
+    "sha256": "00172c6869b8062843ee1a461af53f12791c88e4780476b2ec6d680f896932bd"
+  }
+]

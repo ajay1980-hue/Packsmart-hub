@@ -7,6 +7,8 @@
     migrated: 'packsmart-saas-cloud-migration-v3'
   };
   let approvalRequestUI = null, parcel2goUI = null, parcel2goQuoteUI = null;
+  let shopifyRuntimeUI=null;
+  function runtimeRenewalController(){return shopifyRuntimeUI ||= window.RunvaraShopifyRuntime?.create({request,getContext:()=>({session:state.session,closed:ownerWorkspaceClosed,view:state.view}),onAuthFailure:()=>closeOwnerWorkspace('Owner access could not be verified. Check your session.')});}
   function p2gController(){return parcel2goUI ||= window.RunvaraParcel2GoEntry?.create({request,getContext:()=>({session:state.session,closed:ownerWorkspaceClosed,view:state.view})});}
   function p2gQuoteController(){return parcel2goQuoteUI ||= window.RunvaraParcel2GoQuote?.create({request,getContext:()=>({session:state.session,closed:ownerWorkspaceClosed,view:state.view})});}
   const state = {
@@ -294,7 +296,7 @@
     document.body.classList.add('owner-workspace');
     for (const control of $('#app-shell').querySelectorAll('button, input, select, textarea')) {
       const view = control.dataset.view || control.dataset.viewLink;
-      const available = parcel2goUI?.allowsControl(control.id) || parcel2goQuoteUI?.allowsControl(control.id) || (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
+      const available = shopifyRuntimeUI?.allowsControl(control.id) || parcel2goUI?.allowsControl(control.id) || parcel2goQuoteUI?.allowsControl(control.id) || (view && ownerWorkspaceViews.has(view)) || control.hasAttribute('data-period')
         || ['mobile-menu', 'product-search', 'product-status', 'product-sort', 'order-filter', 'refresh-all','catalogue-import-status'].includes(control.id)
         || control.id === 'catalogue-import-start' && catalogueCanRun()
         || control.id === 'shopify-token-exchange-start' && tokenCanRun()
@@ -309,10 +311,11 @@
     if ($('#refresh-all').textContent !== 'Reload dashboard') $('#refresh-all').textContent = 'Reload dashboard';
     const notice = $('#owner-workspace-notice');
     notice.classList.remove('hidden');
-    const message = 'Owner workspace - viewing and local filters are available. ' + (state.data?.catalogueImport?.enabled ? 'Only the separately approved, one-run Shopify catalogue import is available in Channels. Other imports, edits, approval decisions and paid actions remain unavailable. ' : tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled ? 'Only the separately approved, one-time Shopify access refresh is available in Channels. Imports, other edits, approval decisions and paid actions remain unavailable. ' : 'This dashboard does not admit imports, edits, approval decisions or paid actions. ') + 'Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
+    const message = 'Owner workspace - viewing and local filters are available. ' + (state.data?.shopifyRuntimeRenewal?.enabled ? 'A separate owner approval and Run once action for the existing Shopify connection are available in Connections. Imports, other edits and paid actions remain unavailable. ' : state.data?.catalogueImport?.enabled ? 'Only the separately approved, one-run Shopify catalogue import is available in Channels. Other imports, edits, approval decisions and paid actions remain unavailable. ' : tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled ? 'Only the separately approved, one-time Shopify access refresh is available in Channels. Imports, other edits, approval decisions and paid actions remain unavailable. ' : 'This dashboard does not admit imports, edits, approval decisions or paid actions. ') + 'Automatic work remains paused. Snapshot saved: ' + (state.data?.workspaceSnapshotAt || 'Unknown') + '. This is not a source-sync time. The displayed brief is calculated for this view and has not been saved.';
     if (notice.textContent !== message) notice.textContent = message;
   }
   function closeOwnerWorkspace(message) {
+    shopifyRuntimeUI?.clear();
     parcel2goUI?.clear();
     parcel2goQuoteUI?.clear();
     ownerWorkspaceClosed = true; ownerWorkspaceEpoch++; credentialDiagnosticMessage = ''; invalidateProductReadiness(); tokenExchangeMessage = ''; clearTimeout(tokenExpiryTimer);
@@ -486,7 +489,8 @@
     const tokenWrite=path===shopifyTokenPath && method==='POST' && config.shopifyTokenSubmission===true && tokenDescriptor(state.data?.shopifyTokenExchange)?.enabled===true;
     const p2gRequest=path==='/api/owner/parcel2go-credentials'&&config.parcel2goCredentialRequest===true&&state.data?.parcel2goCredentialEntry&&['GET','POST'].includes(method);
     const p2gQuoteRequest=path==='/api/owner/parcel2go-sandbox-quote'&&config.parcel2goQuoteRequest===true&&state.data?.parcel2goSandboxQuote&&['GET','POST'].includes(method);
-    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !p2gRequest && !p2gQuoteRequest && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
+    const runtimeRequest=config.shopifyRuntimeRequest===true&&state.data?.shopifyRuntimeRenewal?.enabled===true&&((method==='GET'&&['review','status'].some(action=>path==='/api/owner/shopify-runtime-renewal/'+action))||(method==='POST'&&['approve','run','close'].some(action=>path==='/api/owner/shopify-runtime-renewal/'+action)));
+    if (state.session?.ownerWorkspace && !ownerWorkspaceClosed && !runtimeRequest && !p2gRequest && !p2gQuoteRequest && !(method === 'GET' && ['/api/auth/session', '/api/bootstrap'].includes(path)) && !catalogueRead && !catalogueWrite && !credentialDiagnosticRead && !productReadinessRead && !tokenRead && !tokenWrite) {
       throw Object.assign(new Error('This action is not released in owner workspace mode.'), { code: 'OWNER_WORKSPACE_ACTION_CLOSED' });
     }
     if (config.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
@@ -751,6 +755,7 @@
     if (view !== state.view) pauseObjectiveReview('Status checks paused after leaving the review. Select Check status to continue.');
     closeWorkspaceSearch();
     state.view = view;
+    if(view!=='channels')shopifyRuntimeUI?.clear();else runtimeRenewalController()?.mount($('#shopify-runtime-panel'),state.data?.shopifyRuntimeRenewal);
     if(view!=='channels')parcel2goUI?.clear();else p2gController()?.mount($('#parcel2go-credential-panel'),state.data?.parcel2goCredentialEntry);
     if(view!=='channels')parcel2goQuoteUI?.clear();else p2gQuoteController()?.mount($('#parcel2go-quote-panel'),state.data?.parcel2goSandboxQuote);
     $$('.nav-item').forEach(item => { item.classList.toggle('active', item.dataset.view === view); if (item.dataset.view === view) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
@@ -1461,6 +1466,7 @@
   function renderChannels() {
     p2gController()?.mount($('#parcel2go-credential-panel'),state.data?.parcel2goCredentialEntry);
     p2gQuoteController()?.mount($('#parcel2go-quote-panel'),state.data?.parcel2goSandboxQuote);
+    runtimeRenewalController()?.mount($('#shopify-runtime-panel'),state.data?.shopifyRuntimeRenewal);
     window.RunvaraConnections?.render(state.data);
     $('#channel-grid').innerHTML = (state.data.integrations || []).filter(item => ['system', 'billing', 'intelligence'].includes(item.kind)).map(channelCard).join('');
     const shopifyConnection = (state.data.connections || []).find(item => item.provider === 'shopify');

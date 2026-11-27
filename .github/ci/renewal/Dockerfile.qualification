@@ -1,0 +1,20 @@
+ARG PRODUCT_IMAGE
+ARG BROWSER_IMAGE
+ARG NODE_GLIBC_IMAGE
+FROM ${PRODUCT_IMAGE} AS sealed_product
+FROM ${NODE_GLIBC_IMAGE} AS node22_glibc
+FROM ${BROWSER_IMAGE}
+USER root
+COPY --from=node22_glibc /usr/local/ /opt/runvara-node22/
+ENV PATH=/opt/runvara-node22/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WORKDIR /app
+COPY --from=sealed_product /app /app
+COPY .github/ci/renewal /app/.github/ci/renewal
+# Ordinary setup only: no project lifecycle scripts and no test execution here.
+RUN test "$(node --version)" = v22.23.5 \
+    && node -e "if(!process.report.getReport().header.glibcVersionRuntime)process.exit(1)" \
+    && npm --prefix saas/server ci --ignore-scripts \
+    && chown -R 1000:1000 /app
+USER 1000:1000
+ENV HOME=/tmp
+CMD ["node", ".github/ci/renewal/isolated-checks.mjs"]
