@@ -57,6 +57,10 @@ jobs:
         env:
           RUNVARA_QUALIFICATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
           QUALIFICATION_JOB_STATUS: ${{ job.status }}
+          REVIEWED_BASE_SHA: ${{ vars.RUNVARA_QUALIFICATION_BASE_SHA }}
+          REVIEWED_HEAD_SHA: ${{ vars.RUNVARA_QUALIFICATION_HEAD_SHA }}
+          REVIEWED_MERGE_SHA: ${{ vars.RUNVARA_QUALIFICATION_MERGE_SHA }}
+          REVIEWED_PR_NUMBER: ${{ vars.RUNVARA_QUALIFICATION_PR_NUMBER }}
         run: node .github/ci/renewal/publish-evidence.mjs
       - name: Preserve sanitized qualification evidence
         if: always()

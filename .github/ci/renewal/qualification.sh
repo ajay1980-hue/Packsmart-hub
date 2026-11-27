@@ -9,32 +9,58 @@ prefix="runvara-qualification-$id"
 root=$(pwd -P)
 scratch="$root/.runvara-qualification/$id"
 out="$scratch/evidence"
+browser_out="$scratch/browser-evidence"
 product="$prefix-product:local"
 browser="$prefix-browser:local"
 mkdir -p "$out"
-owned_container() { [[ $(docker inspect -f '{{index .Config.Labels "runvara.qualification"}}' "$1" 2>/dev/null) == "$prefix" ]]; }
+owned_container() { [[ $(timeout 10s docker inspect -f '{{index .Config.Labels "runvara.qualification"}}' "$1" 2>/dev/null) == "$prefix" ]]; }
 cleanup() {
-  local failed=0 name
+  local failed=0 name containers images
   if [[ ! -f "$scratch/setup-started" ]]; then
     printf '{"cleanupExit":0,"notNeeded":true,"reason":"setup never began"}\n' > "$out/cleanup.json"
     return 0
   fi
-  if ! timeout 10s docker info >/dev/null 2>&1; then
-    printf '{"cleanupExit":1,"uncertain":true,"reason":"engine unavailable"}\n' > "$out/cleanup.json"
-    return 1
+  local container_names=("$prefix-absent" "$prefix-disabled" "$prefix-browser")
+  local image_names=("$browser" "$product")
+  if containers=$(timeout 10s docker container ls --all --format '{{.Names}}'); then
+    for name in "${container_names[@]}"; do
+      if ! grep -Fxq -- "$name" <<< "$containers"; then continue; fi
+      if owned_container "$name"; then
+        timeout 35s docker stop --time 30 "$name" >/dev/null || failed=1
+        timeout 10s docker rm -f "$name" >/dev/null || failed=1
+      else
+        failed=1
+      fi
+    done
+  else
+    failed=1
   fi
-  for name in "$prefix-absent" "$prefix-disabled" "$prefix-browser"; do
-    if docker container inspect "$name" >/dev/null 2>&1; then
-      if owned_container "$name"; then timeout 35s docker stop --time 30 "$name" >/dev/null || failed=1; docker rm -f "$name" >/dev/null || failed=1; else failed=1; fi
-    fi
-    if docker container inspect "$name" >/dev/null 2>&1; then failed=1; fi
-  done
-  for name in "$browser" "$product"; do
-    if docker image inspect "$name" >/dev/null 2>&1; then
-      if [[ $(docker image inspect -f '{{index .Config.Labels "runvara.qualification"}}' "$name") == "$prefix" ]]; then docker image rm "$name" >/dev/null || failed=1; else failed=1; fi
-    fi
-    if docker image inspect "$name" >/dev/null 2>&1; then failed=1; fi
-  done
+  if images=$(timeout 10s docker image ls --all --format '{{.Repository}}:{{.Tag}}'); then
+    for name in "${image_names[@]}"; do
+      if ! grep -Fxq -- "$name" <<< "$images"; then continue; fi
+      if [[ $(timeout 10s docker image inspect -f '{{index .Config.Labels "runvara.qualification"}}' "$name") == "$prefix" ]]; then
+        timeout 10s docker image rm "$name" >/dev/null || failed=1
+      else
+        failed=1
+      fi
+    done
+  else
+    failed=1
+  fi
+  if containers=$(timeout 10s docker container ls --all --format '{{.Names}}'); then
+    for name in "${container_names[@]}"; do
+      if grep -Fxq -- "$name" <<< "$containers"; then failed=1; fi
+    done
+  else
+    failed=1
+  fi
+  if images=$(timeout 10s docker image ls --all --format '{{.Repository}}:{{.Tag}}'); then
+    for name in "${image_names[@]}"; do
+      if grep -Fxq -- "$name" <<< "$images"; then failed=1; fi
+    done
+  else
+    failed=1
+  fi
   printf '{"cleanupExit":%s,"sharedBaseImagesPreserved":true}\n' "$failed" > "$out/cleanup.json"
   return "$failed"
 }
@@ -69,13 +95,13 @@ trap 'on_exit' EXIT
 trap 'exit 143' TERM INT
 [[ -f "$scratch/setup-complete" && ! -f "$scratch/run-started" ]] || { echo 'HOLD: setup incomplete or run already attempted'; exit 1; }
 touch "$scratch/run-started"
-chmod 0777 "$out" # Only this fresh synthetic-output directory, on the disposable CI runner.
+mkdir -m 0777 "$browser_out" # Browser output only. Runner records stay outside the mount.
 common=(--pull=never --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges:true --pids-limit=256 --memory=2g --cpus=2 --user=1000:1000 --label "runvara.qualification=$prefix" --tmpfs /tmp:rw,nosuid,nodev,mode=1777 --tmpfs /app/saas/server/data:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700)
 verify_boundary() {
   [[ $(docker inspect -f '{{.HostConfig.NetworkMode}}' "$1") == none ]]
   [[ $(docker inspect -f '{{.HostConfig.Privileged}}' "$1") == false ]]
   [[ $(docker inspect -f '{{json .HostConfig.PortBindings}}' "$1") == '{}' || $(docker inspect -f '{{json .HostConfig.PortBindings}}' "$1") == null ]]
-  docker inspect -f '{"id":{{json .Id}},"network":{{json .HostConfig.NetworkMode}},"privileged":{{json .HostConfig.Privileged}},"capDrop":{{json .HostConfig.CapDrop}},"securityOpt":{{json .HostConfig.SecurityOpt}}}' "$1" >> "$out/container-boundaries.jsonl"
+  docker inspect -f '{"id":{{json .Id}},"imageId":{{json .Image}},"network":{{json .HostConfig.NetworkMode}},"privileged":{{json .HostConfig.Privileged}},"capDrop":{{json .HostConfig.CapDrop}},"securityOpt":{{json .HostConfig.SecurityOpt}}}' "$1" >> "$out/container-boundaries.jsonl"
 }
 for flag in absent disabled; do
   name="$prefix-$flag"
@@ -95,9 +121,9 @@ for flag in absent disabled; do
 done
 browser_seccomp="$root/.github/ci/renewal/chromium-seccomp.json"
 printf '%s  %s\n' 0f26e298805cf214a731e7ab60bab43240a03325a3af7be07c64b0e67d7443c5 "$browser_seccomp" | sha256sum --check --status
-docker run -d --name "$prefix-browser" "${common[@]}" --security-opt "seccomp=$browser_seccomp" --shm-size=512m -e HOME=/tmp --mount "type=bind,src=$out,dst=/evidence" "$browser" >/dev/null
+docker run -d --name "$prefix-browser" "${common[@]}" --security-opt "seccomp=$browser_seccomp" --shm-size=512m -e HOME=/tmp --mount "type=bind,src=$browser_out,dst=/evidence" "$browser" >/dev/null
 verify_boundary "$prefix-browser"
 status=$(timeout 240s docker wait "$prefix-browser")
 [[ "$status" == 0 ]]
-[[ -f "$out/complete.json" ]]
+[[ -f "$browser_out/complete.json" ]]
 docker rm "$prefix-browser" >/dev/null

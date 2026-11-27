@@ -16,7 +16,7 @@ Object.defineProperty(chromium,'launch',{configurable:false,writable:false,value
     const result=await cdp.send('Browser.getBrowserCommandLine');await cdp.detach();
     assert.ok(Array.isArray(result.arguments)&&result.arguments.length>0,'browser command-line proof unavailable');
     assert.ok(!result.arguments.some(forbidden),'launched browser disabled sandbox');
-    await fs.writeFile('/evidence/chromium-sandbox.json',JSON.stringify({launches,chromiumSandbox:true,commandLineVerified:true,disablingSwitches:0,fallback:false},null,2),{flag:'wx'});
+    await fs.writeFile('/evidence/chromium-sandbox.json',JSON.stringify({launches,sandboxRequested:true,browserCommandLineVerified:true,disablingSwitches:0,fallback:false},null,2),{flag:'wx'});
     return browser;
   }catch(error){await browser.close();throw error;}
 }});
