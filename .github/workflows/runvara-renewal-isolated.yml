@@ -1,0 +1,73 @@
+name: Runvara isolated renewal qualification (draft)
+
+on:
+  pull_request:
+    types: [ready_for_review]
+    paths:
+      - '.github/ci/renewal/**'
+      - '.github/workflows/runvara-renewal-isolated.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runvara-renewal-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify reviewed inputs before image or dependency downloads
+        env:
+          RUNVARA_QUALIFICATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          REVIEWED_BASE_SHA: ${{ vars.RUNVARA_QUALIFICATION_BASE_SHA }}
+          REVIEWED_HEAD_SHA: ${{ vars.RUNVARA_QUALIFICATION_HEAD_SHA }}
+          REVIEWED_MERGE_SHA: ${{ vars.RUNVARA_QUALIFICATION_MERGE_SHA }}
+          REVIEWED_PR_NUMBER: ${{ vars.RUNVARA_QUALIFICATION_PR_NUMBER }}
+        run: |
+          node .github/ci/renewal/reviewed-source.mjs
+          node .github/ci/renewal/validate-inputs.mjs .
+      - name: Prepare images and pinned dependencies (setup only)
+        timeout-minutes: 6
+        env:
+          RUNVARA_QUALIFICATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash .github/ci/renewal/qualification.sh setup
+      - name: Qualify disabled startup and synthetic owner browser offline
+        timeout-minutes: 10
+        env:
+          RUNVARA_QUALIFICATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: timeout --signal=TERM --kill-after=30s 540s bash .github/ci/renewal/qualification.sh run
+      - name: Verify owned fixture cleanup
+        if: always()
+        timeout-minutes: 2
+        env:
+          RUNVARA_QUALIFICATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash .github/ci/renewal/qualification.sh cleanup
+      - name: Validate and publish only allowlisted evidence
+        if: always()
+        env:
+          RUNVARA_QUALIFICATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+          QUALIFICATION_JOB_STATUS: ${{ job.status }}
+          REVIEWED_BASE_SHA: ${{ vars.RUNVARA_QUALIFICATION_BASE_SHA }}
+          REVIEWED_HEAD_SHA: ${{ vars.RUNVARA_QUALIFICATION_HEAD_SHA }}
+          REVIEWED_MERGE_SHA: ${{ vars.RUNVARA_QUALIFICATION_MERGE_SHA }}
+          REVIEWED_PR_NUMBER: ${{ vars.RUNVARA_QUALIFICATION_PR_NUMBER }}
+        run: node .github/ci/renewal/publish-evidence.mjs
+      - name: Preserve sanitized qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runvara-renewal-isolated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: runvara-ci-evidence/${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 7

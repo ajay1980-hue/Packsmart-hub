@@ -1906,3 +1906,6 @@ button.analytics-table-row:hover { border-color:#3e779f; border-radius:9px; back
   body:has(#view-marketing.active) .command-bar { height: auto; min-height: 72px; flex-wrap: wrap; }
   body:has(#view-marketing.active) .top-actions { min-width: 0; flex-wrap: wrap; }
 }
+#shopify-runtime-panel { min-width: 0; overflow-wrap: anywhere; }
+#shopify-runtime-panel .button-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+#shopify-runtime-panel button { max-width: 100%; white-space: normal; }

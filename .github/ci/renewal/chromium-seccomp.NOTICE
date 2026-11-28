@@ -1,0 +1,5 @@
+Derived from the Moby default seccomp profile (Apache License 2.0).
+Source: https://github.com/moby/profiles/blob/a0fa70805f742f7da15b367770d802ea2a86c68b/seccomp/default.json
+Upstream SHA-256: 3320527d4568265ac97a077609b1bfd4cfd0d789eeb9239b7e094b1526675406
+Local changes: amd64-only rules for Chromium's user, PID and network
+namespaces and its chroot syscall. Used only by the offline browser container.

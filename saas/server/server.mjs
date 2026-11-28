@@ -63,6 +63,8 @@ import { OWNER_PRODUCT_READINESS_PATH } from './lib/owner-product-readiness.mjs'
 import { CATALOGUE_PATH, createCatalogueImporter, catalogueStatus } from './lib/shopify-catalogue-import.mjs';
 import { SHOPIFY_DIAGNOSTIC_PATH, shopifyCredentialDiagnostic } from './lib/shopify-credential-metadata.mjs';
 import { SHOPIFY_TOKEN_PATH, createShopifyTokenExchange } from './lib/shopify-token-exchange.mjs';
+import {createShopifyRuntimeRenewal,runtimeRenewalAction,readRuntimeRenewalBody,SHOPIFY_RUNTIME_RENEWAL_PATH} from './lib/shopify-renewal-runtime.mjs';
+import {assertRuntimeRenewalOwner,assertRuntimeRenewalIdentity,RUNTIME_RENEWAL_WORKSPACE} from './lib/shopify-renewal-runtime-permit.mjs';
 import { PARCEL2GO_ENTRY_PATH, parcel2GoEntryStatus, parseParcel2GoEntry, saveParcel2GoEntry } from './lib/parcel2go-credential-entry.mjs';
 import { PARCEL2GO_QUOTE_PATH, parcel2GoQuoteStatus, parseParcel2GoQuoteSubmission, runParcel2GoOwnerQuote } from './lib/parcel2go-quote-owner.mjs';
 import { PILOT_BASE, isMaintenanceApproval, runQuietApprovalPilot } from './lib/quiet-approval-pilot.mjs';
@@ -125,6 +127,7 @@ const STATIC_FILES = new Map([
   ['/', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/index.html', ['saas/index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['saas/app.js', 'text/javascript; charset=utf-8']],
+  ['/shopify-runtime-renewal-ui.js', ['saas/shopify-runtime-renewal-ui.js', 'text/javascript; charset=utf-8']],
   ['/approval-request-ui.js', ['saas/approval-request-ui.js', 'text/javascript; charset=utf-8']],
   ['/maintenance-approval-ui.js', ['saas/maintenance-approval-ui.js', 'text/javascript; charset=utf-8']],
   ['/maintenance-creative-ui.js', ['saas/maintenance-creative-ui.js', 'text/javascript; charset=utf-8']],
@@ -556,12 +559,19 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     return verifySessionToken(token, env.SESSION_SECRET);
   }
 
-  async function authenticate(req, res, { identityOnly = false, exactSnapshot = false, readBudget = null } = {}) {
+  async function authenticate(req, res, { identityOnly = false, exactSnapshot = false, readBudget = null, runtimeOwner = false } = {}) {
     readBudget?.assertActive();
     const session = sessionFrom(req);
     if (!session) {
       send(res, 401, { error: 'Authentication required', code: 'AUTH_REQUIRED' });
       return null;
+    }
+    if(runtimeOwner){
+      if(session.role!=='owner'||session.workspaceId!==RUNTIME_RENEWAL_WORKSPACE||store.provider!=='supabase'||typeof store.getIdentity!=='function'){
+        send(res,403,{error:'Intended owner required',code:'OWNER_REQUIRED'});return null;
+      }
+      try {assertRuntimeRenewalIdentity({session,state:await store.getIdentity(session.workspaceId)});}
+      catch {send(res,403,{error:'Owner session unavailable',code:'OWNER_REQUIRED'});return null;}
     }
     const state = identityOnly && store.getIdentity ? (readBudget
       ? await readBudget.run(signal => store.getIdentity(session.workspaceId, { signal }))
@@ -588,6 +598,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   }
 
   const withWorkspaceLock = createWorkspaceLock(locks);
+  const shopifyRuntimeRenewal=createShopifyRuntimeRenewal({env,store,integrations,withWorkspaceLock,fetchImpl:options.fetchImpl||fetch});
   const parcel2goLiveSetup = createLiveSetup({env,store,withWorkspaceLock});
   const parcel2goEntryPreflight = createEntryPreflight({env,store});
   const parcel2goLiveEntry = createLiveCredentialEntryController({env,store,withWorkspaceLock});
@@ -1191,6 +1202,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       const productReadinessRoute = pathname === OWNER_PRODUCT_READINESS_PATH;
       const shopifyDiagnosticRoute = pathname === SHOPIFY_DIAGNOSTIC_PATH;
       const shopifyTokenRoute = startupPolicy.quiet && pathname === SHOPIFY_TOKEN_PATH;
+      const runtimeRenewalRoute=runtimeRenewalAction(req.method,pathname);
       const parcel2goEntryRoute = pathname === PARCEL2GO_ENTRY_PATH;
       const parcel2goQuoteRoute = pathname === PARCEL2GO_QUOTE_PATH;
 
@@ -1199,6 +1211,12 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
       if (!startupPolicy.allowsRequest(req.method, pathname)) {
         send(res, 503, QUIET_STARTUP_RESPONSE);
         return;
+      }
+      if(runtimeRenewalRoute){
+        res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
+        if(!shopifyRuntimeRenewal||req.url!==pathname){send(res,409,{error:'Renewal request unavailable',code:'SHOPIFY_RUNTIME_REFUSED'});return;}
+        // Never admit bearer authentication on this exact owner-cookie path.
+        if(req.headers.authorization){send(res,401,{error:'Owner cookie required',code:'AUTH_REQUIRED'});return;}
       }
       if (pathname===PRODUCT_ONLY_SUPPORT_PATH) {
         if(!startupPolicy.quietProductOnlySupport||!['POST','OPTIONS'].includes(req.method)) {send(res,503,QUIET_STARTUP_RESPONSE);return;}
@@ -1284,6 +1302,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
           quietShopifyCatalogue: Boolean(startupPolicy.catalogue?.available()),
           quietShopifyDiagnostic: startupPolicy.quietShopifyDiagnostic,
           quietShopifyTokenExchange: Boolean(startupPolicy.shopifyTokenExchange?.available()),
+          ownerShopifyRuntimeRenewal: Boolean(shopifyRuntimeRenewal),
           quietParcel2GoCredentialEntry: Boolean(startupPolicy.parcel2goCredentialWindow?.available()),
           quietParcel2GoSandboxQuote: Boolean(startupPolicy.parcel2goQuoteWindow?.available()),
           quietOwnerLogin: startupPolicy.quietOwnerLogin,
@@ -1424,10 +1443,36 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             activityReadLimiter.fail(activityScope);
           }
         }
-        const auth = await authenticate(req, res, { readBudget: readinessRead, exactSnapshot: parcel2goQuoteRoute || parcel2goEntryRoute || shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
+        const auth = await authenticate(req, res, { runtimeOwner: runtimeRenewalRoute, readBudget: readinessRead, exactSnapshot: runtimeRenewalRoute || parcel2goQuoteRoute || parcel2goEntryRoute || shopifyTokenRoute || shopifyDiagnosticRoute || catalogueRoute || (startupPolicy.quietOwnerWorkspace && pathname === '/api/bootstrap') || creativePilotRoute || pilotRoute || ['/api/maintenance/commerce', '/api/actions', '/api/actions/reconcile'].includes(pathname), identityOnly: productReadinessRoute || pathname.startsWith('/api/objective-content/') || pathname === '/api/activity' || pathname.startsWith('/api/business-outcomes') || (req.method === 'POST' && /^\/api\/connection-writes\/[a-z0-9_-]+\/execute$/i.test(pathname)) || (req.method === 'GET' && /^\/api\/automation-runs\/[^/]+\/archive$/.test(pathname)) || pathname === '/api/auth/session' || (req.method === 'GET' && /^\/api\/connections\/shopify\/content-requests\/[A-Za-z0-9_-]{16,100}$/.test(pathname)) || (req.method === 'GET' && pathname === '/api/operator/provider-usage') || (req.method === 'POST' && pathname === '/api/business-objectives/reviews') || (req.method === 'GET' && /^\/api\/business-objectives\/reviews\/job_[A-Za-z0-9_-]{1,100}$/.test(pathname)) });
         if (!auth) return;
         const workspaceReadCompletedAt = new Date().toISOString();
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) assertCsrf(req, auth.session, publicUrl);
+        if(runtimeRenewalRoute){
+          const cancellation=new AbortController(),interrupt=()=>cancellation.abort();
+          req.once('aborted',interrupt);res.once('close',interrupt);
+          try {
+            assertRuntimeRenewalOwner(auth);
+            if(draining||req.aborted||res.destroyed)throw Error('Interrupted');
+            const action=pathname.slice(SHOPIFY_RUNTIME_RENEWAL_PATH.length+1);
+            let result;
+            if(req.method==='GET'){
+              if(action==='review'){const review=shopifyRuntimeRenewal.review(auth);result={schema:'runvara-shopify-runtime-review/v2',review,remainingMs:Math.max(0,Date.parse(review.expiresAt)-Date.now())};}
+              else result=shopifyRuntimeRenewal.ownerStatus(auth);
+            }
+            else {
+              if(req.headers.origin!==new URL(publicUrl).origin||req.headers['sec-fetch-site']&&!['same-origin','none'].includes(req.headers['sec-fetch-site']))throw Error('Origin refused');
+              const body=await readRuntimeRenewalBody(req);
+              await shopifyRuntimeRenewal[action==='close'?'revoke':action](auth,body,{signal:cancellation.signal});
+              const state=await store.get(auth.session.workspaceId,{exactSnapshot:true});
+              result=shopifyRuntimeRenewal.ownerStatus({...auth,state});
+            }
+            if(draining||req.aborted||res.destroyed)throw Error('Interrupted');
+            send(res,200,result,{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});
+          } catch {
+            if(!res.destroyed)send(res,409,{error:'Stopped. Check the saved result; do not repeat an uncertain action.',code:'SHOPIFY_RUNTIME_STOPPED'},{'Cache-Control':'no-store','Referrer-Policy':'no-referrer'});
+          } finally {req.off('aborted',interrupt);res.off('close',interrupt);}
+          return;
+        }
         const mutating = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
         if (auth.user.passwordChangeRequired && !['/api/auth/session', '/api/auth/logout', '/api/auth/change-password'].includes(pathname)) throw Object.assign(new Error('Replace the temporary password before accessing business data'), { status: 403, code: 'PASSWORD_CHANGE_REQUIRED' });
         if (mutating && auth.user.role === 'viewer' && !['/api/auth/logout', '/api/auth/change-password'].includes(pathname)) throw Object.assign(new Error('Read-only workspace access'), { status: 403, code: 'ROLE_DENIED' });
@@ -1861,6 +1906,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
             send(res, 200, { ...payload, ownerWorkspace: true, automaticWorkPaused: true,
               catalogueImport: catalogueStatus(auth.state,startupPolicy.catalogue),
               shopifyCredentialDiagnosticAvailable: startupPolicy.quietShopifyDiagnostic,
+              shopifyRuntimeRenewal: {enabled:Boolean(shopifyRuntimeRenewal)},
               productReadinessAvailable: productReadinessRemainingMs > 0,
               productReadinessExpiresAt: startupPolicy.productReadinessWindow?.expiresAt ?? null,
               productReadinessRemainingMs,
@@ -3235,6 +3281,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
     integrityTimer.unref?.();
   });
   server.once('close', () => {
+    shopifyRuntimeRenewal?.close();
     parcel2goOwnerQuote?.close();
     startupPolicy.parcel2goQuoteWindow?.close();
     parcel2goLiveSetup?.close();
@@ -3249,6 +3296,7 @@ export function createPacksmartServer(customEnv = process.env, options = {}) {
   const drain = () => {
     if (drainPromise) return drainPromise;
     draining = true;
+    shopifyRuntimeRenewal?.close();
     parcel2goOwnerQuote?.close();
     startupPolicy.parcel2goQuoteWindow?.close();
     parcel2goLiveSetup?.close();

@@ -8,6 +8,7 @@ import { OWNER_PRODUCT_READINESS_PATH, OWNER_PRODUCT_READINESS_FLAG } from './ow
 import { createOwnerProductReadinessWindow } from './owner-product-readiness-window.mjs';
 import { createParcel2GoCredentialWindow, PARCEL2GO_ENTRY_PATH } from './parcel2go-credential-entry.mjs';
 import { createParcel2GoQuoteWindow, PARCEL2GO_QUOTE_PATH } from './parcel2go-quote-owner.mjs';
+import {runtimeRenewalAction,SHOPIFY_RUNTIME_RENEWAL_PATH} from './shopify-renewal-runtime.mjs';
 
 // Construction-time admission only. Quiet startup cannot be reopened by a
 // request, tenant setting, worker option, or later environment mutation.
@@ -23,6 +24,9 @@ export function createStartupPolicy(env, staticPathnames) {
     throw Object.assign(new Error('Owner workspace requires quiet mode and an exact enabled/v1 or disabled/v1 value'), { code: 'QUIET_OWNER_WORKSPACE_INVALID' });
   }
   const quietOwnerWorkspace = quiet && ownerWorkspace === 'enabled/v1';
+  const runtimeRenewalFlag=env.RUNVARA_OWNER_SHOPIFY_RUNTIME_RENEWAL??'disabled/v1';
+  if(!['disabled/v1','enabled/v1'].includes(runtimeRenewalFlag)||(runtimeRenewalFlag==='enabled/v1'&&!quietOwnerWorkspace))throw Object.assign(Error('Runtime renewal requires quiet owner workspace'),{code:'SHOPIFY_RUNTIME_CONFIG_INVALID'});
+  const shopifyRuntimeRenewal=runtimeRenewalFlag==='enabled/v1';
   const productReadiness=env[OWNER_PRODUCT_READINESS_FLAG]===undefined?'disabled/v1':env[OWNER_PRODUCT_READINESS_FLAG];
   if(!['disabled/v1','enabled/v1'].includes(productReadiness)||(productReadiness==='enabled/v1'&&!quietOwnerWorkspace)) {
     throw Object.assign(new Error('Product readiness requires quiet owner workspace and an exact switch'),{code:'QUIET_OWNER_PRODUCT_READINESS_INVALID'});
@@ -68,6 +72,7 @@ export function createStartupPolicy(env, staticPathnames) {
     mode,
     quiet,
     quietOwnerWorkspace,
+    shopifyRuntimeRenewal,
     get quietOwnerProductReadiness() { return !!productReadinessWindow?.available(); },
     productReadinessWindow,
     quietShopifyDiagnostic,
@@ -83,6 +88,7 @@ export function createStartupPolicy(env, staticPathnames) {
     parcel2goCredentialWindow,
     parcel2goQuoteWindow,
     allowsRequest(method, pathname) {
+      if(pathname===SHOPIFY_RUNTIME_RENEWAL_PATH||pathname.startsWith(SHOPIFY_RUNTIME_RENEWAL_PATH+'/'))return shopifyRuntimeRenewal&&runtimeRenewalAction(method,pathname);
       if(pathname===PARCEL2GO_QUOTE_PATH)return Boolean(quietOwnerWorkspace&&parcel2goQuoteWindow&&(method==='GET'||method==='POST'&&parcel2goQuoteWindow.available()));
       if(pathname===PARCEL2GO_ENTRY_PATH)return Boolean(quietOwnerWorkspace&&parcel2goCredentialWindow&&(method==='GET'||method==='POST'&&parcel2goCredentialWindow.available()));
       if (!quiet) return true;

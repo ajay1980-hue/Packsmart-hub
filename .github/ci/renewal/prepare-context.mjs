@@ -1,0 +1,26 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+const id=process.env.RUNVARA_QUALIFICATION_ID;assert.match(id||'',/^[0-9]+-1$/);
+const scratch=path.resolve('.runvara-qualification',id),context=path.join(scratch,'context'),recipeDir=path.join(scratch,'recipe');
+const review=JSON.parse(fs.readFileSync(path.join(scratch,'evidence/reviewed-source.json'),'utf8'));
+assert.equal(execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),review.merge);
+assert.ok(!fs.existsSync(context)&&!fs.existsSync(recipeDir));fs.mkdirSync(context);fs.mkdirSync(recipeDir);
+const archive=path.join(scratch,'source.tar');
+execFileSync('git',['archive','--format=tar','--output',archive,review.merge]);
+execFileSync('tar',['--extract','--file',archive,'--directory',context,'--no-same-owner']);
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+const input=JSON.parse(fs.readFileSync(path.join(context,'.github/ci/renewal/inputs.json'),'utf8'));
+const original=fs.readFileSync(path.join(context,'saas/server/Dockerfile'));
+const text=original.toString('utf8');assert.equal(text.split('FROM node:22-alpine').length-1,1);
+const resolved=Buffer.from(text.replace('FROM node:22-alpine',`FROM ${input.nodeBase}`),'utf8');
+assert.equal(resolved.toString().replace(`FROM ${input.nodeBase}`,'FROM node:22-alpine'),text);
+fs.writeFileSync(path.join(recipeDir,'Dockerfile'),resolved,{flag:'wx'});
+const rootIgnore=fs.readFileSync(path.join(context,'.dockerignore'));assert.equal(sha(rootIgnore),input.dockerignoreSha256);
+const specific=path.join(context,'saas/server/Dockerfile.dockerignore');
+assert.equal(fs.existsSync(specific),input.dockerfileSpecificIgnoreSha256!==null);
+let specificHash=null;
+if(fs.existsSync(specific)){const bytes=fs.readFileSync(specific);specificHash=sha(bytes);assert.equal(specificHash,input.dockerfileSpecificIgnoreSha256);fs.writeFileSync(path.join(recipeDir,'Dockerfile.dockerignore'),bytes,{flag:'wx'});}
+fs.writeFileSync(path.join(scratch,'evidence/builder-binding.json'),JSON.stringify({sourceCommit:review.merge,context:'clean git archive of exact merge-test SHA',originalRecipeSha256:sha(original),resolvedRecipeSha256:sha(resolved),resolvedFrom:input.nodeBase,otherRecipeBytesUnchanged:true,rootIgnoreSha256:sha(rootIgnore),dockerfileSpecificIgnoreSha256:specificHash,specificIgnorePrecedencePreserved:true,renderRuntimeIdentityClaim:false},null,2),{flag:'wx'});

@@ -1,0 +1,15 @@
+{
+  "schema": "runvara-isolated-qualification/v1",
+  "sourceBaseCommit": "ed416ed302ed74b6602ba5b547339b73e1a34af8",
+  "platform": "linux/amd64",
+  "nodeBase": "node@sha256:12f54cafa58d0e96554ae05871e29663ff7241836377dc9a7916449b8adb062c",
+  "browserBase": "mcr.microsoft.com/playwright@sha256:c091b21d9fae78c76e85cd4356431e9b018402f172a214fc7d7a5e9a7e29d8ac",
+  "imageReviewReference": "official-mcr-metadata-20261122:index=sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e;amd64=sha256:c091b21d9fae78c76e85cd4356431e9b018402f172a214fc7d7a5e9a7e29d8ac",
+  "nodeMajor": 22,
+  "playwrightVersion": "1.62.1",
+  "note": "Official provider manifest metadata only, rehashed offline with header/platform/index linkage; not Render runtime identity or execution proof. Exact PR/base/head/merge controls, final review and scoped publication/execution approval remain required.",
+  "dockerignoreSha256": "a336d3ff3b4bc6dc950ae9f21d4f129b6de0ad56357d9a5e8c2a0287cab9b645",
+  "nodeGlibcBase": "node@sha256:47725aca53d3295ec2d3be8f62726599b3033cc262edc2c7e429909b3ac599fc",
+  "nodeGlibcVersion": "22.23.5",
+  "dockerfileSpecificIgnoreSha256": "b9fd2d84bbe2bd9a9a86a636071b92ccc8e60e8beee224889946978613a7a561"
+}
